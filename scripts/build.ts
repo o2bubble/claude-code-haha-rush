@@ -448,7 +448,8 @@ async function main() {
 
       const pkgRoot = join(DIST, '_pkg_tmp')
       rmSync(pkgRoot, { recursive: true, force: true })
-      mkdirSync(pkgRoot, { recursive: true })
+      // pkgutil --expand-full 要求目标目录不存在（存在会报 "File exists"），
+      // 由 pkgutil 自行创建。
       console.log('  Expanding .pkg (pkgutil --expand-full)...')
       const expand = spawnSync(['pkgutil', '--expand-full', LOCAL_PKG, pkgRoot], { cwd: ROOT, timeout: 600000 })
       if (expand.exitCode !== 0) {
