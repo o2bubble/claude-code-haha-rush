@@ -457,9 +457,14 @@ async function main() {
         process.exit(1)
       }
       // 提取 Python.framework（递归查找）到 dist/python
+      // find -L 跟随符号链接：pkg 展开后 framework 可能是 symlink，-type d 会漏掉。
+      // 找不到时打印目录树诊断（framework 实际位置因 pkg 结构而异）。
       rmSync(PYTHON_DIR, { recursive: true, force: true })
       const extract = spawnSync(['bash', '-c',
-        `FW=$(find '${pkgRoot}' -type d -name 'Python.framework' | head -1); if [ -z "$FW" ]; then echo 'Python.framework not found' >&2; exit 1; fi; ditto "$FW" '${PYTHON_DIR}'`], { cwd: ROOT, timeout: 300000 })
+        `FW=$(find -L '${pkgRoot}' -type d -name 'Python.framework' | head -1); ` +
+        `if [ -z "$FW" ]; then echo 'Python.framework not found; pkgRoot tree:' >&2; ` +
+        `find '${pkgRoot}' -maxdepth 5 \\( -type d -o -type l \\) | head -60 >&2; exit 1; fi; ` +
+        `echo "FW: $FW"; ditto "$FW" '${PYTHON_DIR}'`], { cwd: ROOT, timeout: 300000 })
       if (extract.exitCode !== 0) {
         console.error(`[Error] Python.framework extract failed: ${extract.stderr.toString()}`)
         process.exit(1)
