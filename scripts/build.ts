@@ -457,20 +457,21 @@ async function main() {
         process.exit(1)
       }
       // 提取 Python.framework 到 dist/python。
-      // python.org pkg 是嵌套结构：外层 expand-full 只展开顶层，Python.framework 在
-      // 未解开的子包 Python_Framework.pkg 里（其他子包带 /Payload 已展开，它没有）——
-      // 需先 expand-full 这个嵌套子包再找。find -L 跟随符号链接防漏。
+      // python.org mac pkg 是嵌套结构：外层 expand-full 只解顶层，Python.framework 在
+      // 未解开的嵌套子包 Python_Framework.pkg 里。这里递归展开所有无 Payload 的
+      // *.pkg（文件或目录）直到没有更多，再 find framework。find -L 跟随符号链接。
       rmSync(PYTHON_DIR, { recursive: true, force: true })
       const extract = spawnSync(['bash', '-c',
-        `FW_PKG=$(find -L '${pkgRoot}' -name 'Python_Framework.pkg' | head -1); ` +
-        `SEARCH='${pkgRoot}'; ` +
-        `if [ -n "$FW_PKG" ] && [ ! -d "$FW_PKG/Payload" ]; then echo "Nested framework pkg: $FW_PKG"; ` +
-        `pkgutil --expand-full "$FW_PKG" "\${FW_PKG}.expanded" || { echo 'nested expand failed' >&2; exit 1; }; ` +
-        `SEARCH="\${FW_PKG}.expanded"; fi; ` +
-        `FW=$(find -L "$SEARCH" -type d -name 'Python.framework' | head -1); ` +
-        `if [ -z "$FW" ]; then echo 'Python.framework not found; search tree:' >&2; ` +
-        `find -L "$SEARCH" -maxdepth 6 \\( -type d -o -type l \\) | head -60 >&2; exit 1; fi; ` +
-        `echo "FW: $FW"; ditto "$FW" '${PYTHON_DIR}'`], { cwd: ROOT, timeout: 300000 })
+        `echo "=== pkgRoot top ===" >&2; ls -la '${pkgRoot}' >&2; ` +
+        `echo "=== all *.pkg ===" >&2; find '${pkgRoot}' -name '*.pkg' | head -20 >&2; ` +
+        `CHANGED=1; while [ "\$CHANGED" = "1" ]; do CHANGED=0; ` +
+        `for P in \$(find '${pkgRoot}' -name '*.pkg'); do ` +
+        `if [ ! -d "\$P/Payload" ]; then echo "expanding nested: \$P" >&2; ` +
+        `if pkgutil --expand-full "\$P" "\${P}.expanded" 2>/dev/null; then CHANGED=1; fi; fi; done; done; ` +
+        `FW=\$(find -L '${pkgRoot}' -type d -name 'Python.framework' | head -1); ` +
+        `if [ -z "\$FW" ]; then echo 'Python.framework not found' >&2; ` +
+        `find -L '${pkgRoot}' -maxdepth 4 \\( -type d -o -type f \\) -name '*Framework*' | head -20 >&2; exit 1; fi; ` +
+        `echo "FW: \$FW"; ditto "\$FW" '${PYTHON_DIR}'`], { cwd: ROOT, timeout: 600000 })
       if (extract.exitCode !== 0) {
         console.error(`[Error] Python.framework extract failed: ${extract.stderr.toString()}`)
         process.exit(1)
