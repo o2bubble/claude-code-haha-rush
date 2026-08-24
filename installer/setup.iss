@@ -33,6 +33,11 @@ PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=commandline dialog
 UninstallDisplayIcon={app}\{#MyAppExeName}
 DisableProgramGroupPage=yes
+; 覆盖安装前自动关闭占用的 GUI 应用（文件锁 → MoveFile failed/拒绝访问）。
+; git-credential-manager.exe 无主窗口，CloseApplications 关不掉 → 由 ssInstall 的 taskkill 兜底。
+CloseApplications=yes
+CloseApplicationsFilter=claude-code-gui.exe
+RestartApplications=yes
 
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
@@ -307,12 +312,30 @@ end;
 
 // ── Install / Uninstall hooks ─────────────────────────────────────────
 
+/// 覆盖安装前杀掉可能锁定文件的进程。git-credential-manager.exe 是后台进程
+/// （无主窗口），CloseApplications 管不到它，但它运行时会锁住
+/// git\mingw64\bin\git-credential-manager.exe.config → 覆盖报 MoveFile failed/拒绝访问。
+procedure KillLockingProcesses;
+var
+  ResultCode: Integer;
+begin
+  Exec('taskkill.exe', '/F /IM git-credential-manager.exe /T', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+  // claude-code-gui.exe 兜底（CloseApplications 之外的手动 setup 覆盖场景）
+  Exec('taskkill.exe', '/F /IM claude-code-gui.exe /T', '', SW_HIDE,
+       ewWaitUntilTerminated, ResultCode);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   HomePath, HomeVar: string;
   EnvRoot: Integer;
   EnvSub: string;
 begin
+  if CurStep = ssInstall then begin
+    Log('ssInstall: killing file-locking processes');
+    KillLockingProcesses;
+  end;
   if CurStep = ssPostInstall then begin
     Log('ssPostInstall: starting');
 

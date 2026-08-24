@@ -1,8 +1,9 @@
 name: macOS Build
 
 # 无 mac 机器时的出包路径：推送到本分支/手动触发即用 GitHub 的 macOS runner
-# 构建出 .app + .dmg，作为 artifact 下载分发。
-# 首次接入需要把仓库推到 GitHub（private 免费，Actions 免费额度足够）。
+# 完整跑 build.ts --platform macos 管线（不再是只 cargo tauri build）：
+#   claude 二进制(bun-darwin-arm64) + GUI(.app) + 自包含 bun/tools/python 下载
+#   + 组件 zip 打包 + manifest。产物作为 artifact 下载分发。
 on:
   workflow_dispatch:
   push:
@@ -18,7 +19,6 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
-      # macos runner 自带 Xcode 命令行工具；rust 需显式安装
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -26,17 +26,23 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
 
-      - name: Install frontend deps
-        run: cd gui && bun install
+      - name: Install deps
+        run: |
+          bun install
+          cd gui && bun install
 
-      # beforeBuildCommand (bun run build = tsc + vite build) 由 cargo tauri build 自动触发
-      - name: Build GUI (.app + .dmg)
-        run: cd gui/src-tauri && cargo tauri build --bundles dmg
+      # build.ts 完整 mac 管线：--platform macos 走 mac 分支（darwin 目标/系统 zip/
+      # python pkg 解包），--release 生成 manifest + 组件 zip
+      - name: Full macOS build (build.ts --platform macos)
+        run: |
+          bun run scripts/build.ts --platform macos --release ci-build --notes "macOS CI build"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: claude-code-macos
           path: |
-            gui/src-tauri/target/release/bundle/dmg/*.dmg
-            gui/src-tauri/target/release/bundle/macos/*.app
+            dist/Claude Code.app
+            dist/claude
+            dist/release/ci-build/manifest.json
+            dist/release/ci-build/*.zip
