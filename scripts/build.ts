@@ -446,37 +446,26 @@ async function main() {
         console.log(`  Using offline pkg: ${LOCAL_PKG}`)
       }
 
-      const pkgRoot = join(DIST, '_pkg_tmp')
-      rmSync(pkgRoot, { recursive: true, force: true })
-      // pkgutil --expand-full 要求目标目录不存在（存在会报 "File exists"），
-      // 由 pkgutil 自行创建。
-      console.log('  Expanding .pkg (pkgutil --expand-full)...')
-      const expand = spawnSync(['pkgutil', '--expand-full', LOCAL_PKG, pkgRoot], { cwd: ROOT, timeout: 600000 })
-      if (expand.exitCode !== 0) {
-        console.error(`[Error] pkgutil expand failed: ${expand.stderr.toString()}`)
-        process.exit(1)
-      }
-      // 提取 Python.framework 到 dist/python。
-      // python.org mac pkg 是嵌套结构：外层 expand-full 只解顶层，Python.framework 在
-      // 未解开的嵌套子包 Python_Framework.pkg 里。这里递归展开所有无 Payload 的
-      // *.pkg（文件或目录）直到没有更多，再 find framework。find -L 跟随符号链接。
+      // 用 macOS 官方 installer 直接安装 pkg，从标准位置提取 Python.framework。
+      // pkgutil --expand-full 对 python.org 嵌套 pkg 不可靠（Python_Framework.pkg
+      // 有 Payload 却找不到 framework）。installer 正确处理所有嵌套子包。
+      // CI runner 是临时环境，装到 /Library/Frameworks 无副作用。
       rmSync(PYTHON_DIR, { recursive: true, force: true })
-      const extract = spawnSync(['bash', '-c',
-        `echo "=== pkgRoot top ===" >&2; ls -la '${pkgRoot}' >&2; ` +
-        `echo "=== all *.pkg ===" >&2; find '${pkgRoot}' -name '*.pkg' | head -20 >&2; ` +
-        `CHANGED=1; while [ "\$CHANGED" = "1" ]; do CHANGED=0; ` +
-        `for P in \$(find '${pkgRoot}' -name '*.pkg'); do ` +
-        `if [ ! -d "\$P/Payload" ]; then echo "expanding nested: \$P" >&2; ` +
-        `if pkgutil --expand-full "\$P" "\${P}.expanded" 2>/dev/null; then CHANGED=1; fi; fi; done; done; ` +
-        `FW=\$(find -L '${pkgRoot}' -type d -name 'Python.framework' | head -1); ` +
-        `if [ -z "\$FW" ]; then echo 'Python.framework not found' >&2; ` +
-        `find -L '${pkgRoot}' -maxdepth 4 \\( -type d -o -type f \\) -name '*Framework*' | head -20 >&2; exit 1; fi; ` +
-        `echo "FW: \$FW"; ditto "\$FW" '${PYTHON_DIR}'`], { cwd: ROOT, timeout: 600000 })
-      if (extract.exitCode !== 0) {
-        console.error(`[Error] Python.framework extract failed: ${extract.stderr.toString()}`)
+      const inst = spawnSync(['installer', '-pkg', LOCAL_PKG, '-target', '/'], { cwd: ROOT, timeout: 600000 })
+      if (inst.exitCode !== 0) {
+        console.error(`[Error] installer failed: ${inst.stderr.toString()}`)
         process.exit(1)
       }
-      rmSync(pkgRoot, { recursive: true, force: true })
+      const fwSrc = '/Library/Frameworks/Python.framework'
+      if (!existsSync(fwSrc)) {
+        console.error(`[Error] Python.framework not found after install: ${fwSrc}`)
+        process.exit(1)
+      }
+      const cp = spawnSync(['ditto', fwSrc, PYTHON_DIR], { cwd: ROOT, timeout: 600000 })
+      if (cp.exitCode !== 0) {
+        console.error(`[Error] framework copy failed: ${cp.stderr.toString()}`)
+        process.exit(1)
+      }
       console.log('  Extracted Python.framework → dist/python/')
       // 建 python3 兼容入口：settings.rs 注册 office MCP 用 {exe}/python/bin/python3，
       // 而 pkg 提取的 framework 顶层没有 bin/（python 在 Versions/<ver>/bin/ 下）。
