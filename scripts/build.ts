@@ -451,7 +451,8 @@ async function main() {
       // 有 Payload 却找不到 framework）。installer 正确处理所有嵌套子包。
       // CI runner 是临时环境，装到 /Library/Frameworks 无副作用。
       rmSync(PYTHON_DIR, { recursive: true, force: true })
-      const inst = spawnSync(['installer', '-pkg', LOCAL_PKG, '-target', '/'], { cwd: ROOT, timeout: 600000 })
+      // installer -target / 需 root（GitHub macOS runner 有免密 sudo）
+      const inst = spawnSync(['sudo', 'installer', '-pkg', LOCAL_PKG, '-target', '/'], { cwd: ROOT, timeout: 600000 })
       if (inst.exitCode !== 0) {
         console.error(`[Error] installer failed: ${inst.stderr.toString()}`)
         process.exit(1)
