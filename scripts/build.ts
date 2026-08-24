@@ -456,14 +456,20 @@ async function main() {
         console.error(`[Error] pkgutil expand failed: ${expand.stderr.toString()}`)
         process.exit(1)
       }
-      // 提取 Python.framework（递归查找）到 dist/python
-      // find -L 跟随符号链接：pkg 展开后 framework 可能是 symlink，-type d 会漏掉。
-      // 找不到时打印目录树诊断（framework 实际位置因 pkg 结构而异）。
+      // 提取 Python.framework 到 dist/python。
+      // python.org pkg 是嵌套结构：外层 expand-full 只展开顶层，Python.framework 在
+      // 未解开的子包 Python_Framework.pkg 里（其他子包带 /Payload 已展开，它没有）——
+      // 需先 expand-full 这个嵌套子包再找。find -L 跟随符号链接防漏。
       rmSync(PYTHON_DIR, { recursive: true, force: true })
       const extract = spawnSync(['bash', '-c',
-        `FW=$(find -L '${pkgRoot}' -type d -name 'Python.framework' | head -1); ` +
-        `if [ -z "$FW" ]; then echo 'Python.framework not found; pkgRoot tree:' >&2; ` +
-        `find '${pkgRoot}' -maxdepth 5 \\( -type d -o -type l \\) | head -60 >&2; exit 1; fi; ` +
+        `FW_PKG=$(find -L '${pkgRoot}' -name 'Python_Framework.pkg' | head -1); ` +
+        `SEARCH='${pkgRoot}'; ` +
+        `if [ -n "$FW_PKG" ] && [ ! -d "$FW_PKG/Payload" ]; then echo "Nested framework pkg: $FW_PKG"; ` +
+        `pkgutil --expand-full "$FW_PKG" "\${FW_PKG}.expanded" || { echo 'nested expand failed' >&2; exit 1; }; ` +
+        `SEARCH="\${FW_PKG}.expanded"; fi; ` +
+        `FW=$(find -L "$SEARCH" -type d -name 'Python.framework' | head -1); ` +
+        `if [ -z "$FW" ]; then echo 'Python.framework not found; search tree:' >&2; ` +
+        `find -L "$SEARCH" -maxdepth 6 \\( -type d -o -type l \\) | head -60 >&2; exit 1; fi; ` +
         `echo "FW: $FW"; ditto "$FW" '${PYTHON_DIR}'`], { cwd: ROOT, timeout: 300000 })
       if (extract.exitCode !== 0) {
         console.error(`[Error] Python.framework extract failed: ${extract.stderr.toString()}`)
