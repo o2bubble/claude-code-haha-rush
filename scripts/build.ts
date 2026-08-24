@@ -249,7 +249,7 @@ async function main() {
       console.log('  bun not in components — reusing existing')
     } else {
       console.log('  Downloading bun (macOS, bun-v1.1.30)...')
-      const BUN_URL = 'https://github.com/oven-sh/bun/releases/download/bun-v1.1.30/bun-darwin-arm64.zip'
+      const BUN_URL = 'https://github.com/oven-sh/bun/releases/download/bun-v1.1.30/bun-darwin-aarch64.zip'
       const bunZip = join(DIST, '_bun_dl.zip')
       const dl = spawnSync(['curl', '-L', '-f', '-o', bunZip, BUN_URL], { cwd: ROOT, timeout: 600000 })
       if (dl.exitCode !== 0) {
@@ -364,7 +364,7 @@ async function main() {
         ['fd', 'https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-aarch64-apple-darwin.tar.gz', 'tar.gz'],
         ['jq', 'https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64', 'raw'],
         ['yq', 'https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_darwin_arm64', 'raw'],
-        ['shellcheck', 'https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.darwin.arm64.tar.xz', 'tar.xz'],
+        ['shellcheck', 'https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.darwin.aarch64.tar.xz', 'tar.xz'],
       ]
       for (const [name, url, kind] of TOOL_SOURCES) {
         console.log(`  ${name}...`)
