@@ -468,6 +468,17 @@ async function main() {
         process.exit(1)
       }
       console.log('  Extracted Python.framework → dist/python/')
+
+      // 裁剪冗余: python.org framework 完整提取含测试套件/文档/IDLE/缓存, 664MB 过大。
+      // 删运行不需要的目录 + 全部 __pycache__, 只保留标准库本体。
+      const VPY = join(PYTHON_DIR, 'Versions', 'Current')
+      const stdlib3 = join(VPY, 'lib', 'python3.12')
+      for (const d of ['test', 'idlelib', 'idle_test', 'lib2to3', 'tkinter', 'turtledemo']) {
+        rmSync(join(stdlib3, d), { recursive: true, force: true })
+      }
+      rmSync(join(VPY, 'share'), { recursive: true, force: true })
+      spawnSync(['find', PYTHON_DIR, '-name', '__pycache__', '-type', 'd', '-exec', 'rm', '-rf', '{}', '+'], { cwd: ROOT, timeout: 120000 })
+      console.log('  pruned python (test/Doc/IDLE/__pycache__)')
       // 建 python3 兼容入口：settings.rs 注册 office MCP 用 {exe}/python/bin/python3，
       // 而 pkg 提取的 framework 顶层没有 bin/（python 在 Versions/<ver>/bin/ 下）。
       mkdirSync(join(PYTHON_DIR, 'bin'), { recursive: true })
