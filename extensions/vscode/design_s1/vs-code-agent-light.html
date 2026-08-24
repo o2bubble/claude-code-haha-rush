@@ -1,0 +1,1947 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VS Code Agent — Light Theme Hi-Fi</title>
+<style>
+/* ═══════════════════════════════════════════════════
+   COLOR SYSTEM — Light Theme (GitHub Light inspired)
+   ═══════════════════════════════════════════════════ */
+:root {
+  --bg:        #ffffff;
+  --surface:   #f6f8fa;
+  --surface-2: #eef1f5;
+  --surface-3: #e8ecf0;
+  --fg:        #1f2328;
+  --fg-2:      #656d76;
+  --fg-3:      #8b949e;
+  --border:    #d0d7de;
+  --border-2:  #bbb;
+  --accent:    #0969da;
+  --accent-bg: rgba(9,105,218,0.08);
+  --accent-em: #0969da;
+  --green:     #1a7f37;
+  --green-bg:  rgba(26,127,55,0.10);
+  --yellow:    #9a6700;
+  --yellow-bg: rgba(154,103,0,0.10);
+  --red:       #cf222e;
+  --red-bg:    rgba(207,34,46,0.10);
+  --purple:    #8250df;
+  --purple-bg: rgba(130,80,223,0.08);
+  --orange:    #bf4b00;
+
+  --code-bg:   #f0f2f4;
+
+  --font-sans:  -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono:  'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.5;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ═══════ LAYOUT ═══════ */
+.page-wrap {
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 32px 24px;
+  display: flex;
+  gap: 32px;
+  align-items: flex-start;
+}
+
+/* VS Code window frame */
+.vscode-frame {
+  flex-shrink: 0;
+  width: 420px;
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.02);
+}
+
+/* Title bar */
+.title-bar {
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 12px;
+  background: #eef1f5;
+  border-bottom: 1px solid var(--border);
+  gap: 8px;
+}
+.title-bar .dots {
+  display: flex;
+  gap: 6px;
+}
+.title-bar .dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+}
+.dot.red    { background: #ff5f56; }
+.dot.yellow { background: #ffbd2e; }
+.dot.green  { background: #27c93f; }
+.title-bar .title-text {
+  font-size: 12px;
+  color: var(--fg-3);
+  margin-left: 12px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+/* Scrollable content */
+.sidebar-scroll {
+  height: 720px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.sidebar-scroll::-webkit-scrollbar { width: 4px; }
+.sidebar-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ═══════ PANEL HEADERS ═══════ */
+.panel { border-bottom: 1px solid var(--border); }
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  background: var(--surface);
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.15s;
+}
+.panel-header:hover { background: var(--surface-2); }
+.panel-header .label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.panel-header .label .badge {
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--fg-3);
+  background: var(--surface-3);
+  padding: 0 6px;
+  border-radius: 8px;
+  line-height: 16px;
+}
+.panel-header .action-btn {
+  font-size: 10px;
+  color: var(--fg-3);
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.panel-header .action-btn:hover {
+  background: var(--surface-2);
+  color: var(--fg-2);
+}
+
+/* ═══════ MESSAGES ═══════ */
+.msg-filter {
+  display: flex;
+  gap: 2px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.filter-pill {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.filter-pill:hover { color: var(--fg-2); }
+.filter-pill.active {
+  background: var(--surface-3);
+  color: var(--fg);
+}
+
+.msg {
+  padding: 12px 14px;
+  display: flex;
+  gap: 10px;
+}
+.msg.user {
+  background: var(--surface);
+  border-left: 3px solid var(--accent);
+  margin: 0 8px 8px 24px;
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.msg.assistant {
+  border-left: 3px solid var(--fg-3);
+  margin: 0 8px;
+}
+.msg .avatar {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+.msg.user .avatar {
+  background: var(--accent-bg);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+.msg.assistant .avatar {
+  background: var(--surface-3);
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+}
+.msg .body { flex: 1; min-width: 0; }
+.msg .body p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--fg);
+  margin-bottom: 4px;
+}
+.msg .body .meta {
+  font-size: 10px;
+  color: var(--fg-3);
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+}
+.msg .file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 8px;
+  color: var(--fg-2);
+  margin: 4px 4px 0 0;
+}
+
+/* Thinking block */
+.thinking-block {
+  margin: 4px 12px 4px 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+.thinking-header {
+  padding: 6px 12px;
+  background: var(--surface-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-3);
+  cursor: pointer;
+  user-select: none;
+}
+.thinking-dots {
+  display: flex;
+  gap: 3px;
+}
+.thinking-dots span {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--yellow);
+  animation: pulse-think 1.4s infinite;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes pulse-think {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
+.thinking-content {
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.6;
+  border-top: 1px solid var(--border);
+}
+
+/* Tool card */
+.tool-card {
+  margin: 6px 12px 6px 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+.tool-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.tool-header .tool-icon {
+  width: 16px; height: 16px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+}
+.tool-header .tool-icon.bash { background: var(--surface-3); color: var(--fg-2); }
+.tool-header .tool-icon.edit { background: var(--accent-bg); color: var(--accent); }
+.tool-header .tool-icon.file { background: var(--purple-bg); color: var(--purple); }
+.tool-header .tool-time {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-3);
+}
+.tool-body {
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-2);
+  line-height: 1.6;
+  background: var(--code-bg);
+  border-bottom: 1px solid var(--border);
+}
+.tool-body .cmd-prompt { color: var(--green); }
+.tool-body .cmd-text { color: var(--fg-2); }
+.tool-output {
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: background 0.15s;
+}
+.tool-output:hover { background: var(--surface-2); }
+
+/* Diff viewer */
+.diff-wrap {
+  margin: 6px 12px 6px 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+.diff-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.diff-body {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.7;
+}
+.diff-line {
+  display: flex;
+  padding: 1px 10px;
+}
+.diff-line .ln {
+  width: 28px;
+  text-align: right;
+  padding-right: 10px;
+  color: var(--fg-3);
+  flex-shrink: 0;
+  user-select: none;
+}
+.diff-line .code { flex: 1; white-space: pre; }
+.diff-line.add { background: var(--green-bg); }
+.diff-line.add .code { color: var(--green); }
+.diff-line.del { background: var(--red-bg); }
+.diff-line.del .code { color: var(--red); }
+.diff-line.ctx { background: transparent; }
+.diff-line.ctx .code { color: var(--fg-2); }
+
+/* Permission prompt */
+.permit-card {
+  margin: 6px 12px 6px 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+.permit-card .permit-title {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.permit-card .permit-body {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--fg-3);
+  font-family: var(--font-mono);
+}
+.permit-card .permit-actions {
+  padding: 8px 12px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.permit-btn {
+  font-size: 11px;
+  padding: 4px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg-2);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font-sans);
+}
+.permit-btn:hover { background: var(--surface-2); color: var(--fg); }
+.permit-btn.allow { background: var(--green); color: #fff; border-color: var(--green); }
+.permit-btn.allow:hover { background: #146429; }
+.permit-btn.deny { background: var(--red); color: #fff; border-color: var(--red); }
+.permit-btn.deny:hover { background: #a0111b; }
+
+/* ═══════ PLAN / TASKS ═══════ */
+.plan-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 12px 4px 12px;
+  font-size: 12px;
+}
+.plan-item .status-icon {
+  width: 16px; height: 16px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.plan-item .status-icon.done  { color: var(--green); }
+.plan-item .status-icon.done svg { display: block; }
+.plan-item .status-icon.active  { color: var(--accent); }
+.plan-item .status-icon.active svg { display: block; }
+.plan-item .status-icon.pending  { color: var(--fg-3); }
+.plan-item .plan-text.done { text-decoration: line-through; color: var(--fg-3); }
+.plan-item .plan-text.active { color: var(--fg); font-weight: 500; }
+.plan-item .plan-text.pending { color: var(--fg-3); }
+.plan-item .blocked-by {
+  font-size: 10px;
+  color: var(--yellow);
+  margin-left: 4px;
+}
+
+.task-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.task-item:last-child { border-bottom: none; }
+.task-item .task-info { flex: 1; min-width: 0; }
+.task-item .task-info .task-name { font-size: 12px; color: var(--fg); }
+.task-item .task-info .task-sub {
+  font-size: 10px;
+  color: var(--fg-3);
+  display: flex;
+  gap: 8px;
+  margin-top: 1px;
+}
+.task-item .task-progress {
+  width: 60px;
+  height: 4px;
+  background: var(--surface-3);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.task-item .task-progress .bar {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+.task-item .task-progress .bar.running { background: var(--accent); }
+.task-item .task-progress .bar.done { background: var(--green); }
+.task-item .task-progress .bar.failed { background: var(--red); }
+.task-kill {
+  font-size: 9px;
+  color: var(--fg-3);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 3px;
+  transition: all 0.15s;
+}
+.task-kill:hover { background: var(--red-bg); color: var(--red); }
+
+/* ═══════ CONTEXT BAR ═══════ */
+.context-bar {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  background: var(--surface);
+}
+.context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg-2);
+}
+.context-chip .chip-icon { opacity: 0.7; }
+.context-chip.diag-error { background: var(--red-bg); border-color: rgba(207,34,46,0.25); color: var(--red); }
+.context-chip.diag-warn  { background: var(--yellow-bg); border-color: rgba(154,103,0,0.25); color: var(--yellow); }
+.context-chip .x {
+  margin-left: 2px;
+  opacity: 0.5;
+  cursor: pointer;
+}
+.context-chip .x:hover { opacity: 1; }
+
+/* Selection preview */
+.sel-preview {
+  padding: 6px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.sel-preview .sel-header {
+  font-size: 10px;
+  color: var(--fg-3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+}
+.sel-preview .sel-code {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  color: var(--fg-2);
+}
+.sel-preview .sel-code .ln-hl { color: var(--fg-3); margin-right: 12px; user-select: none; }
+
+/* ═══════ STATUS BAR ═══════ */
+.status-bar {
+  padding: 6px 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 10px;
+}
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-3);
+}
+.status-item .dot-indicator {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+}
+.status-item .dot-indicator.green { background: var(--green); }
+.status-item .dot-indicator.yellow { background: var(--yellow); }
+.status-item .dot-indicator.red { background: var(--red); }
+.status-pill {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.status-pill:hover { border-color: var(--fg-3); color: var(--fg-2); }
+.context-bar-wrap {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.context-bar-fill {
+  width: 48px;
+  height: 4px;
+  background: var(--surface-3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.context-bar-fill .fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--yellow);
+}
+.context-bar-fill .fill.warn { background: var(--orange); }
+.context-bar-fill .fill.danger { background: var(--red); }
+
+/* ═══════ INPUT ═══════ */
+.input-area {
+  padding: 10px 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+.input-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 8px 10px;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  cursor: text;
+}
+.input-box .placeholder {
+  color: var(--fg-3);
+  font-size: 12px;
+}
+.input-box .chip-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--accent-bg);
+  border: 1px solid rgba(9,105,218,0.2);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: var(--accent);
+}
+.input-box .chip-inline .x {
+  margin-left: 2px;
+  opacity: 0.6;
+  cursor: pointer;
+}
+.input-box .chip-inline .x:hover { opacity: 1; }
+.input-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+.input-toolbar .tool {
+  width: 26px; height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-size: 13px;
+}
+.input-toolbar .tool:hover { background: var(--surface-2); color: var(--fg-2); }
+.input-toolbar .tool.send {
+  margin-left: auto;
+  background: var(--accent-em);
+  color: #fff;
+  width: 28px; height: 28px;
+  border-radius: var(--radius);
+}
+.input-toolbar .tool.send:hover { background: #0550ae; }
+.input-toolbar .tool.send:disabled { opacity: 0.4; cursor: default; }
+.input-toolbar .tool.stop {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--red);
+  color: var(--red);
+  width: 28px; height: 28px;
+  border-radius: var(--radius);
+}
+
+/* ═══════ ANNOTATIONS COLUMN ═══════ */
+.anno-col {
+  flex: 1;
+  min-width: 0;
+  position: sticky;
+  top: 32px;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.anno-col::-webkit-scrollbar { width: 4px; }
+.anno-col::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.anno-col h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-2);
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.anno-group { margin-bottom: 18px; }
+.anno-group h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-2);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.anno-group h3 .pill {
+  font-size: 9px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--surface-3);
+  color: var(--fg-3);
+}
+.anno-group ul { list-style: none; }
+.anno-group ul li {
+  font-size: 11px;
+  color: var(--fg-3);
+  padding: 2px 0 2px 12px;
+  position: relative;
+  line-height: 1.5;
+}
+.anno-group ul li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 9px;
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+/* ═══════ OVERLAY CARDS ═══════ */
+.overlay-section {
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: 0 24px 48px;
+}
+.overlay-section h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  padding: 32px 0 16px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+.overlay-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 20px;
+}
+.overlay-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.overlay-card .card-label {
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-2);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.overlay-card .card-body { padding: 14px; }
+
+/* Dropdown mockup */
+.dropdown {
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+  overflow: hidden;
+  font-size: 12px;
+}
+.dropdown .dd-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.dropdown .dd-search input {
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  font-size: 12px;
+  outline: none;
+  width: 100%;
+  font-family: var(--font-sans);
+}
+.dropdown .dd-search input::placeholder { color: var(--fg-3); }
+.dropdown .dd-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-2);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.dropdown .dd-item:last-child { border-bottom: none; }
+.dropdown .dd-item:hover { background: var(--surface); }
+.dropdown .dd-item.active { background: var(--accent-bg); color: var(--accent); }
+.dropdown .dd-item .path {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-3);
+}
+.dropdown .dd-hint {
+  padding: 4px 10px;
+  font-size: 9px;
+  color: var(--fg-3);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+/* Modal mockup */
+.modal-overlay {
+  background: rgba(0,0,0,0.04);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  justify-content: center;
+}
+.modal {
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 48px rgba(0,0,0,0.15);
+  overflow: hidden;
+  width: 100%;
+  max-width: 480px;
+}
+.modal .modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+}
+.modal .modal-header .close {
+  color: var(--fg-3);
+  cursor: pointer;
+  padding: 2px;
+  line-height: 1;
+}
+.modal .modal-header .close:hover { color: var(--fg); }
+.modal .modal-body { padding: 14px 16px; }
+.modal .modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+.modal-btn {
+  font-size: 12px;
+  font-family: var(--font-sans);
+  padding: 5px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg-2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.modal-btn:hover { background: var(--surface-2); color: var(--fg); }
+.modal-btn.primary {
+  background: var(--accent-em);
+  border-color: var(--accent-em);
+  color: #fff;
+}
+.modal-btn.primary:hover { background: #0550ae; }
+.modal-btn.danger {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+.modal-btn.danger:hover { background: #a0111b; }
+
+/* Toast */
+.toast-wrap {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 999;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  min-width: 200px;
+  max-width: 320px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  border: 1px solid var(--border);
+}
+.toast.success { background: #e6f7ec; border-color: rgba(26,127,55,0.3); color: var(--green); }
+.toast.error { background: #fce8e8; border-color: rgba(207,34,46,0.3); color: var(--red); }
+.toast.info { background: #e6f0fd; border-color: rgba(9,105,218,0.3); color: var(--accent); }
+.toast .toast-close {
+  margin-left: auto;
+  opacity: 0.5;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.toast .toast-close:hover { opacity: 1; }
+
+/* Emoji grid */
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  padding: 10px;
+}
+.emoji-grid span {
+  text-align: center;
+  font-size: 18px;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.emoji-grid span:hover { background: var(--surface-2); }
+
+/* ═══════ RESPONSIVE ═══════ */
+@media (max-width: 900px) {
+  .page-wrap { flex-direction: column; padding: 16px; }
+  .vscode-frame { width: 100%; }
+  .anno-col { position: static; max-height: none; }
+}
+@media print {
+  .page-wrap { display: block; }
+  .vscode-frame { width: 100%; position: static; }
+  .anno-col { position: static; }
+}
+
+/* ═══════ UTILITY ═══════ */
+.text-mono { font-family: var(--font-mono); }
+.text-accent { color: var(--accent); }
+.text-green { color: var(--green); }
+.text-red { color: var(--red); }
+.text-yellow { color: var(--yellow); }
+.text-purple { color: var(--purple); }
+.text-muted { color: var(--fg-3); }
+.text-sm { font-size: 10px; }
+.flex { display: flex; }
+.gap-2 { gap: 2px; }
+.gap-4 { gap: 4px; }
+.gap-8 { gap: 8px; }
+.items-center { align-items: center; }
+.ml-auto { margin-left: auto; }
+.mt-4 { margin-top: 4px; }
+.mt-8 { margin-top: 8px; }
+.mb-4 { margin-bottom: 4px; }
+.mb-8 { margin-bottom: 8px; }
+.p-2 { padding: 2px; }
+.px-2 { padding: 0 2px; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════ HEADER ═══════════ -->
+<div style="background:var(--surface);border-bottom:1px solid var(--border);padding:16px 24px;position:sticky;top:0;z-index:100;">
+  <div style="max-width:1360px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;">
+    <div>
+      <span style="font-size:20px;font-weight:600;letter-spacing:-0.02em;display:flex;align-items:center;gap:8px;">
+        VS Code Agent UI <span style="font-size:10px;font-weight:500;color:var(--fg-3);background:var(--surface-3);padding:2px 8px;border-radius:8px;border:1px solid var(--border);">Light Hi-Fi</span>
+      </span>
+      <div style="font-size:11px;color:var(--fg-3);margin-top:2px;">All 18 interaction surfaces — real content, light theme</div>
+    </div>
+    <div style="display:flex;gap:6px;font-size:11px;">
+      <span style="color:var(--fg-3);">Tech / Utility · VS Code sidebar (420px) · Light</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ MAIN LAYOUT ═══════════ -->
+<div class="page-wrap">
+
+  <!-- ───────── VS Code Sidebar Panel ───────── -->
+  <div class="vscode-frame">
+    <div class="title-bar">
+      <div class="dots">
+        <span class="dot red"></span>
+        <span class="dot yellow"></span>
+        <span class="dot green"></span>
+      </div>
+      <span class="title-text">CLAUDE CODE — Agent Panel</span>
+    </div>
+
+    <div class="sidebar-scroll">
+
+      <!-- ── Session History ── -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="label">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2.5 2h11l.5.5v11l-.5.5h-11l-.5-.5v-11l.5-.5zM3 3v10h10V3H3zm2 2h6v1H5V5zm0 2h6v1H5V7zm0 2h4v1H5V9z"/></svg>
+            Sessions
+            <span class="badge">3</span>
+          </span>
+          <div style="display:flex;gap:2px;align-items:center;">
+            <span class="action-btn">+ New</span>
+          </div>
+        </div>
+        <div style="padding:4px 8px 8px;">
+          <div style="display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:var(--radius-sm);background:var(--accent-bg);border:1px solid rgba(9,105,218,0.2);">
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="color:var(--accent);flex-shrink:0;"><circle cx="8" cy="8" r="3"/></svg>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:11px;color:var(--fg);font-weight:500;">Bug fix — login crash</div>
+              <div style="font-size:9px;color:var(--fg-3);">main · 2m ago · 12 msgs</div>
+            </div>
+            <span style="font-size:9px;color:var(--fg-3);cursor:pointer;padding:1px 4px;">&hellip;</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:var(--radius-sm);margin-top:2px;">
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="color:var(--fg-3);flex-shrink:0;"><circle cx="8" cy="8" r="3"/></svg>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:11px;color:var(--fg-2);">Refactor auth middleware</div>
+              <div style="font-size:9px;color:var(--fg-3);">feat/auth · 12m ago · 8 msgs</div>
+            </div>
+            <span style="font-size:9px;color:var(--fg-3);cursor:pointer;padding:1px 4px;">&hellip;</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:var(--radius-sm);margin-top:2px;">
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="color:var(--yellow);flex-shrink:0;"><path d="M8 1l4.28 2.6v5.2L8 11.4 3.72 8.8V3.6L8 1z"/></svg>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:11px;color:var(--fg-2);">Setup CI pipeline</div>
+              <div style="font-size:9px;color:var(--fg-3);">main · 1h ago · 5 msgs</div>
+            </div>
+            <span style="font-size:9px;color:var(--fg-3);cursor:pointer;padding:1px 4px;">&hellip;</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Messages Stream ── -->
+      <div style="border-bottom:1px solid var(--border);">
+        <div class="msg-filter">
+          <span class="filter-pill">All</span>
+          <span class="filter-pill">You</span>
+          <span class="filter-pill active">Agent</span>
+          <span style="margin-left:auto;font-size:10px;color:var(--fg-3);padding:2px 4px;">&darr; 42</span>
+        </div>
+
+        <!-- User message -->
+        <div class="msg user">
+          <div class="avatar">U</div>
+          <div class="body">
+            <p>Fix the login crash when the token expires. The error is in <code style="font-family:var(--font-mono);font-size:11px;color:var(--accent);">src/auth.ts</code> around line 42.</p>
+            <span class="file-chip">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1.5v13l1 .5h8l1-.5V4.5L9.5 1H3l-1 .5z"/></svg>
+              src/auth.ts
+            </span>
+          </div>
+        </div>
+
+        <!-- Assistant message -->
+        <div class="msg assistant">
+          <div class="avatar">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8s3.58 8 8 8 8-3.58 8-8-3.58-8-8-8z"/></svg>
+          </div>
+          <div class="body">
+            <p>Looking at the token refresh path — it seems like there's a race condition where the expired token gets used before the refresh completes. Let me trace through the code.</p>
+            <div class="meta">
+              <span>&#x2191; 1.2k &middot; &#x2193; 840</span>
+              <span style="color:var(--fg-3);">2.3s</span>
+              <span style="cursor:pointer;color:var(--accent);">Copy</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Thinking block -->
+        <div class="thinking-block">
+          <div class="thinking-header">
+            <div class="thinking-dots"><span></span><span></span><span></span></div>
+            Thinking — tracing token expiry path
+          </div>
+          <div class="thinking-content">
+            Let me check the token refresh logic. The issue is that `refreshToken()` is async but the middleware doesn't await it before calling the next handler. I need to look at the guard condition on line 45.<br>
+            <span style="color:var(--fg-3);">── 4 more lines ──</span>
+          </div>
+        </div>
+
+        <!-- Tool card: Execute Command -->
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-icon bash">$</span>
+            Execute Command
+            <span class="tool-time">1.2s</span>
+          </div>
+          <div class="tool-body">
+            <span class="cmd-prompt">$</span> <span class="cmd-text">cat src/auth.ts | head -60</span>
+          </div>
+          <div class="tool-output">
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 2l6 6-6 6"/></svg>
+            Output (14 lines)
+          </div>
+        </div>
+
+        <!-- Diff -->
+        <div class="diff-wrap">
+          <div class="diff-header">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2l1.5 3.5H13l-2.5 2.5.5 3.5L8 9.5 5 11.5l.5-3.5L3 5.5h3.5L8 2z"/></svg>
+            Edit — src/auth.ts
+          </div>
+          <div class="diff-body">
+            <div class="diff-line ctx"><span class="ln">40</span><span class="code">  const token = getToken(req);</span></div>
+            <div class="diff-line ctx"><span class="ln">41</span><span class="code">  if (!token) return next();</span></div>
+            <div class="diff-line del"><span class="ln">42</span><span class="code">  if (isExpired(token)) return res.status(401);</span></div>
+            <div class="diff-line add"><span class="ln">42</span><span class="code">  if (isExpired(token)) {</span></div>
+            <div class="diff-line add"><span class="ln">43</span><span class="code">    await refreshToken(token);</span></div>
+            <div class="diff-line add"><span class="ln">44</span><span class="code">  }</span></div>
+            <div class="diff-line ctx"><span class="ln">45</span><span class="code">  next();</span></div>
+          </div>
+        </div>
+
+        <!-- Permission prompt -->
+        <div class="permit-card">
+          <div class="permit-title">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color:var(--yellow);"><path d="M8 1.5l6 3.5v5.5l-6 3.5-6-3.5V5L8 1.5z"/></svg>
+            Approve Edit — src/auth.ts
+          </div>
+          <div class="permit-body">
+            Write 3 lines, delete 1 line
+          </div>
+          <div class="permit-actions">
+            <button class="permit-btn allow">Allow</button>
+            <button class="permit-btn">Session</button>
+            <button class="permit-btn">Always</button>
+            <button class="permit-btn deny">Deny</button>
+          </div>
+        </div>
+
+        <!-- Assistant response -->
+        <div class="msg assistant">
+          <div class="avatar">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8s3.58 8 8 8 8-3.58 8-8-3.58-8-8-8z"/></svg>
+          </div>
+          <div class="body">
+            <p>Fixed the race condition. The token refresh now properly awaits before proceeding. The issue was that <code style="font-family:var(--font-mono);font-size:11px;color:var(--accent);">isExpired()</code> returned early before the refresh completed, so the next request would still see the stale token.</p>
+            <div class="meta">
+              <span>&#x2191; 2.4k &middot; &#x2193; 1.8k</span>
+              <span>5.1s</span>
+              <span style="cursor:pointer;color:var(--accent);">Copy</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tool card: Read file -->
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-icon file">&#x2139;</span>
+            Read File
+            <span class="tool-time">0.3s</span>
+          </div>
+          <div class="tool-body">
+            <span class="cmd-prompt">#</span> <span class="cmd-text">src/utils.ts</span>
+          </div>
+          <div class="tool-output">
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 2l6 6-6 6"/></svg>
+            32 lines
+          </div>
+        </div>
+
+        <!-- Scroll-to-bottom indicator -->
+        <div style="text-align:center;padding:6px 8px;">
+          <span style="font-size:10px;color:var(--fg-3);background:var(--surface-2);padding:3px 14px;border-radius:12px;border:1px solid var(--border);cursor:pointer;display:inline-flex;align-items:center;gap:4px;">
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3v10M3 8l5 5 5-5"/></svg>
+            Scroll to latest
+          </span>
+        </div>
+      </div>
+
+      <!-- ── Background Tasks ── -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="label">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l5 2.5V6c0 3.3-2 6.3-5 7-3-1.7-5-4.7-5-7V3.5L8 1z"/></svg>
+            Tasks
+            <span class="badge">1/2</span>
+          </span>
+          <span class="action-btn">Clear done</span>
+        </div>
+        <div class="task-item">
+          <div style="color:var(--accent);flex-shrink:0;">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4v4l3 2"/></svg>
+          </div>
+          <div class="task-info">
+            <div class="task-name">npm run build -- --mode prod</div>
+            <div class="task-sub">Running &middot; 14 tool calls &middot; 3.2k tokens</div>
+          </div>
+          <div class="task-progress"><div class="bar running" style="width:62%;"></div></div>
+          <span class="task-kill">&times;</span>
+        </div>
+        <div class="task-item">
+          <div style="color:var(--green);flex-shrink:0;">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l4 4-4 4-4-4 4-4z"/><path d="M2 11h12v2H2v-2z"/></svg>
+          </div>
+          <div class="task-info">
+            <div class="task-name">Lint — src/</div>
+            <div class="task-sub">Completed &middot; 0 warnings</div>
+          </div>
+          <div class="task-progress"><div class="bar done" style="width:100%;"></div></div>
+        </div>
+      </div>
+
+      <!-- ── Plan Panel ── -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="label">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3l7-2 7 2v10l-7 2-7-2V3z"/><path d="M8 3v10M1 5l7 2M15 5l-7 2"/></svg>
+            Plan
+            <span class="badge">2/5</span>
+          </span>
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="color:var(--fg-3);"><path d="M4 6l4 4 4-4"/></svg>
+        </div>
+        <div class="plan-item">
+          <span class="status-icon done">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.8 4.2l-7.3 7.3-4.3-4.3 1.4-1.4 2.9 2.9 5.9-5.9 1.4 1.4z"/></svg>
+          </span>
+          <span class="plan-text done">Extract auth middleware</span>
+        </div>
+        <div class="plan-item">
+          <span class="status-icon active">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="3"/></svg>
+          </span>
+          <span class="plan-text active">Refactor login flow</span>
+        </div>
+        <div class="plan-item">
+          <span class="status-icon pending">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+          </span>
+          <span class="plan-text pending">Add rate limiting</span>
+          <span class="blocked-by">blocked: auth refactor</span>
+        </div>
+        <div class="plan-item">
+          <span class="status-icon pending">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+          </span>
+          <span class="plan-text pending">Update tests</span>
+        </div>
+        <div class="plan-item">
+          <span class="status-icon pending">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+          </span>
+          <span class="plan-text pending">Add rate limiting to API routes</span>
+        </div>
+      </div>
+
+      <!-- ── Context Bar ── -->
+      <div class="context-bar">
+        <span class="context-chip">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" class="chip-icon"><path d="M2 1.5v13l1 .5h8l1-.5V4.5L9.5 1H3l-1 .5z"/></svg>
+          src/auth.ts
+          <span class="x">&times;</span>
+        </span>
+        <span class="context-chip" style="border-color:var(--accent);background:var(--accent-bg);">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" class="chip-icon"><path d="M1 4.5l6-3 6 3v6l-6 3-6-3v-6z"/></svg>
+          Selection (12:38&ndash;12:52)
+        </span>
+        <span class="context-chip diag-error">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l7 14H1L8 1z"/></svg>
+          2 errors
+        </span>
+        <span class="context-chip diag-warn">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l7 14H1L8 1z"/></svg>
+          5 warnings
+        </span>
+      </div>
+
+      <!-- ── Selection Preview ── -->
+      <div class="sel-preview">
+        <div class="sel-header">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 3l5 5-5 5"/></svg>
+          src/auth.ts &mdash; lines 38-52
+        </div>
+        <div class="sel-code">
+          <span class="ln-hl">38</span>  const token = getToken(req);<br>
+          <span class="ln-hl">39</span>  if (!token) return next();<br>
+          <span class="ln-hl" style="background:var(--red-bg);padding:0 4px;margin-left:-4px;">40</span>  <span style="color:var(--red);">if (isExpired(token)) return res.status(401);</span><br>
+          <span class="ln-hl">41</span>  next();
+        </div>
+      </div>
+
+      <!-- ── Input Area ── -->
+      <div class="input-area">
+        <div class="input-box">
+          <span class="chip-inline">
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1.5v13l1 .5h8l1-.5V4.5L9.5 1H3l-1 .5z"/></svg>
+            src/auth.ts
+            <span class="x">&times;</span>
+          </span>
+          <span class="placeholder">Ask Agent...</span>
+        </div>
+        <div class="input-toolbar">
+          <span class="tool" title="@mention file">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1C4.1 1 1 4.1 1 8s3.1 7 7 7 7-3.1 7-7-3.1-7-7-7zm0 12c-2.8 0-5-2.2-5-5s2.2-5 5-5 5 2.2 5 5-2.2 5-5 5z"/></svg>
+          </span>
+          <span class="tool" title="Slash commands">/</span>
+          <span class="tool" title="Structure editor">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1 2.5v11l.5.5h5l.5-.5v-11l-.5-.5h-5l-.5.5zM3 4h1v1H3V4zm8-1.5l-.5.5h-5l-.5.5v1l.5.5h5l.5-.5V3l-.5-.5z"/></svg>
+          </span>
+          <span class="tool" title="Emoji">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6.5"/><circle cx="5.5" cy="7" r="1"/><circle cx="10.5" cy="7" r="1"/><path d="M5 10.5c1 1.5 5 1.5 6 0"/></svg>
+          </span>
+          <span class="tool send" title="Send">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1 1l14 7L1 15V9l10-2L1 5V1z"/></svg>
+          </span>
+        </div>
+      </div>
+
+      <!-- ── Status Bar ── -->
+      <div class="status-bar">
+        <span class="status-item">
+          <span class="dot-indicator green"></span>
+          Connected
+        </span>
+        <span class="status-pill" title="Permission mode">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="margin-right:2px;"><path d="M8 1l5 2.5V6c0 3.3-2 6.3-5 7-3-1.7-5-4.7-5-7V3.5L8 1z"/></svg>
+          Ask
+        </span>
+        <span class="status-pill">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="margin-right:2px;"><path d="M8 0C3.6 0 0 3.6 0 8s3.6 8 8 8 8-3.6 8-8-3.6-8-8-8z"/></svg>
+          Claude Opus
+        </span>
+        <div class="context-bar-wrap" title="Context window">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h12v1H2V3zm0 3h12v1H2V6zm0 3h12v1H2V9zm0 3h10v1H2v-1z"/></svg>
+          <span style="font-size:10px;color:var(--fg-3);">68%</span>
+          <div class="context-bar-fill"><div class="fill" style="width:68%;"></div></div>
+        </div>
+        <span class="status-item" style="margin-left:auto;">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3l5 4H3l5-4zM8 13l-5-4h10l-5 4z"/></svg>
+          Ready
+        </span>
+      </div>
+
+    </div><!-- /sidebar-scroll -->
+  </div><!-- /vscode-frame -->
+
+  <!-- ───────── Annotations Column ───────── -->
+  <div class="anno-col">
+    <h2>Panel Inventory &amp; Interactions</h2>
+
+    <div class="anno-group">
+      <h3>&#x2460; Session History <span class="pill">Collapsible</span></h3>
+      <ul>
+        <li>Active session highlighted with accent bg</li>
+        <li>Pin icon for pinned sessions</li>
+        <li>Hover reveals rename / delete / pin actions</li>
+        <li>Search + sort on expand</li>
+        <li>Two-click delete confirmation</li>
+      </ul>
+    </div>
+
+    <div class="anno-group">
+      <h3>&#x2461; Messages Stream <span class="pill">Filtered</span></h3>
+      <ul>
+        <li>All / You / Agent filter pills</li>
+        <li>User msgs: right-gutter, accent border, file chips</li>
+        <li>Assistant msgs: left, markdown-rendered, copy action</li>
+        <li>Thinking blocks: collapsible + animated dots</li>
+        <li>Tool cards: bash read / file read / edit with diff</li>
+        <li>Permission prompts: Allow / Session / Always / Deny</li>
+        <li>Token counters + timing on assistant msgs</li>
+        <li>Lazy history scroll-up + scroll-to-bottom FAB</li>
+      </ul>
+    </div>
+
+    <div class="anno-group">
+      <h3>&#x2462; Background Tasks <span class="pill">Conditional</span></h3>
+      <ul>
+        <li>Running indicator + animated spinner</li>
+        <li>Progress bar per task</li>
+        <li>Stop (&times;) button sends kill_task</li>
+        <li>Clear completed header action</li>
+        <li>Status badges: running / completed / failed</li>
+      </ul>
+    </div>
+
+    <div class="anno-group">
+      <h3>&#x2463; Plan Panel <span class="pill">Conditional</span></h3>
+      <ul>
+        <li>From plan_tasks message (IDE PlanTasksMessage)</li>
+        <li>Three states: done (green) / active (accent) / pending (outline)</li>
+        <li>Blocked-by warnings in yellow</li>
+        <li>Progress badge (2/5) in header</li>
+        <li>Collapsible section header</li>
+      </ul>
+    </div>
+
+    <div class="anno-group">
+      <h3>&#x2464; Context Bar</h3>
+      <ul>
+        <li>File chips with remove (&times;) action</li>
+        <li>Selection indicator with line range</li>
+        <li>Error / warning diagnostic badges</li>
+        <li>Wraps naturally when many chips</li>
+      </ul>
+    </div>
+
+    <div class="anno-group">
+      <h3>&#x2465; Selection Preview</h3>
+      <ul>
+        <li>Collapsible with expand/collapse chevron</li>
+        <li>Line numbers + highlighted error lines (red bg)</li>
+        <li>Code rendered in monospace</li>
+      </ul>
+    </div>
+
+    <div class="anno-group">
+      <h3>&#x2466; Status Bar</h3>
+      <ul>
+        <li>Connection indicator: green / yellow / red dot</li>
+        <li>Permission mode: pill with shield icon (5 modes)</li>
+        <li>Model selector dropdown</li>
+        <li>Context window fill bar + percentage</li>
+        <li>Status text with icon</li>
+        <li>Quick commands via dropdown</li>
+      </ul>
+    </div>
+
+    <div class="anno-group">
+      <h3>&#x2467; Input Area</h3>
+      <ul>
+        <li>Contenteditable with file chips inline</li>
+        <li>@ button &rarr; file picker dropdown</li>
+        <li>/ button &rarr; slash command autocomplete</li>
+        <li>Structure button &rarr; Markdown Editor</li>
+        <li>Emoji button &rarr; emoji grid</li>
+        <li>Send button (accent blue, disabled when empty)</li>
+        <li>Interrupt button (red border, during streaming)</li>
+        <li>Slash-command autocomplete on typing /</li>
+      </ul>
+    </div>
+
+    <div class="anno-group">
+      <h3>&#x2468; Overlays &amp; Dialogs <span class="pill">10 surfaces</span></h3>
+      <ul>
+        <li>@Mention file picker (tree, search, keyboard nav)</li>
+        <li>Slash command autocomplete (filtered list)</li>
+        <li>Markdown Editor (split edit/preview, toolbar)</li>
+        <li>Quick Command Manager (CRUD, persistent)</li>
+        <li>Permission prompts (3 variants)</li>
+        <li>Rewind/Restore points list</li>
+        <li>Toast notifications (success / error)</li>
+        <li>Status Bar detail: permission mode selector</li>
+        <li>Emoji picker (6-column grid)</li>
+        <li>Side question dialog</li>
+      </ul>
+    </div>
+  </div>
+
+</div><!-- /page-wrap -->
+
+<!-- ═══════════ OVERLAY DETAIL CARDS ═══════════ -->
+<div class="overlay-section">
+  <h2>Overlays &amp; Dialogs — Close-up Detail</h2>
+  <div class="overlay-grid">
+
+    <!-- @Mention File Picker -->
+    <div class="overlay-card">
+      <div class="card-label">@Mention File Picker</div>
+      <div class="card-body">
+        <div class="dropdown" style="max-width:360px;">
+          <div class="dd-search">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color:var(--fg-3);"><path d="M11.5 7.5a4 4 0 1 0-8 0 4 4 0 0 0 8 0zm.8 3.7l3.4 3.4-1.4 1.4-3.4-3.4"/></svg>
+            <input type="text" placeholder="Filter files...">
+          </div>
+          <div class="dd-item">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color:var(--fg-3);"><path d="M2 5v8l1 1h10l1-1V4.5l-.5-.5h-4l-1-1H3l-1 1z"/></svg>
+            src/
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="margin-left:auto;"><path d="M4 6l4 4 4-4"/></svg>
+          </div>
+          <div class="dd-item" style="padding-left:24px;">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1.5v13l1 .5h8l1-.5V4.5L9.5 1H3l-1 .5z"/></svg>
+            auth.ts
+            <span class="path">src/</span>
+          </div>
+          <div class="dd-item active" style="padding-left:24px;">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1.5v13l1 .5h8l1-.5V4.5L9.5 1H3l-1 .5z"/></svg>
+            middleware.ts
+            <span class="path">src/</span>
+          </div>
+          <div class="dd-item" style="padding-left:24px;">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1.5v13l1 .5h8l1-.5V4.5L9.5 1H3l-1 .5z"/></svg>
+            utils.ts
+            <span class="path">src/</span>
+          </div>
+          <div class="dd-hint">&uarr;&darr; navigate &middot; Enter select &middot; Esc close</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slash Command Autocomplete -->
+    <div class="overlay-card">
+      <div class="card-label">Slash Command Autocomplete</div>
+      <div class="card-body">
+        <div class="dropdown" style="max-width:320px;">
+          <div style="padding:6px 10px;border-bottom:1px solid var(--border);font-family:var(--font-mono);font-size:12px;color:var(--fg-3);">
+            /<span style="color:var(--fg);">rev</span>
+          </div>
+          <div class="dd-item active">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2l1.5 3.5H13l-2.5 2.5.5 3.5L8 9.5 5 11.5l.5-3.5L3 5.5h3.5L8 2z"/></svg>
+            review
+            <span class="path">Code review current changes</span>
+          </div>
+          <div class="dd-item">
+            <span style="font-weight:600;color:var(--fg-2);">/rewind</span>
+            <span class="path">Restore to a checkpoint</span>
+          </div>
+          <div class="dd-item">
+            <span style="font-weight:600;color:var(--fg-2);">/release-notes</span>
+            <span class="path">Generate release notes</span>
+          </div>
+          <div class="dd-hint">Tab or Enter to select &middot; Esc close</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Markdown Editor -->
+    <div class="overlay-card">
+      <div class="card-label">Markdown Editor (Structure Mode)</div>
+      <div class="card-body">
+        <div class="modal-overlay">
+          <div class="modal">
+            <div class="modal-header">
+              Markdown Editor
+              <span style="font-size:10px;color:var(--fg-3);font-weight:400;">142 chars</span>
+              <span class="close">&times;</span>
+            </div>
+            <div style="padding:6px 12px;border-bottom:1px solid var(--border);display:flex;gap:4px;flex-wrap:wrap;">
+              <button class="modal-btn" style="font-size:10px;padding:2px 8px;">H2</button>
+              <button class="modal-btn" style="font-size:10px;padding:2px 8px;">&bull; List</button>
+              <button class="modal-btn" style="font-size:10px;padding:2px 8px;">1. List</button>
+              <button class="modal-btn" style="font-size:10px;padding:2px 8px;">&#x2611;</button>
+              <button class="modal-btn" style="font-size:10px;padding:2px 8px;">&lt;/&gt;</button>
+            </div>
+            <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+              <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;min-height:100px;font-family:var(--font-mono);font-size:11px;color:var(--fg-2);background:var(--code-bg);">
+                ## Refactor Plan<br>
+                <br>
+                - [ ] Extract auth middleware<br>
+                - [ ] Add rate limiting<br>
+                <br>
+                | &larr; cursor
+              </div>
+              <div style="font-size:9px;color:var(--fg-3);text-transform:uppercase;letter-spacing:0.04em;">Preview</div>
+              <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;min-height:50px;font-size:12px;">
+                <strong style="color:var(--fg);">Refactor Plan</strong>
+                <div style="color:var(--fg-3);font-size:11px;margin-top:4px;">
+                  &#x2610; Extract auth middleware<br>
+                  &#x2610; Add rate limiting
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <span style="font-size:10px;color:var(--fg-3);">Enter = new line</span>
+              <span style="flex:1;"></span>
+              <button class="modal-btn">Cancel</button>
+              <button class="modal-btn primary">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Command Manager -->
+    <div class="overlay-card">
+      <div class="card-label">Quick Command Manager</div>
+      <div class="card-body">
+        <div class="modal-overlay">
+          <div class="modal" style="max-width:420px;">
+            <div class="modal-header">
+              Quick Commands
+              <span class="close">&times;</span>
+            </div>
+            <div class="modal-body">
+              <div style="margin-bottom:8px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px;">
+                  <span style="color:var(--fg-2);">Deploy staging</span>
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--fg-3);">/deploy staging...</span>
+                  <span style="color:var(--red);cursor:pointer;font-size:14px;line-height:1;">&times;</span>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px;">
+                  <span style="color:var(--fg-2);">Run tests</span>
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--fg-3);">/test --coverage</span>
+                  <span style="color:var(--red);cursor:pointer;font-size:14px;line-height:1;">&times;</span>
+                </div>
+              </div>
+              <div style="display:flex;gap:8px;margin-top:8px;">
+                <input type="text" placeholder="Name" style="flex:1;padding:6px 8px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--fg);font-size:12px;font-family:var(--font-sans);outline:none;">
+                <input type="text" placeholder="Command to send" style="flex:2;padding:6px 8px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--fg);font-size:12px;font-family:var(--font-sans);outline:none;">
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="modal-btn">Close</button>
+              <button class="modal-btn primary">+ Add</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Permission Prompts (3 variants) -->
+    <div class="overlay-card">
+      <div class="card-label">Permission Prompts — 3 Variants</div>
+      <div class="card-body" style="display:flex;flex-direction:column;gap:14px;">
+
+        <div>
+          <div style="font-size:10px;color:var(--fg-3);font-weight:600;margin-bottom:6px;">A — Terminal tool inline</div>
+          <div class="permit-card" style="margin:0;">
+            <div class="permit-title">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color:var(--yellow);"><path d="M8 1l6 3.5v5.5l-6 3.5-6-3.5V5L8 1.5z"/></svg>
+              Execute Command
+            </div>
+            <div class="permit-body" style="font-size:11px;">rm -rf ./build</div>
+            <div class="permit-actions">
+              <button class="permit-btn allow">Allow</button>
+              <button class="permit-btn">Session</button>
+              <button class="permit-btn">Always</button>
+              <button class="permit-btn deny">Deny</button>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:10px;color:var(--fg-3);font-weight:600;margin-bottom:6px;">B — Edit tool with diff</div>
+          <div class="permit-card" style="margin:0;">
+            <div class="permit-title">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2l1.5 3.5H13l-2.5 2.5.5 3.5L8 9.5 5 11.5l.5-3.5L3 5.5h3.5L8 2z"/></svg>
+              Edit — src/auth.ts
+            </div>
+            <div class="permit-body" style="padding:4px 12px;">
+              <div style="font-family:var(--font-mono);font-size:10px;line-height:1.8;">
+                <span style="color:var(--red);">&minus;  if (isExpired(token)) return res.status(401);</span><br>
+                <span style="color:var(--green);">+  if (isExpired(token)) { await refreshToken(token); }</span>
+              </div>
+            </div>
+            <div class="permit-actions">
+              <button class="permit-btn allow">Allow</button>
+              <button class="permit-btn">Session</button>
+              <button class="permit-btn">Always</button>
+              <button class="permit-btn deny">Deny</button>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:10px;color:var(--fg-3);font-weight:600;margin-bottom:6px;">C — Read file (non-destructive)</div>
+          <div class="permit-card" style="margin:0;">
+            <div class="permit-title">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color:var(--accent);"><path d="M2 1.5v13l1 .5h8l1-.5V4.5L9.5 1H3l-1 .5z"/></svg>
+              Read File
+            </div>
+            <div class="permit-body">
+              Path: /etc/config.json<br>
+              <span style="font-size:10px;color:var(--fg-3);">Read system config file</span>
+            </div>
+            <div class="permit-actions">
+              <button class="permit-btn allow">Allow</button>
+              <button class="permit-btn">Session</button>
+              <button class="permit-btn">Always</button>
+              <button class="permit-btn deny">Deny</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Rewind Points -->
+    <div class="overlay-card">
+      <div class="card-label">Rewind / Restore Points</div>
+      <div class="card-body">
+        <div style="font-size:10px;color:var(--fg-3);font-weight:600;margin-bottom:8px;">Restore Points</div>
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px;">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color:var(--accent);flex-shrink:0;"><path d="M8 1v2c3.3 0 6 2.7 6 6s-2.7 6-6 6-6-2.7-6-6c0-2.2 1.2-4.2 3-5.2V9h2V1H8z"/></svg>
+          <span style="color:var(--fg);">Checkpoint — Before refactor</span>
+          <span style="font-size:10px;color:var(--fg-3);margin-left:auto;">3 files</span>
+          <span style="font-size:10px;color:var(--fg-3);">2m ago</span>
+          <button class="modal-btn" style="font-size:10px;padding:2px 10px;">Restore</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px;">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color:var(--fg-3);flex-shrink:0;"><path d="M8 1v2c3.3 0 6 2.7 6 6s-2.7 6-6 6-6-2.7-6-6c0-2.2 1.2-4.2 3-5.2V9h2V1H8z"/></svg>
+          <span style="color:var(--fg-2);">Auto — npm install</span>
+          <span style="font-size:10px;color:var(--fg-3);margin-left:auto;">1 file</span>
+          <span style="font-size:10px;color:var(--fg-3);">12m ago</span>
+          <button class="modal-btn" style="font-size:10px;padding:2px 10px;">Restore</button>
+        </div>
+        <div style="margin-top:6px;font-size:10px;color:var(--fg-3);">
+          Triggered by /rewind or /checkpoint &middot; Restore sends execute_rewind
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div class="overlay-card">
+      <div class="card-label">Toast Notifications</div>
+      <div class="card-body">
+        <div class="toast-wrap" style="position:static;">
+          <div class="toast success">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l4 4-4 4-4-4 4-4z"/></svg>
+            Session "Bug fix" created
+            <span class="toast-close">&times;</span>
+          </div>
+          <div class="toast error">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l5 5-5 5-5-5 5-5z"/></svg>
+            Permission denied
+            <span class="toast-close">&times;</span>
+          </div>
+          <div class="toast info">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="6"/></svg>
+            Compact completed
+            <span class="toast-close">&times;</span>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:var(--fg-3);">
+          Fixed-position bottom-right &middot; 3s auto-dismiss &middot; fade animation
+        </div>
+      </div>
+    </div>
+
+    <!-- Permission Mode Selector -->
+    <div class="overlay-card">
+      <div class="card-label">Permission Mode Selector</div>
+      <div class="card-body">
+        <div class="dropdown" style="max-width:280px;">
+          <div class="dd-item" style="justify-content:space-between;">
+            <span>
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="margin-right:4px;"><path d="M8 1l5 2.5V6c0 3.3-2 6.3-5 7-3-1.7-5-4.7-5-7V3.5L8 1z"/></svg>
+              Default (Ask)
+            </span>
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M4 6l4 4 4-4"/></svg>
+          </div>
+          <div class="dd-item active">Default &mdash; Ask on risky actions</div>
+          <div class="dd-item">Accept Edits &mdash; Auto-approve file edits</div>
+          <div class="dd-item">Plan Mode &mdash; Plan first, execute later</div>
+          <div class="dd-item">Bypass &mdash; Auto-approve all</div>
+          <div class="dd-hint">Saved to ~/.claude/settings.json</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Emoji Picker -->
+    <div class="overlay-card">
+      <div class="card-label">Emoji Picker</div>
+      <div class="card-body">
+        <div class="dropdown" style="max-width:260px;">
+          <div class="emoji-grid">
+            <span>&#x1F60A;</span><span>&#x1F602;</span><span>&#x1F60D;</span><span>&#x1F970;</span><span>&#x1F618;</span><span>&#x1F61C;</span>
+            <span>&#x1F92A;</span><span>&#x1F60F;</span><span>&#x1F60C;</span><span>&#x1F389;</span><span>&#x2728;</span><span>&#x1F680;</span>
+            <span>&#x1F525;</span><span>&#x2764;&#xFE0F;</span><span>&#x1F495;</span><span>&#x1F97A;</span><span>&#x1F622;</span><span>&#x1F624;</span>
+            <span>&#x1F4A1;</span><span>&#x1F3AF;</span><span>&#x2615;</span><span>&#x1F37B;</span><span>&#x1F44D;</span><span>&#x1F44E;</span>
+          </div>
+        </div>
+        <div style="margin-top:6px;font-size:10px;color:var(--fg-3);">
+          6-column grid &middot; click inserts at cursor &middot; categories via tabs
+        </div>
+      </div>
+    </div>
+
+    <!-- Side Question Dialog -->
+    <div class="overlay-card">
+      <div class="card-label">Side Question Dialog</div>
+      <div class="card-body">
+        <div class="modal-overlay">
+          <div class="modal" style="max-width:400px;">
+            <div class="modal-header">
+              Clarification Needed
+              <span class="close">&times;</span>
+            </div>
+            <div class="modal-body">
+              <div style="font-size:12px;color:var(--fg-3);margin-bottom:10px;">
+                Which test framework should I use for the new auth tests?
+              </div>
+              <textarea placeholder="Type your answer..." style="width:100%;min-height:60px;padding:8px 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--fg);font-size:12px;font-family:var(--font-sans);resize:vertical;outline:none;"></textarea>
+            </div>
+            <div class="modal-footer">
+              <button class="modal-btn">Skip</button>
+              <button class="modal-btn primary">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status Bar Context Detail -->
+    <div class="overlay-card">
+      <div class="card-label">Status Bar — Context Window Detail</div>
+      <div class="card-body">
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px;">
+            <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:6px;">
+              <span style="color:var(--fg-2);">Context Window</span>
+              <span style="font-family:var(--font-mono);font-size:10px;color:var(--fg-3);">128K / 200K</span>
+            </div>
+            <div style="height:6px;background:var(--surface-3);border-radius:3px;overflow:hidden;">
+              <div style="height:100%;width:64%;background:linear-gradient(90deg,var(--green),var(--yellow),var(--orange));border-radius:3px;"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:9px;color:var(--fg-3);">
+              <span style="color:var(--green);">&#x25CF; 0&ndash;50%</span>
+              <span style="color:var(--yellow);">&#x25CF; 50&ndash;75%</span>
+              <span style="color:var(--orange);">&#x25CF; 75&ndash;90%</span>
+              <span style="color:var(--red);">&#x25CF; 90%+</span>
+            </div>
+            <div style="margin-top:8px;font-size:10px;color:var(--fg-3);cursor:pointer;display:flex;align-items:center;gap:4px;">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h12v1H2V3zm0 3h12v1H2V6zm0 3h12v1H2V9zm0 3h10v1H2v-1z"/></svg>
+              Compact conversation
+            </div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px;display:flex;justify-content:space-between;">
+            <div>
+              <div style="font-size:10px;color:var(--fg-3);">Model</div>
+              <div style="font-size:12px;color:var(--fg);font-weight:500;">Claude Opus 4.6</div>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-size:10px;color:var(--fg-3);">Tokens</div>
+              <div style="font-size:12px;color:var(--fg);font-family:var(--font-mono);">124,532 / 200K</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════════ INTERACTION INVENTORY ═══════════ -->
+<div class="overlay-section">
+  <h2>Interaction Inventory — All 18 Surfaces</h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-top:12px;">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">1. Session History</div>
+      <div style="font-size:10px;color:var(--fg-3);">Collapsible list &middot; search &middot; sort &middot; rename &middot; pin &middot; delete</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">2. Messages Stream</div>
+      <div style="font-size:10px;color:var(--fg-3);">Filter &middot; scroll &middot; lazy history &middot; FABs &middot; markdown</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">3. Status Bar</div>
+      <div style="font-size:10px;color:var(--fg-3);">Model &middot; permission &middot; context% &middot; quick cmds &middot; status</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">4. Input Area</div>
+      <div style="font-size:10px;color:var(--fg-3);">Contenteditable &middot; chips &middot; send &middot; interrupt &middot; slash</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">5. Context Bar</div>
+      <div style="font-size:10px;color:var(--fg-3);">File chips &middot; selection &middot; diagnostics</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">6. Selection Preview</div>
+      <div style="font-size:10px;color:var(--fg-3);">Collapsible &middot; line numbers &middot; error highlights</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">7. Background Tasks</div>
+      <div style="font-size:10px;color:var(--fg-3);">Progress &middot; stop &middot; clear completed &middot; status badges</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">8. Plan/Todo Panel</div>
+      <div style="font-size:10px;color:var(--fg-3);">3 states &middot; blocked-by &middot; progress badge</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">9. @Mention File Picker</div>
+      <div style="font-size:10px;color:var(--fg-3);">Search &middot; tree &middot; keyboard nav &middot; dir/files</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">10. Emoji Picker</div>
+      <div style="font-size:10px;color:var(--fg-3);">6-col grid &middot; click-to-insert &middot; categories</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">11. Slash Autocomplete</div>
+      <div style="font-size:10px;color:var(--fg-3);">Filtered list &middot; keyboard nav &middot; descriptions</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">12. Markdown Editor</div>
+      <div style="font-size:10px;color:var(--fg-3);">Split edit/preview &middot; toolbar &middot; live render</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">13. Quick Command Manager</div>
+      <div style="font-size:10px;color:var(--fg-3);">CRUD &middot; json persistence &middot; list + delete</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">14. Permission Prompts</div>
+      <div style="font-size:10px;color:var(--fg-3);">3 variants &middot; 4 action buttons &middot; inline</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">15. Rewind/Restore</div>
+      <div style="font-size:10px;color:var(--fg-3);">Checkpoint list &middot; file count &middot; restore action</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">16. Thinking Blocks</div>
+      <div style="font-size:10px;color:var(--fg-3);">Collapsible &middot; animated dots &middot; expand content</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">17. Terminal Tool Cards</div>
+      <div style="font-size:10px;color:var(--fg-3);">Syntax highlight &middot; live output &middot; timer</div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;">
+      <div style="font-weight:600;font-size:12px;color:var(--fg-2);">18. Toast Notifications</div>
+      <div style="font-size:10px;color:var(--fg-3);">Fixed position &middot; 3s fade &middot; success/error/info</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

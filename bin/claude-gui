@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$DIR")"
+cd "$ROOT"
+echo "Claude Code — 聊天 UI"
+echo
+bun run extensions/general_ui/start.ts

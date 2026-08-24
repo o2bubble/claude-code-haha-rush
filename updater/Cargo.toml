@@ -1,0 +1,15 @@
+[package]
+name = "claude-code-updater"
+version = "1.0.0"
+edition = "2021"
+
+[package.metadata.windows]
+windows-subsystem = "windows"
+
+[[bin]]
+name = "Update"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

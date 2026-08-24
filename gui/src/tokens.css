@@ -1,0 +1,335 @@
+/* ===================================================================
+   Claude Code GUI — Design Tokens
+   亮色/暗色双主题 CSS 自定义属性 + 全局滚动条 + 过渡 + focus-visible
+   =================================================================== */
+
+/* ── 亮色主题（默认） ── */
+:root {
+  color-scheme: light;
+  /* 背景 */
+  --bg-root: #ffffff;
+  --bg-surface: #fafafa;
+  --bg-hover: #f3f3f3;
+  --bg-active: #e8f0fe;
+  --bg-code: #f6f8fa;
+
+  /* 前景 / 文字 */
+  --fg-primary: #333333;
+  --fg-secondary: #666666;
+  --fg-muted: #999999;
+  --fg-inverse: #ffffff;
+
+  /* 强调色 */
+  --accent: #007acc;
+  --accent-subtle: rgba(0, 122, 204, 0.08);
+  --accent-glow: rgba(0, 122, 204, 0.16);
+
+  /* 语义色 */
+  --semantic-success: #4caf50;
+  --semantic-warning: #ff9800;
+  --semantic-error: #d32f2f;
+  --semantic-info: #2196f3;
+
+  /* 语义色柔和背景（浅色主题） */
+  --semantic-success-subtle: #e8f5e9;
+  --semantic-warning-subtle: #fff3cd;
+  --semantic-error-subtle: #fdecea;
+  --semantic-info-subtle: #e8f4fd;
+
+  /* 边框 */
+  --border-light: #e0e0e0;
+  --border-medium: #d4d4d4;
+  --border-focus: #007acc;
+
+  /* 启动动画点阵网格 — 亮色下加深便于辨识 */
+  --grid-dot: #c4c4c4;
+
+  /* 投影 */
+  --shadow-sm: 0 1px 4px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.2);
+
+  /* 全屏遮罩（launch / 弹层底） */
+  --overlay: rgba(255, 255, 255, 0.97);
+
+  /* 圆角 */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* 字体 */
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", "Fira Code", "Consolas", monospace;
+
+  /* 过渡 */
+  --transition-fast: 0.1s ease;
+  --transition-normal: 0.15s ease;
+  --transition-slow: 0.3s ease;
+}
+
+/* ── 暗色主题 · 默认（高级深灰 B — 兼容旧值 "dark"） ── */
+[data-theme="dark"],
+[data-theme="dark-b"] {
+  /* 让 Chromium 把未显式定制的原生控件(数字微调/单选框/日期等)按暗色渲染 */
+  color-scheme: dark;
+  --bg-root: #0e0e12;
+  --bg-surface: #15161d;
+  --bg-hover: #1d1e28;
+  --bg-active: #16405e;
+  --bg-code: #09090c;
+
+  --fg-primary: #cdd1da;
+  --fg-secondary: #8f94a1;
+  --fg-muted: #5c6272;
+  --fg-inverse: #f2f3f7;
+
+  --accent: #58c4e8;
+  --accent-subtle: rgba(88, 196, 232, 0.09);
+  --accent-glow: rgba(88, 196, 232, 0.20);
+
+  --border-light: #242533;
+  --border-medium: #3a3b4c;
+  --border-focus: #58c4e8;
+
+  --grid-dot: #23242f;
+
+  --semantic-success: #47c98a;
+  --semantic-warning: #dca743;
+  --semantic-error: #e06262;
+  --semantic-info: #5aa9d6;
+
+  /* 语义色柔和背景（深色主题 — 半透明深调，避免浅色主题的亮底） */
+  --semantic-success-subtle: rgba(71, 201, 138, 0.16);
+  --semantic-warning-subtle: rgba(220, 167, 67, 0.16);
+  --semantic-error-subtle: rgba(224, 98, 98, 0.16);
+  --semantic-info-subtle: rgba(90, 169, 214, 0.16);
+
+  --shadow-sm: 0 1px 4px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+
+  --overlay: rgba(14, 14, 18, 0.97);
+}
+
+/* ── 暗色主题 · 深蓝专业 A ── */
+[data-theme="dark-a"] {
+  color-scheme: dark;
+  --bg-root: #14171f;
+  --bg-surface: #1b2029;
+  --bg-hover: #222a3a;
+  --bg-active: #264f78;
+  --bg-code: #10131a;
+
+  --fg-primary: #d5dbe3;
+  --fg-secondary: #9aa4b2;
+  --fg-muted: #6b7688;
+  --fg-inverse: #f0f4fa;
+
+  --accent: #5aa8ff;
+  --accent-subtle: rgba(90, 168, 255, 0.10);
+  --accent-glow: rgba(90, 168, 255, 0.22);
+
+  --border-light: #2c3547;
+  --border-medium: #3d4a63;
+  --border-focus: #5aa8ff;
+
+  --grid-dot: #33405a;
+
+  --semantic-success: #4ecb71;
+  --semantic-warning: #e2b93d;
+  --semantic-error: #f0666e;
+  --semantic-info: #4fd0e0;
+
+  --semantic-success-subtle: rgba(78, 203, 113, 0.16);
+  --semantic-warning-subtle: rgba(226, 185, 61, 0.16);
+  --semantic-error-subtle: rgba(240, 102, 110, 0.16);
+  --semantic-info-subtle: rgba(79, 208, 224, 0.16);
+
+  --shadow-sm: 0 1px 4px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+
+  --overlay: rgba(20, 23, 31, 0.97);
+}
+
+/* ── 滚动条 ── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-medium);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-muted);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ── 原生 select / option 主题化 ── */
+/* WebView2 原生 <select> 弹开的选项列表默认用系统浅色底，暗色主题下会
+   出现"深框浅字 / 褐色底黑字"看不清的问题。统一跟随主题 token。 */
+select {
+  background-color: var(--bg-root);
+  color: var(--fg-primary);
+}
+select option {
+  background-color: var(--bg-root);
+  color: var(--fg-primary);
+}
+select:focus {
+  outline: 1px solid var(--border-focus);
+}
+
+/* ── 原生 button / input / textarea 跟随主题 ── */
+/* Chromium UA 样式给这些元素设 color: buttontext/fieldtext(黑) + 白底 field，
+   不继承 body 文字色 → 暗色主题下没显式设 color 的按钮黑字黑底看不清、没显式设
+   background 的输入框白底淡字对比度低。这里统一给默认文字色与底色；显式写了
+   color/background 的内联或类样式优先，不受影响。 */
+button {
+  color: var(--fg-primary);
+}
+input,
+textarea {
+  color: var(--fg-primary);
+  background-color: var(--bg-root);
+}
+
+/* ── 全局过渡 ── */
+html {
+  background: var(--bg-root);
+  font-family: var(--font-sans);
+}
+body {
+  color: var(--fg-primary);
+}
+body {
+  transition: background-color var(--transition-normal), color var(--transition-normal);
+}
+
+/* ── focus-visible 光环 ── */
+*:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -1px;
+}
+
+/* ── xterm.js 终端颜色保护 — 防止全局 color 级联 ── */
+.xterm {
+  color: initial;
+}
+.xterm canvas {
+  color: initial;
+}
+
+/* ── 消息淡入动画 ── */
+@keyframes msg-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+/* ── 启动 / 加载动画 ── */
+@keyframes app-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes app-typing {
+  0%, 30% { width: 0; }
+  /* "Claude Code" 11 字符 + letter-spacing 1px×11: 纯 11ch 会裁掉末尾 'e' */
+  85%, 100% { width: calc(11ch + 11px); }
+}
+@keyframes app-fadein {
+  0%, 30% { opacity: 0; transform: translateY(4px); }
+  90%, 100% { opacity: 1; transform: translateY(0); }
+}
+@keyframes app-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+/* ── 启动 → 主界面 镜头展开过渡 ── */
+/* 叙事收尾: 品牌 accent 点亮一次 */
+@keyframes ignite {
+  0%   { text-shadow: none; }
+  45%  { text-shadow: 0 0 22px color-mix(in srgb, var(--accent) 75%, transparent),
+                         0 0 44px color-mix(in srgb, var(--accent) 30%, transparent); }
+  100% { text-shadow: 0 0 8px color-mix(in srgb, var(--accent) 25%, transparent); }
+}
+.splash-ignite { animation: ignite 0.45s ease forwards; }
+/* splash 缩小淡出(镜头拉开) */
+@keyframes splash-exit {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.94); }
+}
+.splash-exit { animation: splash-exit 0.55s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
+/* 主界面从 1.04 放大落位 + 淡入(backwards: 播完不保留 transform, 避免影响 fixed 定位) */
+@keyframes app-enter {
+  from { opacity: 0; transform: scale(1.04); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.app-enter { animation: app-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+
+/* ── 消息内 markdown 内容：防溢出 ── */
+/* marked 渲染的 HTML 用浏览器默认样式，`pre` 默认 white-space:pre 长行会
+   溢出父容器。这里强制换行/收缩，并让代码块、表格、图片都适配容器宽度。 */
+.md-body {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.md-body > *:first-child { margin-top: 0; }
+.md-body > *:last-child { margin-bottom: 0; }
+.md-body pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-code);
+  overflow-x: auto;
+}
+.md-body code {
+  font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.md-body pre code {
+  background: none;
+  padding: 0;
+}
+.md-body img { max-width: 100%; height: auto; }
+.md-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--border-light);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-body th {
+  background: var(--bg-hover);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.md-body tr:nth-child(even) td {
+  background: var(--bg-surface);
+}
+.md-body tr:hover td {
+  background: var(--accent-subtle);
+}
+.md-body table code {
+  white-space: pre-wrap;
+}
+.md-body a { overflow-wrap: anywhere; word-break: break-all; }

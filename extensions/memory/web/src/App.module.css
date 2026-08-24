@@ -1,0 +1,205 @@
+/* ─── Layout ──────────────────────────────────────────── */
+.layout {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ─── Sidebar ─────────────────────────────────────────── */
+.sidebar {
+  width: 240px;
+  min-width: 240px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+}
+
+/* ─── Main area ───────────────────────────────────────── */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ─── Stats bar ───────────────────────────────────────── */
+.statsBar {
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* ─── View tabs ───────────────────────────────────────── */
+.viewToolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.viewToolbar button {
+  font-size: 13px;
+  font-weight: 500;
+  padding: 5px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.viewToolbar button:hover { background: var(--hover-overlay); }
+.viewToolbar button.primary {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+/* ─── Detail panel (slide-in) ─────────────────────────── */
+.detail {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 600px;
+  background: var(--bg);
+  z-index: 20;
+  box-shadow: -4px 0 24px var(--overlay-mask);
+  transform: translateX(0);
+  transition: transform 0.25s var(--ease-standard), width 0.25s var(--ease-standard);
+  display: flex;
+  flex-direction: column;
+}
+.detail.hidden {
+  transform: translateX(100%);
+}
+.detail.editing {
+  width: 600px;
+}
+
+/* ─── Content areas ───────────────────────────────────── */
+.listArea {
+  flex: 1;
+  overflow-y: auto;
+}
+.graphArea {
+  flex: 1;
+  display: none;
+  position: relative;
+  overflow: hidden;
+}
+.graphArea.show {
+  display: block;
+}
+
+/* ─── Memory card ─────────────────────────────────────── */
+.memCard {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+  transition: background var(--motion-fast);
+}
+.memCard:hover { background: var(--hover-overlay); }
+.memCard.selected { background: var(--accent-subtle); }
+
+/* ─── Sidebar sections ────────────────────────────────── */
+.sbSearch {
+  padding: 14px;
+}
+.sbSearch input {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg);
+}
+.sbSearch input::placeholder { color: var(--meta); }
+.sbSearch { position: relative; }
+.sbClearBtn {
+  position: absolute;
+  right: 18px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; font-size: 14px; color: var(--meta);
+  cursor: pointer; padding: 2px 4px; line-height: 1;
+}
+.sbClearBtn:hover { color: var(--fg); }
+
+.sbSection {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.sbLabel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--meta);
+  margin-bottom: 8px;
+}
+
+.sbRow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 0;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  transition: background var(--motion-fast);
+}
+.sbRow:hover { background: var(--hover-overlay); color: var(--fg); }
+.sbRow.active { color: var(--fg); font-weight: 600; }
+
+.sbTags {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 14px 12px;
+}
+.sbTag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  cursor: pointer;
+  margin: 2px 3px 2px 0;
+  transition: background var(--motion-fast);
+}
+.sbTag:hover { background: var(--accent-subtle); opacity: 0.8; }
+.sbTag.active { background: var(--accent); color: #fff; }
+
+.sbBottom {
+  padding: 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sbStats {
+  font-size: 11px;
+  color: var(--meta);
+  text-align: center;
+}
+
+/* ─── Scope tree ──────────────────────────────────────── */
+.scopeTree { padding-left: 12px; }
+
+/* ─── Responsive ──────────────────────────────────────── */
+@media (max-width: 860px) {
+  .sidebar { width: 200px; min-width: 200px; }
+  .detail { width: 320px; }
+}
+@media (max-width: 640px) {
+  .sidebar { width: 52px; min-width: 52px; }
+  .detail { width: 100%; }
+}

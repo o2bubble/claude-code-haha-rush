@@ -1,0 +1,12 @@
+services:
+  claude-memory:
+    build: .
+    container_name: claude-memory
+    ports:
+      - "40020:8080"
+      - "40021:40021"
+    volumes:
+      - /data/memory:/data
+    restart: unless-stopped
+    environment:
+      - DB_PATH=/data/claude-memory.db

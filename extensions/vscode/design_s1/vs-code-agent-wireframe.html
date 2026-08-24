@@ -1,0 +1,1150 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VS Code Agent Extension — UI Wireframe</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --surface: #fff;
+    --fg: #1a1a1a;
+    --muted: #888;
+    --border: #d4d4d4;
+    --hairline: #e8e8e8;
+    --accent: #555;
+    --tag-bg: #eee;
+    --callout: #e0e0e0;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.5;
+    font-size: 13px;
+  }
+
+  .wf-header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 20px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .wf-header h1 {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .wf-header .sub {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+  .wf-badge {
+    display: inline-block;
+    background: var(--tag-bg);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+
+  .wf-layout {
+    display: flex;
+    gap: 0;
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 24px 16px;
+    align-items: flex-start;
+  }
+
+  .sidebar-mockup {
+    width: 420px;
+    min-width: 420px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    position: sticky;
+    top: 100px;
+  }
+  .sidebar-mockup .sidebar-header {
+    padding: 10px 14px;
+    background: #f5f5f5;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sidebar-mockup .sidebar-header .dot { width: 6px; height: 6px; border-radius: 50%; background: #ccc; }
+
+  .panel {
+    border-bottom: 1px solid var(--hairline);
+  }
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: #fafafa;
+    border-bottom: 1px solid var(--hairline);
+    cursor: pointer;
+  }
+  .panel-header .label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .panel-header .actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .wf-block {
+    background: #f0f0f0;
+    border: 1px dashed #ccc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #999;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .wf-line {
+    height: 1px;
+    background: var(--hairline);
+  }
+  .wf-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+  }
+  .wf-text {
+    flex: 1;
+    height: 10px;
+    background: #e8e8e8;
+    border-radius: 2px;
+  }
+  .wf-text.short { max-width: 60%; }
+  .wf-text.medium { max-width: 80%; }
+  .wf-btn {
+    height: 24px;
+    background: #e8e8e8;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+    padding: 0 10px;
+    font-size: 10px;
+    color: #888;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .wf-btn.primary {
+    background: #555;
+    color: #fff;
+    border-color: #555;
+  }
+  .wf-chip {
+    height: 20px;
+    background: #eee;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    padding: 0 8px;
+    font-size: 10px;
+    color: #777;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .wf-progress {
+    height: 4px;
+    background: #eee;
+    border-radius: 2px;
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+  .wf-progress::after {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 65%;
+    background: #bbb;
+    border-radius: 2px;
+  }
+
+  .msg {
+    padding: 10px 12px;
+    display: flex;
+    gap: 10px;
+  }
+  .msg.user { border-left: 3px solid #ccc; background: #fafafa; margin: 0 0 0 24px; }
+  .msg.assistant { border-left: 3px solid #aaa; }
+  .msg .body { flex: 1; }
+  .msg .body .line { height: 8px; background: #e8e8e8; border-radius: 2px; margin-bottom: 6px; }
+  .msg .body .line:last-child { width: 70%; }
+
+  .code-block {
+    margin: 8px 12px;
+    background: #f4f4f4;
+    border: 1px solid var(--hairline);
+    border-radius: 4px;
+    padding: 10px;
+    font-family: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 10px;
+    color: #999;
+    overflow: hidden;
+  }
+  .code-block .cl {
+    height: 12px;
+    background: #e8e8e8;
+    border-radius: 1px;
+    margin-bottom: 4px;
+  }
+  .code-block .cl.indent { margin-left: 16px; width: 80%; }
+
+  .diff-block {
+    margin: 8px 12px;
+    font-family: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 10px;
+    border: 1px solid var(--hairline);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .diff-line {
+    display: flex;
+    padding: 2px 10px;
+    border-bottom: 1px solid #f5f5f5;
+  }
+  .diff-line .ln {
+    width: 32px;
+    color: #bbb;
+    text-align: right;
+    padding-right: 8px;
+    flex-shrink: 0;
+  }
+  .diff-line .code { flex: 1; color: #999; }
+  .diff-line.add { background: #f0f8f0; }
+  .diff-line.add .code { color: #666; }
+  .diff-line.del { background: #fef0f0; }
+  .diff-line.del .code { color: #999; text-decoration: line-through; }
+
+  .input-area {
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: #fafafa;
+  }
+  .input-box {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: #fff;
+    padding: 8px 10px;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+    color: #bbb;
+    font-size: 12px;
+  }
+  .input-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+    justify-content: flex-end;
+  }
+
+  .status-bar {
+    padding: 6px 12px;
+    background: #f5f5f5;
+    border-top: 1px solid var(--hairline);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    align-items: center;
+    font-size: 10px;
+  }
+  .status-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: #888;
+  }
+
+  .annotations-col {
+    flex: 1;
+    padding: 0 0 0 32px;
+    position: sticky;
+    top: 100px;
+    max-height: calc(100vh - 140px);
+    overflow-y: auto;
+  }
+  .anno-group { margin-bottom: 20px; }
+  .anno-group h3 {
+    font-size: 12px;
+    font-weight: 600;
+    color: #555;
+    margin-bottom: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .anno-group ul {
+    list-style: none;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .anno-group ul li {
+    padding: 3px 0;
+    padding-left: 12px;
+    position: relative;
+  }
+  .anno-group ul li::before {
+    content: '—';
+    position: absolute;
+    left: 0;
+    color: #ccc;
+  }
+  .anno-tag {
+    display: inline-block;
+    background: #eee;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 500;
+    color: #666;
+    margin-right: 4px;
+  }
+
+  .detail-section { max-width: 1320px; margin: 0 auto; padding: 0 16px 48px; }
+  .detail-section h2 {
+    font-size: 16px;
+    font-weight: 600;
+    padding: 24px 0 12px;
+    border-top: 1px solid var(--border);
+    margin-top: 8px;
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 20px;
+  }
+  .detail-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .detail-card .card-title {
+    padding: 10px 14px;
+    background: #fafafa;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 12px;
+    font-weight: 600;
+    color: #444;
+  }
+  .detail-card .card-body { padding: 14px; }
+
+  .modal-wf {
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    overflow: hidden;
+    max-width: 480px;
+  }
+  .modal-wf .modal-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--hairline);
+    font-weight: 600;
+    font-size: 13px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .modal-wf .modal-body { padding: 16px; }
+  .modal-wf .modal-footer {
+    padding: 10px 16px;
+    border-top: 1px solid var(--hairline);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .modal-backdrop {
+    background: rgba(0,0,0,0.03);
+    border: 1px dashed #ddd;
+    border-radius: 6px;
+    padding: 8px;
+    display: flex;
+    justify-content: center;
+  }
+
+  .dropdown-wf {
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    overflow: hidden;
+    font-size: 11px;
+  }
+  .dropdown-wf .dd-item {
+    padding: 6px 12px;
+    border-bottom: 1px solid #f5f5f5;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #666;
+  }
+  .dropdown-wf .dd-item:last-child { border-bottom: none; }
+  .dropdown-wf .dd-item.active { background: #f0f0f0; }
+  .dropdown-wf .dd-search {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--hairline);
+    background: #fafafa;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tool-card {
+    margin: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .tool-card .tc-header {
+    padding: 6px 10px;
+    background: #f5f5f5;
+    border-bottom: 1px solid var(--hairline);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: #777;
+  }
+
+  @media print {
+    .wf-layout { display: block; }
+    .sidebar-mockup { position: static; width: 100%; min-width: auto; }
+    .annotations-col { position: static; padding: 24px 0 0; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wf-header">
+  <h1>VS Code Agent Extension <span class="wf-badge">Wireframe</span></h1>
+  <div class="sub">Sidebar webview — 420px wide — All panels &amp; overlays mapped from source</div>
+</div>
+
+<div class="wf-layout">
+
+  <div class="sidebar-mockup">
+    <div class="sidebar-header">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      CLAUDE CODE — AGENT PANEL
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="label">Sessions</span>
+        <div style="display:flex;gap:4px;align-items:center;">
+          <span style="font-size:10px;color:#999;">3 sessions</span>
+          <span class="wf-btn" style="height:18px;font-size:9px;padding:0 6px;">+ New</span>
+        </div>
+      </div>
+      <div style="padding:4px 12px 8px;">
+        <div class="wf-row" style="padding:4px 0;">
+          <span style="font-size:10px;color:#999;">&#x25B6;</span>
+          <span class="wf-text" style="height:8px;max-width:50%;background:#ddd;"></span>
+          <span style="font-size:9px;color:#bbb;">2m ago</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="min-height:320px;">
+      <div style="display:flex;gap:4px;padding:8px 12px;border-bottom:1px solid var(--hairline);">
+        <span class="wf-btn" style="height:20px;font-size:9px;">All</span>
+        <span class="wf-btn" style="height:20px;font-size:9px;">You</span>
+        <span class="wf-btn" style="height:20px;font-size:9px;background:#e0e0e0;">Agent</span>
+      </div>
+
+      <div class="msg user">
+        <div class="body">
+          <div class="line" style="width:85%;"></div>
+          <div class="line" style="width:60%;"></div>
+          <div style="display:flex;gap:4px;margin-top:6px;">
+            <span class="wf-chip">&#x1F4C4; auth.ts</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="body">
+          <div class="line" style="width:90%"></div>
+          <div class="line" style="width:75%"></div>
+          <div class="line" style="width:80%"></div>
+          <div class="line" style="width:45%"></div>
+        </div>
+      </div>
+
+      <div style="padding:4px 12px 4px 24px;">
+        <details open style="font-size:10px;color:#aaa;">
+          <summary style="color:#999;font-style:italic;">Thinking (2.3s)</summary>
+          <div style="padding:4px 0;">
+            <div class="code-block" style="margin:0;">
+              <div class="cl" style="width:90%"></div>
+              <div class="cl indent"></div>
+              <div class="cl" style="width:70%"></div>
+              <div class="cl indent"></div>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div class="tool-card">
+        <div class="tc-header">
+          <span>&#x25B6;</span> Execute Command <span style="margin-left:auto;color:#bbb;">1.2s</span>
+        </div>
+        <div class="code-block" style="margin:0;border:none;border-radius:0;">
+          <div class="cl" style="color:#888;">$ npm run build -- --mode prod</div>
+        </div>
+        <div style="padding:4px 10px;font-size:9px;color:#bbb;cursor:pointer;">
+          &#x25BC; Output (3 lines)
+        </div>
+      </div>
+
+      <div style="padding:6px 12px;">
+        <div style="font-size:9px;color:#999;margin-bottom:4px;">Edit — src/utils.ts</div>
+        <div class="diff-block" style="margin:0;">
+          <div class="diff-line"><span class="ln">12</span><span class="code">import { foo } from './bar';</span></div>
+          <div class="diff-line del"><span class="ln">13</span><span class="code">const OLD = 'deprecated';</span></div>
+          <div class="diff-line add"><span class="ln">13</span><span class="code">const NEW = 'replacement';</span></div>
+          <div class="diff-line"><span class="ln">14</span><span class="code">export default foo;</span></div>
+        </div>
+      </div>
+
+      <div style="padding:6px 12px;">
+        <div style="border:1px dashed #ccc;border-radius:4px;padding:8px 10px;font-size:10px;">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span style="font-weight:600;color:#666;">Approve?</span>
+            <span style="color:#999;">Edit src/utils.ts</span>
+          </div>
+          <div style="display:flex;gap:4px;">
+            <span class="wf-btn" style="background:#ddd;">Allow</span>
+            <span class="wf-btn">Session</span>
+            <span class="wf-btn">Always</span>
+            <span class="wf-btn" style="color:#c66;">Deny</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="body">
+          <div class="line" style="width:88%"></div>
+          <div class="line" style="width:55%"></div>
+          <div style="font-size:9px;color:#bbb;margin-top:4px;">&#x21A5; 1.2k tokens &#183; &#x21A7; 840 tokens</div>
+        </div>
+      </div>
+
+      <div style="text-align:center;padding:4px;">
+        <span class="wf-btn" style="opacity:0.6;">&#x2193; Scroll to bottom</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="label">Tasks (1/2)</span>
+        <span style="font-size:10px;color:#bbb;">Clear done</span>
+      </div>
+      <div style="padding:4px 12px;">
+        <div class="wf-row" style="padding:4px 0;">
+          <span style="font-size:10px;color:#aaa;">&#x25CC;</span>
+          <span class="wf-text" style="max-width:55%;"></span>
+          <span style="font-size:9px;color:#bbb;margin-left:auto;">&#x23F9; Stop</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="label">Plan (2/5)</span>
+        <span style="font-size:9px;color:#bbb;">&#x25BC;</span>
+      </div>
+      <div style="padding:4px 12px 8px;">
+        <div class="wf-row" style="padding:3px 0;font-size:10px;">
+          <span style="color:#aaa;">&#x2713;</span>
+          <span style="color:#999;text-decoration:line-through;">Read auth module</span>
+        </div>
+        <div class="wf-row" style="padding:3px 0;font-size:10px;">
+          <span style="color:#888;">&#x25CF;</span>
+          <span style="color:#666;font-weight:500;">Refactor login flow</span>
+        </div>
+        <div class="wf-row" style="padding:3px 0;font-size:10px;">
+          <span style="color:#bbb;">&#x25CB;</span>
+          <span style="color:#bbb;">Add rate limiting</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="padding:8px 12px;border-top:1px solid var(--hairline);display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:10px;">
+      <span class="wf-chip">&#x1F4C4; src/auth.ts</span>
+      <span class="wf-chip" style="background:#fffde7;">&#x2702; Selection (12 lines)</span>
+      <span style="color:#c66;font-size:9px;">&#x26A0; 2 errors</span>
+    </div>
+
+    <div style="padding:4px 12px 8px;">
+      <div style="font-size:10px;color:#999;cursor:pointer;">&#x25B6; src/auth.ts:42-54</div>
+    </div>
+
+    <div class="status-bar">
+      <span class="status-item"><span style="color:#888;">&#x1F9E0; Model:</span> Claude Opus</span>
+      <span class="status-item"><span style="color:#888;">&#x1F6E1;</span> Ask</span>
+      <span style="display:flex;align-items:center;gap:4px;font-size:10px;color:#888;">
+        <span>&#x229E; 65%</span>
+        <span class="wf-progress" style="width:40px;"></span>
+      </span>
+      <span class="status-item" style="margin-left:auto;"><span style="color:#888;">Status:</span> Ready</span>
+    </div>
+
+    <div class="input-area">
+      <div class="input-box">
+        <span style="color:#ccc;">Ask Agent...</span>
+      </div>
+      <div class="input-actions">
+        <span class="wf-btn" style="height:22px;">@</span>
+        <span class="wf-btn" style="height:22px;">&#x2630; Struct</span>
+        <span class="wf-btn primary" style="height:22px;background:#888;">Send &#x2191;</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="annotations-col">
+    <div class="anno-group">
+      <h3>&#x2460; Session History</h3>
+      <ul>
+        <li><span class="anno-tag">Collapsible</span> header bar with session count</li>
+        <li>Search + sort toolbar (revealed on expand)</li>
+        <li>Session items: title, branch icon, timestamp</li>
+        <li>Active session highlighted</li>
+        <li>Hover: rename / pin / delete actions</li>
+        <li>Pinned sessions at top with distinct bg</li>
+        <li>Two-click delete confirmation</li>
+      </ul>
+    </div>
+    <div class="anno-group">
+      <h3>&#x2461; Messages Stream</h3>
+      <ul>
+        <li><span class="anno-tag">Filter bar</span> All / You / Agent toggle</li>
+        <li>User msgs: right-aligned, blue left border</li>
+        <li>Assistant msgs: left-aligned, markdown rendered</li>
+        <li>Thinking blocks: collapsible &lt;details&gt;</li>
+        <li>Tool cards: Bash/file/edit with live output</li>
+        <li>Diff viewer: unified diff with +/&#x2212; lines</li>
+        <li>Permission prompts: Allow/Deny inline</li>
+        <li>Token stats below assistant messages</li>
+        <li>Lazy history: scroll-up-to-load-more</li>
+        <li>Scroll-to-bottom FAB + perm-pending FAB</li>
+      </ul>
+    </div>
+    <div class="anno-group">
+      <h3>&#x2462; Background Tasks</h3>
+      <ul>
+        <li><span class="anno-tag">Conditional</span> only when tasks exist</li>
+        <li>Status icon: spinner / check / X</li>
+        <li>Stop button per running task &#x2192; kill_task</li>
+        <li>Clear completed broom action</li>
+        <li>Running/total count badge</li>
+      </ul>
+    </div>
+    <div class="anno-group">
+      <h3>&#x2463; Plan / Todo Panel</h3>
+      <ul>
+        <li><span class="anno-tag">Conditional</span> from plan_tasks message</li>
+        <li>Pending / in_progress / completed states</li>
+        <li>Blocked-by warnings, owner labels</li>
+        <li>Done/total progress badge</li>
+      </ul>
+    </div>
+    <div class="anno-group">
+      <h3>&#x2464; Context Bar</h3>
+      <ul>
+        <li>File chips with relative paths</li>
+        <li>Selection indicator + line count</li>
+        <li>Error/warning counts from diagnostics</li>
+      </ul>
+    </div>
+    <div class="anno-group">
+      <h3>&#x2465; Selection Preview</h3>
+      <ul>
+        <li>Collapsible syntax-highlighted code</li>
+        <li>Line numbers, expand/collapse toggle</li>
+      </ul>
+    </div>
+    <div class="anno-group">
+      <h3>&#x2466; Status Bar</h3>
+      <ul>
+        <li>Model profile selector (dropdown)</li>
+        <li>Permission mode selector (5 modes)</li>
+        <li>Context window % + progress bar</li>
+        <li>Quick commands dropdown</li>
+        <li>Status text + model info + token counts</li>
+        <li>Pending permission indicator (pulsing)</li>
+      </ul>
+    </div>
+    <div class="anno-group">
+      <h3>&#x2467; Input Area</h3>
+      <ul>
+        <li>Contenteditable input with placeholder</li>
+        <li>Supports text, file chips, paste chips, image chips</li>
+        <li>@ button &#x2192; file picker dropdown</li>
+        <li>Struct button &#x2192; Markdown Editor dialog</li>
+        <li>Emoji button &#x2192; emoji picker grid</li>
+        <li>Send button (green, disabled when empty)</li>
+        <li>Stop/Interrupt button (red, during streaming)</li>
+        <li>Slash-command autocomplete on /</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="detail-section">
+  <h2>Overlays &amp; Dialogs — Close-up Wireframes</h2>
+  <div class="detail-grid">
+
+    <div class="detail-card">
+      <div class="card-title">@Mention File Picker Dropdown</div>
+      <div class="card-body">
+        <div class="dropdown-wf">
+          <div class="dd-search">
+            <span style="color:#bbb;">&#x1F50D;</span>
+            <span style="color:#ccc;">Filter files...</span>
+          </div>
+          <div class="dd-item">
+            <span style="color:#bbb;">&#x25B6;</span> <span style="color:#999;">&#x1F4C1;</span> src/
+          </div>
+          <div class="dd-item" style="padding-left:24px;">
+            <span style="color:#999;">&#x1F4C4;</span> auth.ts <span style="margin-left:auto;font-size:9px;color:#ccc;">src/</span>
+          </div>
+          <div class="dd-item" style="padding-left:24px;">
+            <span style="color:#999;">&#x1F4C4;</span> middleware.ts <span style="margin-left:auto;font-size:9px;color:#ccc;">src/</span>
+          </div>
+          <div class="dd-item active" style="padding-left:24px;">
+            <span style="color:#666;">&#x1F4C4;</span> <span style="color:#444;">utils.ts</span> <span style="margin-left:auto;font-size:9px;color:#ccc;">src/</span>
+          </div>
+          <div class="dd-item">
+            <span style="color:#bbb;">&#x25B6;</span> <span style="color:#999;">&#x1F4C1;</span> tests/
+          </div>
+          <div class="dd-item">
+            <span style="color:#999;">&#x1F4C4;</span> package.json
+          </div>
+          <div style="padding:4px 12px;font-size:9px;color:#bbb;border-top:1px solid #f5f5f5;">
+            &#x25B2;&#x25BC; to navigate &nbsp; Enter to select &nbsp; Esc to close
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:var(--muted);">
+          <strong>Key:</strong> Hierarchical tree, search filter, keyboard nav (&#x2191;&#x2193;&#x2190;&#x2192; Enter Esc), dirs expandable
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-title">Slash Command Autocomplete</div>
+      <div class="card-body">
+        <div class="dropdown-wf">
+          <div style="padding:6px 12px;font-size:10px;color:#bbb;border-bottom:1px solid #f5f5f5;">
+            /<span style="color:#444;">rev</span>
+          </div>
+          <div class="dd-item active">
+            <span style="font-weight:500;color:#444;">/review</span>
+            <span style="font-size:10px;color:#bbb;">Code review current changes</span>
+          </div>
+          <div class="dd-item">
+            <span style="font-weight:500;color:#666;">/rewind</span>
+            <span style="font-size:10px;color:#bbb;">Restore to a checkpoint</span>
+          </div>
+          <div class="dd-item">
+            <span style="font-weight:500;color:#666;">/release-notes</span>
+            <span style="font-size:10px;color:#bbb;">Generate release notes</span>
+          </div>
+          <div style="padding:4px 12px;font-size:9px;color:#bbb;border-top:1px solid #f5f5f5;">
+            Tab or Enter to select &nbsp; Esc to close
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:var(--muted);">
+          <strong>Key:</strong> Filtered as-you-type, pre-built + dynamic skills, keyboard nav
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-title">Markdown Editor Dialog (Structure Mode)</div>
+      <div class="card-body">
+        <div class="modal-backdrop">
+          <div class="modal-wf" style="width:100%;">
+            <div class="modal-header">
+              Markdown Editor
+              <span style="font-size:9px;color:#bbb;">142 chars</span>
+              <span style="color:#bbb;cursor:pointer;">&#x2715;</span>
+            </div>
+            <div style="padding:6px 12px;border-bottom:1px solid var(--hairline);display:flex;gap:6px;">
+              <span class="wf-btn" style="height:20px;font-size:9px;">H2</span>
+              <span class="wf-btn" style="height:20px;font-size:9px;">&#x2022; List</span>
+              <span class="wf-btn" style="height:20px;font-size:9px;">1. List</span>
+              <span class="wf-btn" style="height:20px;font-size:9px;">&#x2611;</span>
+              <span class="wf-btn" style="height:20px;font-size:9px;">&#x275D;</span>
+              <span class="wf-btn" style="height:20px;font-size:9px;">|</span>
+              <span class="wf-btn" style="height:20px;font-size:9px;">&lt;/&gt;</span>
+            </div>
+            <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+              <div style="border:1px solid #ddd;border-radius:4px;padding:12px;min-height:120px;font-family:monospace;font-size:10px;color:#999;">
+                ## Refactor Plan<br>
+                <br>
+                - [ ] Extract auth middleware<br>
+                - [ ] Add rate limiting<br>
+                <br>
+                | &#x2190; cursor
+              </div>
+              <div style="font-size:9px;color:#aaa;text-transform:uppercase;">Preview</div>
+              <div style="border:1px solid var(--hairline);border-radius:4px;padding:10px;min-height:60px;font-size:11px;">
+                <strong style="color:#555;">Refactor Plan</strong>
+                <div style="color:#bbb;font-size:10px;margin-top:4px;">
+                  &#x2610; Extract auth middleware<br>
+                  &#x2610; Add rate limiting
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <span style="font-size:10px;color:#bbb;">Enter = new line</span>
+              <span style="flex:1;"></span>
+              <span class="wf-btn">Cancel</span>
+              <span class="wf-btn primary">Send</span>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:var(--muted);">
+          <strong>Key:</strong> Split editor/preview, toolbar inserts markdown syntax, real-time preview via 200ms debounced marked.parse()
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-title">Quick Command Management Dialog</div>
+      <div class="card-body">
+        <div class="modal-backdrop">
+          <div class="modal-wf" style="width:100%;">
+            <div class="modal-header">
+              Quick Commands
+              <span style="color:#bbb;cursor:pointer;">&#x2715;</span>
+            </div>
+            <div class="modal-body">
+              <div style="margin-bottom:12px;">
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;font-size:11px;">
+                  <span style="color:#666;">Deploy staging</span>
+                  <span style="color:#bbb;font-size:9px;">/deploy staging...</span>
+                  <span style="color:#c66;font-size:9px;cursor:pointer;">&#x2715;</span>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;font-size:11px;">
+                  <span style="color:#666;">Run tests</span>
+                  <span style="color:#bbb;font-size:9px;">/test --coverage</span>
+                  <span style="color:#c66;font-size:9px;cursor:pointer;">&#x2715;</span>
+                </div>
+              </div>
+              <div class="wf-line" style="margin:8px 0;"></div>
+              <div style="display:flex;gap:8px;margin-bottom:6px;">
+                <input type="text" placeholder="Name" style="flex:1;padding:4px 8px;border:1px solid #ddd;border-radius:3px;font-size:11px;">
+                <input type="text" placeholder="Command to send" style="flex:2;padding:4px 8px;border:1px solid #ddd;border-radius:3px;font-size:11px;">
+              </div>
+            </div>
+            <div class="modal-footer">
+              <span class="wf-btn">Close</span>
+              <span class="wf-btn primary">+ Add</span>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:var(--muted);">
+          <strong>Key:</strong> CRUD for custom slash commands, persists to ~/.claude/quick-cmds.json
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-title">Permission Prompts — 3 Variants</div>
+      <div class="card-body" style="display:flex;flex-direction:column;gap:12px;">
+        <div style="font-size:10px;color:var(--muted);font-weight:600;">Variant A: Terminal tool inline</div>
+        <div class="tool-card" style="margin:0;">
+          <div class="tc-header">&#x25B6; Execute Command <span style="margin-left:auto;">0.3s</span></div>
+          <div class="code-block" style="margin:0;border:none;">$ rm -rf ./build</div>
+          <div style="padding:8px 10px;border-top:1px dashed #fcc;background:#fffafa;">
+            <div style="font-size:10px;color:#c66;margin-bottom:6px;">&#x26A0; Destructive command</div>
+            <div style="display:flex;gap:4px;">
+              <span class="wf-btn" style="background:#ddd;">Allow</span>
+              <span class="wf-btn">Session</span>
+              <span class="wf-btn">Always</span>
+              <span class="wf-btn" style="color:#c66;">Deny</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="font-size:10px;color:var(--muted);font-weight:600;">Variant B: Non-terminal tool inline (with diff)</div>
+        <div style="border:1px solid #eee;border-radius:4px;padding:8px;font-size:10px;">
+          <div style="color:#666;font-weight:500;margin-bottom:4px;">&#x1F4DD; Edit — src/auth.ts</div>
+          <div class="diff-block" style="margin:0 0 6px 0;">
+            <div class="diff-line del"><span class="ln">5</span><span class="code">const OLD = 'x';</span></div>
+            <div class="diff-line add"><span class="ln">5</span><span class="code">const NEW = 'y';</span></div>
+          </div>
+          <div style="display:flex;gap:4px;">
+            <span class="wf-btn" style="background:#ddd;">Allow</span>
+            <span class="wf-btn">Session</span>
+            <span class="wf-btn">Always</span>
+            <span class="wf-btn" style="color:#c66;">Deny</span>
+          </div>
+        </div>
+
+        <div style="font-size:10px;color:var(--muted);font-weight:600;">Variant C: Standalone permission card</div>
+        <div style="border:1px dashed #ddd;border-radius:4px;padding:8px;font-size:10px;">
+          <div style="font-weight:600;color:#666;margin-bottom:4px;">&#x1F527; Read File</div>
+          <div style="color:#999;margin-bottom:2px;">Path: /etc/config.json</div>
+          <div style="color:#999;margin-bottom:6px;">Read system config file</div>
+          <div style="display:flex;gap:4px;">
+            <span class="wf-btn" style="background:#ddd;">Allow</span>
+            <span class="wf-btn">Session</span>
+            <span class="wf-btn">Always</span>
+            <span class="wf-btn" style="color:#c66;">Deny</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-title">Rewind / Restore Points Panel</div>
+      <div class="card-body">
+        <div style="font-size:10px;color:#666;font-weight:600;margin-bottom:8px;">Restore Points</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f5f5f5;font-size:11px;">
+          <span style="color:#555;">&#x1F4F8; Checkpoint A</span>
+          <span style="color:#999;">3 files changed</span>
+          <span style="color:#bbb;">2 min ago</span>
+          <span class="wf-btn" style="height:18px;font-size:9px;">Restore</span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f5f5f5;font-size:11px;">
+          <span style="color:#555;">&#x1F4F8; Before refactor</span>
+          <span style="color:#999;">7 files changed</span>
+          <span style="color:#bbb;">12 min ago</span>
+          <span class="wf-btn" style="height:18px;font-size:9px;">Restore</span>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:var(--muted);">
+          <strong>Key:</strong> Inline in message stream, triggered by /rewind or /checkpoint, restore button sends execute_rewind
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-title">Toast Notifications</div>
+      <div class="card-body">
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div style="background:#f5f5f5;border:1px solid #ddd;border-radius:4px;padding:8px 12px;font-size:11px;display:flex;align-items:center;gap:8px;max-width:280px;">
+            <span style="color:#888;">&#x2713;</span>
+            <span style="color:#555;">Session "Bug fix" created</span>
+            <span style="margin-left:auto;color:#bbb;cursor:pointer;">&#x2715;</span>
+          </div>
+          <div style="background:#fff5f5;border:1px solid #fcc;border-radius:4px;padding:8px 12px;font-size:11px;display:flex;align-items:center;gap:8px;max-width:280px;">
+            <span style="color:#c66;">&#x2715;</span>
+            <span style="color:#666;">Session deleted</span>
+            <span style="margin-left:auto;color:#bbb;cursor:pointer;">&#x2715;</span>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:var(--muted);">
+          <strong>Key:</strong> Fixed-position bottom toast, 3s display with fade animation
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-title">Status Bar — Component Detail</div>
+      <div class="card-body" style="display:flex;flex-direction:column;gap:10px;">
+
+        <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Permission Mode Selector</div>
+          <div class="dropdown-wf" style="max-width:220px;">
+            <div class="dd-item" style="font-size:10px;justify-content:space-between;">
+              <span>&#x1F6E1; Default (Ask)</span> <span style="color:#bbb;">&#x25BC;</span>
+            </div>
+            <div class="dd-item active" style="font-size:10px;">Default — Ask on risky actions</div>
+            <div class="dd-item" style="font-size:10px;">Accept Edits — Auto-approve file edits</div>
+            <div class="dd-item" style="font-size:10px;">Plan Mode — Plan first, execute later</div>
+            <div class="dd-item" style="font-size:10px;">Bypass — Auto-approve all</div>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Context Window Indicator</div>
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--hairline);border-radius:4px;max-width:260px;">
+            <span style="font-size:10px;">&#x229E;</span>
+            <div style="flex:1;">
+              <div style="display:flex;justify-content:space-between;font-size:9px;color:#999;margin-bottom:2px;">
+                <span>Context</span><span>65% &#183; 128K / 200K</span>
+              </div>
+              <div class="wf-progress" style="height:4px;width:100%;"></div>
+            </div>
+            <span style="font-size:9px;color:#bbb;">&#x21BB; Compact</span>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Quick Commands Dropdown</div>
+          <div class="dropdown-wf" style="max-width:200px;">
+            <div class="dd-item" style="font-size:10px;">&#x1F9E0; Recall memories</div>
+            <div class="dd-item" style="font-size:10px;">&#x1F4BE; Update and save</div>
+            <div class="dd-item" style="font-size:10px;">&#x1F4DD; Git commit</div>
+            <div style="border-top:1px solid #eee;"></div>
+            <div class="dd-item" style="font-size:10px;color:#999;">&#x2699; Manage commands...</div>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">Status States</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;">
+            <span style="font-size:9px;padding:2px 8px;background:#e8f5e9;color:#666;border-radius:10px;">Ready</span>
+            <span style="font-size:9px;padding:2px 8px;background:#fff3e0;color:#666;border-radius:10px;">Thinking...</span>
+            <span style="font-size:9px;padding:2px 8px;background:#fce4ec;color:#666;border-radius:10px;">Error</span>
+            <span style="font-size:9px;padding:2px 8px;background:#e3f2fd;color:#666;border-radius:10px;">Compacting...</span>
+            <span style="font-size:9px;padding:2px 8px;background:#f5f5f5;color:#999;border-radius:10px;">Disconnected</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-card">
+      <div class="card-title">Emoji Picker Grid</div>
+      <div class="card-body">
+        <div class="dropdown-wf" style="max-width:240px;">
+          <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:4px;padding:10px;">
+            <span style="text-align:center;font-size:14px;">&#x1F60A;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F602;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F60D;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F970;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F618;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F61C;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F92A;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F60F;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F60C;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F389;</span>
+            <span style="text-align:center;font-size:14px;">&#x2728;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F680;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F525;</span>
+            <span style="text-align:center;font-size:14px;">&#x2764;&#xFE0F;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F495;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F97A;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F622;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F624;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F4A1;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F3AF;</span>
+            <span style="text-align:center;font-size:14px;">&#x2615;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F37B;</span>
+            <span style="text-align:center;font-size:14px;">&#x1F44D;</span>
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:var(--muted);">
+          <strong>Key:</strong> Fixed-position overlay, 6-column grid, click inserts at cursor in contenteditable
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div style="max-width:1320px;margin:0 auto;padding:0 16px 48px;">
+  <h2 style="font-size:16px;font-weight:600;padding-top:24px;border-top:1px solid var(--border);">Interaction Inventory — All 18 Surfaces</h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(280px,1fr));gap:12px;margin-top:16px;">
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">1. Session History Panel</div>
+      <div style="font-size:10px;color:var(--muted);">Collapsible list &#183; search &#183; sort &#183; rename &#183; pin &#183; delete (2-click confirm)</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">2. Messages Stream</div>
+      <div style="font-size:10px;color:var(--muted);">Filter &#183; scroll &#183; lazy history &#183; FABs &#183; markdown rendering</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">3. Status Bar</div>
+      <div style="font-size:10px;color:var(--muted);">Model &#183; permission &#183; context% &#183; quick cmds &#183; tokens &#183; status</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">4. Input Area</div>
+      <div style="font-size:10px;color:var(--muted);">Contenteditable &#183; chips &#183; send &#183; interrupt &#183; slash autocomplete</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">5. Context Bar</div>
+      <div style="font-size:10px;color:var(--muted);">File chips &#183; selection info &#183; diagnostic counts</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">6. Selection Preview</div>
+      <div style="font-size:10px;color:var(--muted);">Collapsible &#183; line numbers &#183; syntax highlighted</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">7. Background Tasks</div>
+      <div style="font-size:10px;color:var(--muted);">Conditional &#183; progress &#183; stop &#183; clear completed</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">8. Plan/Todo Panel</div>
+      <div style="font-size:10px;color:var(--muted);">Conditional &#183; status icons &#183; blocked-by &#183; owner</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">9. @Mention File Picker</div>
+      <div style="font-size:10px;color:var(--muted);">Search &#183; tree &#183; keyboard nav &#183; dir/files</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">10. Emoji Picker</div>
+      <div style="font-size:10px;color:var(--muted);">6-col grid &#183; click-to-insert &#183; fixed position</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">11. Slash Command Autocomplete</div>
+      <div style="font-size:10px;color:var(--muted);">Filtered list &#183; pre-built + dynamic &#183; keyboard nav</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">12. Markdown Editor Dialog</div>
+      <div style="font-size:10px;color:var(--muted);">Split editor/preview &#183; toolbar &#183; real-time marked</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">13. Quick Command Manager</div>
+      <div style="font-size:10px;color:var(--muted);">CRUD &#183; json persistence &#183; list with delete</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">14. Permission Prompts</div>
+      <div style="font-size:10px;color:var(--muted);">3 variants &#183; Allow/Deny/Session/Always &#183; inline</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">15. Rewind/Restore Points</div>
+      <div style="font-size:10px;color:var(--muted);">Inline &#183; checkpoint list &#183; restore button</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">16. Thinking Blocks</div>
+      <div style="font-size:10px;color:var(--muted);">Collapsible details &#183; animated dots &#183; translate</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">17. Terminal Tool Cards</div>
+      <div style="font-size:10px;color:var(--muted);">Syntax highlighted &#183; live output &#183; duration timer</div>
+    </div>
+    <div style="padding:10px 14px;background:#fff;border:1px solid var(--hairline);border-radius:4px;">
+      <div style="font-weight:600;font-size:12px;color:#444;">18. Toast Notifications</div>
+      <div style="font-size:10px;color:var(--muted);">Fixed bottom &#183; 3s fade &#183; success/error states</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

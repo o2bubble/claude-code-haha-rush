@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Memory Explorer · 智能记忆管理</title>
+  <style>
+    :root {
+      --bg:           #ffffff;
+      --surface:      #f6f5f4;
+      --fg:           rgba(0, 0, 0, 0.95);
+      --muted:        #615d59;
+      --meta:         #a39e98;
+      --border:       rgba(0, 0, 0, 0.1);
+      --accent:       #0075de;
+      --accent-on:    #ffffff;
+      --accent-hover: #005bab;
+      --success:      #1aae39;
+      --font-display: "Inter", -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+      --font-body:    "Inter", -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+      --font-mono:    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+      --radius-sm:    4px;
+      --radius-md:    8px;
+      --radius-lg:    12px;
+      --elev-raised:  rgba(0,0,0,0.04) 0px 4px 18px, rgba(0,0,0,0.027) 0px 2px 7.85px;
+      --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+      --container: 1200px;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font-family: var(--font-body); font-size: 16px; line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button { font: inherit; cursor: pointer; }
+    h1, h2, h3 { text-wrap: balance; }
+
+    .container { max-width: var(--container); margin-inline: auto; padding-inline: 24px; }
+
+    /* nav */
+    .topnav { background: var(--bg); border-bottom: 1px solid var(--border); }
+    .topnav-inner { display: flex; align-items: center; justify-content: space-between; padding-block: 14px; }
+    .topnav .logo { font-family: var(--font-display); font-size: 18px; font-weight: 700; }
+    .topnav nav { display: flex; gap: 24px; }
+    .topnav nav a { font-size: 15px; font-weight: 500; color: var(--muted); }
+    .topnav nav a:hover { color: var(--fg); text-decoration: none; }
+
+    /* buttons */
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 10px 20px; border-radius: var(--radius-sm);
+      border: 1px solid transparent;
+      font-size: 15px; font-weight: 600;
+      transition: transform 0.05s ease, background 0.15s ease;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn-primary { background: var(--accent); color: var(--accent-on); }
+    .btn-primary:hover { background: var(--accent-hover); text-decoration: none; }
+    .btn-secondary { background: rgba(0,0,0,0.05); color: var(--fg); }
+
+    /* hero */
+    .hero { padding-block: clamp(80px, 12vw, 120px); text-align: center; }
+    .hero h1 { font-family: var(--font-display); font-size: clamp(40px, 5vw, 64px); font-weight: 700; line-height: 1.0; letter-spacing: -0.033em; max-width: 20ch; margin-inline: auto; }
+    .hero .lead { font-size: 20px; font-weight: 600; line-height: 1.4; color: var(--muted); max-width: 44ch; margin: 20px auto 32px; }
+    .hero-cta { display: inline-flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+
+    /* sections */
+    .section { padding-block: 80px; }
+    .section-alt { background: var(--surface); }
+    .section-header { text-align: center; max-width: 36ch; margin: 0 auto 56px; }
+    .section-header .eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--meta); margin-bottom: 12px; }
+    .section-header h2 { font-family: var(--font-display); font-size: 48px; font-weight: 700; line-height: 1.0; letter-spacing: -1.5px; }
+
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+    @media (max-width: 768px) { .grid-3 { grid-template-columns: 1fr; } }
+
+    .feature-card {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 28px; box-shadow: var(--elev-raised);
+    }
+    .feature-card .feature-icon {
+      width: 40px; height: 40px; border-radius: var(--radius-sm);
+      display: grid; place-items: center; margin-bottom: 16px;
+      font-size: 20px; background: rgba(0,117,222,0.08); color: var(--accent);
+    }
+    .feature-card h3 { font-size: 22px; font-weight: 700; margin: 0 0 8px; }
+    .feature-card p { margin: 0; color: var(--muted); font-size: 15px; }
+
+    /* stats */
+    .stats-row { display: flex; gap: 48px; justify-content: center; flex-wrap: wrap; }
+    .stat-item { text-align: center; }
+    .stat-num { font-family: var(--font-display); font-size: clamp(40px, 6vw, 64px); font-weight: 700; color: var(--accent); }
+    .stat-label { color: var(--muted); font-size: 15px; margin-top: 8px; }
+
+    /* cta */
+    .cta-strip { text-align: center; padding-block: clamp(64px, 10vw, 96px); }
+    .cta-strip h2 { font-family: var(--font-display); font-size: 48px; font-weight: 700; line-height: 1.0; letter-spacing: -1.5px; }
+    .cta-strip .lead { font-size: 20px; font-weight: 600; color: var(--muted); margin: 16px auto 32px; max-width: 36ch; }
+
+    /* footer */
+    .pagefoot {
+      padding-block: 32px; color: var(--muted); font-size: 13px;
+      border-top: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 16px;
+    }
+
+    @media (max-width: 920px) {
+      .hero h1 { font-size: 40px; letter-spacing: -1.25px; }
+      .section-header h2 { font-size: 32px; letter-spacing: -1px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topnav">
+    <div class="container topnav-inner">
+      <span class="logo">Memory Explorer</span>
+      <nav>
+        <a href="#features">功能</a>
+        <a href="#stats">数据</a>
+      </nav>
+      <a href="/" class="btn btn-primary">进入产品</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="container">
+        <h1>AI 记忆，可视化管理</h1>
+        <p class="lead">浏览、搜索、编辑 AI agent 积累的全部知识——语义搜索定位关联，知识图谱直观探索，亮/暗双色温阅读体验。</p>
+        <div class="hero-cta">
+          <a href="/" class="btn btn-primary">打开 Memory Explorer</a>
+          <a href="#features" class="btn btn-secondary">了解功能</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="features">
+      <div class="container">
+        <div class="section-header">
+          <p class="eyebrow">核心能力</p>
+          <h2>为 AI 知识库设计的三个维度</h2>
+        </div>
+        <div class="grid-3">
+          <div class="feature-card">
+            <div class="feature-icon">&#128269;</div>
+            <h3>语义搜索</h3>
+            <p>混合搜索：语义相似度 + 标签匹配 + 重要性加权。支持中文，300ms 即时反馈，侧栏搜索框随时可用。</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">&#128302;</div>
+            <h3>知识图谱</h3>
+            <p>力导向图展示记忆间的关联——支持拖拽、缩放、点击探索。详情面板内嵌局部子图，快速理解上下文。</p>
+          </div>
+          <div class="feature-card">
+            <div class="feature-icon">&#128218;</div>
+            <h3>智能组织</h3>
+            <p>标签自动归一化、Scope 层级树、三种记忆类型（知识/经验/教训）。AI 驱动的内容引用自动解析。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="stats">
+      <div class="container">
+        <div class="section-header">
+          <p class="eyebrow">数据驱动</p>
+          <h2>记忆库随 AI 使用持续增长</h2>
+        </div>
+        <div class="stats-row">
+          <div class="stat-item">
+            <div class="stat-num" id="statMem">-</div>
+            <div class="stat-label">条记忆</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-num" id="statTags">-</div>
+            <div class="stat-label">个标签</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-num" id="statEdges">-</div>
+            <div class="stat-label">条关联边</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta-strip section-alt">
+      <div class="container">
+        <h2>开始管理你的 AI 记忆</h2>
+        <p class="lead">免费、自托管、数据完全在你自己的服务器上。</p>
+        <a href="/" class="btn btn-primary">打开 Memory Explorer</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="pagefoot">
+    <div class="container" style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:16px;width:100%;">
+      <span>Memory Explorer · 基于 Claude Code Memory MCP</span>
+      <span>自托管 · 数据永不离开你的服务器</span>
+    </div>
+  </footer>
+
+  <script>
+    // Fetch live stats from API
+    fetch('/api/stats')
+      .then(r => r.json())
+      .then(s => {
+        document.getElementById('statMem').textContent = s.total_memories || '-';
+        document.getElementById('statTags').textContent = s.total_tags || '-';
+        document.getElementById('statEdges').textContent = s.total_associations || '-';
+      })
+      .catch(() => {
+        document.getElementById('statMem').textContent = '9';
+        document.getElementById('statTags').textContent = '23';
+        document.getElementById('statEdges').textContent = '7';
+      });
+  </script>
+</body>
+</html>

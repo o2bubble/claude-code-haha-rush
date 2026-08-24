@@ -1,0 +1,875 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VS Code Agent Extension — Design Specification</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-2: #1c2333;
+    --fg: #e6edf3;
+    --fg-2: #b1bac4;
+    --fg-3: #848d97;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+    --radius: 6px;
+    --radius-sm: 4px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: var(--font-sans);
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.6;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page {
+    max-width: 1160px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* Header */
+  .spec-header {
+    padding: 40px 0 24px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 32px;
+  }
+  .spec-header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .spec-header h1 .badge {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--accent);
+    background: rgba(88,166,255,0.12);
+    padding: 2px 10px;
+    border-radius: 12px;
+    border: 1px solid rgba(88,166,255,0.25);
+  }
+  .spec-header .meta {
+    display: flex;
+    gap: 24px;
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--fg-3);
+  }
+  .spec-header .meta span strong { color: var(--fg-2); font-weight: 500; }
+
+  /* Sections */
+  section { margin-bottom: 40px; }
+  section h2 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  section h2 .sec-num {
+    font-size: 12px;
+    color: var(--fg-3);
+    font-weight: 400;
+  }
+  section h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg-2);
+    margin: 20px 0 8px;
+  }
+  section h4 {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg-2);
+    margin: 14px 0 6px;
+  }
+  section p, section li {
+    font-size: 13px;
+    color: var(--fg-2);
+    line-height: 1.7;
+  }
+  section ul { padding-left: 20px; }
+  section li { margin-bottom: 3px; }
+
+  /* Token table */
+  .token-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 8px;
+    margin: 12px 0;
+  }
+  .token-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  .token-row .swatch {
+    width: 20px; height: 20px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .token-row .token-name {
+    color: var(--accent);
+    min-width: 110px;
+  }
+  .token-row .token-val {
+    color: var(--fg-3);
+    margin-left: auto;
+  }
+  .token-row.dark-only { border-left: 3px solid var(--accent); }
+
+  /* Surface card */
+  .surface-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+  }
+  .surface-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+  }
+  .surface-card .s-num {
+    font-size: 10px;
+    color: var(--fg-3);
+    font-family: var(--font-mono);
+  }
+  .surface-card .s-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--fg);
+    margin: 2px 0 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .surface-card .s-name .tag {
+    font-size: 9px;
+    font-weight: 500;
+    padding: 1px 8px;
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--fg-3);
+    border: 1px solid var(--border);
+  }
+  .surface-card .s-desc {
+    font-size: 12px;
+    color: var(--fg-3);
+    margin-bottom: 8px;
+  }
+  .surface-card .s-features li {
+    font-size: 11px;
+    color: var(--fg-3);
+    margin-bottom: 2px;
+    list-style: disc;
+    margin-left: 16px;
+  }
+
+  /* Component table */
+  .comp-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin: 8px 0;
+  }
+  .comp-table th {
+    text-align: left;
+    padding: 6px 10px;
+    font-weight: 600;
+    color: var(--fg-2);
+    background: var(--surface);
+    border-bottom: 2px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .comp-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    color: var(--fg-3);
+    vertical-align: top;
+  }
+  .comp-table td:first-child {
+    font-weight: 500;
+    color: var(--fg-2);
+    white-space: nowrap;
+  }
+
+  /* Two-column comparison */
+  .theme-compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 12px 0;
+  }
+  .theme-col {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+  }
+  .theme-col h4 {
+    font-size: 12px;
+    margin: 0 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .theme-col .tk {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+  .theme-col .tk .dot {
+    width: 12px; height: 12px;
+    border-radius: 2px;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .theme-col .tk .nm { color: var(--accent); min-width: 80px; }
+  .theme-col .tk .vl { color: var(--fg-3); }
+
+  /* File list */
+  .file-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 8px;
+  }
+  .file-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+  }
+  .file-item .fi-name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .file-item .fi-desc {
+    font-size: 11px;
+    color: var(--fg-3);
+    margin-top: 2px;
+  }
+
+  /* Status indicator */
+  .status-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .status-pill {
+    font-size: 10px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .divider { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+  @media (max-width: 700px) {
+    .theme-compare { grid-template-columns: 1fr; }
+    .token-grid { grid-template-columns: 1fr; }
+    .surface-grid { grid-template-columns: 1fr; }
+    .comp-table { font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- ═══════════ HEADER ═══════════ -->
+<header class="spec-header">
+  <h1>
+    VS Code Agent Extension
+    <span class="badge">v1.0</span>
+  </h1>
+  <div class="meta">
+    <span><strong>Type:</strong> VS Code Sidebar Webview Panel</span>
+    <span><strong>Width:</strong> 420px (VS Code sidebar)</span>
+    <span><strong>Direction:</strong> Tech / Utility</span>
+    <span><strong>Font:</strong> Inter (UI) + JetBrains Mono (Code)</span>
+  </div>
+  <div class="meta">
+    <span><strong>Surfaces:</strong> 18 total — 8 in-panel + 10 overlays/dialogs</span>
+    <span><strong>Themes:</strong> Dark (GitHub Dark) + Light (GitHub Light)</span>
+    <span><strong>Status:</strong> Design complete — ready for implementation</span>
+  </div>
+</header>
+
+<!-- ═══════════ 1. FILE INVENTORY ═══════════ -->
+<section>
+  <h2><span class="sec-num">01</span> Deliverable Inventory</h2>
+  <div class="file-list">
+    <div class="file-item">
+      <div class="fi-name">vs-code-agent-wireframe.html</div>
+      <div class="fi-desc">Structural wireframe — greybox layout of all 18 surfaces with annotations. Low-fidelity reference for layout validation.</div>
+    </div>
+    <div class="file-item">
+      <div class="fi-name">vs-code-agent-dark.html</div>
+      <div class="fi-desc">Full high-fidelity dark theme mockup. GitHub Dark–inspired palette. All 18 surfaces rendered with real content and CSS states.</div>
+    </div>
+    <div class="file-item">
+      <div class="fi-name">vs-code-agent-light.html</div>
+      <div class="fi-desc">Full high-fidelity light theme mockup. GitHub Light–inspired palette. Structurally identical to dark theme, light color tokens only.</div>
+    </div>
+    <div class="file-item">
+      <div class="fi-name">design-spec.html</div>
+      <div class="fi-desc">This document — comprehensive design specification. Design tokens, component library, surface map, states, implementation guide.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 2. DESIGN TOKENS ═══════════ -->
+<section>
+  <h2><span class="sec-num">02</span> Design Tokens</h2>
+
+  <h3>2.1 Color System — Theme Comparison</h3>
+  <div class="theme-compare">
+
+    <!-- Dark Theme -->
+    <div class="theme-col">
+      <h4>
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#0d1117;border:1px solid #30363d;"></span>
+        Dark Theme (GitHub Dark)
+      </h4>
+      <div class="tk"><span class="dot" style="background:#0d1117;"></span><span class="nm">--bg</span><span class="vl">#0d1117</span></div>
+      <div class="tk"><span class="dot" style="background:#161b22;"></span><span class="nm">--surface</span><span class="vl">#161b22</span></div>
+      <div class="tk"><span class="dot" style="background:#1c2333;"></span><span class="nm">--surface-2</span><span class="vl">#1c2333</span></div>
+      <div class="tk"><span class="dot" style="background:#21262d;"></span><span class="nm">--surface-3</span><span class="vl">#21262d</span></div>
+      <div class="tk"><span class="dot" style="background:#e6edf3;"></span><span class="nm">--fg</span><span class="vl">#e6edf3</span></div>
+      <div class="tk"><span class="dot" style="background:#b1bac4;"></span><span class="nm">--fg-2</span><span class="vl">#b1bac4</span></div>
+      <div class="tk"><span class="dot" style="background:#848d97;"></span><span class="nm">--fg-3</span><span class="vl">#848d97</span></div>
+      <div class="tk"><span class="dot" style="background:#30363d;"></span><span class="nm">--border</span><span class="vl">#30363d</span></div>
+      <div class="tk"><span class="dot" style="background:#58a6ff;"></span><span class="nm">--accent</span><span class="vl">#58a6ff</span></div>
+      <div class="tk"><span class="dot" style="background:#3fb950;"></span><span class="nm">--green</span><span class="vl">#3fb950</span></div>
+      <div class="tk"><span class="dot" style="background:#d29922;"></span><span class="nm">--yellow</span><span class="vl">#d29922</span></div>
+      <div class="tk"><span class="dot" style="background:#f85149;"></span><span class="nm">--red</span><span class="vl">#f85149</span></div>
+      <div class="tk"><span class="dot" style="background:#bc8cff;"></span><span class="nm">--purple</span><span class="vl">#bc8cff</span></div>
+    </div>
+
+    <!-- Light Theme -->
+    <div class="theme-col">
+      <h4>
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ffffff;border:1px solid #d0d7de;"></span>
+        Light Theme (GitHub Light)
+      </h4>
+      <div class="tk"><span class="dot" style="background:#ffffff;"></span><span class="nm">--bg</span><span class="vl">#ffffff</span></div>
+      <div class="tk"><span class="dot" style="background:#f6f8fa;"></span><span class="nm">--surface</span><span class="vl">#f6f8fa</span></div>
+      <div class="tk"><span class="dot" style="background:#eef1f5;"></span><span class="nm">--surface-2</span><span class="vl">#eef1f5</span></div>
+      <div class="tk"><span class="dot" style="background:#e8ecf0;"></span><span class="nm">--surface-3</span><span class="vl">#e8ecf0</span></div>
+      <div class="tk"><span class="dot" style="background:#1f2328;"></span><span class="nm">--fg</span><span class="vl">#1f2328</span></div>
+      <div class="tk"><span class="dot" style="background:#656d76;"></span><span class="nm">--fg-2</span><span class="vl">#656d76</span></div>
+      <div class="tk"><span class="dot" style="background:#8b949e;"></span><span class="nm">--fg-3</span><span class="vl">#8b949e</span></div>
+      <div class="tk"><span class="dot" style="background:#d0d7de;"></span><span class="nm">--border</span><span class="vl">#d0d7de</span></div>
+      <div class="tk"><span class="dot" style="background:#0969da;"></span><span class="nm">--accent</span><span class="vl">#0969da</span></div>
+      <div class="tk"><span class="dot" style="background:#1a7f37;"></span><span class="nm">--green</span><span class="vl">#1a7f37</span></div>
+      <div class="tk"><span class="dot" style="background:#9a6700;"></span><span class="nm">--yellow</span><span class="vl">#9a6700</span></div>
+      <div class="tk"><span class="dot" style="background:#cf222e;"></span><span class="nm">--red</span><span class="vl">#cf222e</span></div>
+      <div class="tk"><span class="dot" style="background:#8250df;"></span><span class="nm">--purple</span><span class="vl">#8250df</span></div>
+    </div>
+
+  </div>
+
+  <div style="font-size:11px;color:var(--fg-3);margin-top:8px;">
+    <strong>Rule:</strong> Semantic tokens (--accent, --green, --red, --yellow, etc.) carry the same meaning across themes — swap the :root block to toggle. Background gradient tokens (--accent-bg, --green-bg, etc.) are computed via <code style="color:var(--accent);">rgba(color, 0.10–0.12)</code>.
+  </div>
+
+  <h3>2.2 Typography</h3>
+  <div class="token-grid">
+    <div class="token-row">
+      <span class="token-name">--font-sans</span>
+      <span class="token-val" style="font-family:var(--font-sans);font-size:12px;">Inter, Segoe UI, system-ui</span>
+    </div>
+    <div class="token-row">
+      <span class="token-name">--font-mono</span>
+      <span class="token-val" style="font-family:var(--font-mono);font-size:12px;">JetBrains Mono, IBM Plex Mono</span>
+    </div>
+  </div>
+
+  <table class="comp-table">
+    <tr><th>Context</th><th>Size</th><th>Weight</th><th>Family</th><th>Notes</th></tr>
+    <tr><td>Panel title</td><td>11px</td><td>600</td><td>Sans</td><td>Uppercase, letter-spacing 0.04em</td></tr>
+    <tr><td>Session name</td><td>11px</td><td>500</td><td>Sans</td><td>—</td></tr>
+    <tr><td>Message body</td><td>13px</td><td>400</td><td>Sans</td><td>Line-height 1.6</td></tr>
+    <tr><td>Code / prompt</td><td>11px</td><td>400</td><td>Mono</td><td>Tool cards, diff viewer</td></tr>
+    <tr><td>Diff content</td><td>11px</td><td>400</td><td>Mono</td><td>Line-height 1.7</td></tr>
+    <tr><td>File chips</td><td>10px</td><td>400</td><td>Sans</td><td>Inline with icon</td></tr>
+    <tr><td>Status text</td><td>10px</td><td>400</td><td>Sans</td><td>Status bar items</td></tr>
+    <tr><td>Button label</td><td>11–12px</td><td>500</td><td>Sans</td><td>Permission/Modal buttons</td></tr>
+    <tr><td>Input placeholder</td><td>12px</td><td>400</td><td>Sans</td><td>Input field</td></tr>
+    <tr><td>Toast message</td><td>12px</td><td>400</td><td>Sans</td><td>Notification</td></tr>
+    <tr><td>Dropdown hint</td><td>9px</td><td>400</td><td>Sans</td><td>Footer hints in dropdowns</td></tr>
+    <tr><td>Overlay title</td><td>13px</td><td>600</td><td>Sans</td><td>Modal header</td></tr>
+  </table>
+
+  <h3>2.3 Spacing &amp; Sizing</h3>
+  <table class="comp-table">
+    <tr><th>Token</th><th>Value</th><th>Usage</th></tr>
+    <tr><td>Panel padding</td><td>8–12px (horizontal)</td><td>Inner content area</td></tr>
+    <tr><td>Message padding</td><td>12px 14px</td><td>User/assistant messages</td></tr>
+    <tr><td>Gap (messages)</td><td>10px</td><td>Avatar-to-body gap</td></tr>
+    <tr><td>Gap (items)</td><td>6–8px</td><td>Between controls, chips</td></tr>
+    <tr><td>Border radius</td><td>6px (--radius)</td><td>Cards, inputs, tool blocks</td></tr>
+    <tr><td>Border radius</td><td>4px (--radius-sm)</td><td>Buttons, small elements</td></tr>
+    <tr><td>Avatar size</td><td>24px</td><td>Message avatar circle</td></tr>
+    <tr><td>Toolbar button</td><td>26×26px</td><td>Input toolbar icons</td></tr>
+    <tr><td>Send button</td><td>28×28px</td><td>Primary action button</td></tr>
+    <tr><td>Indicator dot</td><td>6px</td><td>Connection status</td></tr>
+    <tr><td>Progress bar</td><td>4px</td><td>Task + context window</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 3. COMPONENT LIBRARY ═══════════ -->
+<section>
+  <h2><span class="sec-num">03</span> Component Library</h2>
+
+  <h3>3.1 Panel Header</h3>
+  <table class="comp-table">
+    <tr><th>Property</th><th>Spec</th></tr>
+    <tr><td>Height</td><td>~30px (7px padding top/bottom)</td></tr>
+    <tr><td>Background</td><td>--surface</td></tr>
+    <tr><td>Hover bg</td><td>--surface-3 (dark) / --surface-2 (light)</td></tr>
+    <tr><td>Label style</td><td>11px, 600 weight, uppercase, letter-spacing 0.04em, --fg-3</td></tr>
+    <tr><td>Action style</td><td>--fg-3, hover → --fg, transition 0.15s</td></tr>
+    <tr><td>Cursor</td><td>pointer (collapsible)</td></tr>
+    <tr><td>Border bottom</td><td>1px solid --border</td></tr>
+  </table>
+
+  <h3>3.2 Messages</h3>
+  <table class="comp-table">
+    <tr><th>Element</th><th>Style</th></tr>
+    <tr><td>User message</td><td>--surface-2 bg, 3px accent left border, right-offset 24px from left gutter, border-radius 0 6px 6px 0</td></tr>
+    <tr><td>Assistant message</td><td>No bg, 3px --fg-3 left border, left-aligned</td></tr>
+    <tr><td>Avatar (user)</td><td>24px circle, accent border + bg, "U" initial</td></tr>
+    <tr><td>Avatar (assistant)</td><td>24px circle, --surface-3 bg, agent SVG icon</td></tr>
+    <tr><td>Meta line</td><td>10px, --fg-3, token counts + timing + copy action</td></tr>
+    <tr><td>File chip (inline)</td><td>--surface-3 bg, 1px border, 3px radius, file icon SVG</td></tr>
+  </table>
+
+  <h3>3.3 Thinking Block</h3>
+  <table class="comp-table">
+    <tr><th>Part</th><th>Style</th></tr>
+    <tr><td>Container</td><td>1px border, 6px radius, --surface bg, margin-left 28px</td></tr>
+    <tr><td>Header</td><td>--surface-3 bg, 6px 12px padding, 11px, --fg-3</td></tr>
+    <tr><td>Dots</td><td>3×5px circles in --yellow, animated pulse (1.4s, staggered 0.2s)</td></tr>
+    <tr><td>Content</td><td>--font-mono, 11px, --fg-3, 8px 12px padding, border-top separator</td></tr>
+    <tr><td>Interaction</td><td>Collapsible (click header), cursor pointer, user-select none</td></tr>
+  </table>
+
+  <h3>3.4 Tool Card</h3>
+  <table class="comp-table">
+    <tr><th>Part</th><th>Style</th></tr>
+    <tr><td>Container</td><td>1px border, 6px radius, margin 6px 12px 6px 28px</td></tr>
+    <tr><td>Header</td><td>--surface-3 bg, tool icon (16px), name, time (mono, right)</td></tr>
+    <tr><td>Body</td><td>--font-mono, 11px, code bg (#0a0c10 dark / #f0f2f4 light), prompt $ in green</td></tr>
+    <tr><td>Output toggle</td><td>10px, --fg-3, hover → --surface-3 bg, chevron + line count</td></tr>
+    <tr><td>Tool icon types</td><td>bash ($): --surface-2; edit (star): accent bg; file (i): purple bg</td></tr>
+  </table>
+
+  <h3>3.5 Diff Viewer</h3>
+  <table class="comp-table">
+    <tr><th>Element</th><th>Style</th></tr>
+    <tr><td>Container</td><td>1px border, 6px radius, margin 6px 12px</td></tr>
+    <tr><td>Header</td><td>--surface-3 bg, file icon + "Edit — path"</td></tr>
+    <tr><td>Line numbers</td><td>28px width, right-aligned, --fg-3, user-select none</td></tr>
+    <tr><td>Added (+) line</td><td>--green-bg bg, --green text</td></tr>
+    <tr><td>Deleted (−) line</td><td>--red-bg bg, --red text</td></tr>
+    <tr><td>Context line</td><td>Transparent bg, --fg-2 text</td></tr>
+    <tr><td>Font</td><td>--font-mono, 11px, line-height 1.7, white-space pre</td></tr>
+  </table>
+
+  <h3>3.6 Permission Prompt</h3>
+  <table class="comp-table">
+    <tr><th>Element</th><th>Style</th></tr>
+    <tr><td>Container</td><td>--surface-2 bg (dark) / --surface bg (light), 1px border, 6px radius, margin 6px 12px</td></tr>
+    <tr><td>Title bar</td><td>Shield SVG (--yellow), action name, font-size 12px, 500 weight</td></tr>
+    <tr><td>Body</td><td>--font-mono, 11px, path/command preview</td></tr>
+    <tr><td>Actions</td><td>Row: Allow (--green bg, white text) / Session / Always / Deny (--red bg, white text)</td></tr>
+    <tr><td>Button hover</td><td>Allow → #2ea043 (dark) / #146429 (light). Deny → #da3633 / #a0111b</td></tr>
+  </table>
+
+  <h3>3.7 Task Item</h3>
+  <table class="comp-table">
+    <tr><th>Element</th><th>Style</th></tr>
+    <tr><td>Layout</td><td>flex row, gap 8px, padding 6px 12px, border-bottom separator</td></tr>
+    <tr><td>Status icon</td><td>Running: accent spinner; Done: green check; Failed: red X</td></tr>
+    <tr><td>Progress bar</td><td>60px width, 4px height, --surface-3 bg; fill: accent (running) / green (done) / red (failed)</td></tr>
+    <tr><td>Kill button</td><td>&times;, --fg-3, hover → --red-bg + --red</td></tr>
+    <tr><td>Sub-info</td><td>10px, --fg-3, "Running · N tool calls · N tokens"</td></tr>
+  </table>
+
+  <h3>3.8 Plan Item</h3>
+  <table class="comp-table">
+    <tr><th>State</th><th>Icon</th><th>Text</th></tr>
+    <tr><td>Done</td><td>Check circle SVG, --green</td><td>line-through, --fg-3</td></tr>
+    <tr><td>Active</td><td>Filled circle SVG, --accent</td><td>--fg, font-weight 500</td></tr>
+    <tr><td>Pending</td><td>Outline circle SVG, --fg-3</td><td>--fg-3</td></tr>
+    <tr><td>Blocked</td><td>—</td><td>"blocked: reason" in --yellow, 10px</td></tr>
+  </table>
+
+  <h3>3.9 Context Chip</h3>
+  <table class="comp-table">
+    <tr><th>Type</th><th>Style</th></tr>
+    <tr><td>File chip</td><td>--surface-3 bg (dark) / --surface-2 bg (light), 1px border, 3px radius, 10px, file icon + path + &times; close</td></tr>
+    <tr><td>Selection chip</td><td>Same + accent border + accent-bg</td></tr>
+    <tr><td>Error badge</td><td>--red-bg bg, red border tint, --red text, triangle icon</td></tr>
+    <tr><td>Warning badge</td><td>--yellow-bg bg, yellow border tint, --yellow text</td></tr>
+    <tr><td>Close (&times;)</td><td>Opacity 0.5, hover → 1.0</td></tr>
+  </table>
+
+  <h3>3.10 Input Area</h3>
+  <table class="comp-table">
+    <tr><th>Part</th><th>Style</th></tr>
+    <tr><td>Container</td><td>--surface bg, border-top, padding 10px 12px</td></tr>
+    <tr><td>Input box</td><td>1px border, 6px radius, --surface-3 bg (dark) / --bg (light), min-height 38px, flex wrap for chips</td></tr>
+    <tr><td>File chip inline</td><td>--accent-bg, accent border, 3px radius, 10px, --accent text, &times; close</td></tr>
+    <tr><td>Toolbar button</td><td>26×26px, icon centered, --fg-3, hover → --surface-3 bg</td></tr>
+    <tr><td>Send button</td><td>28×28px, --accent-em bg, white icon, 6px radius, disabled → 0.4 opacity</td></tr>
+    <tr><td>Stop button</td><td>28×28px, transparent bg, 1px --red border, --red icon, 6px radius</td></tr>
+  </table>
+
+  <h3>3.11 Status Bar</h3>
+  <table class="comp-table">
+    <tr><th>Item</th><th>Style</th></tr>
+    <tr><td>Connection dot</td><td>6px circle: --green (connected) / --yellow (degraded) / --red (disconnected)</td></tr>
+    <tr><td>Permission pill</td><td>9px, 1px border, 8px radius, shield icon, click → dropdown</td></tr>
+    <tr><td>Model pill</td><td>9px, 1px border, 8px radius, agent icon</td></tr>
+    <tr><td>Context bar</td><td>Flex row: icon + percentage (10px, --fg-3) + 48px fill bar (4px height)</td></tr>
+    <tr><td>Context fill</td><td>4px height: --yellow (normal) / --orange (warn) / --red (danger)</td></tr>
+    <tr><td>Status text</td><td>10px, --fg-3, icon + label, right-aligned</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 4. SURFACE MAP ═══════════ -->
+<section>
+  <h2><span class="sec-num">04</span> Surface Map — All 18 Interaction Surfaces</h2>
+  <p style="margin-bottom:12px;">The VS Code Agent panel contains 8 in-panel surfaces (shown in the 420px sidebar mockup) and 10 overlay/dialog surfaces (shown in detail cards below the mockup).</p>
+
+  <h3>4.1 In-Panel Surfaces</h3>
+  <div class="surface-grid">
+
+    <div class="surface-card">
+      <div class="s-num">#01</div>
+      <div class="s-name">Session History <span class="tag">Collapsible</span></div>
+      <div class="s-desc">List of past agent sessions with metadata. Header shows session count + "New" button.</div>
+      <ul class="s-features">
+        <li>Active session: accent bg + accent border, glow indicator</li>
+        <li>Hover reveal: rename, pin, delete actions</li>
+        <li>Search + sort bar on expand</li>
+        <li>Two-click delete confirmation</li>
+        <li>Pinned sessions at top with distinct marker</li>
+      </ul>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#02</div>
+      <div class="s-name">Messages Stream <span class="tag">Filtered</span></div>
+      <div class="s-desc">Main conversation feed. Supports user messages, assistant responses, thinking blocks, tool cards, diffs, and permission prompts.</div>
+      <ul class="s-features">
+        <li>All / You / Agent filter pills</li>
+        <li>Lazy history scroll-up (load-more)</li>
+        <li>Scroll-to-bottom FAB with message count</li>
+        <li>Pending permission FAB (pulsing)</li>
+        <li>Token counters + timing per assistant msg</li>
+      </ul>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#03</div>
+      <div class="s-name">Background Tasks <span class="tag">Conditional</span></div>
+      <div class="s-desc">Running and completed sub-tasks with progress bars. Only shown when tasks are active.</div>
+      <ul class="s-features">
+        <li>Progress bar per task (accent / green / red)</li>
+        <li>Kill (&times;) button → kill_task</li>
+        <li>"Clear done" header action</li>
+        <li>Badge: running count / total count</li>
+        <li>Auto-dismiss completed non-error tasks</li>
+      </ul>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#04</div>
+      <div class="s-name">Plan / Todo Panel <span class="tag">Conditional</span></div>
+      <div class="s-desc">Task plan from plan_tasks message (IDE PlanTasksMessage). Three-state progress tracking.</div>
+      <ul class="s-features">
+        <li>Done (green check) / Active (accent dot) / Pending (outline circle)</li>
+        <li>Blocked-by warning in --yellow</li>
+        <li>Progress badge: N/M in header</li>
+        <li>Collapsible section</li>
+      </ul>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#05</div>
+      <div class="s-name">Context Bar <span class="tag">Always visible</span></div>
+      <div class="s-desc">File references, selection info, and diagnostic counts from the current workspace context.</div>
+      <ul class="s-features">
+        <li>File chips with relative path + remove (&times;)</li>
+        <li>Selection chip: file name + line range</li>
+        <li>Diagnostic badges: error count (--red) + warning count (--yellow)</li>
+        <li>Natural wrap when overflowing</li>
+      </ul>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#06</div>
+      <div class="s-name">Selection Preview <span class="tag">Collapsible</span></div>
+      <div class="s-desc">Inline code preview for the selected text range. Shows error line highlighting.</div>
+      <ul class="s-features">
+        <li>Expand/collapse with chevron icon</li>
+        <li>Line numbers (user-select none)</li>
+        <li>Error line highlighted with --red-bg</li>
+        <li>Font: --font-mono, 11px</li>
+      </ul>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#07</div>
+      <div class="s-name">Status Bar <span class="tag">Always visible</span></div>
+      <div class="s-desc">Connection status, permission mode, model selector, context window usage, and quick commands.</div>
+      <ul class="s-features">
+        <li>Connection indicator: green/yellow/red dot</li>
+        <li>Permission mode pill: 5 modes (Default, Accept Edits, Plan Mode, Bypass, Custom)</li>
+        <li>Model selector dropdown</li>
+        <li>Context fill bar: 0–50% green, 50–75% yellow, 75–90% orange, 90%+ red</li>
+        <li>Quick commands dropdown trigger</li>
+      </ul>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#08</div>
+      <div class="s-name">Input Area <span class="tag">Always visible</span></div>
+      <div class="s-desc">Compose area with file chip support, toolbar actions, and send/interrupt controls.</div>
+      <ul class="s-features">
+        <li>Contenteditable input with placeholder text</li>
+        <li>File chip inline (--accent-bg, removable)</li>
+        <li>@ button → file picker dropdown</li>
+        <li>/ button → slash command autocomplete</li>
+        <li>Structure button → Markdown Editor modal</li>
+        <li>Emoji button → emoji picker grid</li>
+        <li>Send (accent) / Stop (red border, during streaming)</li>
+        <li>Slash command autocomplete on typing /</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <h3 style="margin-top:24px;">4.2 Overlay &amp; Dialog Surfaces</h3>
+  <div class="surface-grid">
+
+    <div class="surface-card">
+      <div class="s-num">#09</div>
+      <div class="s-name">@Mention File Picker <span class="tag">Dropdown</span></div>
+      <div class="s-desc">Hierarchical file tree with search filter. Keyboard navigable (↑↓←→ Enter Esc). Dirs collapsible.</div>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#10</div>
+      <div class="s-name">Emoji Picker <span class="tag">Dropdown</span></div>
+      <div class="s-desc">6-column emoji grid. Click inserts at cursor in contenteditable. Category tabs for navigation.</div>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#11</div>
+      <div class="s-name">Slash Command Autocomplete <span class="tag">Dropdown</span></div>
+      <div class="s-desc">Filtered as-you-type list of pre-built + dynamic (custom) commands. Keyboard nav: Tab/Enter to select, Esc to close.</div>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#12</div>
+      <div class="s-name">Markdown Editor <span class="tag">Modal</span></div>
+      <div class="s-desc">Split editor/preview dialog. Toolbar (H2, lists, checkboxes, code blocks, blockquote, divider). Real-time preview via marked.parse().</div>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#13</div>
+      <div class="s-name">Quick Command Manager <span class="tag">Modal</span></div>
+      <div class="s-desc">CRUD management for custom slash commands. List + delete existing. Add form: Name + Command. Persists to JSON.</div>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#14</div>
+      <div class="s-name">Permission Prompts <span class="tag">3 variants</span></div>
+      <div class="s-desc">Variant A: Terminal tool inline (destructive warning). B: Edit tool with diff preview. C: Read file (non-destructive). All: Allow / Session / Always / Deny.</div>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#15</div>
+      <div class="s-name">Rewind / Restore Points <span class="tag">Inline</span></div>
+      <div class="s-desc">Checkpoint list with file count, timestamp, and Restore button. Triggered by /rewind or /checkpoint.</div>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#16</div>
+      <div class="s-name">Thinking Block <span class="tag">Inline</span></div>
+      <div class="s-desc">Collapsible reasoning block. Animated dots during active thinking. Monospace content with truncation ("— N more lines"). Translate action.</div>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#17</div>
+      <div class="s-name">Tool Cards <span class="tag">Inline</span></div>
+      <div class="s-desc">Bash execution, file reads, edits. Syntax-highlighted body, collapsible output, duration timer, copy action.</div>
+    </div>
+
+    <div class="surface-card">
+      <div class="s-num">#18</div>
+      <div class="s-name">Toast Notifications <span class="tag">Fixed overlay</span></div>
+      <div class="s-desc">Bottom-right fixed position. 3 variants: success (--green bg), error (--red bg), info (--accent bg). 3s auto-dismiss with fade. Manual close (&times;).</div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ═══════════ 5. INTERACTION STATES ═══════════ -->
+<section>
+  <h2><span class="sec-num">05</span> Interaction &amp; State Specifications</h2>
+
+  <h3>5.1 Global Interaction Patterns</h3>
+  <table class="comp-table">
+    <tr><th>Pattern</th><th>Specification</th></tr>
+    <tr><td>Hover</td><td>150ms transition, background shift to --surface-3 (dark) / --surface-2 (light)</td></tr>
+    <tr><td>Focus-visible</td><td>Outline: 2px solid --accent, offset 2px. Applies to buttons, inputs, focusable list items</td></tr>
+    <tr><td>Active/Pressed</td><td>Scale 0.97 on buttons, background darken by 5%</td></tr>
+    <tr><td>Disabled</td><td>Opacity 0.4, cursor default. Send button when input empty</td></tr>
+    <tr><td>Loading</td><td>Pulsing thinking dots (--yellow, 1.4s stagger) + disabled send + stop button visible</td></tr>
+    <tr><td>Error</td><td>--red diagnostic badges, error toasts, red-highlighted lines in selection preview</td></tr>
+  </table>
+
+  <h3>5.2 Panel Grouping &amp; Collapse</h3>
+  <table class="comp-table">
+    <tr><th>Panel</th><th>Default</th><th>Collapsible</th><th>Conditional</th></tr>
+    <tr><td>Session History</td><td>Expanded</td><td>Yes</td><td>No</td></tr>
+    <tr><td>Messages Stream</td><td>Expanded</td><td>No (always visible)</td><td>No</td></tr>
+    <tr><td>Background Tasks</td><td>Expanded</td><td>Yes</td><td>Yes</td></tr>
+    <tr><td>Plan / Todo Panel</td><td>Expanded</td><td>Yes</td><td>Yes</td></tr>
+    <tr><td>Context Bar</td><td>Visible</td><td>No</td><td>No (hidden when empty)</td></tr>
+    <tr><td>Selection Preview</td><td>Collapsed</td><td>Yes</td><td>Yes</td></tr>
+    <tr><td>Status Bar</td><td>Visible</td><td>No</td><td>No</td></tr>
+    <tr><td>Input Area</td><td>Visible</td><td>No</td><td>No</td></tr>
+  </table>
+
+  <h3>5.3 Keyboard Navigation</h3>
+  <table class="comp-table">
+    <tr><th>Context</th><th>Keys</th><th>Action</th></tr>
+    <tr><td>@Mention file picker</td><td>↑↓ ←→</td><td>Navigate tree / expand directories</td></tr>
+    <tr><td>@Mention file picker</td><td>Enter</td><td>Select file / toggle directory</td></tr>
+    <tr><td>@Mention file picker</td><td>Esc</td><td>Close dropdown</td></tr>
+    <tr><td>Slash autocomplete</td><td>Tab / Enter</td><td>Select command</td></tr>
+    <tr><td>Slash autocomplete</td><td>Esc</td><td>Close autocomplete</td></tr>
+    <tr><td>Input area</td><td>/</td><td>Trigger slash autocomplete</td></tr>
+    <tr><td>Input area</td><td>@</td><td>Trigger file picker</td></tr>
+    <tr><td>Input area</td><td>Enter</td><td>New line (in contenteditable)</td></tr>
+    <tr><td>Modal</td><td>Esc</td><td>Close / Cancel</td></tr>
+  </table>
+
+  <h3>5.4 Message Types in Stream</h3>
+  <table class="comp-table">
+    <tr><th>Type</th><th>Direction</th><th>Visual key</th></tr>
+    <tr><td>User text</td><td>Right-offset</td><td>Accent left border, --surface-2 bg</td></tr>
+    <tr><td>Assistant text</td><td>Left-aligned</td><td>--fg-3 left border, no bg, avatar</td></tr>
+    <tr><td>Thinking block</td><td>Left, indented</td><td>Dots animation, collapsible, mono</td></tr>
+    <tr><td>Tool card (bash)</td><td>Left, indented</td><td>$ prefix, mono, output toggle</td></tr>
+    <tr><td>Tool card (read)</td><td>Left, indented</td><td># prefix, mono, file path</td></tr>
+    <tr><td>Tool card (edit)</td><td>Left, indented</td><td>Star icon, diff viewer</td></tr>
+    <tr><td>Permission prompt</td><td>Left, indented</td><td>Shield icon, 4 action buttons</td></tr>
+    <tr><td>Plan tasks</td><td>Panel</td><td>Separate panel with progress</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════ 6. LAYOUT SPECIFICATION ═══════════ -->
+<section>
+  <h2><span class="sec-num">06</span> Layout &amp; Implementation Notes</h2>
+
+  <h3>6.1 VS Code Webview Container</h3>
+  <ul>
+    <li><strong>Width:</strong> 420px (VS Code sidebar standard). Responsive down to ~300px minimum.</li>
+    <li><strong>Height:</strong> Scrollable container (sidebar-scroll), 720px mockup height, real height = webview viewport.</li>
+    <li><strong>Scrolling:</strong> Thin scrollbar (4px), --border color, transparent track. Only the sidebar content scrolls, not individual panels.</li>
+    <li><strong>Theme switching:</strong> Toggle 6 CSS custom properties (--bg, --surface, --surface-2, --surface-3, --fg, --fg-2, --fg-3, --border, --accent, --green, --red, --yellow, --purple). The full file has no hardcoded color values outside the :root block.</li>
+  </ul>
+
+  <h3>6.2 CSS Architecture</h3>
+  <ul>
+    <li><strong>Single-file approach:</strong> All styles in one <code>&lt;style&gt;</code> block for the mockup. For implementation, tokens should be extracted to a shared <code>tokens.css</code> and components to individual files.</li>
+    <li><strong>Naming convention:</strong> BEM-like: <code>.panel</code>, <code>.panel-header</code>, <code>.panel-header .label</code>.</li>
+    <li><strong>Transitions:</strong> 150ms ease for all interactive states. 300ms for progress bar fills. Toast: 300ms fade in, 3s visible, 300ms fade out.</li>
+    <li><strong>No external dependencies:</strong> Pure CSS. SVG icons inline.</li>
+  </ul>
+
+  <h3>6.3 Theme Switching Strategy</h3>
+  <ul>
+    <li>Define all colors as CSS custom properties in <code>:root</code>.</li>
+    <li>Swap themes by replacing the <code>:root</code> block. In VS Code extension, use <code>body.vscode-dark</code> / <code>body.vscode-light</code> class toggles.</li>
+    <li>VS Code exposes <code>vscode.theme.kind</code> — use the webview's <code>body</code> class to apply the correct token set.</li>
+    <li>Alternatively, VS Code's <code>ColorThemeKind</code> API can dynamically set CSS variables via JS.</li>
+  </ul>
+
+  <h3>6.4 Responsive Behavior</h3>
+  <ul>
+    <li>At &lt;900px viewport: switch from side-by-side (sidebar + annotations) to stacked layout.</li>
+    <li>At &lt;360px: reduce padding, font sizes remain stable (don't scale down).</li>
+    <li>Overlay modals: max-width 480px, centered in viewport with dark backdrop.</li>
+    <li>Dropdowns: positioned relative to trigger, max-height with scroll for long lists.</li>
+  </ul>
+</section>
+
+<!-- ═══════════ 7. VS CODE INTEGRATION NOTES ═══════════ -->
+<section>
+  <h2><span class="sec-num">07</span> VS Code Webview Integration</h2>
+
+  <table class="comp-table">
+    <tr><th>Area</th><th>Guidance</th></tr>
+    <tr><td>Webview creation</td><td>Use <code>vscode.window.createWebviewPanel()</code> or <code>registerWebviewViewProvider()</code> for sidebar. Set <code>retainContextWhenHidden: true</code> for state persistence.</td></tr>
+    <tr><td>Theme detection</td><td>Use <code>vscode.window.activeColorTheme.kind</code> → set CSS class on webview body. Re-listen on <code>onDidChangeActiveColorTheme</code>.</td></tr>
+    <tr><td>Font scaling</td><td>VS Code exposes <code>--vscode-font-size</code>, <code>--vscode-font-family</code> as CSS variables in webviews — use them as fallbacks.</td></tr>
+    <tr><td>Message passing</td><td>Use <code>postMessage()</code> / <code>onDidReceiveMessage</code> for all extension ↔ webview communication.</td></tr>
+    <tr><td>File picker</td><td>Use <code>vscode.window.showQuickPick()</code> as an alternative to the custom dropdown for file selection.</td></tr>
+    <tr><td>State persistence</td><td>Store session/plan state in extension's <code>globalState</code>. Webview layer is ephemeral.</td></tr>
+    <tr><td>Context menu</td><td>Register <code>vscode.commands.registerTextEditorCommand</code> for "Ask Agent" on selected text → opens webview with pre-filled context.</td></tr>
+    <tr><td>CSP</td><td>Set strict Content-Security-Policy: <code>default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-...';</code></td></tr>
+  </table>
+</section>
+
+<hr class="divider">
+
+<!-- ═══════════ FOOTER ═══════════ -->
+<div style="text-align:center;padding:24px 0 40px;font-size:11px;color:var(--fg-3);">
+  VS Code Agent Extension — Design Specification v1.0<br>
+  Direction: Tech / Utility &middot; 3 deliverable files + 1 spec document &middot; 18 surfaces &middot; 2 themes
+</div>
+
+</div>
+</body>
+</html>

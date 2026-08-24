@@ -1,0 +1,196 @@
+// ── Settings store — persisted via Rust to %APPDATA%/claude-code-gui/settings.json ──
+
+import { eventBus } from "../services/serviceBus";
+import { Events } from "../services/events";
+
+export interface QuickPrompt {
+  id: string;
+  title: string;
+  prompt: string;
+}
+
+export interface AppSettings {
+  workDir: string;
+  workspaces: string[];
+  /** MRU list — most recently bound workspace first (maintained by Rust bind_workspace) */
+  recentWorkspaces?: string[];
+  /** When enabled, startup auto-enters recentWorkspaces[0] and skips the selector */
+  autoEnterRecentWorkspace?: boolean;
+  /** When enabled, layout saves also write to the global baseline so workspaces
+   *  without their own layout fall back to it (workspace layout still wins). */
+  saveLayoutToGlobal?: boolean;
+  isFirstLaunch: boolean;
+  language: "zh" | "en";
+  terminalMaxEntries: number;
+  layoutTree?: object;
+  showHiddenFiles?: boolean;
+  favoriteSkills?: string[];
+  quickPrompts?: QuickPrompt[];
+  /** Favorite session ids — workspace-scoped, stored in the bound workspace's settings.local.json */
+  favoriteSessionIds?: string[];
+  editorFontSize?: number;
+  editorTabSize?: number;
+  editorWordWrap?: boolean;
+  chatEnterBehavior?: "send" | "newline";
+  fileSortOrder?: "name" | "date" | "type";
+  terminalFontSize?: number;
+  autoLoadLatestSession?: boolean;
+  forceChineseThinking?: boolean;
+  permissionMode?: string;
+  skillRegistryUrl?: string;
+  updateServerUrl?: string;
+  /** Main window state persistence */
+  windowWidth?: number;
+  windowHeight?: number;
+  windowX?: number;
+  windowY?: number;
+  windowMaximized?: boolean;
+  _version?: string;
+  uiFontSize?: number;
+  theme?: string;
+  /** 消息队列布局位置: 输入框上方(top, 默认) / 聊天右侧(right) */
+  msgQueuePosition?: "top" | "right";
+  /** 消息队列上限(默认 20) */
+  msgQueueMaxItems?: number;
+  /** 消息列表划词弹出层开关(默认开启) */
+  msgSelectionToolbar?: boolean;
+  /** 会话文件夹开关(默认关, 非默认功能) */
+  sessionFolders?: boolean;
+  /** 会话文件夹数据(工作区作用域): 嵌套树 folders + sessionId->folderId 归属 */
+  sessionFolderTree?: {
+    folders: Array<{ id: string; name: string; parentId?: string }>;
+    assignments: Record<string, string>;
+  };
+  /** 消息时间线导航栏开关(默认关, 需手动开启) */
+  messageTimeline?: boolean;
+  /** 上下文告警开关(默认开): 已用百分比跨过阈值时弹浮动层提示 */
+  contextWarningEnabled?: boolean;
+  /** 上下文告警阈值百分比(默认 90, 即剩余 10%) */
+  contextWarningPercent?: number;
+  /** 自定义压缩提示词（gui 键，后端 compactConfig 读取）：text 空 = 不启用 */
+  customCompactPrompt?: { mode: "append" | "replace"; text: string };
+  /** 压缩时提取脚本路径（默认 handoff 脚本，后端 compactConfig 读取） */
+  compactExtractScript?: string;
+}
+
+let settings: AppSettings = {
+  workDir: "",
+  workspaces: [],
+  isFirstLaunch: true,
+  language: "zh",
+  terminalMaxEntries: 50,
+  skillRegistryUrl: "http://192.168.186.96:8765",
+  _version: "1.0.0-preview",
+  uiFontSize: 100,
+};
+
+let loaded = false;
+
+export function getSettings(): AppSettings {
+  return settings;
+}
+
+export function updateSettings(patch: Partial<AppSettings>) {
+  settings = { ...settings, ...patch };
+  eventBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
+}
+
+/** Direct in-memory set without emitting events or persisting.
+ *  Used by Leaf windows to sync settings from Hub via DataBus. */
+export function applySettingsFromBus(s: AppSettings) {
+  settings = { ...s };
+}
+
+function isTauri(): boolean {
+  return !!(window as any).__TAURI_INTERNALS__;
+}
+
+// Load from Rust backend
+export async function loadSettings(): Promise<AppSettings> {
+  if (loaded) return settings;
+
+  if (isTauri()) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const s: AppSettings = await invoke("get_app_settings");
+      settings = s;
+    } catch {
+      // First launch or error — use defaults
+      const def = await getDefaultWorkDir();
+      settings = { workDir: def, workspaces: [], isFirstLaunch: true, language: "zh", terminalMaxEntries: 50 };
+    }
+  } else {
+    // Browser dev: use localStorage
+    const raw = localStorage.getItem("claude-code-settings");
+    if (raw) {
+      try { settings = JSON.parse(raw); } catch {}
+    }
+    if (!settings.workDir) {
+      settings = { workDir: await getDefaultWorkDir(), workspaces: [], isFirstLaunch: true, language: "zh", terminalMaxEntries: 50 };
+    }
+  }
+
+  // Migrate: if workspaces is empty but workDir is set, seed workspaces
+  if (settings.workspaces.length === 0 && settings.workDir) {
+    settings.workspaces = [settings.workDir];
+  }
+
+  loaded = true;
+  eventBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
+  return settings;
+}
+
+/** Force a re-fetch from Rust (bypasses the `loaded` cache). Must be called
+ *  AFTER the backend has bound a workspace — get_app_settings returns the
+ *  effective merge for the bound workspace, so a workspace switch would
+ *  otherwise keep stale workspace-scoped fields (e.g. favoriteSessionIds)
+ *  in memory. */
+export async function reloadSettings(): Promise<AppSettings> {
+  if (isTauri()) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const s: AppSettings = await invoke("get_app_settings");
+      settings = s;
+      loaded = true;
+      eventBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
+      return settings;
+    } catch (e) {
+      console.error("reloadSettings failed:", e);
+    }
+  }
+  return settings;
+}
+
+// Save to Rust backend. `patch` is a partial set of fields; `scope` chooses the
+// target file: "workspace" (default) → the bound workspace's .claude/settings.local.json,
+// "global" → ~/.claude/settings.json gui. Callers that manage global-only fields
+// (theme, language, …) pass "global" explicitly.
+export async function saveSettings(
+  patch: Partial<AppSettings>,
+  scope?: "global" | "workspace",
+): Promise<void> {
+  settings = { ...settings, ...patch };
+  if (isTauri()) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("save_app_settings", { patch, scope: scope ?? "workspace" });
+    } catch (e) {
+      console.error("saveSettings failed:", e);
+    }
+  } else {
+    localStorage.setItem("claude-code-settings", JSON.stringify(settings));
+  }
+  eventBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
+}
+
+// Get default work directory via Rust (knows user home)
+async function getDefaultWorkDir(): Promise<string> {
+  if (isTauri()) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke("get_default_work_dir");
+    } catch {}
+  }
+  // Fallback for browser
+  return "claude-code-workspace";
+}

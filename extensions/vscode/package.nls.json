@@ -1,0 +1,16 @@
+{
+  "displayName": "Claude Code IDE",
+  "description": "VS Code extension for Claude Code — chat, agent operations, and IDE context integration",
+  "command.startChat": "Claude Code: Start Chat",
+  "command.sendSelection": "Claude Code: Send Selection to Chat",
+  "command.sendFile": "Claude Code: Send Current File to Chat",
+  "command.explainCode": "Claude Code: Explain Selected Code",
+  "command.addToChat": "Claude Code: Add to Chat",
+  "viewContainer.title": "Claude Code Chat",
+  "view.name": "Chat",
+  "configuration.title": "Claude Code IDE",
+  "config.cliPath.description": "Path to the Claude Code repo root (contains bin/claude-ide.cmd). Auto-detected from installation, workspace, or PATH if empty.",
+  "config.autoSendContext.description": "Automatically send active file and selection as context",
+  "config.maxFilesInContext.description": "Maximum number of open files to include in context",
+  "config.language.description": "UI language. \"auto\" follows VS Code's display language."
+}

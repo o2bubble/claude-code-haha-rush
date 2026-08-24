@@ -1,0 +1,15 @@
+{
+  "identifier": "default",
+  "description": "Default capability — main + floating windows",
+  "windows": ["main", "float-*"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "shell:allow-open"
+  ]
+}

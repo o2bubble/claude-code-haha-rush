@@ -1,0 +1,444 @@
+; Claude Code Haha 安装程序脚本
+; 需要 Inno Setup 6+ (https://jrsoftware.org/isdl.php)
+; 用法: ISCC.exe installer\setup.iss
+
+#define MyAppName "Claude Code Haha"
+#define MyAppVersion "2.1.89"
+#define MyAppPublisher "Claude Code Local"
+#define MyAppURL "https://gitee.com/randomlife/claude-code-haha-dev"
+#define MyAppExeName "claude-code-gui.exe"
+
+; Build tag: pass via /DBuildTag=2026W28 or leave blank for DEV
+#ifndef BuildTag
+  #define BuildTag "DEV"
+#endif
+
+[Setup]
+AppId={{E8A7B3C2-D5F1-4A9E-BC60-28F94D731E5D}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppSupportURL={#MyAppURL}
+DefaultDirName={autopf}\{#MyAppName}
+DefaultGroupName={#MyAppName}
+Compression=lzma2/ultra64
+SolidCompression=yes
+OutputDir=..\dist
+OutputBaseFilename=ClaudeCodeHaha_Setup_v{#MyAppVersion}_{#BuildTag}
+WizardStyle=modern
+; All-users install → Program Files + system env (elevated); current-user install
+; → {localappdata}\Programs + user env (no UAC). {autopf} resolves to the right
+; Program Files for each mode, so {app} adapts automatically.
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=commandline dialog
+UninstallDisplayIcon={app}\{#MyAppExeName}
+DisableProgramGroupPage=yes
+
+[Languages]
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
+
+[Components]
+Name: "core"; Description: "核心文件 (claude.exe + CLI 工具 + IDE 插件)"; Types: full compact custom; Flags: fixed
+Name: "gui"; Description: "桌面应用 (Claude Code GUI + 自动更新)"; Types: full
+Name: "gitbash"; Description: "Git Bash 环境 — shell + Unix 命令行工具"; Types: full
+Name: "git"; Description: "Git 仓库操作 — git push/pull/fetch 等（需 Git Bash）"; Types: full
+Name: "python"; Description: "Python 3.12 (完整版) + pywin32"; Types: full
+
+[Tasks]
+Name: "addpath"; Description: "将 Claude Code 添加到系统 PATH（推荐）"; GroupDescription: "系统配置："; Flags: checkedonce
+
+[Files]
+; Core executables at root (always installed)
+Source: "..\dist\claude-code-gui.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: gui
+Source: "..\dist\Update.exe";          DestDir: "{app}"; Flags: ignoreversion; Components: gui
+Source: "..\dist\claude.exe";          DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\bun.exe";             DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\manifest.json";        DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\*.cmd";               DestDir: "{app}"; Flags: ignoreversion
+; CLI tools in bin/
+Source: "..\dist\bin\*";      DestDir: "{app}\bin";         Flags: ignoreversion
+Source: "..\dist\scripts\*";  DestDir: "{app}\scripts";     Flags: ignoreversion
+Source: "..\dist\extensions\*"; DestDir: "{app}\extensions"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Optional: Git Bash + Git repo tools (both go to {app}\git, merged at install time)
+Source: "..\dist\git\*";      DestDir: "{app}\git";    Flags: ignoreversion recursesubdirs createallsubdirs; Components: gitbash git
+; Optional: Python 3.12
+Source: "..\dist\python\*";   DestDir: "{app}\python"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: python
+
+[Icons]
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Components: gui
+Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
+
+[Run]
+Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\scripts\gui-profile.py"" ""{app}"""; \
+    Description: "配置 API Profile (DeepSeek v4 Pro)"; Flags: postinstall skipifsilent nowait skipifdoesntexist; \
+    Components: python and not gui
+
+[Code]
+const
+  SystemEnvKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+  HomeVarName = 'CLAUDE_CODE_HAHA_HOME';
+  WM_SETTINGCHANGE = $001A;
+  SMTO_ABORTIFHUNG = $0002;
+
+function SendMessageTimeout(hWnd: HWND; Msg, wParam, lParam, fuFlags, uTimeout: Cardinal;
+  var lpdwResult: Cardinal): Cardinal; external 'SendMessageTimeoutW@user32.dll stdcall';
+
+// WM_SETTINGCHANGE broadcast — makes newly-written env vars visible to already
+// running processes (Explorer, IDE, terminal) without a logout/reboot.
+procedure BroadcastEnvironmentChange;
+var
+  Dummy: Cardinal;
+begin
+  // lParam = 0 broadcasts to all windows; Explorer and freshly spawned
+  // processes pick up the new environment without a logout/reboot.
+  SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0,
+    SMTO_ABORTIFHUNG, 5000, Dummy);
+end;
+
+// ── PATH helpers ──────────────────────────────────────────────────────
+//
+// PATH entries can exist in two equivalent forms:
+//   - literal token   e.g. %CLAUDE_CODE_HAHA_HOME%\bin   (what the installer writes)
+//   - expanded path   e.g. C:\Program Files\Claude Code Haha\bin
+// Older installs wrote expanded paths; newer ones write %VAR% tokens. Both must
+// be recognized when de-duplicating, so reinstall/upgrade never accumulates
+// duplicate entries.
+
+// True if a PATH entry (by itself, not as a substring of another entry) matches
+// any of the given equivalent forms. `Paths` is the raw ';'-joined value.
+function PathHasEntry(Paths: string; MatchA, MatchB: string): Boolean;
+var
+  Part: string;
+  P: Integer;
+begin
+  Result := False;
+  while Paths <> '' do
+  begin
+    P := Pos(';', Paths);
+    if P > 0 then begin
+      Part := Copy(Paths, 1, P - 1);
+      Delete(Paths, 1, P);
+    end else begin
+      Part := Paths;
+      Paths := '';
+    end;
+
+    Part := Trim(Part);
+    if Part = '' then Continue;
+
+    if (CompareText(Part, MatchA) = 0) or
+       ((MatchB <> '') and (CompareText(Part, MatchB) = 0)) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+// Append an entry to PATH unless an equivalent form already exists. Returns
+// True when a write happened (i.e. caller may want to re-add after removing).
+procedure EnvAddPathTo(RootKey: Integer; SubKeyName, PathToken, PathExpanded: string);
+var
+  Paths: string;
+begin
+  if not RegQueryStringValue(RootKey, SubKeyName, 'Path', Paths) then
+    Paths := '';
+
+  if PathHasEntry(Paths, PathToken, PathExpanded) then
+  begin
+    Log('PATH already contains: ' + PathToken);
+    Exit;
+  end;
+
+  if Paths <> '' then
+    Paths := Paths + ';' + PathToken
+  else
+    Paths := PathToken;
+
+  // RegWriteExpandStringValue (REG_EXPAND_SZ) — PATH holds %VAR% entries (e.g.
+  // %SystemRoot%); writing REG_SZ would stop them expanding.
+  if RegWriteExpandStringValue(RootKey, SubKeyName, 'Path', Paths) then
+    Log('Appended to PATH: ' + PathToken)
+  else
+    Log('Failed to add to PATH: ' + PathToken);
+end;
+
+// Prepend an entry to the FRONT of PATH unless an equivalent form already
+// exists. Used for git\usr\bin so a bare `bash` resolves to git-bash instead
+// of WSL/System32's bash (matches the diagnostics tool's arrange_install_path,
+// which puts git\usr\bin first).
+procedure EnvPrependPathTo(RootKey: Integer; SubKeyName, PathToken, PathExpanded: string);
+var
+  Paths, NewPaths: string;
+begin
+  if not RegQueryStringValue(RootKey, SubKeyName, 'Path', Paths) then
+    Paths := '';
+
+  if PathHasEntry(Paths, PathToken, PathExpanded) then
+  begin
+    Log('PATH already contains: ' + PathToken);
+    Exit;
+  end;
+
+  if Paths <> '' then
+    NewPaths := PathToken + ';' + Paths
+  else
+    NewPaths := PathToken;
+
+  if RegWriteExpandStringValue(RootKey, SubKeyName, 'Path', NewPaths) then
+    Log('Prepended to PATH: ' + PathToken)
+  else
+    Log('Failed to prepend to PATH: ' + PathToken);
+end;
+
+// Remove every entry matching either form (token or expanded) from PATH.
+procedure EnvRemovePathFrom(RootKey: Integer; SubKeyName, PathToken, PathExpanded: string);
+var
+  Paths, NewPaths, Part: string;
+  P: Integer;
+begin
+  if not RegQueryStringValue(RootKey, SubKeyName, 'Path', Paths) then
+    Exit;
+
+  NewPaths := '';
+  while Paths <> '' do
+  begin
+    P := Pos(';', Paths);
+    if P > 0 then begin
+      Part := Copy(Paths, 1, P - 1);
+      Delete(Paths, 1, P);
+    end else begin
+      Part := Paths;
+      Paths := '';
+    end;
+
+    Part := Trim(Part);
+    if (Part = '') or (CompareText(Part, PathToken) = 0) or
+       ((PathExpanded <> '') and (CompareText(Part, PathExpanded) = 0)) then
+      Continue;
+
+    if NewPaths <> '' then
+      NewPaths := NewPaths + ';' + Part
+    else
+      NewPaths := Part;
+  end;
+
+  // Keep REG_EXPAND_SZ so remaining %VAR% entries still expand.
+  RegWriteExpandStringValue(RootKey, SubKeyName, 'Path', NewPaths);
+  Log('Removed from PATH (' + SubKeyName + '): ' + PathToken);
+end;
+
+// Remove all Claude entries (both forms) from system + user PATH. Older
+// installs wrote to the user PATH; newer ones use system PATH (visible to
+// IDE/plugin processes), so uninstall cleans both scopes.
+procedure EnvRemovePath(PathToken, PathExpanded: string);
+begin
+  EnvRemovePathFrom(HKEY_LOCAL_MACHINE, SystemEnvKey, PathToken, PathExpanded);
+  EnvRemovePathFrom(HKEY_CURRENT_USER, 'Environment', PathToken, PathExpanded);
+end;
+
+// ── Install / Uninstall hooks ─────────────────────────────────────────
+
+// ── Claude global config injection ────────────────────────────────────
+
+procedure InjectPythonNote(AppDir: string);
+var
+  ClaudeDir, ClaudeFile, NoteSrc, NoteDst, PythonExe: string;
+  Content, OldNote, InjectLine: AnsiString;
+  OldNotePos: Integer;
+begin
+  ClaudeDir := ExpandConstant('{userdocs}\..\.claude');
+  ClaudeFile := ClaudeDir + '\CLAUDE.md';
+  NoteSrc := AppDir + '\extensions\python\python-env.md';
+  NoteDst := ClaudeDir + '\python-env.md';
+  PythonExe := '%' + HomeVarName + '%\python\python.exe';
+
+  ForceDirectories(ClaudeDir);
+
+  // Copy python-env.md — CLAUDE.md references it via @python-env.md so the content
+  // is maintained in one place (the bundled source file), not pasted into CLAUDE.md.
+  if FileExists(NoteSrc) then begin
+    CopyFile(NoteSrc, NoteDst, False);
+    Log('Installed python-env.md to: ' + NoteDst);
+  end else begin
+    Log('WARNING: python-env.md not found at: ' + NoteSrc);
+    Exit;
+  end;
+
+  if FileExists(ClaudeFile) then begin
+    LoadStringFromFile(ClaudeFile, Content);
+  end else begin
+    Content := '';
+  end;
+
+  // Drop the legacy inline note text (pre-@ref installs wrote it directly into
+  // CLAUDE.md) so an upgrade doesn't end up with both the old inline text and
+  // the new @python-env.md reference.
+  OldNote := '## Python Environment' + #13#10 +
+             '' + #13#10 +
+             'Prefer the user''s existing Python environment (python / python3 on PATH).' + #13#10 +
+             'Only fall back to the bundled Python when no system Python is found:' + #13#10 +
+             '  ' + PythonExe + #13#10 +
+             '' + #13#10 +
+             'To install packages with the bundled Python:' + #13#10 +
+             '  ' + PythonExe + ' -m pip install <package>' + #13#10;
+  OldNotePos := Pos(OldNote, Content);
+  if OldNotePos > 0 then begin
+    Delete(Content, OldNotePos, Length(OldNote));
+    Log('Removed legacy inline Python note from CLAUDE.md');
+  end;
+
+  // Inject @python-env.md into CLAUDE.md
+  InjectLine := '@python-env.md';
+
+  if Pos(InjectLine, Content) > 0 then begin
+    Log('@python-env.md already in CLAUDE.md');
+    Exit;
+  end;
+
+  if Content <> '' then
+    Content := Content + #13#10 + InjectLine + #13#10
+  else
+    Content := '# Claude Code Global Instructions' + #13#10#13#10 + InjectLine + #13#10;
+
+  SaveStringToFile(ClaudeFile, Content, False);
+  Log('Injected @python-env.md into: ' + ClaudeFile);
+end;
+
+// ── Install / Uninstall hooks ─────────────────────────────────────────
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  HomePath, HomeVar: string;
+  EnvRoot: Integer;
+  EnvSub: string;
+begin
+  if CurStep = ssPostInstall then begin
+    Log('ssPostInstall: starting');
+
+    // All-users install runs elevated → system env (HKLM). Current-user install
+    // runs unprivileged → user env (HKCU). The mode comes from the privilege
+    // override dialog shown at startup.
+    if IsAdminInstallMode then begin
+      EnvRoot := HKEY_LOCAL_MACHINE;
+      EnvSub := SystemEnvKey;
+    end else begin
+      EnvRoot := HKEY_CURRENT_USER;
+      EnvSub := 'Environment';
+    end;
+
+    // ── Set CLAUDE_CODE_HAHA_HOME env var ──
+    HomePath := ExpandConstant('{app}');
+    HomeVar := '%' + HomeVarName + '%';
+    Log('set: ' + HomeVarName + ' = ' + HomePath + ' (' + EnvSub + ')');
+    // Path is absolute (no %VAR% inside), but REG_EXPAND_SZ is safer if the
+    // install dir is later referenced from another variable.
+    RegWriteExpandStringValue(EnvRoot, EnvSub, HomeVarName, HomePath);
+
+    // Admin install → system (HKLM) is the single authority (matches the
+    // diagnostics tool's fix_environment_vars). Clear any HKCU leftover so the
+    // user-level value doesn't shadow the correct system value — otherwise the
+    // diagnostics tool flags "用户级残留旧值覆盖系统级正确值" right after install.
+    if IsAdminInstallMode then begin
+      Log('clean: HKCU leftover ' + HomeVarName);
+      RegDeleteValue(HKEY_CURRENT_USER, 'Environment', HomeVarName);
+    end;
+
+    // Point Claude at the bundled git-bash regardless of PATH choice,
+    // so it can find bash.exe even when "add to PATH" is unchecked.
+    if WizardIsComponentSelected('gitbash') then begin
+      Log('set: CLAUDE_CODE_GIT_BASH_PATH (' + EnvSub + ')');
+      // Contains %CLAUDE_CODE_HAHA_HOME% — must be REG_EXPAND_SZ or the
+      // consumer (src/utils/windowsPaths.ts) gets a literal %VAR% path.
+      RegWriteExpandStringValue(EnvRoot, EnvSub,
+        'CLAUDE_CODE_GIT_BASH_PATH',
+        HomeVar + '\git\usr\bin\bash.exe');
+    end else begin
+      // gitbash not installed → GIT_BASH_PATH is obsolete (bash.exe absent);
+      // remove from both scopes, matching the diagnostics' Remove plan.
+      Log('clean: stale GIT_BASH_PATH (gitbash not selected)');
+      RegDeleteValue(HKEY_LOCAL_MACHINE, SystemEnvKey, 'CLAUDE_CODE_GIT_BASH_PATH');
+      RegDeleteValue(HKEY_CURRENT_USER, 'Environment', 'CLAUDE_CODE_GIT_BASH_PATH');
+    end;
+    if IsAdminInstallMode then begin
+      Log('clean: HKCU leftover CLAUDE_CODE_GIT_BASH_PATH');
+      RegDeleteValue(HKEY_CURRENT_USER, 'Environment', 'CLAUDE_CODE_GIT_BASH_PATH');
+    end;
+
+    // Scrub previous install PATH entries from BOTH scopes (expanded path OR
+    // %VAR% token) so reinstall/upgrade never accumulates duplicates and no
+    // user-level leftover survives to be flagged by the diagnostics tool.
+    EnvRemovePathFrom(HKEY_LOCAL_MACHINE, SystemEnvKey, HomeVar, HomePath);
+    EnvRemovePathFrom(HKEY_CURRENT_USER, 'Environment', HomeVar, HomePath);
+
+    if WizardIsTaskSelected('addpath') then begin
+      // Root — claude.exe, claude-code-gui.exe, bun.exe, *.cmd
+      Log('addpath: root');
+      EnvAddPathTo(EnvRoot, EnvSub, HomeVar, HomePath);
+
+      // bin — CLI tools (rg, fd, jq, yq, shellcheck)
+      Log('addpath: bin');
+      EnvAddPathTo(EnvRoot, EnvSub, HomeVar + '\bin', HomePath + '\bin');
+
+      if WizardIsComponentSelected('gitbash') then begin
+        Log('addpath: git\bin');
+        EnvAddPathTo(EnvRoot, EnvSub, HomeVar + '\git\bin', HomePath + '\git\bin');
+      end;
+      if WizardIsComponentSelected('git') then begin
+        Log('addpath: git\mingw64\bin');
+        EnvAddPathTo(EnvRoot, EnvSub, HomeVar + '\git\mingw64\bin', HomePath + '\git\mingw64\bin');
+      end;
+      if WizardIsComponentSelected('python') then begin
+        Log('addpath: python');
+        EnvAddPathTo(EnvRoot, EnvSub, HomeVar + '\python', HomePath + '\python');
+        Log('addpath: python\Scripts');
+        EnvAddPathTo(EnvRoot, EnvSub, HomeVar + '\python\Scripts', HomePath + '\python\Scripts');
+        Log('addpath: python note');
+        InjectPythonNote(ExpandConstant('{app}'));
+      end;
+
+      // Prepending LAST puts git\usr\bin at the very front of PATH, so a bare
+      // `bash` resolves to git-bash, not WSL/System32 (matches the diagnostics
+      // tool's arrange_install_path which prepends git\usr\bin).
+      if WizardIsComponentSelected('gitbash') then begin
+        Log('addpath: git\usr\bin (prepend)');
+        EnvPrependPathTo(EnvRoot, EnvSub, HomeVar + '\git\usr\bin', HomePath + '\git\usr\bin');
+      end;
+      Log('addpath: done');
+    end;
+
+    // Tell the shell / running apps to pick up the new env vars now, so a
+    // reinstall doesn't force a logout/reboot before they take effect.
+    BroadcastEnvironmentChange;
+    Log('ssPostInstall: done');
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  HomePath, HomeVar: string;
+begin
+  if CurUninstallStep = usPostUninstall then begin
+    HomeVar := '%' + HomeVarName + '%';
+    // {app} in the uninstaller resolves to the install dir, so both the %VAR%
+    // token and its expanded form are cleaned from system + user PATH.
+    HomePath := ExpandConstant('{app}');
+
+    EnvRemovePath(HomeVar, HomePath);
+    EnvRemovePath(HomeVar + '\bin', HomePath + '\bin');
+    EnvRemovePath(HomeVar + '\git\usr\bin', HomePath + '\git\usr\bin');
+    EnvRemovePath(HomeVar + '\git\bin', HomePath + '\git\bin');
+    EnvRemovePath(HomeVar + '\git\mingw64\bin', HomePath + '\git\mingw64\bin');
+    EnvRemovePath(HomeVar + '\python', HomePath + '\python');
+
+    // Clean env vars from both scopes — the install wrote to whichever one
+    // matched its mode (system for all-users, user for current-user). Deletes
+    // from the other scope fail harmlessly for a non-admin uninstaller.
+    RegDeleteValue(HKEY_LOCAL_MACHINE, SystemEnvKey, 'CLAUDE_CODE_GIT_BASH_PATH');
+    RegDeleteValue(HKEY_LOCAL_MACHINE, SystemEnvKey, HomeVarName);
+    RegDeleteValue(HKEY_CURRENT_USER, 'Environment', 'CLAUDE_CODE_GIT_BASH_PATH');
+    RegDeleteValue(HKEY_CURRENT_USER, 'Environment', HomeVarName);
+
+    BroadcastEnvironmentChange;
+  end;
+end;
