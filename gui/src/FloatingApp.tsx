@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react";
 declare global { interface Window { __TAURI_INTERNALS__?: { webview?: { label?: string } } } }
 import LayoutRenderer from "./components/LayoutRenderer";
 import { registerPanel, getPanel } from "./stores/panelRegistry";
+import { scanPlugins } from "./services/pluginRegistry";
+import { registerPluginPanels } from "./services/pluginPanelBridge";
 import { getTree, setTree } from "./stores/layoutStore";
 import type { TabGroup } from "./types/layout";
 import { t } from "./i18n";
@@ -47,6 +49,16 @@ export default function FloatingApp() {
   useEffect(() => {
     // ── Register ALL panels (shared definitions, each window registers independently) ──
     ALL_PANEL_DEFS.forEach(registerPanel);
+    // 插件面板注册（浮窗窗口独立 render, 需自注册; registerPanel 有 dup 保护）
+    void (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const entries = (await invoke<{ name: string; manifestJson?: string }[]>("list_plugin_manifests")) ?? [];
+        registerPluginPanels(scanPlugins(entries));
+      } catch (e) {
+        console.warn("[FloatingApp] 插件面板注册失败:", e);
+      }
+    })();
 
     // Set desktop item viewer id from parsed title (format: "Label [item:uuid]")
     if (panelId === "desktop-item-view" && parsedItemId) {
@@ -73,7 +85,8 @@ export default function FloatingApp() {
     // ── Start Bridge + DataBus Leaf ──
     (async () => {
       // "settings.*" 覆盖精确 "settings"（数据同步）+ "settings.navigate"（命令面板分类导航）
-      const subs = ["chat.*", "plan.*", "subagents.*", "terminal.*", "editor.*", "settings.*", "workers.*", "files.*", "desktop.*", "layout.*"];
+      // "plugin.*" 让浮窗/Leaf 能收插件的 crossWindowBus topic（插件浮窗用 plugin.<name>.* 命名空间，bridge 通配已支持）
+      const subs = ["chat.*", "plan.*", "subagents.*", "terminal.*", "editor.*", "settings.*", "workers.*", "files.*", "desktop.*", "layout.*", "plugin.*"];
       await bridge.startLeaf(subs);
       if (cancelled) return;
       startCrossWindowBusLeaf(subs);

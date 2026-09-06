@@ -66,7 +66,6 @@ export const Events = {
 
   // Desktop
   DESKTOP_CHANGED: "desktop.changed",
-  DESKTOP_ITEM_MOVED: "desktop.itemMoved",
   DESKTOP_ITEM_SELECTED: "desktop.itemSelected",
   // Notes
   NOTES_CHANGED: "notes.changed",
@@ -176,12 +175,6 @@ export interface ChatAddReferencePayload {
 export interface DesktopChangedPayload {
   desktops: import("../types/desktop").Desktop[];
   activeDesktopId: string | null;
-}
-
-export interface DesktopItemMovedPayload {
-  itemId: string;
-  x: number;
-  y: number;
 }
 
 export interface DesktopItemSelectedPayload {

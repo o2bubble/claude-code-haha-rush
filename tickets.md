@@ -1718,3 +1718,97 @@ Spec: `.scratch/desktop-table-upgrade/PRD.md` — Status: ready-for-agent
 - [ ] 硬线：AI 一步生成（两级表头+标红加粗+千分位+冻结）一次正确 / 画布交互不打架 / 旧数据兼容 / 编辑回写
 - [ ] 软线：主题协调 / 3-4 张 50 行表格性能
 - [ ] `bunx tsc --noEmit` + vitest 全绿 + `cargo tauri build` 通过
+
+---
+
+# Tickets: GUI 插件系统（安全贡献层 + 后台进程）
+
+Spec: `.scratch/gui-plugin-system/PRD.md` · 第一版只做安全贡献层 + 后台进程；深度拦截层推迟但架构预留。9 项决策已对齐。
+注: 通信命名已重构（eventBus→windowBus、dataBus→crossWindowBus、commands→commandRegistry），下述 ticket 用新名。
+
+## T0 — 通信机制前置准备（三处小改动，插件接入的地基）
+
+**What to build:** 不做整体重构（审计判定现有通信机制活且分层合理）。只做三处插件会直接撞上的小准备——来源标记、事件名类型化、命名空间订阅可扩展。命名重构（eventBus→windowBus 等）**已单独完成**，此处做剩余的。
+注: `windowBus.on/emit` 签名收窄 & FloatingApp 订阅列表，用已重构的新名。
+
+**Blocked by:** 无 — 第一件事（前置，先于 T1）
+
+- [ ] **来源/权限标记**：`windowBus.emit` 和 `crossWindowBus.publish` 加可选 `source/origin` 元数据（`PublishMeta` crossWindowBus 现无 origin），区分内置事件 vs 插件事件
+- [ ] **事件名类型化**：`windowBus.on/emit` 签名从裸 `string` 收窄为 `keyof typeof Events`（想用错事件名编译器报错）
+- [ ] **收敛裸字符串事件名**：`Editor.tsx` `chat.addReference` → `Events.CHAT_ADD_REFERENCE`；`App.tsx` 去掉 `as any`
+- [ ] **铲僵尸事件**：删 `DESKTOP_ITEM_MOVED`（events.ts + desktopStore.ts，只有 emit 无任何订阅者）
+- [ ] **命名空间订阅可扩展**：`FloatingApp.tsx` 硬编码订阅列表改为支持插件命名空间前缀（`plugin.<name>.*`）
+- [ ] **删 desktop 双路径直发**：desktopStore 同一次变更发 windowBus + crossWindowBus 两条路（冗余），统一走 crossWindowBusHub 与 chat 一致
+- [ ] 验收：`tsc --noEmit` 干净 + vitest 全绿；裸字符串全收敛；无 DESKTOP_ITEM_MOVED 残留
+
+## T1 — 插件骨架：manifest 解析 + 目录扫描 + GUI 注册表
+
+**What to build:** 建立 GUI 侧插件基础设施——扫 `%APPDATA%/claude-code-gui/plugins/`，解析各 `plugin.json`，产出可注册的"插件贡献集"（panels/commands/events/processes）。GUI 进程自己发现插件（不依赖 claude.exe 引擎）。
+
+**Blocked by:** T0
+
+- [ ] `gui/src/services/pluginRegistry.ts`：`scanPlugins(dir)` 读目录 → 解析 `plugin.json`（schema 按 PRD §5）→ 返回 `PluginManifest[]`
+- [ ] manifest schema 纯函数 + 类型断言（`parsePluginManifest`），错 manifest 容错跳过 + 日志，不拖垮 GUI 启动
+- [ ] 插件目录解析：`plugin.json` + 可选 `assets/` + `runtime.js` + `process/`，不存在的资源容错
+- [ ] 单元测试：合法/缺失字段/坏 JSON/带 apiVersion 的 manifest 解析
+- [ ] `tsc --noEmit` 干净
+
+## T2 — 贡献面板：运行时 registerPanel + 双形态渲染(in-main/floating) + 布局清理
+
+**What to build:** 让插件贡献的面板真正进现有布局系统——运行时调用 `panelRegistry.registerPanel`。`panelKind=in-main` 走主窗布局(同进程/windowBus)，`panelKind=floating` 走独立浮窗(跨窗/crossWindowBus)。插件停用/卸载时从布局彻底移除（决策#5）。
+
+**Blocked by:** T1
+
+- [ ] 在 `App.tsx` / `FloatingApp.tsx` 的 `ALL_PANEL_DEFS.forEach(registerPanel)` **之后**补 `registerPluginPanels()`（异步，等插件目录扫完）
+- [ ] `in-main`：主窗布局内渲染 `entry`（同进程），与 GUI 经 **windowBus** 通信
+- [ ] `floating`：复用 `create_floating_window` 建 `float-*` 窗口 + `bridge.startLeaf(...)`（跨窗），与 GUI 经 **crossWindowBus** 通信
+- [ ] 面板渲染容器实现：优先支持同进程 React/声明式组件；`sandbox: true` 时再走隔离渲染
+- [ ] 插件面板 id 前缀区分（如 `plugin:<name>:<panelId>`），避免与内置面板 id 撞
+- [ ] 布局清理：插件停用/卸载 → 走 `layoutStore` 移除含该 panelId 的 tabs（参照 `serializeLayout` isEphemeral 过滤，但需**显式删除**）
+- [ ] 手动验证：`%APPDATA%/claude-code-gui/plugins/demo/` 放一个声明面板(可为 in-main 或 floating)的 manifest → 面板出现、可拖可浮窗可关、与 GUI windowBus/crossWindowBus 互通
+
+## T3 — 后台进程：spawn + stdout 端口发现 + 生命周期 + 注册进 Worker 面板
+
+**What to build:** 插件声明后台进程——绑定工作区后 spawn（决策#6），读 `PLUGIN_PORT=` 发现端口（决策#7），面板拿端口订阅；GUI 退出时 kill 防孤儿。**进程同时注册进 Worker 面板**（状态点/端口/kill 可查看管理，用户能感知哪些插件进程在跑）。
+
+**Blocked by:** T1
+
+- [ ] `gui/src-tauri/src/plugin_process.rs`：复用 `backend.rs` 的 spawn→读 stdout→kill 模式，监听 `PLUGIN_PORT=` 行
+- [ ] 生命周期：`WORKSPACE_BOUND` 事件触发按 `startOn=workspace_bound` 的进程启动；GUI 退出/session-end 纳入 `prockill` 清理
+- [ ] 端口发现后 `invoke` 通知 GUI 前端，面板拿地址订阅
+- [ ] **Worker 面板注册**：新建 `gui/src/services/pluginProcessBridge.ts`（仿 mcpBridge `getPluginProcesses()/usePluginProcesses()`）+ Rust 命令 `list_plugin_processes`/`kill_plugin_process`；`WorkerPanel.tsx` 加一段 `pluginProcesses` section（状态点+名字+端口+kill 按钮）
+- [ ] **状态模型**：插件进程状态机 `stopped|starting|running|error|killed`，经 Tauri event（`plugin-process-status`）从 Rust 上报 → `usePluginProcesses` 更新 → **WorkerPanel 与插件面板订阅同一状态源**（单一真相）
+- [ ] **kill 后面板反应**：面板绑定 process 的 WS 连接 `onclose` → 面板按状态切换显示（running 正常订阅数据；stopped/killed/error 显示"进程已停止"占位 + 重启按钮）；**面板本身不随进程死消失**（in-main 面板还在布局里）
+- [ ] **重挂/重启**：WorkerPanel kill 后该行变"重启"按钮 → Rust `restart_plugin_process`（kill 旧 PID → 重新 spawn → 重读 `PLUGIN_PORT=` → 回 running）；插件面板内重启按钮调同一命令
+- [ ] **崩溃监控**：Rust `wait()`/exit handler 监控子进程 exit → 上报 `error` 到前端（面板/WorkerPanel 显示 error，不 silent 死）；**第一版不自动重启**（可手动）
+- [ ] 多插件端口各自上报（天然规避冲突）；进程退出状态回传前端
+- [ ] 手动验证：插件声明抓数据进程 → 工作区绑定后启动 → **Worker 面板看到该进程（状态/端口/kill）** → 面板订阅到实时数据 → kill 后面板显示"已停止"+重启按钮 → 重启回 running → GUI 关闭进程被杀
+
+## T4 — 贡献命令 + 事件订阅（增量行为层）
+
+**What to build:** 插件的命令进命令调色板/工具栏，点按触发面板/后台进程事件；插件订阅 GUI 生命周期事件做被动响应。（纯增量，不做宿主内拦截。）
+
+**Blocked by:** T1
+
+- [ ] `contributes.commands[]` → GUI 命令调色板（`useCommandPalette`）注册，点按 → 经事件桥发给对应面板/进程
+- [ ] `contributes.events[]` → GUI 生命周期事件（`Events` 枚举）广播到插件
+- [ ] 命令/事件的插件 id 前缀同 T2，避免命名冲突
+
+## T5 — 平台化发布：插件包 + 市场集成（复用技能市场）
+
+**What to build:** 插件能打包、发布、搜索、安装——复用 `claude-code-gui-release-platform` 的 `POST /packages`（`require_auth`）+ `GET /packages` 列表，GUI 侧参考 `SkillsPanel`。
+
+**Blocked by:** T2, T3
+
+- [ ] 定义插件包格式（zip：`plugin.json` + 资源），打包/校验
+- [ ] 发布 API 接入（`POST /packages`），插件包 vs 技能包的类型区分
+- [ ] GUI 市场 UI：列表/搜索/安装（参考 `SkillsPanel` 现有逻辑，适配插件面板）
+- [ ] 安装 → 落到 `%APPDATA%/claude-code-gui/plugins/` → 触发 T1 重扫 → 面板活
+
+## T6 — 验收（人工清单，PRD §9）
+
+- [ ] 手动在 `%APPDATA%/claude-code-gui/plugins/demo/` 放插件（面板 in-main/floating + 命令 + 后台进程）→ 面板自动出现、可拖可浮窗可关
+- [ ] 命令进调色板，点按 → 面板收到事件
+- [ ] 后台进程绑定工作区后启动 → 面板订阅到数据 → GUI 退出进程被杀（无孤儿）
+- [ ] 停用/卸载 → 面板从布局移除
+- [ ] `tsc --noEmit` + vitest 全绿 + `cargo tauri build` 通过

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useBackend, BackendService } from "../../services/backendService";
 import { useMcpStatus } from "../../services/mcpBridge";
+import { usePluginProcesses, processStatusMeta, isProcessActive } from "../../services/pluginProcessBridge";
 import { useEventHandler, useEvent } from "../../services/useService";
 import { Events, type ChatStateChangedPayload } from "../../services/events";
 import type { BackgroundTask } from "../../stores/chatStore";
@@ -59,6 +60,7 @@ export function WorkerPanel() {
   const backend = useBackend();
   const mcp = useMcpStatus();
   const guiServer = useGuiServerStatus();
+  const pluginProcesses = usePluginProcesses();
 
   const runningTasks = tasks.filter((t) => t.status === "running");
   const doneTasks = tasks.filter((t) => t.status !== "running");
@@ -179,6 +181,55 @@ export function WorkerPanel() {
           ↻
         </button>
       </div>
+
+      {/* Plugin processes (T3) — 状态点+id+端口+kill/重启 */}
+      {pluginProcesses.length > 0 && (
+        <>
+          <div style={sectionLabel}>{t("worker.pluginProcesses", { count: pluginProcesses.length })}</div>
+          {pluginProcesses.map((p) => {
+            const meta = processStatusMeta(p.status);
+            return (
+              <div key={p.processId} style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "4px 10px",
+                borderBottom: "1px solid var(--border-light)",
+              }}>
+                <span title={t("worker.pluginProcessTitle", { name: p.processId })}
+                  style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: statusColor[meta.color === "success" ? "running" : meta.color === "accent" ? "starting" : meta.color === "error" ? "error" : "stopped"], flexShrink: 0 }} />
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--fg-primary)", fontWeight: 500 }}>
+                  {p.processId}
+                </span>
+                <span style={{ color: "var(--fg-muted)", fontSize: 10, whiteSpace: "nowrap" }}>{t(`worker.pluginStatus${meta.label[0].toUpperCase()}${meta.label.slice(1)}`)}</span>
+                {p.port ? (
+                  <span style={{ color: "var(--fg-muted)", fontSize: 10 }}>{t("worker.port")} {p.port}</span>
+                ) : null}
+                {isProcessActive(p) ? (
+                  <button
+                    onClick={() => { void (async () => {
+                      const { invoke } = await import("@tauri-apps/api/core");
+                      await invoke("kill_plugin_process_cmd", { processId: p.processId });
+                    })(); }}
+                    title={t("worker.pluginKill")}
+                    style={{ border: "1px solid var(--border-medium)", borderRadius: 3, fontSize: 10, backgroundColor: "var(--bg-root)", cursor: "pointer", padding: "2px 6px", fontFamily: "inherit" }}
+                  >
+                    ✕
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => { void (async () => {
+                      const { invoke } = await import("@tauri-apps/api/core");
+                      await invoke("restart_plugin_process_cmd", { processId: p.processId, command: "", args: [], env: {} });
+                    })(); }}
+                    title={t("worker.pluginRestart")}
+                    style={{ border: "1px solid var(--border-medium)", borderRadius: 3, fontSize: 10, backgroundColor: "var(--bg-root)", cursor: "pointer", padding: "2px 6px", fontFamily: "inherit" }}
+                  >
+                    ↻
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </>
+      )}
 
       {/* Active tasks */}
       {runningTasks.length > 0 && (

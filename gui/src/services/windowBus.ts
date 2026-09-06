@@ -1,5 +1,9 @@
 // ── EventBus — typed pub/sub ──
 
+import { Events } from "./events";
+
+/** 事件名的值类型（Events 枚举的值联合，如 "chat.stateChanged" | "settings.changed" ...） */
+type EventName = (typeof Events)[keyof typeof Events];
 type EventHandler = (data: any) => void;
 
 interface StickyEntry {
@@ -12,7 +16,7 @@ class EventBus {
   private sticky = new Map<string, StickyEntry>();
 
   /** Subscribe to an event. Returns unsubscribe function. */
-  on(event: string, handler: EventHandler): () => void {
+  on(event: EventName, handler: EventHandler): () => void {
     let set = this.handlers.get(event);
     if (!set) { set = new Set(); this.handlers.set(event, set); }
     set.add(handler);
@@ -29,8 +33,9 @@ class EventBus {
     };
   }
 
-  /** Emit an event. If opts.sticky, new subscribers will immediately receive the latest value. */
-  emit(event: string, data?: any, opts?: { sticky?: boolean }): void {
+  /** Emit an event. If opts.sticky, new subscribers will immediately receive the latest value.
+   *  opts.origin 标记来源（"app"=内置 / 插件名=插件）——为插件系统区分"谁发的"留位。 */
+  emit(event: EventName, data?: any, opts?: { sticky?: boolean; origin?: string }): void {
     if (opts?.sticky) {
       this.sticky.set(event, { data, sticky: true });
     }
@@ -42,7 +47,7 @@ class EventBus {
   }
 
   /** Remove sticky value (e.g. when backend goes down) */
-  clearSticky(event: string): void {
+  clearSticky(event: EventName): void {
     this.sticky.delete(event);
   }
 }

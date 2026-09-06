@@ -470,7 +470,6 @@ export function moveItem(itemId: string, x: number, y: number): void {
     ),
     updatedAt: Date.now(),
   }));
-  windowBus.emit(Events.DESKTOP_ITEM_MOVED, { itemId, x, y });
   notifyDesktopChanged(ownerDesktopIdOfItem(itemId));
 }
 
@@ -808,8 +807,15 @@ export async function forceSaveDesktop(): Promise<void> {
 
 function notifyDesktopChanged(dirtyDesktopId?: string): void {
   const payload = { desktops: [...desktops], activeDesktopId };
+  // 两条路各司其职，不能合并成一条：
+  // - windowBus(DESKTOP_CHANGED) → crossWindowBusHub 继电 publish —— Hub 自身/
+  //   单窗口的变更，把 desktop.list/items 推给 Leaf。
+  // - 直接 crossWindowBus.publish —— Leaf 窗（浮窗/desktop-item-view）里发生
+  //   moveItem/updateItem 时，这是 Leaf→Hub 的唯一通道（Leaf 无 Hub 继电）。
+  //   Hub 的 crossWindowBusHub 订阅 desktop.list 有 fromBridge 守卫，只消化
+  //   Bridge 来的（Leaf 经过 bridgeOut → Hub bridgeReceive → fromBridge=true）。
+  //   若删掉这行，Leaf 变更永不发往 Hub → 主窗画布分叉。
   windowBus.emit(Events.DESKTOP_CHANGED, payload, { sticky: true });
-  // Publish to DataBus for cross-window sync (Leaf → Hub and Hub → Leaf)
   crossWindowBus.publish("desktop.list", payload.desktops, { sticky: true });
   crossWindowBus.publish("desktop.items", payload.activeDesktopId, { sticky: true });
   if (!_refetching) scheduleSave(dirtyDesktopId);

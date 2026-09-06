@@ -28,6 +28,7 @@ mod db;
 mod diagnostics;
 mod guard;
 mod mcp;
+mod plugin_process;
 mod prockill;
 mod settings;
 
@@ -452,6 +453,10 @@ pub fn run() {
             read_dir,
             read_file,
             read_bytes,
+            list_plugin_manifests,
+            list_plugin_processes,
+            kill_plugin_process_cmd,
+            restart_plugin_process_cmd,
             save_file,
             save_bytes,
             create_path,
@@ -522,6 +527,8 @@ pub fn run() {
                     let mut guard = state.lock().unwrap();
                     backend::kill(&mut guard);
                 }
+                // T3: 插件后台进程随 GUI 退出 kill(防孤儿/占端口)。
+                crate::plugin_process::kill_all_plugin_processes();
                 log::info!("Cleanup complete");
             }
         });
@@ -581,6 +588,39 @@ fn read_bytes(path: String) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
 }
 
+/// 读取插件目录中各 plugin.json → 前端 scanPlugins(纯逻辑) 处理。
+/// 路径 = app_data_dir()/plugins/<name>/plugin.json。返回 `[{name, manifestJson}]`。
+/// webview 无 fs (capabilities 只放行 read/write text file, 无 readDir+scope),
+/// 目录枚举由 Rust 完成, 前端只管解析。
+#[tauri::command]
+fn list_plugin_manifests(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"));
+    let plugins_dir = base.join("plugins");
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let Ok(read_dir) = std::fs::read_dir(&plugins_dir) else {
+        return Ok(serde_json::json!(entries)); // 目录不存在 → 无插件
+    };
+    for entry in read_dir.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue; // 隐藏目录跳过
+        }
+        let manifest_path = dir.join("plugin.json");
+        let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
+            continue; // 缺 plugin.json → 跳过(前端容错同名逻辑)
+        };
+        entries.push(serde_json::json!({ "name": name, "manifestJson": contents }));
+    }
+    Ok(serde_json::to_value(entries).map_err(|e| e.to_string())?)
+}
+
 #[tauri::command]
 fn save_file(path: String, content: String) -> Result<(), String> {
     log::info!("save_file: {}", path);
@@ -599,6 +639,30 @@ fn save_bytes(path: String, base64_data: String) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create parent dir: {}", e))?;
     }
     std::fs::write(&path, &data).map_err(|e| format!("Cannot write file: {}", e))
+}
+
+/// 查询插件后台进程状态(WorkerPanel / 插件面板)。
+#[tauri::command]
+fn list_plugin_processes() -> Vec<crate::plugin_process::PluginProcessInfo> {
+    crate::plugin_process::list_all()
+}
+
+/// 杀插件后台进程(WorkerPanel kill 按钮)。
+#[tauri::command]
+fn kill_plugin_process_cmd(app: tauri::AppHandle, process_id: String) -> bool {
+    crate::plugin_process::kill_plugin_process(&app, &process_id)
+}
+
+/// 重启插件后台进程(kill 旧 → spawn 新; 面板/WorkerPanel 重启按钮)。
+#[tauri::command]
+fn restart_plugin_process_cmd(
+    app: tauri::AppHandle,
+    process_id: String,
+    command: String,
+    args: Vec<String>,
+    env: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    crate::plugin_process::restart_plugin_process(&app, &process_id, &command, args, env)
 }
 
 #[tauri::command]

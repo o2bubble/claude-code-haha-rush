@@ -37,6 +37,8 @@ export interface PublishMeta {
   fromBridge?: boolean;
   /** The topic being published. */
   topic?: string;
+  /** 来源标识——区分内置("app") vs 插件贡献的发布。插件系统用它区分"谁发的"。 */
+  origin?: string;
 }
 
 export type DataHandler = (payload: unknown, meta: PublishMeta) => void;
@@ -225,10 +227,10 @@ export const crossWindowBus = {
    * are merged before delivery. State topics skip re-delivery if the value
    * hasn't changed. Command topics are forwarded to the Bridge.
    */
-  publish(topic: string, payload: unknown, opts?: { sticky?: boolean }): void {
+  publish(topic: string, payload: unknown, opts?: { sticky?: boolean; origin?: string }): void {
     const route = resolveChannel(topic);
     const sticky = opts?.sticky ?? route.sticky;
-    const meta: PublishMeta = { mergeId: ++_mergeIdCounter, topic };
+    const meta: PublishMeta = { mergeId: ++_mergeIdCounter, topic, ...(opts?.origin ? { origin: opts.origin } : {}) };
 
     switch (route.channel) {
       case "stream":

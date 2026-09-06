@@ -162,7 +162,7 @@ export default memo(function MonacoEditor({ path, name, content, onChange, readO
         const sel = editor.getSelection();
         const start = sel?.startLineNumber || editor.getPosition()?.lineNumber || 1;
         const end = sel && !sel.isEmpty() && sel.endLineNumber !== start ? sel.endLineNumber : undefined;
-        windowBus.emit("chat.addReference", {
+        windowBus.emit(Events.CHAT_ADD_REFERENCE, {
           reference: { type: "file", path: pathRef.current, startLine: start, endLine: end },
         });
       },

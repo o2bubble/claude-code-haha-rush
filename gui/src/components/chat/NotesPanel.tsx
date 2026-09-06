@@ -346,7 +346,7 @@ export default function NotesPanel() {
   }, [scopeFilter, tagFilter, searchQuery, sort, loadList]);
 
   // ── MCP / AI 联动（保留） ──
-  useEventHandler<{ noteId?: string }>(Events.NOTE_SELECTED as any, (payload) => {
+  useEventHandler<{ noteId?: string }>(Events.NOTE_SELECTED, (payload) => {
     if (!payload?.noteId) return;
     if (selectedId === payload.noteId) return;
     invoke<NoteData>("note_get", { id: payload.noteId }).then((n) => {
@@ -490,7 +490,7 @@ export default function NotesPanel() {
   const onRowContext = (e: ReactMouseEvent, n: NoteSummary) => {
     e.preventDefault();
     const items: ContextMenuItem[] = [
-      { label: t("notes.sendToChat"), action: () => windowBus.emit("chat.addReference", { reference: { type: "note", path: n.id, label: n.title || t("notes.untitled") } }) },
+      { label: t("notes.sendToChat"), action: () => windowBus.emit(Events.CHAT_ADD_REFERENCE, { reference: { type: "note", path: n.id, label: n.title || t("notes.untitled") } }) },
       { label: t("notes.sendToDesktopMenu"), action: () => sendToDesktop(n.id) },
       { separator: true },
     ];
