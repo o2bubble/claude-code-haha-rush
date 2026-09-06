@@ -1800,10 +1800,10 @@ Spec: `.scratch/gui-plugin-system/PRD.md` · 第一版只做安全贡献层 + �
 
 **Blocked by:** T2, T3
 
-- [ ] 定义插件包格式（zip：`plugin.json` + 资源），打包/校验
-- [ ] 发布 API 接入（`POST /packages`），插件包 vs 技能包的类型区分
-- [ ] GUI 市场 UI：列表/搜索/安装（参考 `SkillsPanel` 现有逻辑，适配插件面板）
-- [ ] 安装 → 落到 `%APPDATA%/claude-code-gui/plugins/` → 触发 T1 重扫 → 面板活
+- [x] 定义插件包格式（zip：`plugin.json` + 资源），打包/校验（见 `.scratch/gui-plugin-system/T5-plugin-packages.md`，上传脚本 `scripts/publish-plugin.py`）
+- [x] 发布 API 接入（`POST /packages`），插件包 vs 技能包的类型区分（server `type=plugin` 分叉校验：plugin → 根 plugin.json + pluginName；skill → SKILL.md。DB 加 `type` 列 `ALTER TABLE` 迁移）
+- [x] GUI 市场 UI：列表/搜索/安装（新面板 `PluginMarketPanel`，复用 skillMarketplace 过滤 `type==="plugin"`）
+- [x] 安装 → 落到 `%APPDATA%/claude-code-gui/plugins/`（Rust `install_plugin_package`：下载→解压→找 plugin.json 根→校验→复制到 `plugins/<pluginName>/`）→ 触发重扫（`refreshPluginRegistry`：scanPlugins/setActiveManifests/registerPluginPanels/事件转发重启/refreshPluginProcesses）→ 面板活
 
 ## T6 — 验收（人工清单，PRD §9）
 

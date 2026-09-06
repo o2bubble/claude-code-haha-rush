@@ -848,6 +848,7 @@ const en: Locale = {
     feedback: "Feedback",
     update: "Updates",
     diagnostics: "Diagnostics",
+    pluginMarket: "Plugin Market",
   },
   diagnostics: {
     backendService: "Backend Service",

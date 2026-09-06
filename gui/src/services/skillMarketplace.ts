@@ -11,6 +11,8 @@ export interface PackageSummary {
   tags: string[];
   download_count: number;
   skill_count: number;
+  /** 包类型: "skill"(技能市场) | "plugin"(插件市场)。server 无该字段时默认 "skill" */
+  type?: string;
 }
 
 export interface SkillInPackage {

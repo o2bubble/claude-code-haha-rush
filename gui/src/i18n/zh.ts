@@ -846,6 +846,7 @@ const zh = {
     feedback: "反馈",
     update: "更新",
     diagnostics: "运行环境诊断",
+    pluginMarket: "插件市场",
   },
   diagnostics: {
     backendService: "后端服务",

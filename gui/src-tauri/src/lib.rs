@@ -497,6 +497,7 @@ pub fn run() {
             get_skills_dir,
             install_skill,
             install_package,
+            install_plugin_package,
             delete_skill,
             // Notes
             note_create,
@@ -3045,6 +3046,63 @@ async fn install_package(zip_url: String, package_name: String) -> Result<(), St
     rx.recv().map_err(|e| format!("Install panicked: {}", e))?
 }
 
+/// 安装插件包(T5): 下载 zip → 解压 temp → 找 plugin.json 根 → 校验 → 落到
+/// app_data_dir()/plugins/<pluginName>/（旧同名先删）。返回 pluginName 供前端重扫。
+/// 插件包顶层结构: 根含 plugin.json(或单一子目录含 plugin.json)。
+#[tauri::command]
+async fn install_plugin_package(
+    app: tauri::AppHandle,
+    zip_url: String,
+    package_name: String,
+) -> Result<String, String> {
+    // package_name 仅日志/校验用; 落盘目录以 plugin.json 的 pluginName 为准
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<String, String> {
+            let base = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"));
+            let plugins_dir = base.join("plugins");
+            std::fs::create_dir_all(&plugins_dir)
+                .map_err(|e| format!("Cannot create plugins dir: {}", e))?;
+
+            let temp_dir = plugins_dir.join(format!(".tmp_plugin_{}", package_name));
+            download_and_extract(&zip_url, &temp_dir, None)?;
+
+            // 找 plugin.json 根: temp 自身(无插件包根目录)或唯一含 plugin.json 的子目录
+            let plugin_root = find_plugin_root(&temp_dir)?;
+
+            // 校验 plugin.json 可解析且含 pluginName
+            let manifest_str = std::fs::read_to_string(plugin_root.join("plugin.json"))
+                .map_err(|e| format!("Cannot read plugin.json: {}", e))?;
+            let parsed: serde_json::Value = serde_json::from_str(&manifest_str)
+                .map_err(|e| format!("plugin.json not valid JSON: {}", e))?;
+            let plugin_name = parsed.get("pluginName")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "plugin.json missing pluginName".to_string())?
+                .to_string();
+            if plugin_name.trim().is_empty() {
+                return Err("plugin.json pluginName is empty".to_string());
+            }
+
+            // 落到 plugins/<pluginName>/
+            let target_dir = plugins_dir.join(&plugin_name);
+            if target_dir.exists() {
+                std::fs::remove_dir_all(&target_dir).ok();
+            }
+            copy_dir_recursive(&plugin_root, &target_dir)
+                .map_err(|e| format!("Cannot install plugin: {}", e))?;
+
+            std::fs::remove_dir_all(&temp_dir).ok();
+            log::info!("Plugin installed: {} (from {})", plugin_name, package_name);
+            Ok(plugin_name)
+        })();
+        let _ = tx.send(result);
+    });
+    rx.recv().map_err(|e| format!("Install panicked: {}", e))?
+}
+
 // ── Helpers ──
 
 /// 下载 zip 字节，传输中断（decode/超时/连接）时自动重试一次。
@@ -3229,6 +3287,26 @@ fn has_skill_dirs(dir: &std::path::Path) -> bool {
     } else {
         false
     }
+}
+
+/// 找插件包根目录: temp 自身含 plugin.json → 直接返回; 否则在子目录中找唯一含 plugin.json 的目录。
+fn find_plugin_root(temp_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    if temp_dir.join("plugin.json").exists() {
+        return Ok(temp_dir.to_path_buf());
+    }
+    let entries = std::fs::read_dir(temp_dir)
+        .map_err(|e| format!("Cannot read temp dir: {}", e))?;
+    let mut found: Option<std::path::PathBuf> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.join("plugin.json").exists() {
+            if found.is_some() {
+                return Err("Multiple plugin roots found in zip".to_string());
+            }
+            found = Some(path);
+        }
+    }
+    found.ok_or_else(|| "No plugin.json found in extracted zip".to_string())
 }
 
 // ─── Notes commands (user-level; route through server when reachable) ───

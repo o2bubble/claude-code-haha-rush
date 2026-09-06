@@ -182,6 +182,7 @@ async def download_skill(slug: str, skill_name: str):
 async def upload_package(
     manifest: str = Form(...),
     skills: UploadFile = File(...),
+    type: str = Form("skill"),
     _auth=Depends(require_auth),
 ):
     # Parse manifest
@@ -195,6 +196,8 @@ async def upload_package(
     for field in required:
         if not meta.get(field):
             raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+    if type not in ("skill", "plugin"):
+        raise HTTPException(status_code=400, detail="type must be 'skill' or 'plugin'")
 
     slug = _slugify(meta["name"])
     if not slug:
@@ -217,16 +220,32 @@ async def upload_package(
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="Invalid zip file")
 
-    # Count skills (subdirectories with SKILL.md)
-    skill_count = 0
-    if pkg_dir.exists():
-        for entry in pkg_dir.iterdir():
-            if entry.is_dir() and (entry / "SKILL.md").exists():
-                skill_count += 1
-
-    if skill_count == 0:
-        shutil.rmtree(pkg_dir)
-        raise HTTPException(status_code=400, detail="No skills found in zip (need SKILL.md in each skill dir)")
+    # 按 type 分叉校验:
+    if type == "plugin":
+        # 插件包: 根必须含 plugin.json, 且 pluginName 声明在 manifest.name 对应(可选校验)
+        if not (pkg_dir / "plugin.json").exists():
+            shutil.rmtree(pkg_dir)
+            raise HTTPException(status_code=400, detail="Plugin zip missing plugin.json at root")
+        try:
+            import json as _json
+            pm = _json.loads((pkg_dir / "plugin.json").read_text(encoding="utf-8"))
+        except Exception:
+            shutil.rmtree(pkg_dir)
+            raise HTTPException(status_code=400, detail="plugin.json is not valid JSON")
+        if not pm.get("pluginName"):
+            shutil.rmtree(pkg_dir)
+            raise HTTPException(status_code=400, detail="plugin.json missing pluginName")
+        skill_count = 0  # 插件包无 skill 数
+    else:
+        # 技能包: 必须含 SKILL.md 子目录
+        skill_count = 0
+        if pkg_dir.exists():
+            for entry in pkg_dir.iterdir():
+                if entry.is_dir() and (entry / "SKILL.md").exists():
+                    skill_count += 1
+        if skill_count == 0:
+            shutil.rmtree(pkg_dir)
+            raise HTTPException(status_code=400, detail="No skills found in zip (need SKILL.md in each skill dir)")
 
     # Write manifest.yaml for later reference
     manifest_path = pkg_dir / "manifest.yaml"
@@ -241,6 +260,7 @@ async def upload_package(
         version=meta["version"],
         tags=meta.get("tags", []),
         skill_count=skill_count,
+        pkg_type=type,
     )
 
     return {"ok": True, "data": pkg}

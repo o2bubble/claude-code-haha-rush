@@ -29,10 +29,15 @@ def init_db() -> None:
             tags        TEXT DEFAULT '[]',
             download_count INTEGER DEFAULT 0,
             skill_count INTEGER DEFAULT 0,
+            type        TEXT DEFAULT 'skill',
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         )
     """)
+    # 迁移: 老库无 type 列 → ALTER 补齐(存量包默认 skill)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(packages)").fetchall()]
+    if "type" not in cols:
+        conn.execute("ALTER TABLE packages ADD COLUMN type TEXT DEFAULT 'skill'")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS api_keys (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,15 +80,16 @@ def get_package(slug: str) -> dict | None:
 
 
 def insert_package(slug: str, name: str, description: str, author: str,
-                   version: str, tags: list[str], skill_count: int) -> dict:
+                   version: str, tags: list[str], skill_count: int,
+                   pkg_type: str = "skill") -> dict:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn = get_conn()
     conn.execute(
         """INSERT INTO packages (slug, name, description, author, version, tags,
-           skill_count, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           skill_count, type, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (slug, name, description, author, version, json.dumps(tags),
-         skill_count, now, now),
+         skill_count, pkg_type, now, now),
     )
     conn.commit()
     conn.close()
@@ -213,6 +219,7 @@ def _row_to_pkg(row: sqlite3.Row) -> dict:
         "tags": json.loads(row["tags"]),
         "download_count": row["download_count"],
         "skill_count": row["skill_count"],
+        "type": row["type"] if "type" in row.keys() else "skill",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

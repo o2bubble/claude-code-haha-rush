@@ -25,6 +25,7 @@ import NotesPanel from "../components/chat/NotesPanel";
 import HelpPanel from "../components/chat/HelpPanel";
 import { UpdatePanel } from "../components/chat/UpdatePanel";
 import { DiagnosticPanel } from "../components/chat/DiagnosticPanel";
+import PluginMarketPanel from "../components/chat/PluginMarketPanel";
 
 /* ── Helper: wrap component in ErrorBoundary ── */
 function withError(name: string, el: JSX.Element) {
@@ -123,5 +124,10 @@ export const ALL_PANEL_DEFS: PanelDefinition[] = [
   {
     id: "diagnostics", title: t("panel.diagnostics"), icon: "diagnostics", userManaged: false, defaultView: "main",
     views: [{ id: "main", title: t("panel.diagnostics"), render: () => withError("Diagnostics", <DiagnosticPanel />) }],
+  },
+  {
+    // 插件市场(T5): 用户打开的市场面板, userManaged 默认 true(可在面板下拉开关)
+    id: "plugin-market", title: t("panel.pluginMarket"), icon: "package", defaultView: "main",
+    views: [{ id: "main", title: t("panel.pluginMarket"), render: () => withError("PluginMarket", <PluginMarketPanel />) }],
   },
 ];
