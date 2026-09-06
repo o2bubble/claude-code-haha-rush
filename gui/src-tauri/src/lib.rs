@@ -3236,10 +3236,15 @@ pub(crate) fn download_and_extract(url: &str, temp_dir: &std::path::Path, on_pro
     Ok(())
 }
 
-/// Find the directory containing SKILL.md within an extracted temp dir.
-/// Checks temp dir itself first, then immediate subdirectories.
-fn find_skill_root(temp_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    if temp_dir.join("SKILL.md").exists() {
+/// Find the directory containing a marker file (SKILL.md / plugin.json) within
+/// an extracted temp dir. Checks temp dir itself first, then immediate subdirs.
+/// 三个 find_*_root 中收编的同形部分（skill/plugin/package 的 marker 匹配共用）。
+fn find_marker_root(
+    temp_dir: &std::path::Path,
+    marker: &str,
+    label: &str,
+) -> Result<std::path::PathBuf, String> {
+    if temp_dir.join(marker).exists() {
         return Ok(temp_dir.to_path_buf());
     }
     let entries = std::fs::read_dir(temp_dir)
@@ -3247,15 +3252,21 @@ fn find_skill_root(temp_dir: &std::path::Path) -> Result<std::path::PathBuf, Str
     let mut found: Option<std::path::PathBuf> = None;
     for entry in entries.flatten() {
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            if entry.path().join("SKILL.md").exists() {
+            if entry.path().join(marker).exists() {
                 if found.is_some() {
-                    return Err("Multiple skill roots found in zip".to_string());
+                    return Err(format!("Multiple {} roots found in zip", label));
                 }
                 found = Some(entry.path());
             }
         }
     }
-    found.ok_or_else(|| "No SKILL.md found in extracted zip".to_string())
+    found.ok_or_else(|| format!("No {} found in extracted zip", label))
+}
+
+/// Find the directory containing SKILL.md within an extracted temp dir.
+/// Checks temp dir itself first, then immediate subdirectories.
+fn find_skill_root(temp_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    find_marker_root(temp_dir, "SKILL.md", "skill")
 }
 
 /// Find the package root within an extracted temp dir.
@@ -3291,22 +3302,7 @@ fn has_skill_dirs(dir: &std::path::Path) -> bool {
 
 /// 找插件包根目录: temp 自身含 plugin.json → 直接返回; 否则在子目录中找唯一含 plugin.json 的目录。
 fn find_plugin_root(temp_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    if temp_dir.join("plugin.json").exists() {
-        return Ok(temp_dir.to_path_buf());
-    }
-    let entries = std::fs::read_dir(temp_dir)
-        .map_err(|e| format!("Cannot read temp dir: {}", e))?;
-    let mut found: Option<std::path::PathBuf> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() && path.join("plugin.json").exists() {
-            if found.is_some() {
-                return Err("Multiple plugin roots found in zip".to_string());
-            }
-            found = Some(path);
-        }
-    }
-    found.ok_or_else(|| "No plugin.json found in extracted zip".to_string())
+    find_marker_root(temp_dir, "plugin.json", "plugin")
 }
 
 // ─── Notes commands (user-level; route through server when reachable) ───

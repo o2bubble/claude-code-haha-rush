@@ -6,7 +6,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { t as i18nT } from "../../i18n";
 import { skillMarketplace, type PackageSummary } from "../../services/skillMarketplace";
+import { reloadPlugins } from "../../services/pluginRegistry";
 import { addStatusMessage } from "../../stores/statusMsgStore";
+import { pkgCardStyle, pkgHeaderStyle, installBtnStyle, emptyStyle, retryBtnStyle } from "./marketplaceStyles";
 
 // ── 已安装插件集合(从 list_plugin_manifests 拿) ──
 
@@ -67,23 +69,8 @@ export default function PluginMarketPanel() {
   };
 
   const refreshPluginRegistry = async () => {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const entries = (await invoke<{ name: string; manifestJson?: string }[]>("list_plugin_manifests")) ?? [];
-      const m = await import("../../services/pluginRegistry");
-      const manifests = m.scanPlugins(entries);
-      m.setActiveManifests(manifests);
-      const p = await import("../../services/pluginPanelBridge");
-      p.registerPluginPanels(manifests);
-      const c = await import("../../services/pluginCommandBridge");
-      c.stopPluginEventForwarding();
-      c.startPluginEventForwarding();
-      // 进程状态刷新(新声明进 Worker 面板列表; 实际 spawn 在下次 WORKSPACE_BOUND)
-      const pp = await import("../../services/pluginProcessBridge");
-      await pp.refreshPluginProcesses();
-    } catch (e) {
-      console.warn("[PluginMarketPanel] 插件重扫失败:", e);
-    }
+    // 单一入口 reloadPlugins (scan→setActiveManifests→registerPluginPanels→事件→进程)
+    await reloadPlugins();
   };
 
   const filtered = packages.filter(
@@ -124,7 +111,8 @@ export default function PluginMarketPanel() {
         ) : (
           filtered.map((pkg) => {
             const isInstalling = installing.has(pkg.slug);
-            const isInstalled = installed.has(pkg.name);
+            // installed(key=插件目录名=pluginName) 可能 ≠ market name/slug → 两者任一命中
+            const isInstalled = installed.has(pkg.name) || installed.has(pkg.slug);
             return (
               <div key={pkg.slug} style={pkgCardStyle}>
                 <div style={pkgHeaderStyle}>
@@ -163,33 +151,3 @@ export default function PluginMarketPanel() {
     </div>
   );
 }
-
-const pkgCardStyle: React.CSSProperties = {
-  borderBottom: "1px solid var(--border-light)",
-  backgroundColor: "var(--bg-root)",
-};
-
-const pkgHeaderStyle: React.CSSProperties = {
-  display: "flex", alignItems: "center", gap: 8,
-  padding: "8px 12px",
-};
-
-const installBtnStyle: React.CSSProperties = {
-  border: "1px solid var(--accent)", borderRadius: 3,
-  padding: "2px 8px", cursor: "pointer",
-  fontSize: "calc(var(--font-scale, 1) * 11px)", fontFamily: "var(--font-sans)",
-  backgroundColor: "transparent", color: "var(--accent)",
-  flexShrink: 0,
-};
-
-const emptyStyle: React.CSSProperties = {
-  padding: "20px 12px", textAlign: "center",
-  fontSize: "calc(var(--font-scale, 1) * 12px)", color: "var(--fg-muted)", fontFamily: "var(--font-sans)",
-};
-
-const retryBtnStyle: React.CSSProperties = {
-  marginTop: 8, border: "1px solid var(--accent)", borderRadius: 3,
-  padding: "2px 12px", cursor: "pointer",
-  fontSize: "calc(var(--font-scale, 1) * 11px)", fontFamily: "var(--font-sans)",
-  backgroundColor: "transparent", color: "var(--accent)",
-};

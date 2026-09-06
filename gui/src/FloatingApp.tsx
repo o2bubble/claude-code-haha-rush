@@ -3,8 +3,9 @@ import { useEffect, useRef, useState } from "react";
 declare global { interface Window { __TAURI_INTERNALS__?: { webview?: { label?: string } } } }
 import LayoutRenderer from "./components/LayoutRenderer";
 import { registerPanel, getPanel } from "./stores/panelRegistry";
-import { scanPlugins } from "./services/pluginRegistry";
-import { registerPluginPanels } from "./services/pluginPanelBridge";
+import { reloadPlugins } from "./services/pluginRegistry";
+import { windowBus } from "./services/windowBus";
+import { Events } from "./services/events";
 import { getTree, setTree } from "./stores/layoutStore";
 import type { TabGroup } from "./types/layout";
 import { t } from "./i18n";
@@ -49,16 +50,12 @@ export default function FloatingApp() {
   useEffect(() => {
     // ── Register ALL panels (shared definitions, each window registers independently) ──
     ALL_PANEL_DEFS.forEach(registerPanel);
-    // 插件面板注册（浮窗窗口独立 render, 需自注册; registerPanel 有 dup 保护）
-    void (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const entries = (await invoke<{ name: string; manifestJson?: string }[]>("list_plugin_manifests")) ?? [];
-        registerPluginPanels(scanPlugins(entries));
-      } catch (e) {
-        console.warn("[FloatingApp] 插件面板注册失败:", e);
-      }
-    })();
+    // 插件面板注册（浮窗窗口独立 render, 需自注册; 用 reloadPlugins 单一入口）
+    void reloadPlugins();
+    // 浮窗即活: 监听注册表变更(插件安装/重扫) → 重扫 → 新插件面板/命令在浮窗可见
+    const off = windowBus.on(Events.PANEL_REGISTRY_CHANGED, () => {
+      void reloadPlugins();
+    });
 
     // Set desktop item viewer id from parsed title (format: "Label [item:uuid]")
     if (panelId === "desktop-item-view" && parsedItemId) {
@@ -96,6 +93,7 @@ export default function FloatingApp() {
 
     return () => {
       cancelled = true;
+      off();
       realMount.current = false;
       // Use setTimeout to avoid StrictMode double-mount triggering goodbye
       // (StrictMode: mount→unmount→mount; realMount=true after 2nd mount)

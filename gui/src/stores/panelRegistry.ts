@@ -31,6 +31,15 @@ export function registerPanel(panel: PanelDefinition) {
   windowBus.emit(Events.PANEL_REGISTRY_CHANGED, { panels: [...panels.values()] }, { sticky: true });
 }
 
+/** 覆盖注册：同名已存在时替换定义（插件重装新版本——文件更新了但面板定义还是旧版，
+ *  registerPanel 的 dup 保护会静默忽略 → 用本函数覆盖再 emit）。只对"已存在"场景用。
+ *  循环防护：FloatingApp 订阅 PANEL_REGISTRY_CHANGED → reloadPlugins → rerenderPanel
+ *  由 reloadPlugins 的 _reloading 防重入挡住，无死循环。 */
+export function rerenderPanel(panel: PanelDefinition) {
+  panels.set(panel.id, panel);
+  windowBus.emit(Events.PANEL_REGISTRY_CHANGED, { panels: [...panels.values()] }, { sticky: true });
+}
+
 export function getPanel(id: string): PanelDefinition | undefined {
   return panels.get(id);
 }

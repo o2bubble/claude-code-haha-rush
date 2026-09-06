@@ -8,10 +8,8 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { WorkspaceSelector } from "./components/chat/WorkspaceSelector";
 import { WelcomeWizard, type WizardSettings } from "./components/chat/WelcomeWizard";
 import { registerPanel } from "./stores/panelRegistry";
-import { scanPlugins, setActiveManifests, getActiveManifests } from "./services/pluginRegistry";
-import { registerPluginPanels } from "./services/pluginPanelBridge";
-import { startPluginProcesses, startPluginProcessListener, refreshPluginProcesses } from "./services/pluginProcessBridge";
-import { startPluginEventForwarding } from "./services/pluginCommandBridge";
+import { reloadPlugins, getActiveManifests } from "./services/pluginRegistry";
+import { startPluginProcesses, startPluginProcessListener } from "./services/pluginProcessBridge";
 import { ALL_PANEL_DEFS } from "./services/panelDefs";
 import { getSettings, loadSettings, reloadSettings, saveSettings, updateSettings } from "./stores/settingsStore";
 import { workspaceBasename } from "./utils/workspace";
@@ -569,26 +567,14 @@ export default function App() {
     // its tab titles are English panel ids. Refresh titles now that the registry
     // is populated — a layout-less workspace would otherwise keep English labels.
     refreshAllTitles();
-    // 插件面板注册：Rust 读 %APPDATA%/claude-code-gui/plugins/ → scanPlugins(容错)
-    // → registerPluginPanels。异步, 不阻塞注册点; 插件面板在注册后自动进布局。
+    // 插件面板注册：reloadPlugins（单一入口：scan→setActiveManifests→registerPluginPanels
+    // →事件转发→进程刷新）。异步, 不阻塞注册点; 插件面板在注册后自动进布局。
     void (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const entries = (await invoke<{ name: string; manifestJson?: string }[]>("list_plugin_manifests")) ?? [];
-        const manifests = scanPlugins(entries);
-        // 单一真相: 命令桥/事件转发/调色板/Worker 面板全部读这里
-        setActiveManifests(manifests);
-        registerPluginPanels(manifests);
-        // T3: 启动插件进程状态监听(kill/restart/崩溃的 plugin-process-status 回收)
-        await startPluginProcessListener();
-        await refreshPluginProcesses();
-        // T4: 贡献事件转发(订阅 Events 枚举 → plugin.<name>.event.<event>)
-        startPluginEventForwarding();
-        // 插件面板注册晚于布局恢复时, 标题可能仍是持久化值 → 再刷新一次收敛
-        refreshAllTitles();
-      } catch (e) {
-        console.warn("[App] 插件面板注册失败(非 Tauri 环境/命令缺失):", e);
-      }
+      await reloadPlugins();
+      // T3: 启动插件进程状态监听(kill/restart/崩溃的 plugin-process-status 回收) —— 一次性
+      await startPluginProcessListener();
+      // 插件面板注册晚于布局恢复时, 标题可能仍是持久化值 → 再刷新一次收敛
+      refreshAllTitles();
     })();
   }, []);
 

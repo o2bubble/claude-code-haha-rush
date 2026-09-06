@@ -244,3 +244,36 @@ export function pluginCommandTopic(pluginName: string, commandId: string): strin
 export function pluginEventTopic(pluginName: string, event: string): string {
   return `plugin.${pluginName}.event.${event}`;
 }
+
+// ─── reloadPlugins — 插件重扫单一入口（App / FloatingApp / 插件市场共用）───
+
+/**
+ * 重扫插件目录（list_plugin_manifests → scanPlugins → setActiveManifests
+ * → registerPluginPanels → 事件转发重启 → refreshPluginProcesses）。
+ * 安装/卸载/目录变更后调用一次，面板/命令/事件即活（进程下次 WORKSPACE_BOUND 启动）。
+ * 非 Tauri 环境 / 命令缺失时静默降级（调用方无需 try）。
+ * 动态 import 桥模块——本模块被各桥引用，静态 import 会成循环依赖。
+ */
+let _reloading = false;
+
+export async function reloadPlugins(): Promise<void> {
+  if (_reloading) return; // 防重入: PANEL_REGISTRY_CHANGED → FloatingApp reload 触发的连锁
+  _reloading = true;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const entries = (await invoke<{ name: string; manifestJson?: string }[]>("list_plugin_manifests")) ?? [];
+    const manifests = scanPlugins(entries);
+    setActiveManifests(manifests);
+    const { registerPluginPanels } = await import("./pluginPanelBridge");
+    registerPluginPanels(manifests);
+    const { stopPluginEventForwarding, startPluginEventForwarding } = await import("./pluginCommandBridge");
+    stopPluginEventForwarding();
+    startPluginEventForwarding();
+    const { refreshPluginProcesses } = await import("./pluginProcessBridge");
+    await refreshPluginProcesses();
+  } catch (e) {
+    console.warn("[pluginRegistry] reloadPlugins 失败(非 Tauri 环境/命令缺失):", e);
+  } finally {
+    _reloading = false;
+  }
+}

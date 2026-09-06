@@ -3,7 +3,7 @@
 // id 前缀 `plugin:<name>:<panelId>` 防撞内置面板。render 用同进程声明式组件
 // (第一版显示插件信息; sandbox:true 的隔离渲染留作后续选项, 见 PRD §10)。
 
-import { registerPanel } from "../stores/panelRegistry";
+import { rerenderPanel } from "../stores/panelRegistry";
 import { pluginPanelId, type PluginManifest, type PluginPanel } from "./pluginRegistry";
 import type { PanelView } from "../stores/panelRegistry";
 
@@ -38,7 +38,9 @@ export function registerPluginPanels(manifests: PluginManifest[]): void {
         title: v.title,
         render: pluginPanelContent(manifest, panel),
       }));
-      registerPanel({
+      // rerenderPanel(覆盖语义): 插件可能重装新版本——面板定义必须更新,
+      // registerPanel 的 dup 保护会静默忽略(面板停留在旧版)。
+      rerenderPanel({
         id: pluginPanelId(manifest.pluginName, panel.id),
         title: panel.title,
         icon: "grid3x3", // 插件面板默认图标（第一版）
