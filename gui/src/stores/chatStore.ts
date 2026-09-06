@@ -52,9 +52,25 @@ export interface SlashCommand {
   type: string;
 }
 
+/** GUI 侧 effort 档位（与后端 EffortLevel 对齐）。 */
+export type EffortLevelUI = 'low' | 'medium' | 'high' | 'max';
+
+/** 后端上报的当前模型能力，GUI 据此决定显示哪些档位。 */
+export interface ModelCapabilities {
+  effort: boolean;
+  maxEffort: boolean;
+  thinking: boolean;
+  adaptiveThinking: boolean;
+  reasoning: boolean;
+  defaultEffort?: EffortLevelUI | number;
+}
+
 export interface ChatState {
   messages: ChatMessage[];
   streaming: boolean;
+  /** 压缩会话中：status compacting → compact_boundary 之间。压缩期流无事件、lastStreamEventAt 停更，
+   *  用于抑制"流卡死决策期"（压缩不是卡死）。 */
+  compacting?: boolean;
   connected: boolean;
   sessionId: string | null;
   sessions: Session[];
@@ -72,6 +88,12 @@ export interface ChatState {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   model: string;
+  /** 思考模式开/关（后端 thinkingEnabled 回播同步）。 */
+  thinkingModeEnabled: boolean;
+  /** GUI 手动设置的 effort 档位；null = 跟随模型默认。 */
+  effort: EffortLevelUI | null;
+  /** 当前模型能力（后端 model_capabilities 回播）。 */
+  modelCapabilities: ModelCapabilities | null;
   /** True once a session list has arrived from the backend — used to avoid
    *  mislabeling favorites as stale before the list loads. */
   sessionsLoaded: boolean;
@@ -81,12 +103,24 @@ export interface ChatState {
   sessionTotal: number | null;
   /** 最近一次流式活动的时间戳（null=尚无）；无响应提示据此计算卡顿秒数。 */
   lastStreamEventAt: number | null;
+  /** 后端权威忙闲信号（status 广播携带 busy 布尔写入）。undefined = 后端尚无信号
+   *  （初始化/WS 半开），回落 streaming；true/false 后即用权威值。用于消除乐观
+   *  streaming 与后端 busy 的失同步（interrupt 乐观清空/等子代理静默/error 卡 true）。 */
+  backendBusy?: boolean;
 }
 
 let state: ChatState = emptyChatState();
 
 export function getChatState(): ChatState {
   return state;
+}
+
+/** 聊天是否就绪可发送：后端 WS 已连接(connected) 且会话列表已加载(sessionsLoaded)。
+ *  未就绪时不入队、不加气泡（消息可能排进 messageQueue 而用户气泡先出现，造成"假发送"）。
+ *  纯版收一个状态便于测试；无参版读全局。 */
+export function isChatReady(s?: ChatState): boolean {
+  const st = s ?? state;
+  return !!(st.connected && st.sessionsLoaded);
 }
 
 export function updateChatState(partial: Partial<ChatState>) {

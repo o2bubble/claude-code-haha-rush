@@ -26,7 +26,7 @@ import {
   type AttributionState,
   createEmptyAttributionState,
 } from '../utils/commitAttribution.js'
-import type { EffortValue } from '../utils/effort.js'
+import type { EffortLevel, EffortValue } from '../utils/effort.js'
 import type { FileHistoryState } from '../utils/fileHistory.js'
 import type { REPLHookContext } from '../utils/hooks/postSamplingHooks.js'
 import type { SessionHooksState } from '../utils/hooks/sessionHooks.js'
@@ -425,6 +425,10 @@ export type AppState = DeepImmutable<{
   advisorModel?: string
   // Effort value
   effortValue?: EffortValue
+  // 3P reasoning-capable models (DeepSeek): thinking on/off + intensity via
+  // `reasoning:{effort}`. 'none' = thinking off. undefined = Claude-native
+  // (uses the `thinking` block). Set by ideMode control handlers.
+  reasoningEffort?: EffortLevel | 'none'
   // Set synchronously in launchUltraplan before the detached flow starts.
   // Prevents duplicate launches during the ~5s window before
   // ultraplanSessionUrl is set by teleportToRemote. Cleared by launchDetached

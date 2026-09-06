@@ -107,13 +107,27 @@ import {
 import { getLogDisplayTitle } from 'src/utils/log.js'
 import type { LogOption } from 'src/types/logs.js'
 import { clearSessionMetadata, clearSessionMessagesCache, flushSessionStorage, recordTranscript, resetSessionFilePointer, saveAgentName, saveCustomTitle, saveTag } from 'src/utils/sessionStorage.js'
-import { getCurrentUsage } from 'src/utils/tokens.js'
+import { getCurrentUsage, tokenCountWithEstimation } from 'src/utils/tokens.js'
 import { setOnFileWritten } from 'src/utils/file.js'
 import {
   getContextWindowForModel,
   calculateContextPercentages,
 } from 'src/utils/context.js'
 import { getMainLoopModel } from 'src/utils/model/model.js'
+import {
+  parseEffortValue,
+  convertEffortValueToLevel,
+  modelSupportsEffort,
+  modelSupportsMaxEffort,
+  getDefaultEffortForModel,
+  type EffortLevel,
+  type EffortValue,
+} from '../utils/effort.js'
+import {
+  modelSupportsThinking,
+  modelSupportsAdaptiveThinking,
+  modelSupportsReasoning,
+} from '../utils/thinking.js'
 import {
   compactConversation,
   buildPostCompactMessages,
@@ -176,13 +190,60 @@ let busy = false
 let currentAbortController: AbortController | null = null
 // Thinking mode toggle — user can enable/disable extended thinking
 let thinkingEnabled = false
+// GUI-set effort strength (drives `output_config.effort`; on reasoning-capable
+// providers it also drives `reasoning:{effort}`). Undefined = follow model default.
+let sessionEffort: EffortValue | undefined = undefined
 
 function getThinkingConfig(): { type: 'disabled' } | { type: 'enabled'; budget_tokens: number } {
   if (!thinkingEnabled) return { type: 'disabled' }
   return { type: 'enabled', budget_tokens: 16000 }
 }
+
+/**
+ * Resolve the `reasoning:{effort}` value for the current model/session.
+ * - Not reasoning-capable (Claude-native) → undefined (claude.ts uses the
+ *   `thinking` block instead).
+ * - Thinking off → 'none'.
+ * - Thinking on → the GUI effort strength, or 'high' when none chosen.
+ */
+function getReasoningEffortForModel(model: string): EffortLevel | 'none' | undefined {
+  if (!modelSupportsReasoning(model)) return undefined
+  if (!thinkingEnabled) return 'none'
+  if (sessionEffort !== undefined) {
+    // DeepSeek's `reasoning.effort` accepts none/low/high/max — no 'medium'.
+    const level =
+      typeof sessionEffort === 'string'
+        ? sessionEffort
+        : convertEffortValueToLevel(sessionEffort)
+    return level === 'medium' ? 'high' : level
+  }
+  return 'high'
+}
+
+/** Recomputed whenever thinking/effort changes and written onto appState so
+ *  every query path (query.ts:694 reads appState.effortValue) picks it up. */
+function syncEffortAndReasoningState(): void {
+  const model = getMainLoopModel()
+  appState = {
+    ...appState,
+    effortValue: sessionEffort,
+    reasoningEffort: getReasoningEffortForModel(model),
+  }
+}
+
+/** Static per-model capabilities the GUI uses to decide which tiers to show. */
+function getModelCapabilities(model: string) {
+  return {
+    effort: modelSupportsEffort(model),
+    maxEffort: modelSupportsMaxEffort(model),
+    thinking: modelSupportsThinking(model),
+    adaptiveThinking: modelSupportsAdaptiveThinking(model),
+    reasoning: modelSupportsReasoning(model),
+    defaultEffort: getDefaultEffortForModel(model),
+  }
+}
 // Track previous task state for detecting changes (background agent notifications)
-const previousTaskSnapshots = new Map<string, { status: string; description: string; tool_uses: number; total_tokens: number }>()
+const previousTaskSnapshots = new Map<string, { status: string; description: string; tool_uses: number; total_tokens: number; msg_count: number; last_tool?: string }>()
 
 const pendingControlRequests: Map<
   string,
@@ -709,12 +770,23 @@ function buildContextWindowStatus() {
   const model = getMainLoopModel()
   const contextWindowSize = getContextWindowForModel(model)
   const windowUsage = getCurrentUsage(mutableMessages)
+  // compact 后压缩产物（boundary + summary + messagesToKeep）无 usage → getCurrentUsage 返回
+  // null，前端因 remaining_percentage=null 不更新、停留压缩前旧值。用 tokenCountWithEstimation
+  // 兜底估算窗口占用（有 usage 时与原来的 getCurrentUsage 精确值完全一致）。
   const windowTokens = windowUsage
     ? windowUsage.input_tokens +
       windowUsage.cache_creation_input_tokens +
       windowUsage.cache_read_input_tokens
-    : 0
-  const percentages = calculateContextPercentages(windowUsage, contextWindowSize)
+    : tokenCountWithEstimation(mutableMessages)
+  // 直接按 token 数算百分比（估算/精确两种情形都给出非 null 的 used/remaining，前端才会更新）。
+  const usedPercentage =
+    contextWindowSize > 0
+      ? Math.min(100, Math.max(0, Math.round((windowTokens / contextWindowSize) * 100)))
+      : null
+  const percentages = {
+    used: usedPercentage,
+    remaining: usedPercentage !== null ? 100 - usedPercentage : null,
+  }
 
   return {
     type: 'context_window' as const,
@@ -835,7 +907,7 @@ async function handleCompact(ws: WebSocket): Promise<void> {
   const abortController = new AbortController()
   currentAbortController = abortController
 
-  broadcastToAll({ type: 'status', status: 'compacting' })
+  broadcastToAll({ type: 'status', status: 'compacting', busy: true })
 
   try {
     const model = getMainLoopModel()
@@ -875,7 +947,7 @@ async function handleCompact(ws: WebSocket): Promise<void> {
       )
       busy = false
       currentAbortController = null
-      broadcastToAll({ type: 'status', status: 'ready' })
+      broadcastToAll({ type: 'status', status: 'ready', busy: false })
       return
     }
 
@@ -961,11 +1033,11 @@ async function handleCompact(ws: WebSocket): Promise<void> {
       }),
     )
 
-    broadcastToAll({ type: 'status', status: 'ready' })
+    broadcastToAll({ type: 'status', status: 'ready', busy: false })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     broadcastToAll({ type: 'error', message: `Compaction failed: ${message}` })
-    broadcastToAll({ type: 'status', status: 'ready' })
+    broadcastToAll({ type: 'status', status: 'ready', busy: false })
   } finally {
     busy = false
     currentAbortController = null
@@ -988,7 +1060,14 @@ function broadcastTaskStateChanges(): void {
       description: string
       agentType?: string
       status: string
-      progress?: { toolUses?: number; toolUseCount?: number; tokenCount?: number }
+      startTime?: number
+      messages?: Array<{ role: string; content: unknown; timestamp?: number }>
+      progress?: {
+        toolUses?: number
+        toolUseCount?: number
+        tokenCount?: number
+        lastActivity?: { toolName: string; activityDescription?: string }
+      }
       identity?: { agentName: string; teamName: string; agentId: string; color?: string }
     }
     const prev = previousTaskSnapshots.get(taskId)
@@ -1001,6 +1080,10 @@ function broadcastTaskStateChanges(): void {
       color: t.identity.color,
     } : undefined
 
+    const currentMsgCount = t.messages?.length ?? 0
+    const currentLastTool = t.progress?.lastActivity?.activityDescription
+      ?? t.progress?.lastActivity?.toolName
+
     if (!prev) {
       // New task created
       previousTaskSnapshots.set(taskId, {
@@ -1008,6 +1091,7 @@ function broadcastTaskStateChanges(): void {
         description: t.description,
         tool_uses: t.progress?.toolUses ?? t.progress?.toolUseCount ?? 0,
         total_tokens: t.progress?.tokenCount ?? 0,
+        msg_count: currentMsgCount,
       })
       if (t.status === 'running') {
         broadcastToAll({
@@ -1034,12 +1118,25 @@ function broadcastTaskStateChanges(): void {
         status: t.status,
         tool_uses: t.progress?.toolUses ?? t.progress?.toolUseCount ?? prev.tool_uses,
         total_tokens: t.progress?.tokenCount ?? prev.total_tokens,
+        msg_count: currentMsgCount,
       })
+      // Flush any messages appended since the last push (agent finished —
+      // final transcript chunk must reach the panel without waiting for poll)
+      if (currentMsgCount > prev.msg_count && t.messages) {
+        broadcastToAll({
+          type: 'task_messages',
+          task_id: taskId,
+          messages: t.messages.slice(prev.msg_count),
+          total: currentMsgCount,
+        })
+      }
     } else if (t.status === 'running') {
       // Send progress updates for running tasks
       const newToolUses = t.progress?.toolUses ?? t.progress?.toolUseCount ?? prev.tool_uses
       const newTokens = t.progress?.tokenCount ?? prev.total_tokens
-      if (newToolUses !== prev.tool_uses || newTokens !== prev.total_tokens) {
+      // last_tool 无条件入快照(含 undefined): 若条件性存储, 工具间隙(last_tool 变
+      // undefined)时 undefined !== 旧值永真 → 每次 setAppState 都广播(风暴)。
+      if (newToolUses !== prev.tool_uses || newTokens !== prev.total_tokens || currentLastTool !== prev.last_tool) {
         broadcastToAll({
           type: 'task_progress',
           task_id: taskId,
@@ -1047,13 +1144,26 @@ function broadcastTaskStateChanges(): void {
           status: t.status,
           tool_uses: newToolUses,
           total_tokens: newTokens,
+          last_tool: currentLastTool,
+          start_time: t.startTime,
           identity,
         })
         previousTaskSnapshots.set(taskId, {
           ...prev,
           tool_uses: newToolUses,
           total_tokens: newTokens,
+          last_tool: currentLastTool,
         })
+      }
+      // Push transcript deltas: messages the panel hasn't seen yet
+      if (currentMsgCount > prev.msg_count && t.messages) {
+        broadcastToAll({
+          type: 'task_messages',
+          task_id: taskId,
+          messages: t.messages.slice(prev.msg_count),
+          total: currentMsgCount,
+        })
+        previousTaskSnapshots.set(taskId, { ...prev, msg_count: currentMsgCount })
       }
     }
   }
@@ -1309,7 +1419,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
 
   // Built-in IDE commands (not registered in the commands system)
   if (rawName === 'mcp-refresh') {
-    broadcastToAll({ type: 'status', status: 'thinking' })
+    broadcastToAll({ type: 'status', status: 'thinking', busy: true })
     await refreshMcpTools()
     broadcastToAll({
       type: 'assistant',
@@ -1325,7 +1435,10 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
   )
   if (!matchingCommand) return false
 
-  broadcastToAll({ type: 'status', status: 'thinking' })
+  // 任意 slash 命令都会短暂占用后端（prompt/memory 会设 busy，local 也可能慢）。
+  // 前端据此保守判忙（消息入队稍等）比误判空闲直发撞 busy 更安全 —— 结束的
+  // ready/result 会把 backendBusy 清回 false。
+  broadcastToAll({ type: 'status', status: 'thinking', busy: true })
 
   // Build minimal context
   const ctx: ToolUseContext = {
@@ -1387,7 +1500,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
           type: 'tui_only_notice',
           command: rawName,
         })
-        broadcastToAll({ type: 'status', status: 'ready' })
+        broadcastToAll({ type: 'status', status: 'ready', busy: false })
         return true
       }
     }
@@ -1445,7 +1558,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
         })
         void persistSlashResult(trimmed, result.value)
       }
-      broadcastToAll({ type: 'status', status: 'ready' })
+      broadcastToAll({ type: 'status', status: 'ready', busy: false })
       return true
     }
 
@@ -1466,7 +1579,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
         type: 'tui_only_notice',
         command: rawName,
       })
-      broadcastToAll({ type: 'status', status: 'ready' })
+      broadcastToAll({ type: 'status', status: 'ready', busy: false })
       return true
     }
 
@@ -1521,7 +1634,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
         message: { role: 'assistant', content: skillsText },
         parent_tool_use_id: null,
       })
-      broadcastToAll({ type: 'status', status: 'ready' })
+      broadcastToAll({ type: 'status', status: 'ready', busy: false })
       void persistSlashResult(trimmed, skillsText)
       return true
     }
@@ -1547,7 +1660,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
         message: { role: 'assistant', content: text },
         parent_tool_use_id: null,
       })
-      broadcastToAll({ type: 'status', status: 'ready' })
+      broadcastToAll({ type: 'status', status: 'ready', busy: false })
       void persistSlashResult(trimmed, text)
       return true
     }
@@ -1573,14 +1686,14 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
         message: { role: 'assistant', content: text },
         parent_tool_use_id: null,
       })
-      broadcastToAll({ type: 'status', status: 'ready' })
+      broadcastToAll({ type: 'status', status: 'ready', busy: false })
       void persistSlashResult(trimmed, text)
       return true
     }
 
     if (rawName === 'memory') {
       // Trigger memory recall via the conversation (send a prompt to the API)
-      broadcastToAll({ type: 'status', status: 'thinking' })
+      broadcastToAll({ type: 'status', status: 'thinking', busy: true })
       busy = true
       const promptContent: ContentBlockParam[] = [{ type: 'text', text: 'Please recall any saved memories about the user and this project. Use the memory tool to retrieve them, then summarize what you know.' }]
       await runPromptCommand(promptContent)
@@ -1645,7 +1758,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
         message: { role: 'assistant', content: outputText },
         parent_tool_use_id: null,
       })
-      broadcastToAll({ type: 'status', status: 'ready' })
+      broadcastToAll({ type: 'status', status: 'ready', busy: false })
       void persistSlashResult(trimmed, outputText)
       return true
     }
@@ -1683,7 +1796,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
         })
         void persistSlashResult(trimmed, outputText)
       }
-      broadcastToAll({ type: 'status', status: 'ready' })
+      broadcastToAll({ type: 'status', status: 'ready', busy: false })
       return true
     }
 
@@ -1776,7 +1889,7 @@ async function handleUserPrompt(userContent: string | ContentBlockParam[], ws?: 
     session_id: getSessionId(),
   })
 
-  broadcastToAll({ type: 'status', status: 'thinking' })
+  broadcastToAll({ type: 'status', status: 'thinking', busy: true })
 
   const ideContextPrompt = buildIDEContextPrompt()
 
@@ -1833,7 +1946,7 @@ async function handleUserPrompt(userContent: string | ContentBlockParam[], ws?: 
       subtype: abortController.signal.aborted ? 'error' : 'success',
       result: abortController.signal.aborted ? 'interrupted' : 'turn_complete',
     })
-    broadcastToAll({ type: 'status', status: 'ready' })
+    broadcastToAll({ type: 'status', status: 'ready', busy: false })
 
     busy = false
     currentAbortController = null
@@ -1850,6 +1963,7 @@ function interruptCurrentTurn(): void {
     broadcastToAll({
       type: 'status',
       status: 'interrupting',
+      busy: true,
     })
   }
   // No-op when there's no active turn — avoids broadcasting a spurious
@@ -2400,12 +2514,16 @@ async function handleListTasks(ws: WebSocket): Promise<void> {
 async function handleKillTask(ws: WebSocket, taskId: string): Promise<void> {
   const task = appState.tasks?.[taskId]
   if (!task || (task as Record<string, unknown>).type !== 'local_agent') {
-    ws.send(jsonStringify({ type: 'error', message: `Task not found: ${taskId}` }))
+    // task_error, not the global error channel: the GUI resets `streaming` on
+    // any `error` — a stale task lookup here (agent already finished) made the
+    // webview show "ready" while the main turn was still busy, so the next
+    // user prompt hit "A prompt is already being processed".
+    ws.send(jsonStringify({ type: 'task_error', scope: 'kill_task', task_id: taskId, message: `Task not found: ${taskId}` }))
     return
   }
   const t = task as { abortController?: AbortController; description?: string; status?: string }
   if (t.status !== 'running') {
-    ws.send(jsonStringify({ type: 'error', message: `Task is not running: ${t.description ?? taskId}` }))
+    ws.send(jsonStringify({ type: 'task_error', scope: 'kill_task', task_id: taskId, message: `Task is not running: ${t.description ?? taskId}` }))
     return
   }
   t.abortController?.abort()
@@ -2414,13 +2532,15 @@ async function handleKillTask(ws: WebSocket, taskId: string): Promise<void> {
 async function handleLoadAgentTranscript(ws: WebSocket, taskId: string): Promise<void> {
   const task = appState.tasks?.[taskId]
   if (!task) {
-    ws.send(jsonStringify({ type: 'error', message: `Task not found: ${taskId}` }))
+    // task_error — same reason as handleKillTask: this fires routinely when the
+    // transcript is fetched for a task that just finished and was cleaned up.
+    ws.send(jsonStringify({ type: 'task_error', scope: 'load_agent_transcript', task_id: taskId, message: `Task not found: ${taskId}` }))
     return
   }
 
   const t = task as Record<string, unknown>
   if (t.type !== 'in_process_teammate' && t.type !== 'local_agent') {
-    ws.send(jsonStringify({ type: 'error', message: `Task is not a sub-agent: ${taskId}` }))
+    ws.send(jsonStringify({ type: 'task_error', scope: 'load_agent_transcript', task_id: taskId, message: `Task is not a sub-agent: ${taskId}` }))
     return
   }
 
@@ -2860,9 +2980,37 @@ async function handleClientMessage(
 
     case 'set_thinking_mode': {
       const enabled = message.enabled === true
-      if (enabled === thinkingEnabled) break
+      if (message.effort !== undefined) {
+        sessionEffort = parseEffortValue(message.effort)
+      }
       thinkingEnabled = enabled
-      broadcastToAll({ type: 'thinking_mode_changed', enabled: thinkingEnabled })
+      syncEffortAndReasoningState()
+      broadcastToAll({
+        type: 'thinking_mode_changed',
+        enabled: thinkingEnabled,
+        effort: sessionEffort,
+      })
+      break
+    }
+
+    case 'set_effort': {
+      sessionEffort = parseEffortValue(message.level)
+      syncEffortAndReasoningState()
+      broadcastToAll({ type: 'effort_changed', value: sessionEffort })
+      break
+    }
+
+    case 'get_model_capabilities': {
+      try {
+        const model = getMainLoopModel()
+        ws.send(jsonStringify({
+          type: 'model_capabilities',
+          model,
+          capability: getModelCapabilities(model),
+        }))
+      } catch (e) {
+        console.error('[ideMode] get_model_capabilities failed:', e)
+      }
       break
     }
 
@@ -3027,7 +3175,19 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
         ws.send(jsonStringify({
           type: 'thinking_mode_changed',
           enabled: thinkingEnabled,
+          effort: sessionEffort,
         }))
+
+        // Send model capabilities so the GUI knows which thinking/effort tiers
+        // are available for the active model
+        try {
+          const model = getMainLoopModel()
+          ws.send(jsonStringify({
+            type: 'model_capabilities',
+            model,
+            capability: getModelCapabilities(model),
+          }))
+        } catch { /* best-effort */ }
 
         // Send available slash commands (skills, plugins, bundled) for autocomplete
         broadcastSlashCommands(ws)

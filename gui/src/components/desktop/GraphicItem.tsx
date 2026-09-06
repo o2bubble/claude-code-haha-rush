@@ -56,6 +56,19 @@ function GraphicItemImpl({ item }: Props) {
           startOnLoad: false,
           securityLevel: "strict",
           theme: isDark ? "dark" : "default",
+          // 用项目已备的高对比度配色覆盖主题，避免 Mermaid 内建主题在某版本/子类型
+          // 下节点文字与底色对比度低（如浅字配浅底）导致看不清。沿用上方 nodeText 等色值。
+          themeVariables: isDark
+            ? {
+                primaryColor: nodeFill,       // 节点底（深灰 #2d2d2d）
+                primaryTextColor: nodeText,   // 节点文字（浅灰 #d4d4d4）
+                primaryBorderColor: nodeStroke,// 节点描边
+                lineColor: edgeStroke,        // 边线
+                nodeTextColor: nodeText,      // 节点文字（flowchart 节点）
+                textColor: nodeText,
+                edgeLabelBackground: nodeFill, // 边标签底，避免透明映出低对比
+              }
+            : undefined,
         });
         const { svg } = await mermaid.render(`gm-${reqId}-${Date.now()}`, content.mermaid);
         if (!cancelled) setMermaidSvg(svg);

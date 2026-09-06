@@ -268,8 +268,8 @@ const C = {
   } as React.CSSProperties,
 };
 
-const STEP_LABELS_ZH = ["语言", "字体", "模型", "思考", "面板", "服务", "完成"];
-const STEP_LABELS_EN = ["Language", "Font", "Model", "Thinking", "Layout", "Server", "Done"];
+// 步骤名跟随当前语言 → 渲染时经 t() 取值
+const STEP_LABEL_KEYS = ["wizard.stepLanguage", "wizard.stepFontScale", "wizard.tabModel", "wizard.tabThinking", "wizard.tabLayout", "wizard.tabServer", "wizard.finish"];
 
 // ── Step content renderers ──
 
@@ -365,11 +365,12 @@ function StepProfile({ value, onChange }: { value: string | null; onChange: (id:
       const TEMPLATES: Record<string, { baseUrl: string; model: string; label: string }> = {
         "deepseek-v4-pro": { baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-v4-pro", label: "DeepSeek v4 Pro" },
         "deepseek-v4-flash": { baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-v4-flash", label: "DeepSeek v4 Flash" },
+        "deepseek-v4-flash-vision-exp": { baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-v4-flash-vision-exp", label: "DeepSeek v4 Flash Vision" },
         "qwen-3.6-plus": { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen3.6-plus", label: "Qwen 3.6 Plus" },
       };
 
       if (provider === "deepseek" || provider === "qwen") {
-        if (!authToken.trim()) { setCreateError("请输入 API Key"); setCreating(false); return; }
+        if (!authToken.trim()) { setCreateError(t("profile.enterApiKey")); setCreating(false); return; }
         for (const id of selectedModels) {
           const cfg = TEMPLATES[id];
           if (!cfg) continue;
@@ -424,7 +425,7 @@ function StepProfile({ value, onChange }: { value: string | null; onChange: (id:
 
   // Preset model options per provider
   const getPresetModels = () => {
-    if (provider === "deepseek") return ["deepseek-v4-pro", "deepseek-v4-flash"];
+    if (provider === "deepseek") return ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"];
     if (provider === "qwen") return ["qwen-3.6-plus"];
     return [];
   };
@@ -432,6 +433,7 @@ function StepProfile({ value, onChange }: { value: string | null; onChange: (id:
     const labels: Record<string, string> = {
       "deepseek-v4-pro": "DeepSeek v4 Pro",
       "deepseek-v4-flash": "DeepSeek v4 Flash",
+      "deepseek-v4-flash-vision-exp": "DeepSeek v4 Flash Vision",
       "qwen-3.6-plus": "Qwen 3.6 Plus",
     };
     return labels[id] || id;
@@ -557,7 +559,7 @@ function StepProfile({ value, onChange }: { value: string | null; onChange: (id:
                   style={C.inputStyle}
                 />
                 <div style={{ fontSize: "calc(var(--font-scale, 1) * 10px)", color: "var(--fg-muted)", marginTop: 2 }}>
-                  使用 ANTHROPIC_AUTH_TOKEN
+                  {t("wizard.useAuthToken")}
                 </div>
               </div>
               <div>
@@ -651,7 +653,7 @@ function StepThinking({ value, onChange }: { value: boolean; onChange: (v: boole
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={C.title}>
-        {t("wizard.stepThinking")}
+        {t("wizard.tabThinking")}
         <span style={C.experimentalBadge}>{t("wizard.thinkingExperimental")}</span>
       </div>
       <div style={C.subtitle}>{t("wizard.thinkingDesc")}</div>
@@ -718,7 +720,7 @@ function StepServer({ value, onChange }: { value: ServerProfile; onChange: (v: S
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={C.title}>{t("wizard.stepServer")}</div>
+      <div style={C.title}>{t("wizard.tabServer")}</div>
       <div style={C.subtitle}>{t("wizard.serverDesc")}</div>
       <div style={{
         fontSize: "calc(var(--font-scale, 1) * 11px)",
@@ -949,7 +951,7 @@ export function WelcomeWizard({ onComplete }: WelcomeWizardProps) {
     };
   }, []);
 
-  const stepLabels = getLanguage() === "zh" ? STEP_LABELS_ZH : STEP_LABELS_EN;
+  const stepLabels = STEP_LABEL_KEYS.map((k) => t(k));
 
   return (
     <div style={C.overlay}>

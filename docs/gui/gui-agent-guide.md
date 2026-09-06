@@ -75,7 +75,7 @@ Each block type requires a specific content structure. **Match `type=` parameter
 | type= | content.type | Key content fields |
 |-------|-------------|-------------------|
 | `text` | `"text"` | `format` ("plain"\|"markdown"\|lang), `text` |
-| `table` | `"table"` | `columns[{id, name, width?}]`, `rows[{id, cells: {colId: value}}]` |
+| `table` | `"table"` | `columns[{id, name, width?, children?, pinned?}]`, `rows[{id, cells: {colId: value}}]`, `cellStyles?`, `formats?` — 多级表头/合并/样式/数字格式/冻结，语法见下方 Table syntax（高级） |
 | `drawing` | `"drawing"` | `svg` (view mode), `width`, `height`, `elements?` (editable strokes) |
 | `chart` | `"chart"` | `chartType` ("bar"\|"line"\|"pie"\|"scatter"\|"area"\|"radar"\|"funnel"\|"gauge"), `title`, `data: {labels, datasets}`; config: bar{stack:true}, pie{donut:true}, scatter{[x,y] pairs} |
 | `graphic` | `"graphic"` | `mermaid` (Mermaid code, recommended), or legacy `subType`+"flowchart"\|"mindmap"+`nodes[]`+`edges[]` |
@@ -101,6 +101,23 @@ desktop_create_item(type="table", label="Project Tasks",
       {id:"r1",cells:{c1:"Design API",c2:"Done"}},
       {id:"r2",cells:{c1:"Implement",c2:"In Progress"}},
     ]})
+
+# Table syntax（高级）— 多级表头 / 合并 / 单元格样式 / 数字格式 / 冻结
+# 1) 多级表头: 列组用 children 树。组不承载数据，叶子列才是数据列（cells 的 key = 叶子列 id）。
+desktop_create_item(type="table", label="区域销售",
+  content={type:"table",
+    columns:[
+      {id:"city",name:"城市",pinned:"left"},                                  # pinned 冻结列
+      {id:"g-east",name:"华东",children:[{id:"q1",name:"Q1"},{id:"q2",name:"Q2"}]},
+      {id:"total",name:"总计"},
+    ],
+    rows:[{id:"r1",cells:{city:"上海",q1:"12345.6",q2:"0.25",total:"12370.1"}}],
+    formats={q1:"0,0.00", q2:"0%"},                                          # 千分位两位小数 / 百分比
+    cellStyles={"r1:total":{color:"#e5484d",bold:true,align:"right"}},        # 标红加粗右对齐
+  })
+# 2) 跨列合并: 该格 cellStyle 加 colSpan:N（向右占 N 列，N=1 不合并）。
+#    cellStyles 键格式 "rowId:colId"，可用字段: color / bgColor / bold / italic / align('left'|'center'|'right') / colSpan。
+# NOT supported: rowSpan（跨行合并）、条件着色（直接算好静态色写 cellStyles）、公式（算好结果写值）。
 
 # Vector art (raw SVG, view-only)
 desktop_create_item(type="drawing", label="Sketch", width=800, height=600,

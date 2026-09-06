@@ -284,6 +284,19 @@ const TEMPLATES: Record<string, ProviderTemplate[]> = {
       },
       requiresToken: true,
     },
+    {
+      label: 'DeepSeek v4 Flash Vision',
+      profileName: 'deepseek-v4-flash-vision-exp',
+      vars: {
+        ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+        ANTHROPIC_MODEL: 'deepseek-v4-flash-vision-exp',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-flash-vision-exp',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash-vision-exp',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-flash-vision-exp',
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: '1000000',
+      },
+      requiresToken: true,
+    },
   ],
   '2': [
     {
@@ -308,6 +321,19 @@ const TEMPLATES: Record<string, ProviderTemplate[]> = {
         ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-pro',
         ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-pro',
         ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-pro',
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: '1000000',
+      },
+      requiresToken: true,
+    },
+    {
+      label: 'DeepSeek v4 Flash Vision',
+      profileName: 'deepseek-v4-flash-vision-exp',
+      vars: {
+        ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+        ANTHROPIC_MODEL: 'deepseek-v4-flash-vision-exp',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-flash-vision-exp',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash-vision-exp',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-flash-vision-exp',
         CLAUDE_CODE_MAX_CONTEXT_TOKENS: '1000000',
       },
       requiresToken: true,
@@ -373,8 +399,8 @@ async function cmdCreate(): Promise<void> {
   try {
     console.log('\n=== Create Profile ===\n')
     console.log('Templates:')
-    console.log('  [1] DeepSeek v4 Pro   (preset: only needs AUTH_TOKEN)')
-    console.log('  [2] DeepSeek v4 Flash (preset: only needs AUTH_TOKEN)')
+    console.log('  [1] DeepSeek v4 Pro/Flash/Vision (preset: only needs AUTH_TOKEN)')
+    console.log('  [2] DeepSeek v4 Flash/Pro/Vision (preset: only needs AUTH_TOKEN)')
     console.log('  [3] Qwen 3.6 Plus     (preset: only needs AUTH_TOKEN)')
     console.log('  [4] Custom            (fill in all fields)')
     console.log()
@@ -411,6 +437,7 @@ async function cmdCreate(): Promise<void> {
       { label: '64K', value: '65536' },
       { label: '128K', value: '131072' },
       { label: '256K', value: '262144' },
+      { label: '384K', value: '393216' },
       { label: 'Custom', value: '' },
     ], '65536')
     const maxContext = await askPreset(prompt, 'MAX_CONTEXT (context window)', [

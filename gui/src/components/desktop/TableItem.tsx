@@ -1,7 +1,24 @@
-import React, { memo, useCallback, useState } from "react";
+import React, { memo, useCallback, useMemo, useState } from "react";
+import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
+import { AgGridReact } from "ag-grid-react";
 import type { DesktopItem, TableContent } from "../../types/desktop";
 import { updateItem } from "../../stores/desktopStore";
 import { t } from "../../i18n";
+import { useEvent } from "../../services/useService";
+import { Events, type SettingsChangedPayload } from "../../services/events";
+import { isDarkTheme } from "../../utils/themeUtils";
+import {
+  toColumnDefs,
+  toRowData,
+  fromRowData,
+  leafColumns,
+  cellStyleFor,
+  colSpanFor,
+  gridThemeFor,
+} from "../../utils/tableAdapter";
+
+// AG Grid 36: 需显式注册 Community 模块（一次性）
+ModuleRegistry.registerModules([AllCommunityModule]);
 
 interface Props {
   item: DesktopItem;
@@ -14,8 +31,7 @@ function generateId() {
 function TableItemImpl({ item }: Props) {
   const content = item.content as TableContent;
   const { columns, rows } = content;
-  const [editingCell, setEditingCell] = useState<{ row: number; col: number } | null>(null);
-  const [editingHeader, setEditingHeader] = useState<number | null>(null);
+  const [editingHeader, setEditingHeader] = useState<string | null>(null); // colId
 
   const commit = useCallback(
     (patch: Partial<TableContent>) => {
@@ -24,164 +40,154 @@ function TableItemImpl({ item }: Props) {
     [item.id, content],
   );
 
-  // ── Rows ──
+  // ── AG Grid 数据（adapter 主 seam）──
+
+  const columnDefs = useMemo(() => toColumnDefs(content), [content]);
+  const rowData = useMemo(() => toRowData(content), [content]);
+
+  // cellStyles → 逐格 cellClass 规则走 cellRenderer 太重，改用 colDef cellStyle 回调
+  // （在 toColumnDefs 已含 valueFormatter；这里补动态样式回调 + colSpan 回调）
+  const styledColumnDefs = useMemo(() => {
+    const patch = (def: any): any => ({
+      ...def,
+      ...(def.field
+        ? {
+            cellStyle: (p: { data?: { id?: string }; colDef?: { field?: string } }) =>
+              cellStyleFor(content, p.data?.id ?? "", p.colDef?.field ?? ""),
+            colSpan: (p: { data?: { id?: string } }) =>
+              colSpanFor(content, p.data?.id ?? "", def.field),
+          }
+        : {}),
+      ...(def.children ? { children: def.children.map(patch) } : {}),
+    });
+    return columnDefs.map(patch);
+  }, [columnDefs, content]);
+
+  // ── 编辑回写（grid → store）──
+
+  const handleCellValueChanged = useCallback(
+    (p: { data: Record<string, string>; oldValue?: unknown; newValue?: unknown }) => {
+      if (p.oldValue === p.newValue) return;
+      const nextRows = fromRowData(content, [p.data]);
+      // 只更新这一行（按 rowId 对齐，不整表替换 rows 引用外的内容）
+      const rowId = p.data.id;
+      const idx = rows.findIndex((r) => r.id === rowId);
+      if (idx < 0) return;
+      const newRows = [...rows];
+      newRows[idx] = nextRows[0];
+      commit({ rows: newRows });
+    },
+    [content, rows, commit],
+  );
+
+  // ── 结构操作（沿用原交互）──
 
   const addRow = () => {
-    const newRow = {
-      id: generateId(),
-      cells: Object.fromEntries(columns.map((c) => [c.id, ""])),
-    };
-    commit({ rows: [...rows, newRow] });
+    commit({ rows: [...rows, { id: generateId(), cells: Object.fromEntries(leafColumns(columns).map((c) => [c.id, ""])) }] });
   };
 
-  const deleteRow = (rowIdx: number) => {
-    commit({ rows: rows.filter((_, i) => i !== rowIdx) });
+  const deleteRow = (rowId: string) => {
+    commit({ rows: rows.filter((r) => r.id !== rowId) });
   };
-
-  const setCellValue = (rowIdx: number, colId: string, value: string) => {
-    const newRows = rows.map((r, i) => {
-      if (i !== rowIdx) return r;
-      return { ...r, cells: { ...r.cells, [colId]: value } };
-    });
-    commit({ rows: newRows });
-  };
-
-  // ── Columns ──
 
   const addColumn = () => {
     const id = generateId();
-    const name = t("desktop.block.colName", { n: columns.length + 1 });
+    const name = t("desktop.block.colName", { n: leafColumns(columns).length + 1 });
     commit({
       columns: [...columns, { id, name }],
       rows: rows.map((r) => ({ ...r, cells: { ...r.cells, [id]: "" } })),
     });
   };
 
-  const deleteColumn = (colIdx: number) => {
-    const targetId = columns[colIdx].id;
+  const deleteColumn = (colId: string) => {
+    const walk = (cols: typeof columns): typeof columns =>
+      cols
+        .filter((c) => c.id !== colId)
+        .map((c) => (c.children ? { ...c, children: walk(c.children) } : c))
+        // 组表头 children 空了就整组删除
+        .filter((c) => !c.children || c.children.length > 0);
     commit({
-      columns: columns.filter((_, i) => i !== colIdx),
+      columns: walk(columns),
       rows: rows.map((r) => {
         const next = { ...r.cells };
-        delete next[targetId];
+        delete next[colId];
         return { ...r, cells: next };
       }),
     });
   };
 
-  const renameColumn = (colIdx: number, name: string) => {
-    commit({ columns: columns.map((c, i) => i === colIdx ? { ...c, name } : c) });
+  const renameColumn = (colId: string, name: string) => {
+    const walk = (cols: typeof columns): typeof columns =>
+      cols.map((c) =>
+        c.id === colId ? { ...c, name } : c.children ? { ...c, children: walk(c.children) } : c,
+      );
+    commit({ columns: walk(columns) });
   };
 
-  // ── Keyboard navigation ──
+  // 编辑态按键不穿透画布（与 title 编辑一致的守卫）
+  const swallowKeys = useCallback((e: React.KeyboardEvent) => {
+    e.stopPropagation();
+  }, []);
 
-  const handleCellKeyDown = (e: React.KeyboardEvent, rowIdx: number, colIdx: number) => {
-    if (e.key === "Tab") {
-      e.preventDefault();
-      setEditingCell(null);
-      const nextCol = e.shiftKey ? colIdx - 1 : colIdx + 1;
-      if (nextCol >= 0 && nextCol < columns.length) {
-        setEditingCell({ row: rowIdx, col: nextCol });
-      } else if (!e.shiftKey && rowIdx + 1 < rows.length) {
-        setEditingCell({ row: rowIdx + 1, col: 0 });
-      } else if (e.shiftKey && rowIdx - 1 >= 0) {
-        setEditingCell({ row: rowIdx - 1, col: columns.length - 1 });
-      }
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      setEditingCell(null);
-    } else if (e.key === "Escape") {
-      setEditingCell(null);
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      if (rowIdx + 1 < rows.length) setEditingCell({ row: rowIdx + 1, col: colIdx });
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      if (rowIdx - 1 >= 0) setEditingCell({ row: rowIdx - 1, col: colIdx });
-    }
-  };
-
-  const colCount = columns.length;
+  // 主题：跟随设置变化（isDarkTheme 单一来源），切换即时重建 AG Grid theme
+  const sp = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
+  const isDark = isDarkTheme(
+    sp?.settings?.theme ?? (typeof document !== "undefined" ? document.documentElement.dataset.theme : undefined),
+  );
+  const gridTheme = useMemo(() => gridThemeFor(isDark), [isDark]);
 
   return (
-    <div style={CONTAINER}>
-      <table style={TABLE}>
-        <thead>
-          <tr>
-            {columns.map((col, ci) => (
-              <th
-                key={col.id}
-                style={{ ...TH, width: col.width || undefined }}
-                onDoubleClick={() => setEditingHeader(ci)}
-              >
-                {editingHeader === ci ? (
-                  <input
-                    autoFocus
-                    value={col.name}
-                    onChange={(e) => renameColumn(ci, e.target.value)}
-                    onBlur={() => setEditingHeader(null)}
-                    onKeyDown={(e) => { if (e.key === "Enter") setEditingHeader(null); }}
-                    style={HEADER_INPUT}
-                  />
-                ) : (
-                  <span style={{ cursor: "pointer" }} title={t("desktop.block.renameColumn")}>{col.name}</span>
-                )}
-                {colCount > 1 && (
-                  <button onClick={() => deleteColumn(ci)} style={DEL_BTN} title={t("desktop.block.deleteColumn")}>×</button>
-                )}
-              </th>
-            ))}
-            <th style={TH_ADD}>
-              <button onClick={addColumn} style={ADD_BTN} title={t("desktop.block.addColumn")}>+</button>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 ? (
-            <tr>
-              <td colSpan={colCount + 1} style={EMPTY_ROW}>
-                {t("desktop.block.emptyTable")}
-              </td>
-            </tr>
-          ) : (
-            rows.map((row, ri) => (
-              <tr key={row.id} style={ri % 2 === 0 ? ROW_EVEN : ROW_ODD}>
-                {columns.map((col, ci) => {
-                  const isEditing = editingCell?.row === ri && editingCell?.col === ci;
-                  const value = row.cells[col.id] ?? "";
-                  return (
-                    <td
-                      key={col.id}
-                      style={TD}
-                      onClick={() => setEditingCell({ row: ri, col: ci })}
-                    >
-                      {isEditing ? (
-                        <input
-                          autoFocus
-                          value={value}
-                          onChange={(e) => setCellValue(ri, col.id, e.target.value)}
-                          onBlur={() => setEditingCell(null)}
-                          onKeyDown={(e) => handleCellKeyDown(e, ri, ci)}
-                          style={CELL_INPUT}
-                        />
-                      ) : (
-                        <span style={CELL_TEXT}>{value || "\u00A0"}</span>
-                      )}
-                    </td>
-                  );
-                })}
-                <td style={TD_DEL}>
-                  <button onClick={() => deleteRow(ri)} style={DEL_BTN} title={t("desktop.block.deleteRow")}>×</button>
-                </td>
-              </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+    <div style={CONTAINER} onKeyDown={swallowKeys} onKeyUp={swallowKeys}>
+      <div style={GRID_WRAP}>
+        <AgGridReact
+          theme={gridTheme as never}
+          columnDefs={styledColumnDefs}
+          rowData={rowData}
+          getRowId={(p) => String(p.data.id)}
+          defaultColDef={{ sortable: false, lockPinned: true, suppressMovable: true } as never}
+          stopEditingWhenCellsLoseFocus
+          suppressCellFocus={false}
+          suppressRowClickSelection
+          suppressDragLeaveHidesColumns
+          onCellValueChanged={handleCellValueChanged as never}
+          headerHeight={34}
+          rowHeight={30}
+        />
+      </div>
 
       <div style={FOOTER}>
         <button onClick={addRow} style={ADD_ROW_BTN}>{t("desktop.block.addRow")}</button>
-        <span style={ROW_COUNT}>{t("desktop.block.rowColCount", { r: rows.length, c: colCount })}</span>
+        <span style={ROW_COUNT}>{t("desktop.block.rowColCount", { r: rows.length, c: leafColumns(columns).length })}</span>
+      </div>
+
+      {/* 表头改名沿用：列出叶子列名 + 删除按钮（AG Grid 内嵌表头编辑复杂度高，首版沿用底部条） */}
+      <div style={COL_BAR}>
+        {leafColumns(columns).map((col) => (
+          <span key={col.id} style={COL_CHIP}>
+            {editingHeader === col.id ? (
+              <input
+                autoFocus
+                value={col.name}
+                onChange={(e) => renameColumn(col.id, e.target.value)}
+                onBlur={() => setEditingHeader(null)}
+                onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") setEditingHeader(null); }}
+                style={HEADER_INPUT}
+              />
+            ) : (
+              <span
+                style={{ cursor: "pointer", whiteSpace: "nowrap" }}
+                title={t("desktop.block.renameColumn")}
+                onDoubleClick={() => setEditingHeader(col.id)}
+              >
+                {col.name}
+              </span>
+            )}
+            {leafColumns(columns).length > 1 && (
+              <button onClick={() => deleteColumn(col.id)} style={DEL_BTN} title={t("desktop.block.deleteColumn")}>×</button>
+            )}
+          </span>
+        ))}
+        <button onClick={addColumn} style={ADD_BTN} title={t("desktop.block.addColumn")}>+</button>
       </div>
     </div>
   );
@@ -194,73 +200,14 @@ export const TableItem = memo(TableItemImpl);
 const CONTAINER: React.CSSProperties = {
   display: "flex", flexDirection: "column", height: "100%",
   fontSize: 12, fontFamily: "var(--font-sans)",
-  overflow: "auto",
+  gap: 4, padding: 4, boxSizing: "border-box",
 };
 
-const TABLE: React.CSSProperties = {
-  width: "100%", borderCollapse: "collapse",
-  tableLayout: "auto",
-};
-
-const TH: React.CSSProperties = {
-  position: "sticky", top: 0,
-  backgroundColor: "var(--bg-surface)", color: "var(--fg-secondary)",
-  fontWeight: 600, fontSize: 11, textAlign: "left",
-  padding: "4px 6px", borderBottom: "2px solid var(--border-light)",
-  userSelect: "none", whiteSpace: "nowrap",
-};
-
-const TH_ADD: React.CSSProperties = {
-  ...TH, width: 32, textAlign: "center", padding: "2px",
-};
-
-const HEADER_INPUT: React.CSSProperties = {
-  width: "100%", fontSize: 11, fontFamily: "inherit",
-  padding: "1px 4px", border: "1px solid var(--accent)",
-  borderRadius: 2, outline: "none",
-};
-
-const TD: React.CSSProperties = {
-  padding: "3px 6px", borderBottom: "1px solid var(--border-light)",
-  cursor: "text", minWidth: 60, maxWidth: 300,
-};
-
-const CELL_TEXT: React.CSSProperties = {
-  display: "block", minHeight: 16, overflow: "hidden",
-  textOverflow: "ellipsis", whiteSpace: "nowrap",
-};
-
-const CELL_INPUT: React.CSSProperties = {
-  width: "100%", fontSize: 12, fontFamily: "inherit",
-  padding: "1px 4px", border: "1px solid var(--accent)",
-  borderRadius: 2, outline: "none", minWidth: 60,
-};
-
-const TD_DEL: React.CSSProperties = {
-  ...TD, width: 28, textAlign: "center", cursor: "default", padding: "2px",
-};
-
-const ROW_EVEN: React.CSSProperties = {};
-const ROW_ODD: React.CSSProperties = { backgroundColor: "var(--bg-hover)" };
-
-const EMPTY_ROW: React.CSSProperties = {
-  padding: 24, textAlign: "center", color: "var(--fg-muted)", fontSize: 12,
-};
-
-const DEL_BTN: React.CSSProperties = {
-  border: "none", background: "none", cursor: "pointer",
-  fontSize: 14, color: "var(--fg-muted)", padding: 0,
-  lineHeight: 1, opacity: 0.5,
-};
-
-const ADD_BTN: React.CSSProperties = {
-  border: "none", background: "none", cursor: "pointer",
-  fontSize: 16, color: "var(--accent)", padding: 0,
-  lineHeight: 1, fontWeight: 600,
+const GRID_WRAP: React.CSSProperties = {
+  flex: 1, minHeight: 0, width: "100%",
 };
 
 const FOOTER: React.CSSProperties = {
-  padding: "4px 8px", borderTop: "1px solid var(--border-light)",
   display: "flex", justifyContent: "space-between", alignItems: "center",
 };
 
@@ -272,4 +219,33 @@ const ADD_ROW_BTN: React.CSSProperties = {
 
 const ROW_COUNT: React.CSSProperties = {
   fontSize: 10, color: "var(--fg-muted)",
+};
+
+const COL_BAR: React.CSSProperties = {
+  display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center",
+  borderTop: "1px solid var(--border-light)", paddingTop: 4,
+};
+
+const COL_CHIP: React.CSSProperties = {
+  display: "inline-flex", alignItems: "center", gap: 2,
+  padding: "1px 6px", border: "1px solid var(--border-light)", borderRadius: 3,
+  fontSize: 11, color: "var(--fg-secondary)",
+};
+
+const HEADER_INPUT: React.CSSProperties = {
+  width: 70, fontSize: 11, fontFamily: "inherit",
+  padding: "1px 4px", border: "1px solid var(--accent)",
+  borderRadius: 2, outline: "none",
+};
+
+const DEL_BTN: React.CSSProperties = {
+  border: "none", background: "none", cursor: "pointer",
+  fontSize: 12, color: "var(--fg-muted)", padding: 0,
+  lineHeight: 1, opacity: 0.5,
+};
+
+const ADD_BTN: React.CSSProperties = {
+  border: "none", background: "none", cursor: "pointer",
+  fontSize: 14, color: "var(--accent)", padding: "0 4px",
+  lineHeight: 1, fontWeight: 600,
 };

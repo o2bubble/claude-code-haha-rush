@@ -128,6 +128,7 @@ const SPLIT_CONTAINER = {
 const ICON_BTN_BASE = {
   width: 36, height: 36, display: "flex", alignItems: "center",
   justifyContent: "center", cursor: "grab", borderRadius: 4, position: "relative",
+  flexShrink: 0, // 空间不足时缩小自身，不压缩间距（溢出交给 … 菜单）
 } as const;
 
 const ROOT_EDGE_BADGE_BASE = {
@@ -321,7 +322,10 @@ function SplitView({ node }: { node: SplitNode }) {
         if (vis === "hidden") return null;
 
         const nextSize = node.sizes[i + 1] ?? 0;
-        const showDivider = !isLast && !collapsed && size > 0 && nextSize > 0;
+        // 折叠组后面仍渲染分隔条（可拖），不再因 collapsed 隐藏——否则折叠后兄弟面板
+        // 在该 split 内失去唯一可拖手柄（如 sidebar-left 折叠后快捷提示无法调整）。
+        // 隐藏(display:none)由上方 vis==="hidden" return null 处理。
+        const showDivider = !isLast && size > 0 && nextSize > 0;
         const normPct = visibleTotal > 0 ? (size / visibleTotal * 100) : size;
 
         return (
@@ -1032,6 +1036,80 @@ function IconBtn({ groupId, tab, indicatorStyle, isDropIcon, isActiveTab }: {
   );
 }
 
+// ── Activity bar 图标溢出 ──
+// 图标不再因空间不足而压缩间距(flexShrink:0)；放不下的 tab 收进末尾"…"菜单(点击切过去)。
+function IconOverflowBar({ node, barStyle, indicator, isActivityBottom, iconDropTabId, dropIsReorder, dropReorderBeforeTabId }: {
+  node: TabGroupType;
+  barStyle: React.CSSProperties;
+  indicator: React.CSSProperties;
+  isActivityBottom: boolean;
+  iconDropTabId?: string;
+  dropIsReorder: boolean;
+  dropReorderBeforeTabId?: string;
+}) {
+  const barRef = useRef<HTMLDivElement>(null);
+  const [vis, setVis] = useState<{ n: number; over: boolean }>({ n: node.tabs.length, over: false });
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    const slot = 36 + 2; // IconBtn 36 + gap 2
+    const compute = () => {
+      const available = isActivityBottom ? el.clientWidth : el.clientHeight;
+      const raw = Math.max(1, Math.floor(available / slot));
+      if (node.tabs.length <= raw) setVis({ n: node.tabs.length, over: false });
+      else setVis({ n: Math.max(1, raw - 1), over: true }); // 留一个槽位给 "…"
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [node.tabs.length, isActivityBottom]);
+
+  const hidden = node.tabs.slice(vis.n);
+  const showMore = vis.over && hidden.length > 0;
+  const rhDir = isActivityBottom ? "horizontal" : undefined;
+
+  return (
+    <div ref={barRef} style={{ ...ICON_BAR_BASE, position: "relative", ...barStyle } as React.CSSProperties}>
+      {node.tabs.slice(0, vis.n).map((tab) => [
+        <ReorderHandle key={`rh-before-${tab.id}`} groupId={node.id} beforeTabId={tab.id}
+          isActive={dropIsReorder && dropReorderBeforeTabId === tab.id} direction={rhDir} />,
+        <IconBtn key={tab.id} groupId={node.id} tab={tab} indicatorStyle={indicator}
+          isDropIcon={iconDropTabId === tab.id} isActiveTab={tab.id === node.activeTabId} />,
+      ])}
+      <ReorderHandle key="rh-end" groupId={node.id} beforeTabId={null}
+        isActive={dropIsReorder && dropReorderBeforeTabId === undefined} direction={rhDir} />
+      {showMore && (
+        <div title={t("layout.tabOverflow")} onClick={() => setOpen(v => !v)}
+          style={{ width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", borderRadius: 4, flexShrink: 0, color: open ? "var(--fg-primary)" : "var(--fg-muted)", background: open ? "var(--border-light)" : "transparent" }}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-ellipsis"><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /><circle cx="5" cy="12" r="1" /></svg>
+        </div>
+      )}
+      {showMore && open && (
+        <div style={{
+          position: "absolute", zIndex: 60, minWidth: 150, maxHeight: 300, overflow: "auto",
+          background: "var(--bg-surface)", border: "1px solid var(--border-medium)",
+          borderRadius: 8, boxShadow: "var(--shadow-md)", padding: 4, display: "flex", flexDirection: "column", gap: 2,
+          ...(isActivityBottom ? { bottom: 40, right: 4 } : { left: 52, top: Math.min(200, vis.n * 38 + 4) }),
+        } as React.CSSProperties}>
+          {hidden.map((tab) => (
+            <button key={tab.id} type="button"
+              onClick={() => { setActiveTab(node.id, tab.id); setOpen(false); }}
+              onMouseEnter={(e) => { (e.currentTarget.style.background = "var(--bg-hover)"); }}
+              onMouseLeave={(e) => { (e.currentTarget.style.background = "transparent"); }}
+              style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 9px", background: "transparent", border: "none", borderRadius: 5, cursor: "pointer", textAlign: "left", whiteSpace: "nowrap", fontFamily: "inherit", fontSize: "calc(var(--font-scale,1)*11.5px)", color: "var(--fg-primary)" }}>
+              <span style={{ display: "inline-flex", color: "var(--fg-muted)" }}>{iconFor(tab.icon)}</span>
+              <span>{tab.title}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── 分割按钮（模块级，group 右上角 ⊕ → 选择方向）──
 
 function LayoutChip({ nodeId, groupId, singleTab, activeTab }: {
@@ -1277,19 +1355,10 @@ function TabGroupView({ node }: { node: TabGroupType }) {
         }}
       >
         {isActivityRight ? null : showIconBar && (
-          <div style={{
-            ...ICON_BAR_BASE,
-            backgroundColor: iconBarHighlight ?? "var(--bg-hover)",
-            ...iconBar,
-          } as React.CSSProperties}>
-            {node.tabs.flatMap((tab, i) => [
-              <ReorderHandle key={`rh-before-${tab.id}`} groupId={node.id} beforeTabId={tab.id}
-                isActive={dropIsReorder && dropReorderBeforeTabId === tab.id} direction={isActivityBottom ? "horizontal" : undefined} />,
-              <IconBtn key={tab.id} groupId={node.id} tab={tab} indicatorStyle={indicator} isDropIcon={iconDropTabId === tab.id} isActiveTab={tab.id === node.activeTabId} />,
-            ])}
-            <ReorderHandle key="rh-end" groupId={node.id} beforeTabId={null}
-              isActive={dropIsReorder && dropReorderBeforeTabId === undefined} direction={isActivityBottom ? "horizontal" : undefined} />
-          </div>
+          <IconOverflowBar node={node}
+            barStyle={{ ...ICON_BAR_BASE, backgroundColor: iconBarHighlight ?? "var(--bg-hover)", ...iconBar }}
+            indicator={indicator} isActivityBottom={isActivityBottom}
+            iconDropTabId={iconDropTabId} dropIsReorder={dropIsReorder} dropReorderBeforeTabId={dropReorderBeforeTabId} />
         )}
         {!collapsed && (
         <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0, minHeight: 0, position: "relative" }}>

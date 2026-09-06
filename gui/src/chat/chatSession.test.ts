@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createChatSession } from "./chatSession";
-import { emptyChatState } from "./chatReduce";
+import { emptyChatState, isBackendBusy } from "./chatReduce";
 import { getChatState, replaceState } from "../stores/chatStore";
 import { _reset as resetTerminal, getEntries } from "../stores/terminalStore";
 import { dataBus } from "../services/dataBus";
@@ -95,6 +95,29 @@ describe("ChatSession — transport", () => {
   });
 });
 
+describe("ChatSession — send guard (not-ready)", () => {
+  it("drops a user send when connected/sessionsLoaded are not ready (no bubble, no socket)", () => {
+    const s = createChatSession();
+    s.connect(8100);
+    const ws = FakeWebSocket.instances[0];
+    // 初始 emptyChatState(): connected=false, sessionsLoaded=false → 未就绪
+    s.sendMessage("你好");
+    expect(getChatState().messages).toHaveLength(0);
+    expect(ws.sent).toHaveLength(0);
+  });
+
+  it("allows a user send once ready (connected && sessionsLoaded)", () => {
+    replaceState({ ...emptyChatState(), connected: true, sessionsLoaded: true });
+    const s = createChatSession();
+    s.connect(8101);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+    s.sendMessage("你好");
+    expect(getChatState().messages).toHaveLength(1);
+    expect(ws.sent.some((d) => d.includes('"type":"user"'))).toBe(true);
+  });
+});
+
 describe("ChatSession — onclose re-detect guard", () => {
   beforeEach(() => {
     mocks.BackendService.getState.mockReset();
@@ -151,5 +174,44 @@ describe("ChatSession — session auto-resume", () => {
     await vi.waitFor(() => {
       expect(ws.sent.filter((d) => d.includes("resume_session"))).toHaveLength(1);
     });
+  });
+});
+
+describe("ChatSession — backendBusy gate (authoritative busy beats optimistic streaming)", () => {
+  it("interrupt 后 streaming 被乐观清 false 但 backendBusy 仍 true → sendMessage 入队不直发", () => {
+    // 复现 bug: interrupt() 立即清 streaming，但后端 turn 未收尾 (busy=true)。
+    // 若 gate 用 streaming 判"空闲"→ force 直发撞后端 "A prompt is already being processed"。
+    // 改用 backendBusy 后: 仍忙 → 入队，不直发。
+    replaceState({ ...emptyChatState(), connected: true, sessionsLoaded: true, streaming: false, backendBusy: true });
+    expect(getChatState().backendBusy).toBe(true);
+    const s = createChatSession();
+    s.connect(8200);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+    s.sendMessage("醒词");
+    expect(getChatState().messages).toHaveLength(0); // 未直发 → 无用户气泡
+    expect(ws.sent.some((d) => d.includes('"type":"user"'))).toBe(false); // 未撞 busy
+  });
+
+  it("status:ready 送达 → backendBusy:false → 后续 sendMessage 直发", () => {
+    replaceState({ ...emptyChatState(), connected: true, sessionsLoaded: true, backendBusy: true });
+    const s = createChatSession();
+    s.connect(8201);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+    // 后端 turn 收尾 → ready 广播, reducer 把 backendBusy 清 false
+    ws._msg({ type: "status", status: "ready", busy: false });
+    s.sendMessage("你好");
+    expect(getChatState().messages).toHaveLength(1);
+    expect(ws.sent.some((d) => d.includes('"type":"user"'))).toBe(true);
+  });
+
+  it("backendBusy undefined (初始化) 回落 streaming 旧行为", () => {
+    // 后端尚无信号 → isBackendBusy 回落 streaming。streaming=true 时应入队不直发。
+    // 不走 connect/onopen（其广播 status:connected 会清 streaming，干扰回落语义）。
+    replaceState({ ...emptyChatState(), connected: true, sessionsLoaded: true, streaming: true, backendBusy: undefined });
+    const s = createChatSession();
+    s.sendMessage("你好");
+    expect(getChatState().messages).toHaveLength(0); // 入队(无 activeSession) → 无用户气泡
   });
 });

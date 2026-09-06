@@ -8,6 +8,7 @@ import {
 } from "../../stores/settingsStore";
 import { t, setLanguage, getLanguage, type Language } from "../../i18n";
 import { DEFAULT_CONTEXT_WARNING_ENABLED, DEFAULT_CONTEXT_WARNING_PERCENT } from "../../utils/contextWarning";
+import { DEFAULT_STALL_WAKE_PROMPT } from "../../utils/streamStallDecision";
 import { EmptyState } from "../SharedStates";
 import { useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
@@ -147,13 +148,35 @@ function CompactSettingsSection({ settings, update }: {
   settings: AppSettings;
   update: (patch: Partial<AppSettings>) => void;
 }) {
-  const mode = settings.customCompactPrompt?.mode ?? "append";
-  const text = settings.customCompactPrompt?.text ?? "";
+  const ccp = settings.customCompactPrompt;
+  const mode = ccp?.mode ?? "append";
+  const text = ccp?.text ?? "";
   const enabled = text.trim() !== "";
-  const preset = text === HANDOFF_COMPACT_PRESET ? "handoff" : "custom";
+  // 预设识别靠 presetId；缺省（旧设置无 presetId）按 text 推导，兼容历史配置
+  const derivePreset = (): "none" | "handoff" | "custom" =>
+    ccp?.presetId ?? (!text.trim() ? "none" : text === HANDOFF_COMPACT_PRESET ? "handoff" : "custom");
+  const preset = derivePreset();
 
-  const patchPrompt = (p: { mode?: "append" | "replace"; text?: string }) =>
-    update({ customCompactPrompt: { mode: p.mode ?? mode, text: p.text ?? text } });
+  const patchPrompt = (p: {
+    mode?: "append" | "replace";
+    text?: string;
+    presetId?: "none" | "handoff" | "custom";
+  }) =>
+    update({
+      customCompactPrompt: {
+        mode: p.mode ?? mode,
+        text: p.text ?? text,
+        presetId: p.presetId ?? ccp?.presetId,
+      },
+    });
+
+  // 迁移：识别为 handoff 但 text 不是最新模板 → 自动刷新为最新（改预设模板后旧设置跟上）
+  useEffect(() => {
+    if (derivePreset() === "handoff" && text !== HANDOFF_COMPACT_PRESET) {
+      update({ customCompactPrompt: { mode, text: HANDOFF_COMPACT_PRESET, presetId: "handoff" } });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: 12 }}>
@@ -161,7 +184,10 @@ function CompactSettingsSection({ settings, update }: {
       <div style={S.row}>
         <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
           <input type="checkbox" checked={enabled}
-            onChange={(e) => patchPrompt({ text: e.target.checked ? (text || HANDOFF_COMPACT_PRESET) : "" })} />
+            onChange={(e) => patchPrompt({
+              text: e.target.checked ? (text || HANDOFF_COMPACT_PRESET) : "",
+              presetId: e.target.checked ? (ccp?.presetId ?? "handoff") : "none",
+            })} />
           <span>{t("settings.customCompactEnabled")}</span>
         </label>
       </div>
@@ -175,7 +201,10 @@ function CompactSettingsSection({ settings, update }: {
               <option value="replace">{t("settings.customCompactModeReplace")}</option>
             </select>
             <select value={preset}
-              onChange={(e) => patchPrompt({ text: e.target.value === "handoff" ? HANDOFF_COMPACT_PRESET : e.target.value === "none" ? "" : text })}
+              onChange={(e) => patchPrompt({
+                text: e.target.value === "handoff" ? HANDOFF_COMPACT_PRESET : e.target.value === "none" ? "" : text,
+                presetId: e.target.value as "none" | "handoff" | "custom",
+              })}
               style={S.select}>
               <option value="none">{t("settings.customCompactPresetNone")}</option>
               <option value="custom">{t("settings.customCompactPresetCustom")}</option>
@@ -183,7 +212,7 @@ function CompactSettingsSection({ settings, update }: {
             </select>
           </div>
           <textarea value={text}
-            onChange={(e) => patchPrompt({ text: e.target.value })}
+            onChange={(e) => patchPrompt({ text: e.target.value, presetId: "custom" })}
             style={{ width: "100%", minHeight: 90, border: "1px solid var(--border-medium)", borderRadius: 4, padding: 6, fontFamily: "inherit", fontSize: 12, background: "var(--bg-root)" }} />
           <FieldHint text={t("settings.customCompactPromptDesc")} />
         </>
@@ -194,6 +223,13 @@ function CompactSettingsSection({ settings, update }: {
           onChange={(e) => update({ compactExtractScript: e.target.value })}
           style={{ ...S.input, width: "100%" }} />
         <FieldHint text={t("settings.compactExtractScriptDesc")} />
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <Label text={t("settings.streamStallWakePrompt")} />
+        <input value={settings.streamStallWakePrompt ?? ""} placeholder={DEFAULT_STALL_WAKE_PROMPT}
+          onChange={(e) => update({ streamStallWakePrompt: e.target.value })}
+          style={{ ...S.input, width: "100%" }} />
+        <FieldHint text={t("settings.streamStallWakePromptDesc")} />
       </div>
     </div>
   );
@@ -222,7 +258,7 @@ function CategoryContent({ cat, settings, update, flashField }: {
               }}
               style={S.select}
             >
-              <option value="zh">中文</option>
+              <option value="zh">{t("wizard.langZh")}</option>
               <option value="en">English</option>
             </select>
             <FieldHint text={t("settings.languageDesc")} />
@@ -262,21 +298,20 @@ function CategoryContent({ cat, settings, update, flashField }: {
               onChange={(v) => update({ saveLayoutToGlobal: v })} />
             <FieldHint text={t("settings.saveLayoutToGlobalDesc")} />
           </div>
+          <div>
+            <Label text={t("settings.serverAddr")} />
+            <input type="text"
+              value={settings.skillRegistryUrl ?? "http://192.168.186.96:8765"}
+              onChange={(e) => update({ skillRegistryUrl: e.target.value })}
+              style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
+            <FieldHint text={t("settings.serverAddrDesc")} />
+          </div>
         </div>
       );
 
     case "skills":
       return (
-        <div style={S.form}>
-          <div>
-            <Label text={t("skills.registryUrl")} />
-            <input type="text"
-              value={settings.skillRegistryUrl ?? "http://192.168.186.96:8765"}
-              onChange={(e) => update({ skillRegistryUrl: e.target.value })}
-              style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
-            <FieldHint text={t("skills.registryUrlDesc")} />
-          </div>
-        </div>
+        <div style={S.form} />
       );
 
     case "files":

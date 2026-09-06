@@ -109,6 +109,16 @@ export function modelSupportsThinking(model: string): boolean {
   return canonical.includes('sonnet-4') || canonical.includes('opus-4')
 }
 
+/**
+ * Whether a 3P model controls thinking via the `reasoning:{effort}` field
+ * (e.g. DeepSeek) instead of Claude's `thinking` block. Enabled by a static
+ * capability env flag: ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES=...,reasoning.
+ * Defaults to false (Claude-native `thinking` block).
+ */
+export function modelSupportsReasoning(model: string): boolean {
+  return get3PModelCapabilityOverride(model, 'reasoning') === true
+}
+
 // @[MODEL LAUNCH]: Add the new model to the allowlist if it supports adaptive thinking.
 export function modelSupportsAdaptiveThinking(model: string): boolean {
   const supported3P = get3PModelCapabilityOverride(model, 'adaptive_thinking')

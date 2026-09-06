@@ -113,6 +113,14 @@ export function NoteEditor({ note, scopeOptions, saveState, onChange, onDelete, 
   const editorRef = useRef<any>(null);
   const noteRef = useRef(note);
   useEffect(() => { noteRef.current = note; }, [note]);
+  // Last markdown the Milkdown editor itself emitted. Used to tell a LOCAL
+  // edit (content changes because the user typed) from a REMOTE one (content
+  // changed because another GUI synced it via server db_changed). On a remote
+  // change we re-init the editor to display the new body; on a local echo we
+  // leave the editor's cursor/selection alone.
+  const lastMdRef = useRef(note.content);
+  const [reinitToken, setReinitToken] = useState(0);
+  useEffect(() => { lastMdRef.current = note.content; }, [note.id]);
 
   const scopeAnchorRef = useRef<HTMLDivElement>(null);
   const overflowWrapRef = useRef<HTMLDivElement>(null);
@@ -158,6 +166,7 @@ export function NoteEditor({ note, scopeOptions, saveState, onChange, onDelete, 
           ctx.set(defaultValueCtx, note.content || "");
           ctx.get(listenerCtx).markdownUpdated((_, md) => {
             if (editorReady.current) {
+              lastMdRef.current = md;
               const cur = noteRef.current;
               onChange({ ...cur, content: md });
             }
@@ -176,7 +185,20 @@ export function NoteEditor({ note, scopeOptions, saveState, onChange, onDelete, 
     })();
 
     return () => { cancelled = true; };
-  }, [note.id, rawMode, onChange]); // re-init when switching notes or toggling raw mode
+  }, [note.id, rawMode, onChange, reinitToken]); // re-init when switching notes, toggling raw mode, or a remote body sync
+
+  // ── Remote body sync ──
+  // Milkdown is initialized once with `note.content`; it doesn't follow the
+  // `note.content` prop. When another GUI edits this note, the server pushes a
+  // db_changed → parent reloads the note via note_get → `note.content` changes
+  // WITHOUT a local Milkdown edit (lastMdRef unchanged). Bump reinitToken so the
+  // WYSIWYG editor re-creates with the new body. Local echoes are skipped.
+  useEffect(() => {
+    if (rawMode) return;
+    if (note.content === lastMdRef.current) return;
+    setReinitToken((k) => k + 1);
+    lastMdRef.current = note.content;
+  }, [note.content, rawMode]);
 
   // ── Toolbar actions (Milkdown $Command.run()) ──
   const doInsertTable = useCallback(async () => {

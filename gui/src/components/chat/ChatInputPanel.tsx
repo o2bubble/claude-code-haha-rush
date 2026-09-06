@@ -14,6 +14,7 @@ import { setAskQuestionCallbacks, clearAskQuestionCallbacks } from "./AskQuestio
 import { routeCommand } from "../../utils/commandRouter";
 import { getSettings, type AppSettings } from "../../stores/settingsStore";
 import { addStatusMessage } from "../../stores/statusMsgStore";
+import { getSubAgentState } from "../../stores/subAgentStore";
 import {
   computeContextWarning, dismiss, type ContextWarningState,
   DEFAULT_CONTEXT_WARNING_ENABLED, DEFAULT_CONTEXT_WARNING_PERCENT,
@@ -21,6 +22,10 @@ import {
 import { computeStreamStall } from "../../chat/chatReduce";
 import { openSettingsFloat } from "../Toolbar";
 import { dataBus } from "../../services/dataBus";
+import { StreamStallDecisionBar } from "./StreamStallDecisionBar";
+import {
+  computeStreamStallDecision, enterWaiting, resetToIdle, shouldAutoWake, type StreamStallDecisionState,
+} from "../../utils/streamStallDecision";
 
 function PermissionPrompt({ onAllow, onAllowAlways, onDeny }: {
   onAllow: () => void; onAllowAlways: () => void; onDeny: () => void;
@@ -315,8 +320,56 @@ export function ChatInputPanel() {
   const queuePos = useQueuePosition();
   const queueCollapse = useMsgQueueCollapse();
   const { port } = useBackend();
-  const { sendMessage, respondToPermission, interrupt, compact } = useChatBridge(port);
+  const { sendMessage, respondToPermission, interrupt, compact, wakeStream } = useChatBridge(port);
   const askFloatRef = useRef<string | null>(null);
+
+  // 流静默决策期：模型流静默超过阈值时弹「是否中断？」，让用户裁量而非硬杀。
+  const [showStallDecision, setShowStallDecision] = useState(false);
+  const stallDecisionRef = useRef<StreamStallDecisionState>({ status: "idle", lastSeenActivity: null });
+  const interruptRef = useRef(interrupt);
+  interruptRef.current = interrupt; // 每渲染更新，避免 interval 闭包捕旧值
+  const wakeRef = useRef(wakeStream);
+  wakeRef.current = wakeStream;
+  // 上次自动唤醒时间：自动唤醒后冷却期内再次卡死只纯中断，防"唤醒→又卡→又唤醒"死循环
+  const lastAutoWakeRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    // 3s 轮询（与「已 N 秒无响应」提示一致）：靠时间推进触发状态迁移。
+    const tick = () => {
+      const st = getChatState();
+      // 等用户回答(AskUserQuestion/权限)、压缩会话中，或有子代理在跑时，agent 回合未结束、
+      // 流也无事件，但这 ≠ 流卡死（一个在等用户、一个在压缩处理、一个在等子代理完成）。
+      // 静默计时不该计入，抑制决策期——否则等子代理完成会被误判"流卡死"。
+      const hasRunningSubAgent = getSubAgentState().agents.some((a) => a.status === "running");
+      if (st.pendingControlRequest || st.compacting || hasRunningSubAgent) {
+        stallDecisionRef.current = resetToIdle();
+        setShowStallDecision(false);
+        return;
+      }
+      const res = computeStreamStallDecision({
+        streaming: st.streaming,
+        lastStreamEventAt: st.lastStreamEventAt,
+        now: Date.now(),
+        state: stallDecisionRef.current,
+      });
+      stallDecisionRef.current = res.nextState;
+      setShowStallDecision(res.show);
+      if (res.autoInterrupt) {
+        // 决策期无响应超时：中断后视冷却决定是否"唤醒"(发醒词接力)。
+        // 冷却内只纯中断(停止自动恢复)，冷却过了才自动唤醒。最后一次都回 idle 防重复。
+        stallDecisionRef.current = resetToIdle();
+        if (shouldAutoWake(lastAutoWakeRef.current, Date.now())) {
+          lastAutoWakeRef.current = Date.now();
+          wakeRef.current(); // 中断 + 发醒词，让 AI 接力继续
+        } else {
+          interruptRef.current(); // 冷却中：纯中断，不唤醒
+        }
+      }
+    };
+    tick();
+    const iv = setInterval(tick, 3000);
+    return () => clearInterval(iv);
+  }, []);
 
   // Open/close floating window for AskUserQuestion
   useEffect(() => {
@@ -389,16 +442,22 @@ export function ChatInputPanel() {
           return; // Don't send to backend
         }
         case "C": {
-          // Spawn system terminal with Claude. Prefer Git Bash, fall back to cmd.
+          // Spawn system terminal with Claude. macOS 用系统 Terminal；Windows 优先 git-bash 兜底 cmd。
           const settings = getSettings();
           const workDir = settings.workDir || "";
+          const isMac = /mac/i.test(navigator.platform || "");
           try {
             const { invoke } = await import("@tauri-apps/api/core");
-            // Try git-bash first (fewer quoting issues on Windows)
-            try {
-              await invoke("open_system_terminal", { terminalType: "git-bash", workDir, claudeLaunch: true });
-            } catch {
-              await invoke("open_system_terminal", { terminalType: "cmd", workDir, claudeLaunch: true });
+            if (isMac) {
+              await invoke("open_system_terminal", { terminalType: "terminal", workDir, claudeLaunch: true });
+            } else {
+              // Windows: 优先 git-bash（少引号/命令问题），缺失时兜底 cmd 并提示
+              try {
+                await invoke("open_system_terminal", { terminalType: "git-bash", workDir, claudeLaunch: true });
+              } catch {
+                await invoke("open_system_terminal", { terminalType: "cmd", workDir, claudeLaunch: true });
+                addStatusMessage(t("chat.terminalGitBashFallback"), "info");
+              }
             }
             addStatusMessage(t("chat.terminalOpened"), "success");
             setTimeout(() => { requestPluginRefresh(); }, 15000);
@@ -425,6 +484,30 @@ export function ChatInputPanel() {
           onAllow={() => respondToPermission(true)}
           onAllowAlways={() => respondToPermission(true, true)}
           onDeny={() => respondToPermission(false)}
+        />
+      )}
+      {showStallDecision && (
+        <StreamStallDecisionBar
+          onWait={() => {
+            // 用户接管决定权：抑制再弹，直到流恢复活动（lastStreamEventAt 变化）才解除
+            stallDecisionRef.current = enterWaiting({
+              streaming: getChatState().streaming,
+              lastStreamEventAt: getChatState().lastStreamEventAt,
+              now: Date.now(),
+              state: stallDecisionRef.current,
+            });
+            setShowStallDecision(false);
+          }}
+          onWake={() => {
+            stallDecisionRef.current = resetToIdle();
+            setShowStallDecision(false);
+            wakeStream();
+          }}
+          onInterrupt={() => {
+            stallDecisionRef.current = resetToIdle();
+            setShowStallDecision(false);
+            interrupt();
+          }}
         />
       )}
       {/* 队列作为输入框容器的插槽(top/right), 与输入框共享外框(无双重边框)

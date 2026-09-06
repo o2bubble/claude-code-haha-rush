@@ -1,5 +1,4 @@
 import memoize from 'lodash-es/memoize.js'
-import { getAPIProvider } from './providers.js'
 
 export type ModelCapabilityOverride =
   | 'effort'
@@ -7,6 +6,7 @@ export type ModelCapabilityOverride =
   | 'thinking'
   | 'adaptive_thinking'
   | 'interleaved_thinking'
+  | 'reasoning'
 
 const TIERS = [
   {
@@ -29,9 +29,12 @@ const TIERS = [
  */
 export const get3PModelCapabilityOverride = memoize(
   (model: string, capability: ModelCapabilityOverride): boolean | undefined => {
-    if (getAPIProvider() === 'firstParty') {
-      return undefined
-    }
+    // NOTE: no getAPIProvider() === 'firstParty' gate here. Base-url relays
+    // (e.g. api.deepseek.com/anthropic) report as 'firstParty' yet are 3P —
+    // the user opts into an override by setting ANTHROPIC_DEFAULT_*_MODEL +
+    // ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES on their profile. Model
+    // capability env is honored for ANY pinned model, standard first-party
+    // profiles simply never set these vars.
     const m = model.toLowerCase()
     for (const tier of TIERS) {
       const pinned = process.env[tier.modelEnvVar]

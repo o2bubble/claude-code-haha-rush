@@ -1176,7 +1176,14 @@ export function toggleGroupHidden(nodeId: string) {
 
 // Shortcuts
 export function toggleLeftPanel() { toggleGroupHidden("sidebar-left"); }
-export function toggleRightPanel() { toggleGroupHidden("chat-split"); }
+export function toggleRightPanel() {
+  // 右侧聊天列：默认布局为 chat-split(split，含消息+输入)；用户自定义布局可能把右
+  // 侧改成单独的 chat-messages-group(group，直接挂根，如根 split sizes=[..,30] 末位)。
+  // 若硬编码 chat-split，而它已不在树里 → findParentSplit 返回 null → toggleGroupHidden
+  // 第 1154 行 if(!parent) return 静默失效(点按钮无反应)。动态挑树里真正存在的那个。
+  const target = findParentSplit(tree, "chat-split") ? "chat-split" : "chat-messages-group";
+  toggleGroupHidden(target);
+}
 export function toggleBottomPanel() { toggleGroupHidden("bottom-panel"); }
 
 // ── 布局预设 — 替代「恢复默认布局」：从预设里选一套面板排布 ──

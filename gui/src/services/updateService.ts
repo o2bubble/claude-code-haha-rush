@@ -13,12 +13,20 @@ export function getUpdateAvailability(): { hasUpdate: boolean; version: string }
   return { hasUpdate: _hasUpdate, version: _updateVersion };
 }
 
-/** A "real" update = an installed component whose sha differs from remote.
- *  Components never installed (e.g. newly published like the updater) surface
- *  in the update panel as opt-in but must NOT light the red-dot badge or get
- *  auto-checked — they're a first-time install, not an update. */
+/** 组件即使"从未安装"也属必需项（升级新版 GUI 就必须带，否则功能降级/缺失）。
+ *  目前只有 server：新 GUI 依赖其 publish/claim/ack RPC。这类组件不得落入可忽略的
+ *  opt-in —— 必须进 updates 语义（亮红点 + 默认勾选 + 优先更新）。 */
+export const REQUIRED_COMPONENTS = ["server"] as const;
+
+/** A "real" update = an installed component whose sha differs from remote,
+ *  OR a never-installed component that is REQUIRED (e.g. server on first upgrade
+ *  to a GUI version that depends on it). Required-but-uninstalled components must
+ *  light the red-dot badge and get auto-checked — unlike pure opt-in components
+ *  (e.g. updater) which are a first-time install the user may skip. */
 export function hasRealUpdate(components: ComponentStatus[]): boolean {
-  return components.some((c) => c.needs_update && c.installed);
+  return components.some(
+    (c) => c.needs_update && (c.installed || REQUIRED_COMPONENTS.includes(c.name as any)),
+  );
 }
 
 export function setUpdateAvailability(hasUpdate: boolean, version: string): void {
@@ -58,6 +66,12 @@ function getBaseUrl(): string {
   return getSettings().skillRegistryUrl ?? "http://192.168.186.96:8765";
 }
 
+// 平台化下载：mac 走 ?platform=macos（服务器按平台分目录存 manifest + 组件 zip）。
+// check_for_updates 由 Rust 端按 target_os 加参数，这里只管组件下载 URL。
+function platformQuery(): string {
+  return /mac/i.test(navigator.platform || "") ? "?platform=macos" : "";
+}
+
 export const updateService = {
   async checkForUpdates(): Promise<UpdateCheckResult> {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -68,7 +82,7 @@ export const updateService = {
   async downloadAndInstall(componentName: string, version: string, postInstallJson?: string, newSha256?: string, newSize?: number): Promise<void> {
     const { invoke } = await import("@tauri-apps/api/core");
     const baseUrl = getBaseUrl();
-    const url = `${baseUrl}/api/updates/${version}/components/${componentName}/download`;
+    const url = `${baseUrl}/api/updates/${version}/components/${componentName}/download${platformQuery()}`;
     return invoke("download_and_install_component", {
       componentName,
       downloadUrl: url,
@@ -81,7 +95,7 @@ export const updateService = {
   async prepareGuiUpdate(version: string, newSha256?: string, newSize?: number): Promise<string> {
     const { invoke } = await import("@tauri-apps/api/core");
     const baseUrl = getBaseUrl();
-    const url = `${baseUrl}/api/updates/${version}/components/gui/download`;
+    const url = `${baseUrl}/api/updates/${version}/components/gui/download${platformQuery()}`;
     return invoke<string>("prepare_gui_update", {
       downloadUrl: url,
       newSha256: newSha256 ?? null,

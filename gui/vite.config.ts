@@ -8,6 +8,6 @@ export default defineConfig({
     strictPort: true,
     watch: { ignored: ['**/src-tauri/target/**'] },
   },
-  build: { target: 'esnext' },
+  build: { target: 'esnext', sourcemap: true },
   clearScreen: false,
 })

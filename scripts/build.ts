@@ -22,6 +22,7 @@ const ROOT = resolve(import.meta.dir, '..')
 const DIST = join(ROOT, 'dist')
 const DIST_BIN = join(DIST, 'bin')   // CLI tools only (rg, fd, jq, yq, shellcheck)
 const GUILDIR = join(ROOT, 'gui', 'src-tauri')
+const SERVERDIR = join(GUILDIR, 'server')   // GUI server daemon (独立二进制, 随 GUI 同目录分发)
 const UPDDIR = join(ROOT, 'updater')
 const BIN_DIR = join(ROOT, 'bin')
 
@@ -61,7 +62,7 @@ async function main() {
   // Known components: gui, claude, bun, updater (exe) + tools, python, git, extensions (dir).
   // --components <a,b,c> 只重建/重打这些组件，其余复用上一版本组件 zip 与现有 dist 产物。
   // 无 --components（且无 -only 旗标）时 = 全量构建，行为不变。
-  const KNOWN_COMPONENTS = ['gui', 'claude', 'bun', 'updater', 'tools', 'python', 'git', 'extensions']
+  const KNOWN_COMPONENTS = ['gui', 'server', 'claude', 'bun', 'updater', 'tools', 'python', 'git', 'extensions']
   const COMPONENTS_IDX = process.argv.indexOf('--components')
   const COMPONENTS_ARG = COMPONENTS_IDX >= 0 ? process.argv[COMPONENTS_IDX + 1] : null
   let COMPONENT_SET: Set<string> | null = null
@@ -210,6 +211,18 @@ async function main() {
     await copyGuiArtifact()
   } else {
     await buildGui()
+  }
+
+  // 3b. Build GUI server (cargo) — 独立守护进程，GUI 从 exe 同目录发现(find_server_exe)。
+  //     server 与 gui 强依赖：新 GUI 依赖新 server 的 publish/claim/ack RPC。上线时组件更新
+  //     顺序 server 优先于 gui(见 update.rs 组件优先级)，保证"新 GUI+新 server"配套。
+  const serverDistPath = join(DIST, isMac ? 'claude-gui-server' : 'claude-gui-server.exe')
+  const serverExeName = isMac ? 'claude-gui-server' : 'claude-gui-server.exe'
+  if (!selected('server') && existsSync(serverDistPath)) {
+    console.log('[3b/10] GUI server not in components — reusing existing dist')
+  } else {
+    console.log('[3b/10] Building GUI server...')
+    await smartRustBuild('GUI Server', SERVERDIR, serverExeName, serverExeName, [], 'server')
   }
 
   // 4. Build Updater (cargo) — macOS 无 Update.exe stager（.app 更新走整体替换），plan=skip
@@ -468,17 +481,9 @@ async function main() {
         process.exit(1)
       }
       console.log('  Extracted Python.framework → dist/python/')
-
-      // 裁剪冗余: python.org framework 完整提取含测试套件/文档/IDLE/缓存, 664MB 过大。
-      // 删运行不需要的目录 + 全部 __pycache__, 只保留标准库本体。
-      const VPY = join(PYTHON_DIR, 'Versions', 'Current')
-      const stdlib3 = join(VPY, 'lib', 'python3.12')
-      for (const d of ['test', 'idlelib', 'idle_test', 'lib2to3', 'tkinter', 'turtledemo']) {
-        rmSync(join(stdlib3, d), { recursive: true, force: true })
-      }
-      rmSync(join(VPY, 'share'), { recursive: true, force: true })
-      spawnSync(['find', PYTHON_DIR, '-name', '__pycache__', '-type', 'd', '-exec', 'rm', '-rf', '{}', '+'], { cwd: ROOT, timeout: 120000 })
-      console.log('  pruned python (test/Doc/IDLE/__pycache__)')
+      // 不做瘦身 —— 保持 python.org 完整 framework（universal2 双架构 + 完整标准库）。
+      // 实机测试：lipo -thin arm64 / 删 test/idlelib/lib2to3 会破坏 Framework，
+      // python 解释器报「缺少 Framework」。代价是体积增大，但优先可用性（宁可大也要能跑）。
       // 建 python3 兼容入口：settings.rs 注册 office MCP 用 {exe}/python/bin/python3，
       // 而 pkg 提取的 framework 顶层没有 bin/（python 在 Versions/<ver>/bin/ 下）。
       mkdirSync(join(PYTHON_DIR, 'bin'), { recursive: true })
@@ -700,6 +705,28 @@ async function main() {
       console.log(`  ${name}`)
     }
   }
+  } else {
+    // macOS launcher：Unix shebang，跟 claude 二进制平级放 dist/ 根。IDE 插件
+    // （vscode/intellij：extension.ts IDE_SCRIPT / intellij ProcessManager）按平台找
+    // 无扩展名 claude-ide，此前 mac 分支零 launcher → mac IDE 找不到启动脚本。
+    // CLI 用 shebang 调 claude；bun 脚本用 bun 调 .ts。claude/claude-haha 不生成
+    // （会与 mac 的 claude 二进制同名冲突，命令行直接用二进制）。
+    const unix: Record<string, string> = {
+      'claude-ide': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" --ide-mode "$@"\n',
+      'cla': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" "$@"\n',
+      'cla-bypass': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" --permission-mode bypassPermissions "$@"\n',
+      'claude-profile': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/claude-profile.ts" "$@"; else echo "[Error] bun not found."; fi\n',
+      'cdp-browser': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/cdp-browser.ts" "$@"; else echo "[Error] bun not found."; fi\n',
+      'kill-claude': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/kill-claude.ts" "$@"; else echo "[Error] bun not found."; fi\n',
+      'cdp-setup': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/cdp-setup.ts" "$@"; else echo "[Error] bun not found."; fi\n',
+      'memory-setup': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/memory-setup.ts" "$@"; else echo "[Error] bun not found."; fi\n',
+    };
+    for (const [name, content] of Object.entries(unix)) {
+      const p = join(DIST, name)
+      writeFileSync(p, content)
+      spawnSync(['chmod', '+x', p])
+      console.log(`  ${name}`)
+    }
   }
 
   // 11. Generate update manifest + component zips (only with --release <version>)
@@ -736,6 +763,11 @@ async function main() {
 
   // Directory content fingerprint — metadata-only, fast (~1s for 100k files)
   // Hashes (relative_path, file_size) pairs so content=immaterial changes are ignored
+  // ⚠️ 局限：size-only 摘要无法检出「内容变但大小恰好不变」的目录组件（如 mac 的
+  //  Claude Code.app，前端嵌入 claude-code-gui 二进制 size 相同但内容不同）→ 客户端
+  //  check_for_updates 只对比 sha 值，会漏提示更新。发布脚本需对 gui 组件用内容 hash
+  //  覆盖（见 temp/release_mac_*.py dir_content_hash）。勿在此改为内容 hash——会让全部
+  //  dir 组件 sha 算法突变，引发一次全量重下。
   function dirMetaHash(dir: string): string {
     const entries: Array<{ path: string; size: number }> = []
     for (const e of readdirSync(dir, { recursive: true })) {
@@ -770,9 +802,47 @@ async function main() {
     git: { kind: 'dir', path: 'git' },
     extensions: { kind: 'dir', path: 'extensions' },
   }
+  // server 仅 Windows 作为独立组件分发；mac 上随 .app(embed)，不作为独立 manifest 组件
+  // （mac 是整 .app 替换，独立 server 更新与时序冲突；GUI 从 exe 同目录 find_server_exe）。
+  if (PLATFORM === 'windows') {
+    componentSources.server = { kind: 'file', path: 'claude-gui-server.exe' }
+  }
   const manifestSources = Object.fromEntries(
     Object.entries(componentSources).filter(([name]) => planActive.has(name)),
   )
+
+  // macOS: 把全部组件合并进 Claude Code.app（Contents/MacOS/），出开箱即用的完整 .app。
+  // 必须在 manifestComponents 计算之前——gui 的 sha 是 .app 目录 hash，embed 后才是最终形态，
+  // 否则服务器 manifest 的 gui sha 与完整 .app 不符，客户端永远提示 gui 需更新。
+  if (PLATFORM === 'macos') {
+    const appMacOS = join(DIST, 'Claude Code.app', 'Contents', 'MacOS')
+    // gui 自身是 .app，不嵌；server 必须随 .app（GUI 从 current_exe 同目录找 claude-gui-server）
+    const embedDirs = ['claude', 'bun', 'bin', 'python', 'extensions', 'server']
+    for (const rel of embedDirs) {
+      const srcP = join(DIST, rel)
+      if (existsSync(srcP)) {
+        console.log(`  embed ${rel} → .app/Contents/MacOS/`)
+        const run = spawnSync(['ditto', srcP, join(appMacOS, rel)], { cwd: DIST, timeout: 600000 })
+        if (run.exitCode !== 0) {
+          console.error(`  [Error] embed ${rel} failed:`, run.stderr.toString())
+          process.exit(1)
+        }
+      } else {
+        console.warn(`  [Warn] embed ${rel}: dist/${rel} missing, skipping`)
+      }
+    }
+    // mac launcher 也复制进 .app 根（跟 claude 二进制平级）——IDE 插件按平台找
+    // 无扩展名 claude-ide（extension.ts:57 IDE_SCRIPT / intellij ProcessManager），
+    // 否则 .app 里只有 claude 没有 claude-ide，mac IDE 找不到启动脚本。
+    for (const name of ['claude-ide', 'cla', 'cla-bypass', 'claude-profile', 'cdp-browser', 'kill-claude', 'cdp-setup', 'memory-setup']) {
+      const srcP = join(DIST, name)
+      if (existsSync(srcP)) {
+        copyFileSync(srcP, join(appMacOS, name))
+        spawnSync(['chmod', '+x', join(appMacOS, name)])
+        console.log(`  embed launcher ${name} → .app/Contents/MacOS/`)
+      }
+    }
+  }
 
   const manifestComponents: Record<string, object> = {}
   for (const [name, src] of Object.entries(manifestSources)) {
@@ -782,9 +852,43 @@ async function main() {
       : { sha256: dirMetaHash(path), size: dirSize(path) }
   }
 
+  // release_notes 叠加历史：本版(--notes)在前 + 上一版本(本地 dist/release 最新)的累积
+  // 说明在后。客户端更新面板据此看到自上次更新以来的完整变更栈，而非单版孤岛。
+  const prevNotes = (() => {
+    const relDir = join(DIST, 'release')
+    if (!existsSync(relDir)) return ''
+    // 按版本号数值比较取"真正上一版"，而非字符串排序——字符串排序会把 .9 排在 .13 后
+    // ("9" > "1")，导致累积 notes 基底错取远早版本。数值比较才能保证基底是紧邻上一版。
+    const prevs = readdirSync(relDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name !== version && /^\d{4}\.\d{2}\.\d{2}/.test(d.name))
+      .map((d) => d.name)
+      .sort((a, b) => {
+        const num = (s: string) => s.match(/\d+/g)?.map(Number) ?? []
+        const aa = num(a), bb = num(b)
+        const n = Math.max(aa.length, bb.length)
+        for (let i = 0; i < n; i++) {
+          const x = aa[i] ?? 0, y = bb[i] ?? 0
+          if (x !== y) return x - y
+        }
+        return 0
+      })
+    if (!prevs.length) return ''
+    try { return JSON.parse(readFileSync(join(relDir, prevs[prevs.length - 1], 'manifest.json'), 'utf8')).release_notes || '' } catch { return '' }
+  })()
+  // 只保留最新几条：累积拼接会让 note 页无限变长。本版在前 + 最近若干版在后。
+  const MAX_RELEASE_NOTES = 5
+  const release_notes = [NOTES.trim(), prevNotes.trim()]
+    .filter(Boolean)
+    .join('\n\n---\n\n')
+    .split('\n\n---\n\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, MAX_RELEASE_NOTES)
+    .join('\n\n---\n\n')
+
   const manifest = {
     version,
-    release_notes: NOTES,
+    release_notes,
     published_at: publishedAt,
     components: manifestComponents,
   }
@@ -796,6 +900,13 @@ async function main() {
   // Also copy to dist/ root so installer can pick it up (updater reads {app}\manifest.json)
   copyFileSync(join(RELEASE_DIR, 'manifest.json'), join(DIST, 'manifest.json'))
   console.log(`  manifest.json → release/${version}/ + dist/`)
+
+  // 完整 .app 内置本地 manifest（组件 sha 已算好）——更新面板据此判定组件已安装，不重复下载
+  if (PLATFORM === 'macos') {
+    const appMacOS = join(DIST, 'Claude Code.app', 'Contents', 'MacOS')
+    copyFileSync(join(RELEASE_DIR, 'manifest.json'), join(appMacOS, 'manifest.json'))
+    console.log('  embed manifest.json → .app/Contents/MacOS/')
+  }
 
   // 组件选择 / GUI-only / update-only：复用上一版本组件 zip（只有目标组件变了），只重打对应 zip
   // 按语义版本排序（数值逐段比较）——字典序会让 2026.08.21.10 排在 .9 前面，取错复用源
@@ -822,25 +933,38 @@ async function main() {
 
   // 压缩组件 zip —— 复用/重打逻辑与原来一致（want/prevRelDir），
   // 差异只在源（manifestSources 按平台）与 zip 工具（mac 用系统 zip，Windows 用 Compress-Archive）。
+  // 记录每个组件压缩后 zip 的实际字节数，用于 Manifest 的 size 字段。
+  // 目录组件（mac 的 gui=.app、python/tools 等）之前用 dirSize()（未压缩目录总大小），
+  // 与实际分发下载的压缩 zip 差数倍 —— 客户端据此显示"动辄上G"。改为 zip 实际大小。
+  const zipSizes: Record<string, number> = {}
   const compress = (name: string, src: { kind: 'file' | 'dir'; path: string }) => {
     const srcPath = join(DIST, src.path)
     const zipPath = join(RELEASE_DIR, `${name}.zip`)
     if (!want(name)) {
-      if (existsSync(zipPath)) { console.log(`  ${name}.zip (kept existing)`); return }
+      if (existsSync(zipPath)) {
+        zipSizes[name] = statSync(zipPath).size
+        console.log(`  ${name}.zip (kept existing)`); return
+      }
       if (prevRelDir) {
         const prevZip = join(prevRelDir, `${name}.zip`)
         if (existsSync(prevZip)) {
           copyFileSync(prevZip, zipPath)
+          zipSizes[name] = statSync(zipPath).size
           console.log(`  ${name}.zip (reused from ${prevLabel})`)
           return
         }
       }
     }
     if (PLATFORM === 'macos') {
-      // macOS: 系统 zip（无 PowerShell）。file → 单文件入 zip 根；dir → 目录内容入 zip 根。
-      const run = src.kind === 'file'
-        ? spawnSync(['zip', '-j', '-q', zipPath, srcPath], { cwd: DIST })
-        : spawnSync(['zip', '-r', '-q', zipPath, '.'], { cwd: srcPath })
+      // macOS: 目录组件用 ditto 打 zip——保留 symlink/权限（python framework 的
+      //  symlink 不被解引用）。仅 gui 用 --keepParent（prepare_gui_update_mac
+      //  walkdir_find 找顶层 Claude Code.app/）；其他目录组件必须内容入 zip 根
+      //（try_install copy_dir_recursive(temp_dir, dst) 有顶层会复制出双层目录）。
+      // 单文件组件（claude/bun）无 symlink，zip -j 打根文件即可。
+      const keepParent = name === 'gui' ? ['--keepParent'] : []
+      const run = src.kind === 'dir'
+        ? spawnSync(['ditto', '-c', '-k', '--sequesterRsrc', ...keepParent, srcPath, zipPath], { cwd: DIST })
+        : spawnSync(['zip', '-j', '-q', zipPath, srcPath], { cwd: DIST })
       if (run.exitCode !== 0) {
         console.error(`  [Error] zip failed for ${name}:`, run.stderr.toString())
         process.exit(1)
@@ -850,11 +974,33 @@ async function main() {
       spawnSync(['powershell', '-NoProfile', '-Command',
         `Compress-Archive -Path '${arg}' -DestinationPath '${zipPath}' -Force`], { cwd: DIST })
     }
-    const sizeKB = Math.round(statSync(zipPath).size / 1024)
-    console.log(`  ${name}.zip (${sizeKB} KB)`)
+    const zipSize = statSync(zipPath).size
+    zipSizes[name] = zipSize
+    console.log(`  ${name}.zip (${Math.round(zipSize / 1024)} KB)`)
   }
 
   for (const [name, src] of Object.entries(manifestSources)) compress(name, src)
+
+  // 回填 Manifest 各组件 size 为实际压缩 zip 字节数（目录组件在 848-852 处用 dirSize
+  // 未压缩目录总大小，虚标数倍）。zip 此刻已全部生成，逐一改写 manifest 对象并重写
+  // 三个副本：release/<ver>/、dist/、.app/Contents/MacOS/（mac 内嵌）。
+  let manifestRewritten = false
+  for (const name of Object.keys(manifestComponents)) {
+    if (zipSizes[name] !== undefined && manifestComponents[name] && typeof manifestComponents[name] === 'object') {
+      ;(manifestComponents[name] as { size: number }).size = zipSizes[name]
+      manifestRewritten = true
+    }
+  }
+  if (manifestRewritten) {
+    writeFileSync(join(RELEASE_DIR, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
+    copyFileSync(join(RELEASE_DIR, 'manifest.json'), join(DIST, 'manifest.json'))
+    if (PLATFORM === 'macos') {
+      copyFileSync(join(RELEASE_DIR, 'manifest.json'), join(DIST, 'Claude Code.app', 'Contents', 'MacOS', 'manifest.json'))
+      console.log('  [fix] manifest size → zip actual size (re-embedded into .app)')
+    } else {
+      console.log('  [fix] manifest size → zip actual size')
+    }
+  }
 
   console.log(`  Release ${version} ready: dist/release/${version}/`)
 

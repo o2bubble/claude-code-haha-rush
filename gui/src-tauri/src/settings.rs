@@ -42,6 +42,10 @@ pub struct CompactPrompt {
     pub mode: String,
     #[serde(default)]
     pub text: String,
+    /// 预设标识（'none'|'handoff'|'custom'）。预设识别不再靠 text 字符串相等，
+    /// 这样改动预设模板（HANDOFF_COMPACT_PRESET）后旧设置仍能识别并自动刷新。缺省 None=旧结构。
+    #[serde(rename = "presetId", default)]
+    pub preset_id: Option<String>,
 }
 fn default_compact_mode() -> String { "append".into() }
 
@@ -57,6 +61,13 @@ pub struct AppSettings {
     pub terminal_max_entries: u32,
     #[serde(rename = "permissionMode", default = "default_permission_mode")]
     pub permission_mode: String,
+    /// Thinking toggle & effort tier — persisted so the frontend can restore
+    /// backend process memory after a backend restart (backend defaults both
+    /// to off; without this the toolbar shows "on" while requests omit thinking).
+    #[serde(rename = "thinkingModeEnabled", default)]
+    pub thinking_mode_enabled: Option<bool>,
+    #[serde(rename = "effort", default)]
+    pub effort: Option<String>,
     #[serde(rename = "layoutTree", default)]
     pub layout_tree: Option<serde_json::Value>,
     #[serde(rename = "showHiddenFiles", default)]
@@ -127,6 +138,8 @@ pub struct AppSettings {
     pub custom_compact_prompt: Option<CompactPrompt>,
     #[serde(rename = "compactExtractScript", default)]
     pub compact_extract_script: Option<String>,
+    #[serde(rename = "streamStallWakePrompt", default)]
+    pub stream_stall_wake_prompt: Option<String>,
 }
 
 pub fn default_work_dir() -> String {
@@ -149,6 +162,8 @@ impl Default for AppSettings {
             language: "zh".into(),
             terminal_max_entries: 50,
             permission_mode: "default".into(),
+            thinking_mode_enabled: None,
+            effort: None,
             layout_tree: None,
             show_hidden_files: false,
             workspaces: vec![],
@@ -184,6 +199,7 @@ impl Default for AppSettings {
             message_timeline: None,
             custom_compact_prompt: None,
             compact_extract_script: None,
+            stream_stall_wake_prompt: None,
         }
     }
 }
@@ -365,6 +381,16 @@ fn register_office_mcp_at(
                 .unwrap()
         }
     };
+    // 用户已有自定义 office 配置且其 command 指向的 python 可执行 → 保留用户自己的，
+    // 不覆盖（用户可能想在别的 python 环境跑 office MCP，例如自定义 venv/系统 python）。
+    // 若用户配置的 command 不可执行（坏配置），回退内置 python 覆盖自愈。
+    if let Some(existing) = servers.get("office") {
+        let cmd = existing.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        if !cmd.is_empty() && std::path::Path::new(cmd).exists() {
+            log::info!("office MCP: 保留用户已有配置 (command={cmd})，跳过覆盖");
+            return;
+        }
+    }
     servers.insert(
         "office".to_string(),
         serde_json::json!({
@@ -438,6 +464,155 @@ fn sync_office_guide_at(claude_dir: &std::path::Path, src: &std::path::Path) {
     }
     if std::fs::write(&claude_md, content).is_ok() {
         log::info!("Injected @office-bridge.md into {}", claude_md.display());
+    }
+}
+
+// ── CLI 工具提示词同步 ──
+
+/// GUI 启动时把 CLI 工具偏好（cli-tools.md）同步到 ~/.claude/ 并确保 `@cli-tools.md`
+/// 注入 CLAUDE.md（幂等）。install-tools 在 Windows 曾以文本表格注入过
+/// "## Preferred CLI Tools"；这里兼容：已有 @cli-tools.md 或已有该文本段则跳过，
+/// 避免重复。mac 手动装 .app 无 install-tools → 由 GUI 补齐。
+pub fn sync_cli_tools() {
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    else {
+        return;
+    };
+    let src = exe_dir
+        .join("extensions")
+        .join("cli-tools")
+        .join("cli-tools.md");
+    let claude_dir = user_home().join(".claude");
+    sync_cli_tools_at(&claude_dir, &src);
+}
+
+/// 删除 CLAUDE.md 里 install-tools 曾注入的 "## Preferred CLI Tools" 文本段（header 到下一个
+/// @ref / header / 文件尾），用于迁移到 @cli-tools.md。纯函数（可单测）。
+fn strip_cli_tools_section(content: &str) -> String {
+    let Some(idx) = content.find("## Preferred CLI Tools") else {
+        return content.to_string();
+    };
+    // 段起点：含 header 前可能的空行（\n\n 或 \n）
+    let mut start = idx;
+    if let Some(p) = content[..idx].rfind("\n\n") {
+        start = p + 2;
+    } else if let Some(p) = content[..idx].rfind('\n') {
+        start = p + 1;
+    }
+    // 段尾：下一个 "\n\n@" 或 "\n## " 或内容尾
+    let rest = &content[idx..];
+    let end = rest
+        .find("\n\n@")
+        .or_else(|| rest.find("\n## "))
+        .map(|p| idx + p)
+        .unwrap_or(content.len());
+    let mut out = content[..start].to_string();
+    out.push_str(&content[end..]);
+    out
+}
+
+/// 可注入核心（单测用临时目录，绝不碰真实 ~/.claude）。
+fn sync_cli_tools_at(claude_dir: &std::path::Path, src: &std::path::Path) {
+    if !src.exists() {
+        log::debug!("cli-tools: skip sync (source missing: {})", src.display());
+        return;
+    }
+    let _ = std::fs::create_dir_all(claude_dir);
+
+    let dst = claude_dir.join("cli-tools.md");
+    let needs_write = match std::fs::read(&dst) {
+        Ok(existing) => std::fs::read(src).map(|cur| existing != cur).unwrap_or(true),
+        Err(_) => true,
+    };
+    if needs_write {
+        if let Ok(content) = std::fs::read(src) {
+            if std::fs::write(&dst, content).is_ok() {
+                log::info!("Synced cli-tools → {}", dst.display());
+            }
+        }
+    }
+
+    // 迁移旧文本段 → @cli-tools.md（所有平台统一 @ref）：删掉 "## Preferred CLI Tools"
+    // 文本表（install-tools 曾注入），再注入 @cli-tools.md（幂等：已注入则跳过）。
+    let claude_md = claude_dir.join("CLAUDE.md");
+    let content = std::fs::read_to_string(&claude_md).unwrap_or_default();
+    let migrated = strip_cli_tools_section(&content);
+    let mut next = migrated;
+    let mut changed = next != content;
+    if !next.contains("@cli-tools.md") {
+        next = if next.is_empty() {
+            "# Claude Code Global Instructions\n\n@cli-tools.md\n".to_string()
+        } else {
+            next.trim_end().to_string() + "\n\n@cli-tools.md\n"
+        };
+        changed = true;
+    }
+    if changed {
+        if std::fs::write(&claude_md, next).is_ok() {
+            log::info!("Migrated CLI tools prompt to @cli-tools.md in {}", claude_md.display());
+        }
+    }
+}
+
+// ── python-env 指南同步 ──
+
+/// GUI 启动时把 python-env.md 同步到 ~/.claude/ 并确保 `@python-env.md` 注入 CLAUDE.md。
+/// 与 office-bridge 同模式（mac/win 统一、每次启动幂等、更新免重装），但内容按平台
+/// 动态生成 bundled python 路径——逻辑同 register_office_mcp：win=exe_dir/python/python.exe，
+/// mac=exe_dir/python/bin/python3（经 Versions/Current→3.12）。
+pub fn sync_python_env() {
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    else {
+        return;
+    };
+    let claude_dir = user_home().join(".claude");
+    sync_python_env_at(&claude_dir, &exe_dir);
+}
+
+/// 可注入核心（单测用临时目录 + 临时 exe_dir，绝不碰真实 ~/.claude）。
+fn sync_python_env_at(claude_dir: &std::path::Path, exe_dir: &std::path::Path) {
+    let py_exe = if cfg!(target_os = "windows") {
+        exe_dir.join("python").join("python.exe")
+    } else {
+        exe_dir.join("python").join("bin").join("python3")
+    };
+    let py = py_exe.display();
+    let content = format!(
+        "## Python Environment\n\nPrefer the user's existing Python environment (python / python3 on PATH).\nOnly fall back to the bundled Python when no system Python is found:\n  {}\n\nTo install packages with the bundled Python:\n  {} -m pip install <package>\n",
+        py, py
+    );
+
+    let _ = std::fs::create_dir_all(claude_dir);
+
+    // 内容不同才写，避免每次启动磁盘写。
+    let dst = claude_dir.join("python-env.md");
+    let needs_write = match std::fs::read_to_string(&dst) {
+        Ok(existing) => existing != content,
+        Err(_) => true,
+    };
+    if needs_write {
+        if std::fs::write(&dst, &content).is_ok() {
+            log::info!("Synced python-env.md → {}", dst.display());
+        }
+    }
+
+    // 注入 @python-env.md 到 CLAUDE.md（幂等：已存在则跳过）。
+    let claude_md = claude_dir.join("CLAUDE.md");
+    let mut content_md = std::fs::read_to_string(&claude_md).unwrap_or_default();
+    if content_md.contains("@python-env.md") {
+        return;
+    }
+    if content_md.is_empty() {
+        content_md = "# Claude Code Global Instructions\n\n@python-env.md\n".to_string();
+    } else {
+        content_md = content_md.trim_end().to_string() + "\n\n@python-env.md\n";
+    }
+    if std::fs::write(&claude_md, content_md).is_ok() {
+        log::info!("Injected @python-env.md into {}", claude_md.display());
     }
 }
 
@@ -636,6 +811,7 @@ fn merge_workspace_overrides(base: &mut AppSettings, o: &AppSettings) {
     if o.session_folders.is_some() { base.session_folders = o.session_folders; }
     if o.session_folder_tree.is_some() { base.session_folder_tree = o.session_folder_tree.clone(); }
     if o.message_timeline.is_some() { base.message_timeline = o.message_timeline; }
+    if o.stream_stall_wake_prompt.is_some() { base.stream_stall_wake_prompt = o.stream_stall_wake_prompt.clone(); }
     if o.window_width.is_some() { base.window_width = o.window_width; }
     if o.window_height.is_some() { base.window_height = o.window_height; }
     if o.window_x.is_some() { base.window_x = o.window_x; }
@@ -1051,6 +1227,44 @@ mod tests {
         assert!(global.get("mcpServers").and_then(|m| m.get("office")).is_none(), "缺文件不注册");
     }
 
+    /// 用户已有 office 配置且其 command 指向可执行文件 → 保留用户自己的，不覆盖。
+    #[test]
+    fn office_mcp_keeps_user_config_when_command_executable() {
+        // user 自定的 python：真实存在的可执行文件（用 fixture 的 py? 不行，fixture py 是空文件但 exists）。
+        // 这里用当前测试进程自身 exe 作为"用户可执行的 command"。
+        let user_cmd = std::env::current_exe().unwrap(); // 存在且"可执行"
+        // JSON 里反斜杠必须转义成 \\，否则 Command 路径含 \ 会让整个 JSON 非法、解析失败。
+        let cmd_escaped = user_cmd.to_string_lossy().replace('\\', "\\\\");
+        let dir = std::env::temp_dir().join(format!("office_mcp_keep_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let g = dir.join(".claude.json");
+        let user_json = format!(
+            r#"{{"mcpServers":{{"office":{{"command":"{}","args":["user_office_server.py"]}}}}}}"#,
+            cmd_escaped
+        );
+        let _ = std::fs::write(&g, user_json);
+
+        // 内置 py/server（空文件，exists=true），会被"保留用户"分支跳过
+        let builtin_py = dir.join("builtin_python.exe");
+        let builtin_server = dir.join("builtin_server.py");
+        let _ = std::fs::write(&builtin_py, "");
+        let _ = std::fs::write(&builtin_server, "");
+
+        register_office_mcp_at(&g, &builtin_py, &builtin_server);
+
+        let global = read_json(&g);
+        assert_eq!(
+            global["mcpServers"]["office"]["command"].as_str().unwrap(),
+            user_cmd.to_str().unwrap(),
+            "用户可执行的 office 配置应被保留，不覆盖成内置 python"
+        );
+        assert_eq!(
+            global["mcpServers"]["office"]["args"][0].as_str().unwrap(),
+            "user_office_server.py",
+            "用户的自定义 args 保留"
+        );
+    }
+
     // ── 压缩配置读回（struct 字段回归）──
 
     /// gui 键里的 customCompactPrompt/compactExtractScript 读回 AppSettings 必须保留。
@@ -1090,6 +1304,34 @@ mod tests {
         assert!(claude_md.contains("@office-bridge.md"), "应注入 @ 引用");
     }
 
+    #[test]
+    fn cli_tools_injects_and_idempotent() {
+        let (c, src) = guide_fixture("clitools");
+        std::fs::write(&src, "## Preferred CLI Tools\n\n| Task | Tool |\n|------|------|\n| search | `rg` |\n").unwrap();
+        sync_cli_tools_at(&c, &src);
+        let md = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
+        assert!(md.contains("@cli-tools.md"), "应注入 @ 引用");
+
+        std::fs::write(&src, "## Preferred CLI Tools\n\nupdated\n").unwrap();
+        sync_cli_tools_at(&c, &src);
+        let md2 = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
+        assert_eq!(md2.matches("@cli-tools.md").count(), 1, "@ 引用不重复注入");
+    }
+
+    /// CLAUDE.md 已有旧文本表格（install-tools 注入）→ 迁移：删文本段 + 注入 @cli-tools.md，其他 @ 保留。
+    #[test]
+    fn cli_tools_migrates_legacy_text() {
+        let (c, src) = guide_fixture("clitools_migrate");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join("CLAUDE.md"), "# header\n\n## Preferred CLI Tools\n\n| x | y |\n\n@other.md\n").unwrap();
+        std::fs::write(&src, "## Preferred CLI Tools\n\nnew\n").unwrap();
+        sync_cli_tools_at(&c, &src);
+        let md = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
+        assert!(!md.contains("## Preferred CLI Tools"), "旧文本段应被删除");
+        assert!(md.contains("@cli-tools.md"), "迁移后注入 @ 引用");
+        assert!(md.contains("@other.md"), "其他 @ 引用保留");
+    }
+
     /// 幂等：内容变化才更新 md，@ 引用不重复注入。
     #[test]
     fn office_guide_idempotent() {
@@ -1126,6 +1368,55 @@ mod tests {
         assert_eq!(md.matches("@office-bridge.md").count(), 1, "已有引用不重复");
         assert!(md.contains("@other.md"), "其余行保留");
         assert_eq!(std::fs::read_to_string(c.join("office-bridge.md")).unwrap(), "new\n");
+    }
+
+    // ── python-env 指南同步（临时目录 + 临时 exe_dir，绝不碰真实 ~/.claude）──
+
+    fn pyenv_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pyenv_{}_{}", std::process::id(), tag));
+        let _ = std::fs::create_dir_all(&dir);
+        let claude_dir = dir.join(".claude");
+        let exe_dir = dir.join("exe");
+        (claude_dir, exe_dir)
+    }
+
+    /// 生成 python-env.md（含平台 python 路径）+ 注入 @python-env.md。
+    #[test]
+    fn python_env_writes_and_injects() {
+        let (c, exe) = pyenv_fixture("basic");
+        sync_python_env_at(&c, &exe);
+
+        let content = std::fs::read_to_string(c.join("python-env.md")).unwrap();
+        assert!(content.contains("## Python Environment"), "生成 python-env.md");
+        assert!(content.contains(&exe.join("python").display().to_string()), "含 bundled python 路径");
+        assert!(content.contains("-m pip install"), "含 pip 安装说明");
+        let md = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
+        assert!(md.contains("@python-env.md"), "应注入 @ 引用");
+    }
+
+    /// 幂等：重复调用不重复注入 @ 引用。
+    #[test]
+    fn python_env_idempotent() {
+        let (c, exe) = pyenv_fixture("idem");
+        sync_python_env_at(&c, &exe);
+        sync_python_env_at(&c, &exe);
+
+        let md = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
+        assert_eq!(md.matches("@python-env.md").count(), 1, "@ 引用不重复注入");
+    }
+
+    /// CLAUDE.md 已有 @ 引用 → 不重复注入，其余行保留。
+    #[test]
+    fn python_env_keeps_existing_injection() {
+        let (c, exe) = pyenv_fixture("keep");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join("CLAUDE.md"), "# header\n\n@office-bridge.md\n@other.md\n").unwrap();
+        sync_python_env_at(&c, &exe);
+
+        let md = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
+        assert_eq!(md.matches("@python-env.md").count(), 1, "已有引用不重复");
+        assert!(md.contains("@office-bridge.md"), "其余 @ 引用保留");
+        assert!(md.contains("@other.md"), "其余行保留");
     }
 
     /// 迁移把 settings.json 根 mcpServers 搬进 ~/.claude.json；

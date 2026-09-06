@@ -1621,3 +1621,100 @@ Work the **frontier**: any ticket whose blockers are all done.
 - [x] 全 GUI 扫描并清理硬编码浅色（FileTree 拖入桌面死色）
 - [x] `bunx tsc --noEmit` 干净
 - [x] 验证：themeUtils 测试 16/16 PASS + 发布 08.19.6
+
+---
+
+## 启动意图 P1 — `--intent <id>` + server 意图会合（T1→T3 依赖序）
+
+**Source spec:** `.scratch/gui-intent-launch/PRD.md`
+
+**一句话目标：** 加一个全新启动通道 `claude-code-gui.exe --intent <intentId>`：命令行只传一个不可猜测 id，真正意图内容由 server 承载（publish → claim → 执行 → ack）。命令行进意图模式后忽略其余常规参数，先显式 ensure_server（bind 前）→ claim → bind 意图 workspace → 执行 `runIntent` → ack（发起方 P1 用 `query_intent_status` 轮询，P2 转定向通知，见 PRD §5.4）。
+
+**Blocked by:** 现有 server 骨架（`shared` + `server` crate，8766 单例 + `subscribe_events` 全广播），已就绪，不依赖其它未完成 ticket。
+
+### T1 — server 意图会合：publish / claim / ack / query + pending_intents
+
+**Status:** done (2026-08-28)
+
+**What to build:** 在 `gui/src-tauri/server/src/main.rs` 加意图会合。server 内存 `pending_intents` map（`intent_id → PendingIntent`，含 payload/origin/created_at/ttl_ms/claimed_by/claimed_at/status）。注册 4 个 RPC：`publish_intent(intent_id, payload, origin, ttl_ms)`（同 id 覆盖或拒绝）、`claim_intent(intent_id, client_id)`（原子 claim：pending 且未过期才返回 payload + 置 claimed_by；已领/过期 → 错误）、`ack_intent(intent_id, client_id, result?)`（claim 者才能标记 done，一次性）、`query_intent_status(intent_id)`（返回 status/payload?/result?，供发起方轮询）。TTL GC：读写顺带清理过期未领；claimed 超时未 ack → expired。intent_id 用 UUIDv4，防冒领。
+
+**Blocked by:** None — can start immediately（server 骨架已存在）
+
+- [x] `PendingIntent` 结构 + 全局 `Mutex<HashMap>` 或 `RwLock`
+- [x] `publish_intent` / `claim_intent`（原子）/ `ack_intent` / `query_intent_status` 四个 `register_method`
+- [x] TTL GC（过期未领/claimed/done 一律 remove，读写顺带 GC）
+- [x] server 测试：publish→claim（原子，二次 claim 报错）→ack（一次）→query 拿 done；TTL 过期清理；跨 client 冒领拒绝
+- [x] `cargo test`（server + shared）全绿
+
+### T2 — GUI Rust：`--intent` 解析 + 互斥 + 意图模式 + 显式 ensure_server(bind 前) + claim→bind
+
+**Status:** done (2026-08-28)
+
+**What to build:** `lib.rs` 启动参数解析第一步先看有无 `--intent <id>`：有则置 `startup_intent_mode=true` 存 intent_id，**跳过 `--workspace` 解析（不设 `CLI_WORKSPACE`，不与意向共存，互斥）**；无则走现状。意图模式下 `setup()` 里**在 bind 前显式 `ensure_server(server_state, 占位ws)`**（attach→spawn→local），server 起后 claim；local 降级则先渲染、后台等自愈后再 claim。暴露 `get_startup_intent_mode()` / `get_startup_intent_id()` 给前端。`is_first_instance`：意图启动即使第二实例绑同一工作区，**覆盖"不自动加载最近会话"抑制**（它 claim 的意图明确要打开某会话）→ 走 intent 分支。
+
+**Blocked by:** T1（claim 用 server RPC）
+
+- [x] `--intent` 解析 + `startup_intent_mode` / `intent_id` 全局（`CLI_INTENT_ID` OnceLock + `is_intent_mode()`）
+- [x] 互斥：`--intent` 出现 → 跳过 `--workspace` 解析（吞掉剩余命令行）
+- [x] 意图模式 setup() 显式 `ensure_server`（BEFORE bind），非意图保持现状（bind 后惰性）
+- [x] `get_startup_intent_mode()` / `get_startup_intent_id()` Tauri command
+- [x] `is_first_instance` 意图覆盖
+- [x] `cargo build`（gui）通过 + `bunx tsc --noEmit` 干净
+
+### T3 — GUI 前端：意图模式 + runIntent + 发起方轮询 query
+
+**Status:** done (2026-08-28)
+
+**What to build:** 前端 `App.tsx` 启动读 `get_startup_intent_mode()` + intent_id：非意图 → 现状 landing / auto-enter-recent；意图 → 等 server connected（闸门）→ `invoke claim_intent(intent_id)` → 得 payload `{workspace, kind, session_id?/panel_id?}` → bind(payload.workspace)（若 CLI 未绑）→ 等"意图依赖的数据就绪"（open_session→sessionsLoaded）→ `runIntent(kind)`：switchSession(session_id) / activatePanel(panel_id) → `ack_intent(intent_id, result)`。幂等只执行一次；数据未就绪短重试；失败 toast + ack(error)。**发起方闭环随 T4（会话行「在新窗口打开」publish+spawn+poll）。**
+
+**Blocked by:** T2（前端读 intent + invoke claim）
+
+- [x] `get_startup_intent_mode()`/intent_id 读侧 + 意图/非意图分支
+- [x] 意图分支：等 server connected → claim → bind → runIntent → ack
+- [x] `runIntent(kind)` 动作映射（open_session/focus_panel，kind 枚举加值不改管道）
+- [x] 幂等（`intentHandledRef`）+ 短重试（claim 40×300ms）+ 失败 toast + ack(error)
+- [x] 发起方侧 `query_intent_status` 轮询（P1；接收端已闭环 + 发起方见 T4）
+- [x] 验收（PRD §9）：`--intent` 启动意图模式；`--intent` + 常规参数同传 → 常规忽略；server 未起 → spawn daemon 降级；已被 claim → 报错不重复；第二实例 + intent → 仍开目标会话（不被 is_first_instance 抑制）；无 `--intent` → 与现状一致
+
+### T4 — 发起方闭环：会话行「在新窗口打开」(publish + spawn + poll)
+
+**Status:** done (2026-08-28)
+
+**What to build:** 发起方右击/悬停会话行「在新窗口打开」→ 生成 uuid intent_id → `publish_startup_intent` 到 server → `spawn_intent_gui`(current_exe `--intent <id>`) 新实例 → 轮询 `query_intent_status` 直到 done/expired/超时。server 不可用 → toast「无法在新窗口打开」。与 T1/T2/T3 组成 §8 P1 端到端闭环（§9「右击会话→新 GUI intent 模式→claim→bind→打开会话→ack」）。
+
+**Blocked by:** T1/T2/T3
+
+- [x] `server_client.rs`: publish_intent + query_intent_status 方法
+- [x] `lib.rs`: publish_startup_intent + spawn_intent_gui(current_exe --intent) + query_intent_status command
+- [x] SessionPanel: 会话行 hover「在新窗口打开」(ExternalLink) → publish → spawn → poll
+- [x] i18n: sessions.openInNewWindow (en/zh)
+- [x] `cargo build`（gui）0 错误 + `bunx tsc --noEmit` 干净 + server/vitest 全绿
+- [ ] 真机验证：右击会话 → 新 GUI 意图模式 → claim → bind → 打开该会话 → 发起方 toast「已打开」
+
+## Ready: Super Desktop 表格升级 — AG Grid adapter（多级表头/合并/样式/格式/冻结）
+
+Spec: `.scratch/desktop-table-upgrade/PRD.md` — Status: ready-for-agent
+
+### T1. Schema 扩展 + adapter 纯函数（主 seam）
+
+- [ ] `types/desktop.ts`: `TableColumn.children?/pinned?`、`TableContent.cellStyles?/formats?`、`CellStyle{color,bgColor,bold,italic,align,colSpan}` — 全可选，旧数据零迁移
+- [ ] 新增 adapter 纯函数（自有 schema ⇄ AG Grid colDef/rowData/cellStyle）：多级表头树→columnGroups、cellStyles→cellStyle+colSpan、formats→valueFormatter、pinned→pinned；旧数据（无新字段）透传行为不变；非法输入容错
+- [ ] adapter 单测（vitest，先例：desktopStore/snapAnchor/graphicContent 纯函数测试）：转换语义/旧数据兼容/round-trip
+
+### T2. TableItem 渲染层换 AG Grid（adapter 消费方）
+
+- [ ] `ag-grid-community` + `ag-grid-react` 引入（仅 Community，MIT）
+- [ ] TableItem 用 AG Grid 重写：双击单元格就地编辑（沿用）、+行/+列/双击改名沿用、右键菜单（合并选中格/清除样式/加删行列）
+- [ ] 主题对齐 CSS 变量（暗色 4 档走 isDarkTheme）；编辑态按键 stopPropagation 防画布穿透
+- [ ] 旧表格打开外观/编辑行为不变（硬线验收 4）
+
+### T3. MCP/AI 链路
+
+- [ ] MCP desktop_create_item / update_item 的 table content 校验放行新字段（新增字段全可选）
+- [ ] AI 指引文档（docs/gui 源 + 构建拷贝 ~/.claude/）补表格语法规范：字段说明/典型示例/「暂不支持」（rowSpan/条件着色/公式）清单；MCP tool 描述同步
+
+### T4. 验收（人工清单，PRD Further Notes）
+
+- [ ] 硬线：AI 一步生成（两级表头+标红加粗+千分位+冻结）一次正确 / 画布交互不打架 / 旧数据兼容 / 编辑回写
+- [ ] 软线：主题协调 / 3-4 张 50 行表格性能
+- [ ] `bunx tsc --noEmit` + vitest 全绿 + `cargo tauri build` 通过

@@ -1,11 +1,11 @@
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import { t } from "../../i18n";
 import { useEvent, useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
 import type { ChatInsertTextPayload, ChatAddReferencePayload, SettingsChangedPayload, ChatStateChangedPayload } from "../../services/events";
 import { formatReference } from "../../utils/referenceParser";
-import { saveClipboardItem } from "../../services/clipboardService";
-import { getChatState } from "../../stores/chatStore";
+import { saveClipboardItem, resolvePaste, collectPaste, isRealFilePath, defaultReadDir } from "../../services/clipboardService";
+import { getChatState, isChatReady } from "../../stores/chatStore";
 import { getSettings } from "../../stores/settingsStore";
 import type { SlashCommand } from "../../stores/chatStore";
 import { SlashCommandDropdown } from "./SlashCommandDropdown";
@@ -23,7 +23,6 @@ interface InputAreaProps {
 }
 
 const CHIP_ICONS: Record<string, string> = { file: "📄", dir: "📁", line: "📄", panel: "📋", session: "💬", paste: "📋", desktop: "🖥️", "desktop-item": "📌" };
-const PASTE_CHIP_THRESHOLD = 120; // chars — auto-collapse long pastes into chips
 
 /** Walk contenteditable DOM: text nodes → text, chips → @ref{...} or full text, <br> → newline */
 function extractContent(container: HTMLElement): string {
@@ -51,7 +50,7 @@ function hasContent(container: HTMLElement): boolean {
   return text.length > 0;
 }
 
-function insertChipAtCursor(container: HTMLElement, refText: string, label: string) {
+function insertChipAtCursor(container: HTMLElement, refText: string, label: string, anchorOffset = -1) {
   const icon = (() => {
     for (const [type, emoji] of Object.entries(CHIP_ICONS)) {
       if (refText.startsWith(`@ref{${type}:`)) return emoji;
@@ -74,7 +73,21 @@ function insertChipAtCursor(container: HTMLElement, refText: string, label: stri
   // Add click-to-remove
   chip.addEventListener("click", () => chip.remove());
 
+  container.focus();
   const sel = window.getSelection();
+  // 1) 面板发送时 composer 可能已失焦（实时 selection 不在容器内）——用缓存的光标锚点
+  //    定位插入点：有锚点则插到"记忆的光标处"，无锚点/越界则回退。这是"光标处追加"的关键。
+  if (anchorOffset >= 0 && setCaretAtCharOffset(container, anchorOffset)) {
+    const range = sel ? sel.getRangeAt(0) : null;
+    range?.deleteContents();
+    range?.insertNode(chip);
+    range?.setStartAfter(chip);
+    range?.collapse(true);
+    if (sel && range) { sel.removeAllRanges(); sel.addRange(range); }
+    container.focus();
+    return;
+  }
+  // 2) 实时 selection 在容器内 → 插光标处
   if (sel && sel.rangeCount > 0 && container.contains(sel.anchorNode)) {
     const range = sel.getRangeAt(0);
     range.deleteContents();
@@ -85,6 +98,7 @@ function insertChipAtCursor(container: HTMLElement, refText: string, label: stri
     sel.removeAllRanges();
     sel.addRange(range);
   } else {
+    // 3) 末尾追加兜底
     container.appendChild(chip);
   }
   container.focus();
@@ -113,6 +127,54 @@ function getCursorTextOffset(container: HTMLElement): number {
   };
   for (const child of container.childNodes) walk(child);
   return found ? offset : -1;
+}
+
+/**
+ * 把塌缩光标设到容器内指定字符偏移处（文本字符 + @ref chip 的引用长度，与
+ * getCursorTextOffset 互为逆映射）。面板发送时 composer 可能已失焦、实时 selection
+ * 不在容器内，用这个把"缓存的光标偏移"定回编辑器。越界/容器空 → false（调用方回退末尾追加）。
+ */
+function setCaretAtCharOffset(container: HTMLElement, offset: number): boolean {
+  if (offset < 0) return false;
+  let remaining = offset;
+  const walk = (node: Node): { node: Node; i: number } | null => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const len = (node.textContent || "").length;
+      if (remaining <= len) return { node, i: remaining };
+      remaining -= len;
+      return null;
+    }
+    if (node instanceof HTMLElement) {
+      if (node.dataset.ref) {
+        const len = (node.dataset.ref || "").length;
+        if (remaining <= len) return { node, i: 0 }; // 落在 chip 起点，插到它前面
+        remaining -= len;
+        return null;
+      }
+      for (const child of Array.from(node.childNodes)) {
+        const r = walk(child);
+        if (r) return r;
+      }
+    }
+    return null;
+  };
+  let target: { node: Node; i: number } | null = null;
+  for (const child of Array.from(container.childNodes)) {
+    const r = walk(child);
+    if (r) { target = r; break; }
+  }
+  if (!target) return false;
+  const sel = window.getSelection();
+  const range = document.createRange();
+  if (target.node.nodeType === Node.TEXT_NODE) {
+    range.setStart(target.node, target.i);
+  } else {
+    range.setStartBefore(target.node);
+  }
+  range.collapse(true);
+  if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+  container.focus();
+  return true;
 }
 
 /** Check if container text has a / at a word boundary before the cursor */
@@ -159,9 +221,16 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
   const [slashFilter, setSlashFilter] = useState("");
   const [slashAnchor, setSlashAnchor] = useState({ top: 0, left: 0 });
   const [slashHighlight, setSlashHighlight] = useState(0);
+  // 光标锚点：composer 聚焦时随时记住光标字符偏移，供面板"发送到聊天"引用（失焦时也能插到记忆位置）
+  const cursorOffsetRef = useRef<number>(-1);
 
   // Reactive slash commands from chatStore
   const chatPayload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
+  // 后端就绪 + 会话已加载 才能发送。就绪判定收敛到共享 isChatReady（单一源），
+  // 策略本身由 sendMessage 层拥有；这里只读 boolean 用于按钮 disabled 的 UI 反馈。
+  const backendReady = !!chatPayload?.state
+    ? isChatReady(chatPayload.state)
+    : isChatReady();
   const rawCommands: SlashCommand[] = chatPayload?.state?.slashCommands ?? getChatState().slashCommands ?? [];
   const slashCommands = rawCommands.filter((c) => c && c.cmd);
   const slashFiltered = slashCommands.filter((c) => {
@@ -173,10 +242,40 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
     if (divRef.current) setHasText(hasContent(divRef.current));
   }, []);
 
+  // 光标锚点更新：composer 处于 activeElement 时（聚焦态），selectionchange 随时记录偏移
+  useEffect(() => {
+    const onSelChange = () => {
+      const el = divRef.current;
+      if (el && document.activeElement === el) {
+        const o = getCursorTextOffset(el);
+        if (o >= 0) cursorOffsetRef.current = o;
+      }
+    };
+    document.addEventListener("selectionchange", onSelChange);
+    return () => document.removeEventListener("selectionchange", onSelChange);
+  }, []);
+
   // Handle plain-text insert (命令面板 atStart → 最前；其他 → 光标处)
-  useEventHandler<ChatInsertTextPayload>(Events.CHAT_INSERT_TEXT, ({ text: insertText, atStart, appendEnd }) => {
+  useEventHandler<ChatInsertTextPayload>(Events.CHAT_INSERT_TEXT, ({ text: insertText, atStart, appendEnd, replySuffix, newlineBefore }) => {
     const el = divRef.current;
     if (!el) return;
+    // 回复引用模式：若当前行有文字先换行，插入《选中文字》并把光标停在书名号中间
+    if (replySuffix) {
+      el.focus();
+      if (newlineBefore && hasContent(el)) el.appendChild(document.createElement("br"));
+      const prefix = document.createTextNode(insertText);          // 《选中文字
+      el.appendChild(prefix);
+      const suffix = document.createTextNode(replySuffix);         // 》
+      el.appendChild(suffix);
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.setStart(prefix, prefix.length);                        // 光标停在 prefix 末尾（》前）
+      range.collapse(true);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      updateHasText();
+      return;
+    }
     el.focus();
     const sel = window.getSelection();
     if (atStart) {
@@ -218,7 +317,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
     if (!el) return;
     const refText = formatReference(reference);
     const label = reference.label || reference.path.split(/[/\\]/).pop() || reference.path;
-    insertChipAtCursor(el, refText, label);
+    insertChipAtCursor(el, refText, label, cursorOffsetRef.current);
     updateHasText();
   });
 
@@ -231,6 +330,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
     onSend(content);
     el.innerHTML = "";
     setHasText(false);
+    cursorOffsetRef.current = -1; // 内容清空 → 锚点作废
   }, [onSend]);
 
   const handleSlashSelect = useCallback((cmd: string) => {
@@ -337,66 +437,52 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
       if (!el) return;
       el.focus();
 
-      // ── Images from clipboard (screenshot, copy image) ──
-      const items = e.clipboardData.items;
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (item.type.startsWith("image/")) {
-          const blob = item.getAsFile();
-          if (blob) {
-            const filePath = await saveClipboardItem(blob, workDir);
-            if (filePath) {
-              const name = filePath.split(/[/\\]/).pop() || "image";
-              const refText = formatReference({ type: "file", path: filePath, label: name });
-              insertChipAtCursor(el, refText, name);
-              updateHasText();
-            }
-            return;
-          }
+      // 提取结构化剪贴板输入，交给 resolvePaste 做粘贴决策。
+      const { files, images, text } = collectPaste(e);
+      const decision = await resolvePaste({
+        files,
+        images,
+        text,
+        pathExists: isRealFilePath,
+        readDir: defaultReadDir,
+      });
+
+      if (decision.kind === "refs") {
+        for (const r of decision.refs) {
+          const refText = formatReference({ type: r.type, path: r.path, label: r.label });
+          insertChipAtCursor(el, refText, r.label, cursorOffsetRef.current);
         }
+        updateHasText();
+        return;
       }
 
-      // ── Files from clipboard (copy from explorer) ──
-      const files = e.clipboardData.files;
-      if (files.length > 0) {
+      if (decision.kind === "saveImages") {
         let anySaved = false;
-        for (let i = 0; i < files.length; i++) {
-          const filePath = await saveClipboardItem(files[i], workDir, files[i].name);
+        for (const item of decision.items) {
+          const filePath = await saveClipboardItem(item.blob, workDir, item.name);
           if (filePath) {
-            const name = filePath.split(/[/\\]/).pop() || files[i].name;
+            const name = filePath.split(/[/\\]/).pop() || "image";
             const refText = formatReference({ type: "file", path: filePath, label: name });
-            insertChipAtCursor(el, refText, name);
+            insertChipAtCursor(el, refText, name, cursorOffsetRef.current);
             anySaved = true;
           }
         }
-        if (anySaved) { updateHasText(); return; }
+        if (anySaved) updateHasText();
+        return;
       }
 
-      // ── Text paste ──
-      const plain = e.clipboardData.getData("text/plain");
-      if (!plain) return;
-
-      if (plain.length > PASTE_CHIP_THRESHOLD) {
-        // Decode only for readable chip label; raw text stays in ref path
-        let labelSrc = plain;
-        if (plain.includes("%") && /%[0-9A-Fa-f]{2}/.test(plain)) {
-          try { labelSrc = decodeURIComponent(plain); } catch { /* keep raw */ }
-        }
-        const preview = labelSrc.replace(/\s+/g, " ").slice(0, 40);
-        const refText = formatReference({ type: "paste", path: plain, label: `${preview}…` });
-        insertChipAtCursor(el, refText, `${preview}…`);
+      // decision.kind === "inlineText": 普通短文本按光标位置插入。
+      const plain = decision.text;
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        range.insertNode(document.createTextNode(plain));
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
       } else {
-        const sel = window.getSelection();
-        if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
-          const range = sel.getRangeAt(0);
-          range.deleteContents();
-          range.insertNode(document.createTextNode(plain));
-          range.collapse(false);
-          sel.removeAllRanges();
-          sel.addRange(range);
-        } else {
-          el.appendChild(document.createTextNode(plain));
-        }
+        el.appendChild(document.createTextNode(plain));
       }
       updateHasText();
     },
@@ -506,16 +592,16 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
           ) : (
             <button
               onClick={handleSend}
-              disabled={!hasText}
+              disabled={!hasText || !backendReady}
               style={{
                 padding: "6px 14px",
                 border: "none",
                 borderRadius: 8,
-                backgroundColor: hasText ? "var(--accent)" : "#ccc",
+                backgroundColor: hasText && backendReady ? "var(--accent)" : "#ccc",
                 color: "var(--fg-inverse)",
                 fontSize: 13,
                 fontFamily: "var(--font-sans)",
-                cursor: hasText ? "pointer" : "default",
+                cursor: hasText && backendReady ? "pointer" : "default",
                 fontWeight: 600,
               }}
             >

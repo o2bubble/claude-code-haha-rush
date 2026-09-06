@@ -20,6 +20,7 @@ use tauri::Manager;
 use base64::Engine;
 
 mod notes;
+mod server_client;
 mod update;
 
 mod backend;
@@ -38,6 +39,17 @@ struct DbState {
 
 /// The `--workspace <path>` CLI argument, if this instance was launched with one.
 static CLI_WORKSPACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The `--intent <intentId>` CLI argument, if this instance was launched in
+/// intent mode. Mutually exclusive with CLI_WORKSPACE: when set, regular args
+/// (including --workspace) are ignored and the server supplies everything.
+static CLI_INTENT_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// True when launched via `--intent <id>`. Intent-mode startup must ensure the
+/// server is up BEFORE binding (the intent payload picks the workspace).
+fn is_intent_mode() -> bool {
+    CLI_INTENT_ID.get().is_some()
+}
 
 /// 本进程当前持有的工作区锁路径（切换工作区时释放旧的，避免另一实例误判）。
 static HELD_WORKSPACE_LOCK: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
@@ -159,25 +171,44 @@ pub fn run() {
 
     log::info!("=== Claude Code GUI starting ===");
 
-    // --workspace <path>: bind this instance directly to a workspace (skips the
-    // workspace selector). Used by shortcuts / scripts for multi-instance.
+    // --intent <intentId>: intent mode (mutex). The real intent — including which
+    // workspace/kind — lives on the server (published by the launcher). This
+    // instance attaches, claims it, and executes instead of showing landing.
+    // --intent swallows all regular args, so --workspace is ignored when present.
+    // --workspace <path>: (non-intent) bind directly, skipping the selector.
     let mut cli_workspace: Option<String> = None;
+    let mut cli_intent: Option<String> = None;
     {
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
-            if a == "--workspace" {
-                if let Some(v) = args.next() {
-                    cli_workspace = Some(v);
+            match a.as_str() {
+                "--intent" => {
+                    if let Some(v) = args.next() {
+                        cli_intent = Some(v);
+                    }
+                    // Intent mode: ignore the rest of the command line.
+                    break;
                 }
+                "--workspace" => {
+                    if let Some(v) = args.next() {
+                        cli_workspace = Some(v);
+                    }
+                }
+                _ => {}
             }
         }
-        if let Some(ws) = &cli_workspace {
-            log::info!("CLI --workspace: {}", ws);
-            CLI_WORKSPACE.set(ws.clone()).ok();
-            // Set the process-level binding early so setup()'s settings::load_settings()
-            // merges this workspace's gui (window state, layout) before restore.
-            settings::set_bound_work_dir(ws);
-        }
+    }
+    if let Some(id) = &cli_intent {
+        log::info!("CLI --intent: {} (intent mode — regular args ignored)", id);
+        CLI_INTENT_ID.set(id.clone()).ok();
+        // Do NOT set_bound_work_dir here — the workspace comes from the intent
+        // payload (claimed on the server), not the command line.
+    } else if let Some(ws) = &cli_workspace {
+        log::info!("CLI --workspace: {}", ws);
+        CLI_WORKSPACE.set(ws.clone()).ok();
+        // Set the process-level binding early so setup()'s settings::load_settings()
+        // merges this workspace's gui (window state, layout) before restore.
+        settings::set_bound_work_dir(ws);
     }
 
     let settings = settings::load_settings();
@@ -254,6 +285,7 @@ pub fn run() {
             work_dir: work_dir.clone(),
         }))
         .manage(Mutex::new(settings.clone()))
+        .manage(Mutex::new(Option::<server_client::ServerClient>::None))
         .manage(Mutex::new(backend::BackendState {
             process: None,
             backend_pid: None,
@@ -263,6 +295,9 @@ pub fn run() {
         }))
         .manage(guard::GuardRuntime::default())
         .setup(move |app| {
+            // 全局 AppHandle：供 server 事件转发器 emit 到前端。
+            server_client::set_app_handle(app.handle().clone());
+
             // 进程级环境：GUI 及其所有子进程（IDE 后端/系统终端）不需要系统注册表
             // 即可工作。系统级只保留 CLAUDE_CODE_HAHA_HOME（非 GUI 场景锚点），
             // PATH 等工具目录在进程内前置——免提权、装完免重启、mac/win 统一。
@@ -308,6 +343,10 @@ pub fn run() {
             if saved_window_maximized {
                 let _ = main_window.maximize();
             }
+            // The OS may have placed the window at the hidden sentinel before
+            // assigning a slot (or the saved position points at a removed monitor)
+            // — bring it back on-screen so the GUI is never invisible.
+            ensure_window_on_screen(app.handle(), &main_window);
             // 迁移旧版散落的项目/工作区级 profile 到用户级（幂等）。
             migrate_legacy_profiles();
             // 单文件→双文件回退：把 settings.json 根 mcpServers 迁到 ~/.claude.json，
@@ -319,6 +358,12 @@ pub fn run() {
             // office 操作指南同步到 ~/.claude/ + 注入 @office-bridge.md（每次启动幂等，
             // 更新免重装；安装器只管装文件，不碰用户配置）。
             settings::sync_office_guide();
+            // python-env 指南同步（同模式）：mac 无安装器，靠 GUI 启动把 python-env.md
+            // 同步到 ~/.claude/ + 注入 @python-env.md，bundled python 路径按平台动态生成。
+            settings::sync_python_env();
+            // CLI 工具提示词同步（同模式）：install-tools 在 Windows 注入过文本表格，
+            // mac 手动 .app 无 install-tools，靠 GUI 启动把 cli-tools.md 同步 + 注入 @cli-tools.md。
+            settings::sync_cli_tools();
 
             // Windows: kill the IDE backend synchronously when the user logs off
             // or shuts down. tao never forwards WM_QUERYENDSESSION, so without
@@ -346,7 +391,20 @@ pub fn run() {
             let mcp_port = mcp::start_mcp_server(app.handle().clone());
             log::info!("MCP server started on port {}", mcp_port);
 
-            if let Some(ws) = cli_workspace {
+            if is_intent_mode() {
+                // Intent-mode startup: the intent payload (including which
+                // workspace) lives on the server, so we CANNOT bind until we
+                // claim it. Ensure the server is up FIRST (attach→spawn→local);
+                // the frontend's intent flow then claims → binds → executes. A
+                // `workspace` of "" is fine — subscribe_events is all-broadcast.
+                let server_state = app.state::<Mutex<Option<server_client::ServerClient>>>();
+                let ensured = tauri::async_runtime::block_on(server_client::ensure_server(&server_state, ""));
+                if ensured.is_some() {
+                    log::info!("Intent-mode startup: server connected");
+                } else {
+                    log::warn!("Intent-mode startup: server unavailable — degraded to local");
+                }
+            } else if let Some(ws) = cli_workspace {
                 // --workspace instance: bind synchronously (init DB, register MCP,
                 // spawn backend) so BackendState is populated before the webview
                 // loads — the frontend's bind call then short-circuits via the
@@ -356,8 +414,8 @@ pub fn run() {
                     Err(e) => log::error!("bind_workspace({}) failed: {}", ws, e),
                 }
             } else {
-                // No --workspace: no pre-start. The frontend shows the workspace
-                // selector and calls bind_workspace when the user picks one.
+                // No --workspace, no intent: no pre-start. The frontend shows the
+                // workspace selector and calls bind_workspace when the user picks one.
                 log::info!("No --workspace arg — waiting for workspace selection");
             }
 
@@ -368,7 +426,20 @@ pub fn run() {
             mcp::get_mcp_port,
             bind_workspace,
             get_cli_workspace,
+            get_startup_intent_mode,
+            get_startup_intent_id,
+            claim_startup_intent,
+            ack_startup_intent,
+            publish_startup_intent,
+            query_intent_status,
+            spawn_intent_gui,
+            get_gui_server_status,
+            restart_gui_server,
             is_first_instance,
+            notify_sessions_changed,
+            notify_settings_changed,
+            session_status_report,
+            get_session_statuses,
             db_save_plan,
             db_get_plans,
             db_get_plan_sessions,
@@ -400,11 +471,13 @@ pub fn run() {
             restart_ide_backend,
             fix_restart_ide_backend,
             list_model_profiles,
+            get_profile_env,
             switch_model_profile,
             create_profile,
             delete_profile,
             set_default_profile,
             open_system_terminal,
+            spawn_gui_instance,
             create_floating_window,
             open_url_window,
             open_in_explorer,
@@ -582,40 +655,329 @@ fn rename_path(path: String, new_name: String) -> Result<String, String> {
     Ok(new_path.to_string_lossy().to_string())
 }
 
+/// Bound workspace from settings (the data layer's per-workspace key).
+fn bound_workdir(settings: &Mutex<settings::AppSettings>) -> Result<String, String> {
+    let s = settings.lock().map_err(|e| format!("Lock error: {e}"))?;
+    Ok(s.work_dir.clone())
+}
+
+/// Degradation ladder (ticket 06): attach → spawn → re-attach → None (local).
+/// None → callers fall back to the local SQLite connection. On success caches
+/// the client and starts the background event forwarder.
+async fn server_client_or(
+    server_state: &Mutex<Option<server_client::ServerClient>>,
+    workspace: &str,
+) -> Option<server_client::ServerClient> {
+    server_client::ensure_server(server_state, workspace).await
+}
+
+/// Drop a cached server client after an RPC failure, so the NEXT call re-runs
+/// ensure_server (attach→spawn→re-attach) instead of being stuck on a dead
+/// connection. The current call already fell through to the local path.
+fn reset_server(server_state: &Mutex<Option<server_client::ServerClient>>) {
+    if let Ok(mut g) = server_state.lock() {
+        *g = None;
+    }
+}
+
 // ── DB commands ──
 
 #[tauri::command]
-fn db_save_plan(state: tauri::State<Mutex<DbState>>, settings: tauri::State<Mutex<settings::AppSettings>>, plan: db::PlanInput) -> Result<(), String> {
+async fn db_save_plan(
+    state: tauri::State<'_, Mutex<DbState>>,
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+    plan: db::PlanInput,
+) -> Result<bool, String> {
+    let ws = bound_workdir(&settings)?;
+    if let Some(client) = server_client_or(&server_state, &ws).await {
+        let payload = serde_json::to_value(&plan).map_err(|e| e.to_string())?;
+        match client.mutate(&ws, "plan", "", payload).await {
+            Ok(res) => return Ok(res.get("superseded").and_then(|v| v.as_bool()).unwrap_or(false)),
+            Err(_) => reset_server(&server_state), // dead connection → self-heal + local fallback
+        }
+    }
     let db = ensure_db(&state, &settings)?;
-    db::save_plan(&db.conn, &plan)
+    db::save_plan(&db.conn, &plan)?;
+    Ok(false)
+}
+
+/// Tell the server this GUI's chat session list changed, so other GUIs on the
+/// same user re-request theirs. No-op when no server — sessions still work locally.
+#[tauri::command]
+async fn notify_sessions_changed(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+) -> Result<(), String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        return client.notify_sessions_changed().await.map_err(|e| e);
+    }
+    Ok(())
+}
+
+/// Report this GUI's currently-open session + binary agent state (the server
+/// injects our client_id). No-op without a server — cross-GUI status isn't the
+/// local fallback's concern.
+#[tauri::command]
+async fn session_status_report(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+    session_id: String,
+    state: String,
+) -> Result<(), String> {
+    let ws = bound_workdir(&settings)?;
+    if let Some(client) = server_client_or(&server_state, &ws).await {
+        let status = claude_gui_shared::presence::SessionStatus {
+            workspace: ws.clone(),
+            session_id,
+            state: if state == "working" {
+                claude_gui_shared::presence::SessionState::Working
+            } else {
+                claude_gui_shared::presence::SessionState::Idle
+            },
+            client_id: client.client_id().to_string(),
+        };
+        return client.session_status_report(status).await;
+    }
+    Ok(())
+}
+
+/// Workspace-scoped snapshot of currently-open sessions + agent state (initial
+/// live state for a joining GUI). Empty when no server.
+#[tauri::command]
+async fn get_session_statuses(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+) -> Result<Vec<claude_gui_shared::presence::SessionStatus>, String> {
+    let ws = bound_workdir(&settings)?;
+    if let Some(client) = server_client_or(&server_state, &ws).await {
+        // Snapshot is used as the "open elsewhere" index — drop our own entry
+        // (the incremental stream already skips self) so our current session is
+        // never marked as open in another window.
+        let self_id = client.client_id().to_string();
+        return client
+            .get_session_statuses(&ws)
+            .await
+            .map(|v| v.into_iter().filter(|s| s.client_id != self_id).collect());
+    }
+    Ok(Vec::new())
+}
+
+/// Tell the server this GUI saved a workspace-scoped setting (e.g.
+/// favoriteSessionIds), so other GUIs reload their merged settings. No-op without
+/// a server — settings still work locally.
+#[tauri::command]
+async fn notify_settings_changed(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+) -> Result<(), String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        return client.notify_settings_changed().await.map_err(|e| e);
+    }
+    Ok(())
+}
+
+// ── Startup intent (--intent <id>) ──
+// The frontend can't construct a client_id for the server's atomic claim, so
+// these bridge commands send `client_id()` automatically.
+
+/// Claim this instance's startup intent on the server. Returns the pending
+/// intent record (payload incl. workspace/kind) or an error if the server is
+/// unreachable (local degraded) or the intent was already claimed/expired.
+#[tauri::command]
+async fn claim_startup_intent(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    intent_id: String,
+) -> Result<serde_json::Value, String> {
+    let Some(client) = server_client_or(&server_state, "").await else {
+        return Err("Server unavailable (local degraded)".to_string());
+    };
+    client.claim_intent(&intent_id).await
+}
+
+/// Ack the claimed intent after execution (done/failed). Only the claimer may
+/// ack, once. No-op without a server.
+#[tauri::command]
+async fn ack_startup_intent(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    intent_id: String,
+    result: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let Some(client) = server_client_or(&server_state, "").await else {
+        return Ok(());
+    };
+    client.ack_intent(&intent_id, result).await
+}
+
+// ── Launcher half of the startup-intent flow ──
+// Right-click "open in new window": publish the intent on the server, spawn a
+// new GUI with `--intent <id>`, then the launcher polls query_intent_status.
+
+/// Publish a startup intent so a freshly-spawned GUI can claim it. The payload
+/// (workspace, kind, session_id/panel_id) travels on the server.
+#[tauri::command]
+async fn publish_startup_intent(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    intent_id: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let Some(client) = server_client_or(&server_state, "").await else {
+        return Err("Server unavailable (local degraded)".to_string());
+    };
+    client.publish_intent(&intent_id, payload, 60_000).await
+}
+
+/// Poll an intent's status after the new GUI claims/acks it. Returns the record
+/// (status/payload/result/claimed_by) or an error if the intent was dropped.
+#[tauri::command]
+async fn query_intent_status(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    intent_id: String,
+) -> Result<serde_json::Value, String> {
+    let Some(client) = server_client_or(&server_state, "").await else {
+        return Err("Server unavailable (local degraded)".to_string());
+    };
+    client.query_intent_status(&intent_id).await
+}
+
+/// Spawn a NEW GUI instance with `--intent <id>`. Detaches from this process —
+/// the new instance opens its own window and runs the intent flow.
+#[tauri::command]
+fn spawn_intent_gui(intent_id: String) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--intent").arg(&intent_id);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW — spin up detached, no console
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+// ── GUI server 面板管理（Workers 面板）──
+
+/// 查询 GUI server 存活状态（只读，不主动拉起）。已连接且 ping 通 → connected=true；
+/// 已连接但 ping 失败（daemon 挂了）→ 清缓存并报 disconnected；未连接 → disconnected。
+/// 端口固定 8766（bind-to-claim 单例）。
+#[tauri::command]
+async fn get_gui_server_status(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+) -> Result<serde_json::Value, String> {
+    let connected = match server_state.lock().map(|g| g.clone()).unwrap_or(None) {
+        Some(client) => {
+            let alive = client.ping().await.map(|_| true).unwrap_or(false);
+            if !alive {
+                reset_server(&server_state); // 死连接 → 清缓存(Ping 失败)，自愈留给下次 ensure
+            }
+            alive
+        }
+        None => false,
+    };
+    Ok(serde_json::json!({ "connected": connected, "port": 8766_u16 }))
+}
+
+/// 手动重启 GUI server：断开当前 client 缓存 → 重新 ensure_server(attach→spawn→local)。
+/// server daemon 若已挂会自动重新拉起；已连则重新 attach。
+#[tauri::command]
+async fn restart_gui_server(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+) -> Result<(), String> {
+    reset_server(&server_state);
+    server_client::ensure_server(&server_state, "").await;
+    Ok(())
 }
 
 #[tauri::command]
-fn db_get_plans(state: tauri::State<Mutex<DbState>>, settings: tauri::State<Mutex<settings::AppSettings>>, offset: u32, limit: u32) -> Result<Vec<db::PlanRecord>, String> {
+async fn db_get_plans(
+    state: tauri::State<'_, Mutex<DbState>>,
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<db::PlanRecord>, String> {
+    let ws = bound_workdir(&settings)?;
+    if let Some(client) = server_client_or(&server_state, &ws).await {
+        match client.list_plans(&ws, offset, limit).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     let db = ensure_db(&state, &settings)?;
     db::get_plans(&db.conn, offset, limit)
 }
 
 #[tauri::command]
-fn db_get_plan_sessions(state: tauri::State<Mutex<DbState>>, settings: tauri::State<Mutex<settings::AppSettings>>) -> Result<Vec<db::PlanSession>, String> {
+async fn db_get_plan_sessions(
+    state: tauri::State<'_, Mutex<DbState>>,
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+) -> Result<Vec<db::PlanSession>, String> {
+    let ws = bound_workdir(&settings)?;
+    // 计划历史时间线也走 server 同源读（与 db_get_plans 一致），否则跨 GUI 实例读本地
+    // data.db 与 server 写入不一致 → 部分实例历史时间线消失。
+    if let Some(client) = server_client_or(&server_state, &ws).await {
+        match client.list_plan_sessions(&ws).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     let db = ensure_db(&state, &settings)?;
     db::get_plan_sessions(&db.conn)
 }
 
 #[tauri::command]
-fn db_save_desktop(state: tauri::State<Mutex<DbState>>, settings: tauri::State<Mutex<settings::AppSettings>>, desktop: db::DesktopRecord) -> Result<(), String> {
+async fn db_save_desktop(
+    state: tauri::State<'_, Mutex<DbState>>,
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+    desktop: db::DesktopRecord,
+) -> Result<bool, String> {
+    let ws = bound_workdir(&settings)?;
+    if let Some(client) = server_client_or(&server_state, &ws).await {
+        let payload = serde_json::to_value(&desktop).map_err(|e| e.to_string())?;
+        match client.mutate(&ws, "desktop", "", payload).await {
+            Ok(res) => return Ok(res.get("superseded").and_then(|v| v.as_bool()).unwrap_or(false)),
+            Err(_) => reset_server(&server_state), // dead connection → self-heal + local fallback
+        }
+    }
     let db = ensure_db(&state, &settings)?;
-    db::save_desktop(&db.conn, &desktop)
+    db::save_desktop(&db.conn, &desktop)?;
+    Ok(false)
 }
 
 #[tauri::command]
-fn db_get_desktops(state: tauri::State<Mutex<DbState>>, settings: tauri::State<Mutex<settings::AppSettings>>) -> Result<Vec<db::DesktopRecord>, String> {
+async fn db_get_desktops(
+    state: tauri::State<'_, Mutex<DbState>>,
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+) -> Result<Vec<db::DesktopRecord>, String> {
+    let ws = bound_workdir(&settings)?;
+    if let Some(client) = server_client_or(&server_state, &ws).await {
+        match client.list_desktops(&ws).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     let db = ensure_db(&state, &settings)?;
     db::get_desktops(&db.conn)
 }
 
 #[tauri::command]
-fn db_delete_desktop(state: tauri::State<Mutex<DbState>>, settings: tauri::State<Mutex<settings::AppSettings>>, id: String) -> Result<(), String> {
+async fn db_delete_desktop(
+    state: tauri::State<'_, Mutex<DbState>>,
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+    id: String,
+) -> Result<(), String> {
+    let ws = bound_workdir(&settings)?;
+    if let Some(client) = server_client_or(&server_state, &ws).await {
+        match client
+            .mutate(&ws, "delete_desktop", "", serde_json::json!({ "id": id }))
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     let db = ensure_db(&state, &settings)?;
     db::delete_desktop(&db.conn, &id)
 }
@@ -635,16 +997,18 @@ fn db_load_desktop_history(state: tauri::State<Mutex<DbState>>, settings: tauri:
 // ── Settings commands ──
 
 #[tauri::command]
-fn get_app_settings(state: tauri::State<Mutex<settings::AppSettings>>) -> Result<settings::AppSettings, String> {
-    let s = state.lock().map_err(|e| format!("Lock error: {}", e))?;
-    // Before a workspace is bound the state holds reload_effective_settings(global
-    // workDir) — that would leak one workspace's overrides (favoriteSessionIds,
-    // layoutTree, …) into every instance at startup. Return the pure global
-    // baseline until a workspace is bound; the frontend reloads after bind.
+fn get_app_settings(_state: tauri::State<Mutex<settings::AppSettings>>) -> Result<settings::AppSettings, String> {
+    // Before a workspace is bound, return the pure global baseline — the cached
+    // state would leak one workspace's overrides (favoriteSessionIds, layoutTree,
+    // …) into every instance at startup.
     if settings::bound_work_dir().is_empty() {
         return Ok(settings::load_global_settings());
     }
-    Ok(s.clone())
+    // Once bound, re-read the shared workspace file fresh instead of returning the
+    // bind-time cached state. Another GUI may have written it (e.g. favoriteSessionIds
+    // via cross-GUI sync); without this, reloadSettings sees a stale snapshot and the
+    // other instance's change never shows until a restart re-binds.
+    Ok(settings::reload_effective_settings(&settings::bound_work_dir()))
 }
 
 /// Returns the `--workspace <path>` CLI arg (if any). The frontend uses this to
@@ -654,10 +1018,31 @@ fn get_cli_workspace() -> Option<String> {
     CLI_WORKSPACE.get().cloned()
 }
 
+/// True when this instance was launched with `--intent <id>` (intent mode).
+/// The frontend reads this to run the intent flow instead of landing.
+#[tauri::command]
+fn get_startup_intent_mode() -> bool {
+    is_intent_mode()
+}
+
+/// The `--intent <intentId>` id (if any), so the frontend can claim it on the
+/// server, fetch the real payload, and execute.
+#[tauri::command]
+fn get_startup_intent_id() -> Option<String> {
+    CLI_INTENT_ID.get().cloned()
+}
+
 /// 本实例是否是「当前绑定工作区」的第一个实例（第二个实例绑定同一工作区应跳过
 /// "自动加载最近会话"）。
 #[tauri::command]
 fn is_first_instance() -> bool {
+    // Intent-launched instances always honor their explicit intent (open a given
+    // session), even if they're a second instance on the same workspace — the
+    // "skip auto-load latest session" suppression only applies to the normal
+    // path. See PRD §6.3.
+    if is_intent_mode() {
+        return true;
+    }
     IS_FIRST_INSTANCE.lock().map(|v| *v).unwrap_or(true)
 }
 
@@ -727,6 +1112,29 @@ fn save_window_state(
         "windowX": x, "windowY": y, "windowMaximized": maximized,
     });
     settings::merge_gui_patch(&path, &patch)
+}
+
+/// Guard: the main window must actually be on a screen. WebView2/tao can place
+/// an unpositioned window at Windows' off-screen sentinel (-32000,-32000) before
+/// the OS assigns a slot — a race that leaves the whole GUI invisible. A restored
+/// position can likewise point at a monitor that's since been removed. If the
+/// window's rect overlaps no monitor, re-center it on the primary screen.
+fn ensure_window_on_screen(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let Ok(pos) = window.outer_position() else { return; };
+    let Ok(size) = window.outer_size() else { return; };
+    let wx = pos.x;
+    let wy = pos.y;
+    let wxr = (wx, wy, wx + size.width as i32, wy + size.height as i32);
+    let monitors = app.available_monitors().unwrap_or_default();
+    let on_screen = monitors.iter().any(|m| {
+        let p = m.position();
+        let s = m.size();
+        let mxr = (p.x, p.y, p.x + s.width as i32, p.y + s.height as i32);
+        wxr.0 < mxr.2 && wxr.2 > mxr.0 && wxr.1 < mxr.3 && wxr.3 > mxr.1
+    });
+    if !on_screen {
+        let _ = window.center();
+    }
 }
 
 /// Bind this GUI instance to a workspace: init the per-workspace DB, spawn the
@@ -911,6 +1319,8 @@ fn list_model_profiles() -> Result<ModelProfilesResult, String> {
                     .unwrap_or_default();
                 let label = id.clone();
                 let mut model = String::new();
+                // 旧 profile 自动补能力 env（幂等；deepseek/qwen 推断，其余不动）
+                let _ = ensure_profile_capability_env(&path);
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     for (k, v) in parse_env_file(&content) {
                         if k == "ANTHROPIC_MODEL" || k == "ANTHROPIC_DEFAULT_SONNET_MODEL" {
@@ -953,6 +1363,8 @@ fn switch_model_profile(
         return Err(format!("Profile '{}' not found", profile_id));
     }
 
+    // 切换前确保能力 env 已补（旧 profile 自动迁移，幂等）
+    let _ = ensure_profile_capability_env(&profile_path);
     let content = std::fs::read_to_string(&profile_path)
         .map_err(|e| format!("Cannot read profile: {}", e))?;
     let env_vars = parse_env_file(&content);
@@ -1066,6 +1478,55 @@ fn ensure_profiles_dir() -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
+/// 为旧 profile 自动补能力 env（ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES）。
+/// 幂等：已含 `*_SUPPORTED_CAPABILITIES` 或未知 provider 时不动。
+/// 依据 ANTHROPIC_BASE_URL 推断：deepseek → thinking+reasoning（用 reasoning 字段控思考）；
+/// dashscope/aliyun（Qwen）→ thinking（Claude 原生 thinking 块）。其他 provider 不迁移
+/// （无法推断用什么字段，留给用户在 GUI 配置）。切换到旧 profile 时自动落盘，无需重建。
+fn ensure_profile_capability_env(path: &std::path::Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    if content.contains("_SUPPORTED_CAPABILITIES") {
+        return false;
+    }
+    let vars = parse_env_file(&content);
+    let base_url = vars
+        .iter()
+        .find(|(k, _)| k == "ANTHROPIC_BASE_URL")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    let caps = if base_url.contains("deepseek") {
+        "effort,max_effort,thinking,reasoning"
+    } else if base_url.contains("aliyuncs") || base_url.contains("dashscope") {
+        "effort,max_effort,thinking"
+    } else {
+        return false; // 未知 provider，不迁移
+    };
+
+    // 只为已设定 tier model 的层补能力 env（否则 get3PModelCapabilityOverride 匹配不到）
+    let mut additions = String::new();
+    for model_key in [
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    ] {
+        if vars.iter().any(|(k, _)| k == model_key) {
+            additions.push_str(&format!("{}_SUPPORTED_CAPABILITIES={}\n", model_key, caps));
+        }
+    }
+    if additions.is_empty() {
+        return false; // 未设任何 DEFAULT_*_MODEL，能力 env 无效
+    }
+
+    let mut new_content = content;
+    if !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    new_content.push_str(&additions);
+    std::fs::write(path, new_content).is_ok()
+}
+
 /// 迁移旧版散落在项目/工作区级的 .env.profiles：复制 *.env 到用户级，
 /// 同名不覆盖（用户级优先）。旧目录保留不删，避免破坏 git 仓库内已提交内容。
 pub(crate) fn migrate_legacy_profiles() {
@@ -1114,6 +1575,24 @@ fn create_profile(profile_name: String, env_vars: HashMap<String, String>) -> Re
     Ok(())
 }
 
+/// 读指定 profile 的 env 变量，供 GUI 编辑预填（新建模板只返回 id/label/model）。
+#[tauri::command]
+fn get_profile_env(profile_name: String) -> Result<std::collections::HashMap<String, String>, String> {
+    let dir = find_profiles_dir()
+        .ok_or_else(|| "Cannot find .env.profiles directory".to_string())?;
+    let path = dir.join(format!("{}.env", profile_name));
+    if !path.exists() {
+        return Err(format!("Profile '{}' not found", profile_name));
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Cannot read profile: {}", e))?;
+    let mut map = std::collections::HashMap::new();
+    for (k, v) in parse_env_file(&content) {
+        map.insert(k, v);
+    }
+    Ok(map)
+}
+
 #[tauri::command]
 fn delete_profile(profile_name: String) -> Result<(), String> {
     let dir = find_profiles_dir()
@@ -1123,6 +1602,38 @@ fn delete_profile(profile_name: String) -> Result<(), String> {
         return Err(format!("Profile '{}' not found", profile_name));
     }
     std::fs::remove_file(&path).map_err(|e| format!("Cannot delete profile: {}", e))?;
+
+    // 断掉迁移复活源：migrate_legacy_profiles 会从工作区/项目级的 .env.profiles 把
+    // 同名 .env 拷回用户级(dst.exists()==false 即拷)。若不删这里的源, 用户删除的
+    // profile 下次启动又会被迁移拷回——"删除后重启又出现"。同名的源文件一并清掉。
+    // work_dir 为空时退化为相对路径会误删 CWD 下文件, 必须先守住非空。
+    let work_dir = settings::load_settings().work_dir;
+    if !work_dir.is_empty() {
+        let legacy_src = std::path::PathBuf::from(&work_dir)
+            .join(".env.profiles").join(format!("{}.env", profile_name));
+        if legacy_src.exists() {
+            let _ = std::fs::remove_file(&legacy_src);
+            log::info!("[profile] 清理迁移源残留 {} (防复活)", legacy_src.display());
+        }
+    }
+    // find_project_root 的迁移源(安装版 script 所在项目根)也一并清理, 双源都断。
+    if let Ok(script) = find_ide_script() {
+        let root_src = find_project_root(&script).join(".env.profiles").join(format!("{}.env", profile_name));
+        if root_src.exists() {
+            let _ = std::fs::remove_file(&root_src);
+        }
+    }
+
+    // 若删的是当前激活 profile, 清掉指向它的标记, 避免重启后仍被当作激活。
+    if let Some((active_id, _)) = resolve_active_profile() {
+        if active_id == profile_name && !work_dir.is_empty() {
+            let _ = std::fs::remove_file(user_claude_dir().join(".env.active"));
+            let ws_marker = std::path::PathBuf::from(&work_dir).join(".claude").join("active-profile");
+            let _ = std::fs::remove_file(&ws_marker);
+            log::info!("[profile] 已删激活 profile, 清除 active 标记");
+        }
+    }
+
     log::info!("Profile deleted: {}", profile_name);
     Ok(())
 }
@@ -1663,9 +2174,15 @@ fn build_ide_backend_command(work_dir: &str) -> Result<Command, String> {
 
     // Stream idle watchdog — default-off in the engine, but without it a hung or
     // silently-dropped model API stream waits forever (SDK timeout only covers
-    // the initial fetch, not the streaming body). 5 min between chunks is
-    // generous enough for huge-context requests (582k+ tokens) while still
-    // recovering a genuinely stuck call instead of hanging the session.
+    // the initial fetch, not the streaming body). Kept long (300s) as a pure
+    // backstop: the GUI frontend already runs a stall "decision period" — after
+    // ~60s of silence it prompts the user to keep waiting or interrupt, and
+    // auto-interrupts at ~120s if unhandled. This hard watchdog only fires in the
+    // extreme case a user chose "keep waiting" then left, or the frontend's
+    // interrupt command never reached the backend. Long enough for huge-context
+    // cold-start (prefill can be silent before the first chunk) and for the
+    // "keep waiting" window; tool execution happens after the stream closes so
+    // long background tasks are unaffected.
     cmd.env("CLAUDE_ENABLE_STREAM_WATCHDOG", "1")
         .env("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "300000");
 
@@ -2128,9 +2645,15 @@ fn open_system_terminal(terminal_type: String, work_dir: String, claude_launch: 
 fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch: Option<bool>) -> Result<(), String> {
     use std::process::Command;
     let launch = claude_launch.unwrap_or(false);
+    // work_dir 为空时 `cd ""` 会报 bash 错（`: string is empty`），回退到主目录。
+    let target_dir = if work_dir.trim().is_empty() {
+        std::env::var("HOME").unwrap_or_else(|_| "~".into())
+    } else {
+        work_dir.clone()
+    };
     // 转义 work_dir 供 bash 引号内使用，再整体作为 AppleScript 字符串字面量转义。
     // 两层：`"` → `\"`（AppleScript 字面量），`\` → `\\`（保持 bash 路径原样）。
-    let work = work_dir.replace('\\', "\\\\").replace('"', "\\\"");
+    let work = target_dir.replace('\\', "\\\\").replace('"', "\\\"");
     let body = if launch {
         format!("cd \"{}\" && CLAUDE_CODE_SKIP_PROMPT_HISTORY=true claude", work)
     } else {
@@ -2140,11 +2663,46 @@ fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch:
         "tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{}\"",
         body
     );
-    Command::new("osascript")
+    // 用 .output() 而非 .spawn()：osascript 可能因 macOS 自动化权限(TCC)被拒而返回
+    // 非零退出码，但 spawn 不检查 → Rust 谎报 Ok、前端也以为成功，实际终端没开。
+    // 检查退出码，权限被拒(-1743)时给用户可读错误。
+    let out = Command::new("osascript")
         .arg("-e")
         .arg(&script)
-        .spawn()
-        .map_err(|e| format!("Failed to open Terminal: {}", e))?;
+        .output()
+        .map_err(|e| format!("Failed to run osascript: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "osascript failed (exit {:?}): {}. 可能是 macOS「自动化」权限未授权 — 请到 系统设置→隐私与安全性→自动化 允许本 App 控制「终端」(Terminal)",
+            out.status.code(),
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// 拉起一个新的 GUI 实例。macOS 双击 .app 走 LaunchServices 会复用已运行实例（多实例
+/// 起不来），这里用 `open -n` 强制开新进程；Windows 直接拉起当前 exe（普通多实例）。
+#[tauri::command]
+fn spawn_gui_instance() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
+    #[cfg(target_os = "macos")]
+    {
+        // .app 根 = Contents/MacOS/ 上溯两级（MacOS → Contents → *.app）
+        let app = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+            .ok_or_else(|| "无法定位 .app 根".to_string())?;
+        std::process::Command::new("open")
+            .arg("-n")
+            .arg(app)
+            .spawn()
+            .map_err(|e| format!("open -n 失败: {}", e))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::process::Command::new(&exe).spawn()
+            .map_err(|e| format!("spawn 失败: {}", e))?;
+    }
     Ok(())
 }
 
@@ -2205,22 +2763,28 @@ fn run_cli_print(app: tauri::AppHandle, prompt: String, work_dir: String) -> Res
 }
 
 fn run_cli_print_blocking(prompt: &str, work_dir: &str) -> Result<String, String> {
-    let script_name = if cfg!(target_os = "windows") { "claude-haha.cmd" } else { "claude-haha" };
+    // 翻译技能直调 claude 二进制（Windows=claude.exe、mac=claude），不走 claude-haha.cmd 壳。
+    // Windows 的 claude-haha.cmd 只是 "%~dp0claude.exe" %* 的转发壳，直调可省一层 shell。
+    // claude.exe 与 GUI 同目录（{app} 根），find_cli_script 的 exe 同目录直查能命中。
+    let script_name = if cfg!(target_os = "windows") { "claude.exe" } else { "claude" };
     let script = find_cli_script(script_name)?;
     let script = strip_extended_prefix(&script);
 
-    let project_root = find_project_root(&script);
-    let project_root = strip_extended_prefix(&project_root);
+    // mac 的 claude 在 .app/Contents/MacOS/ 下，find_project_root 上溯两级得到 Contents/（无意义），
+    // 用 work_dir 作为运行目录（翻译目标工作区）。Windows 的 claude.exe 在 {app} 根，同样上溯无意义，
+    // 故两平台都直接用 work_dir 运行，CLAUDE_CODE_CWD 也会覆盖实际 cwd。
+    let project_root = std::path::PathBuf::from(work_dir);
 
     let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.arg("/c").arg(&script).arg("-p");
+        let mut c = Command::new(&script);
+        c.arg("-p");
         #[cfg(windows)]
         c.creation_flags(CREATE_NO_WINDOW);
         c
     } else {
-        let mut c = Command::new("bash");
-        c.arg(&script).arg("-p");
+        // mac: claude 是二进制（非 shell 脚本），直接 exec，不由 bash 包裹。
+        let mut c = Command::new(&script);
+        c.arg("-p");
         c
     };
 
@@ -2259,6 +2823,12 @@ fn find_cli_script(script_name: &str) -> Result<std::path::PathBuf, String> {
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         for _ in 0..6 {
+            // exe 同目录直链：mac 的 .app/Contents/MacOS/claude、Windows 安装目录 {app}/claude.exe
+            // 都与 GUI 同目录平级放（不在 bin/ 子目录），先直查，避免多一层 shell/壳转发。
+            let direct = dir.join(script_name);
+            if direct.exists() {
+                return Ok(direct);
+            }
             let candidate = dir.join("bin").join(script_name);
             if candidate.exists() {
                 return Ok(candidate);
@@ -2343,7 +2913,9 @@ async fn install_skill(zip_url: String, skill_name: String) -> Result<(), String
             let target_dir = skills_dir.join(&skill_name);
             let temp_dir = skills_dir.join(format!(".tmp_install_{}", skill_name));
 
-            download_and_extract(&zip_url, &temp_dir)?;
+            // 技能下载不产生 UI 进度事件（update-download-progress 只给更新组件用），
+            // 传输层靠 callback 上报进度，这里传 None 即无 UI 副作用。
+            download_and_extract(&zip_url, &temp_dir, None)?;
 
             let skill_root = find_skill_root(&temp_dir)?;
 
@@ -2373,7 +2945,7 @@ async fn install_package(zip_url: String, package_name: String) -> Result<(), St
 
             let temp_dir = skills_dir.join(format!(".tmp_pkg_{}", package_name));
 
-            download_and_extract(&zip_url, &temp_dir)?;
+            download_and_extract(&zip_url, &temp_dir, None)?;
 
             let pkg_root = find_package_root(&temp_dir)?;
 
@@ -2413,10 +2985,10 @@ async fn install_package(zip_url: String, package_name: String) -> Result<(), St
 
 /// 下载 zip 字节，传输中断（decode/超时/连接）时自动重试一次。
 /// 公网大文件易被代理掐断 chunked 流 → 带重试显著降低偶发失败。
-fn download_zip_retry(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
+fn download_zip_retry(client: &reqwest::blocking::Client, url: &str, on_progress: Option<&ProgressCb>) -> Result<Vec<u8>, String> {
     let mut last_err: Option<String> = None;
     for attempt in 0..2 {
-        match download_zip_once(client, url) {
+        match download_zip_once(client, url, on_progress) {
             Ok(bytes) => return Ok(bytes),
             Err(e) => {
                 last_err = Some(e);
@@ -2429,18 +3001,72 @@ fn download_zip_retry(client: &reqwest::blocking::Client, url: &str) -> Result<V
     Err(last_err.unwrap_or_else(|| "download failed".to_string()))
 }
 
-fn download_zip_once(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
-    let response = client.get(url).send()
+fn download_zip_once(client: &reqwest::blocking::Client, url: &str, on_progress: Option<&ProgressCb>) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::time::Instant;
+    let mut response = client.get(url).send()
         .map_err(|e| format!("Download failed: {}", e))?;
     if !response.status().is_success() {
         return Err(format!("Download returned HTTP {}", response.status()));
     }
-    response.bytes()
-        .map_err(|e| format!("Download read failed: {}", e))
-        .map(|b| b.to_vec())
+    let total = response.content_length().unwrap_or(0);
+    let mut buf: Vec<u8> = Vec::with_capacity(total as usize);
+    let mut chunk = [0u8; 256 * 1024];
+    let start = Instant::now();
+    let mut last_emit = start;
+    loop {
+        let n = response.read(&mut chunk)
+            .map_err(|e| format!("Download read failed: {}", e))?;
+        if n == 0 { break; }
+        buf.extend_from_slice(&chunk[..n]);
+        // 每 ~300ms 上报一次进度（避免 IPC 刷爆）。传输层只调 callback，不 emit、不管理状态。
+        let now = Instant::now();
+        if now.duration_since(last_emit).as_millis() >= 300 {
+            if let Some(cb) = on_progress { cb(buf.len() as u64, total); }
+            last_emit = now;
+        }
+    }
+    // 结束前恒上报一次（缩放到 100% 或已下载量）
+    if let Some(cb) = on_progress { cb(buf.len() as u64, total); }
+    Ok(buf)
 }
 
-pub(crate) fn download_and_extract(url: &str, temp_dir: &std::path::Path) -> Result<(), String> {
+/// 下载进度回调：接收 (transferred_bytes, total_bytes)。由调用方决定是否/如何使用
+/// （update.rs 用它 emit 到前端；技能下载传 None 即不产生 UI 副作用）。
+/// 传输层保持纯净——不依赖 Tauri、不引用"组件"概念、不管理任何进度状态。
+pub type ProgressCb = Box<dyn Fn(u64, u64) + Send>;
+
+/// 构造"更新组件下载进度"回调：EMA 平滑速度状态封装在闭包里（不再用全局 map），
+/// 每次进度上报 emit `update-download-progress` 到前端。component 由调用方捕获。
+pub(crate) fn make_update_progress_cb(component: String) -> ProgressCb {
+    // EMA 状态在闭包外捕获（RefCell 内部可变），闭包多次调用共享同一速度状态。
+    use std::cell::RefCell;
+    use std::time::Instant;
+    let state = RefCell::new((0u64, Instant::now(), 0.0f64));
+    Box::new(move |transferred: u64, total: u64| {
+        let mut st = state.borrow_mut();
+        let (last_bytes, last_t, ema) = *st;
+        let now = Instant::now();
+        let dt = now.duration_since(last_t).as_secs_f64();
+        let delta = transferred.saturating_sub(last_bytes);
+        let instant = if dt > 0.001 { delta as f64 / dt } else { ema };
+        let new_ema = if ema == 0.0 { instant } else { ema * 0.7 + instant * 0.3 };
+        *st = (transferred, now, new_ema);
+
+        let percent = if total > 0 { (transferred as f64 * 100.0 / total as f64).min(100.0) } else { 0.0 };
+        if let Some(app) = server_client::app_handle() {
+            let _ = app.emit("update-download-progress", serde_json::json!({
+                "component": component,
+                "transferred": transferred,
+                "total": total,
+                "speedBytesPerSec": new_ema,
+                "percent": percent,
+            }));
+        }
+    })
+}
+
+pub(crate) fn download_and_extract(url: &str, temp_dir: &std::path::Path, on_progress: Option<ProgressCb>) -> Result<(), String> {
     if temp_dir.exists() {
         std::fs::remove_dir_all(temp_dir).ok();
     }
@@ -2452,7 +3078,7 @@ pub(crate) fn download_and_extract(url: &str, temp_dir: &std::path::Path) -> Res
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("Cannot create HTTP client: {}", e))?;
-    let bytes = download_zip_retry(&client, url)?;
+    let bytes = download_zip_retry(&client, url, on_progress.as_ref())?;
 
     let zip_path = temp_dir.join("download.zip");
     std::fs::write(&zip_path, &bytes)
@@ -2541,55 +3167,150 @@ fn has_skill_dirs(dir: &std::path::Path) -> bool {
     }
 }
 
-// ─── Notes commands ───
+// ─── Notes commands (user-level; route through server when reachable) ───
 
 #[tauri::command]
-fn note_create(input: notes::NoteInput) -> Result<notes::Note, String> {
+async fn note_create(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    input: notes::NoteInput,
+) -> Result<notes::Note, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_create(input.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_create(input)
 }
 
 #[tauri::command]
-fn note_update(id: String, input: notes::NoteUpdate) -> Result<notes::Note, String> {
+async fn note_update(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    id: String,
+    input: notes::NoteUpdate,
+) -> Result<notes::Note, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_update(&id, input.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_update(&id, input)
 }
 
 #[tauri::command]
-fn note_delete(id: String) -> Result<bool, String> {
+async fn note_delete(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    id: String,
+) -> Result<bool, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_delete(&id).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_delete(&id)
 }
 
 #[tauri::command]
-fn note_get(id: String) -> Result<notes::Note, String> {
+async fn note_get(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    id: String,
+) -> Result<notes::Note, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_get(&id).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_get(&id)
 }
 
 #[tauri::command]
-fn note_list(scope: Option<String>, tag: Option<String>, limit: Option<u32>) -> Result<Vec<notes::NoteSummary>, String> {
+async fn note_list(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    scope: Option<String>,
+    tag: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<notes::NoteSummary>, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_list(scope.clone(), tag.clone(), limit).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_list(scope, tag, limit)
 }
 
 #[tauri::command]
-fn note_search(query: String, scope: Option<String>, limit: Option<u32>) -> Result<Vec<notes::NoteSummary>, String> {
-    notes::note_search(&query, scope, limit)
+async fn note_search(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    query: String,
+    scope: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<notes::NoteSummary>, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_search(query.clone(), scope.clone(), limit).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
+    notes::note_search(query, scope, limit)
 }
 
 #[tauri::command]
-fn note_associate(input: notes::NoteAssocInput) -> Result<bool, String> {
+async fn note_associate(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    input: notes::NoteAssocInput,
+) -> Result<bool, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_associate(input.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_associate(input)
 }
 
 #[tauri::command]
-fn note_disassociate(source_id: String, target_id: String) -> Result<bool, String> {
+async fn note_disassociate(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    source_id: String,
+    target_id: String,
+) -> Result<bool, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_disassociate(&source_id, &target_id).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_disassociate(&source_id, &target_id)
 }
 
 #[tauri::command]
-fn note_tags(scope: Option<String>) -> Result<Vec<notes::TagCount>, String> {
+async fn note_tags(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    scope: Option<String>,
+) -> Result<Vec<notes::TagCount>, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_tags(scope.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_tags(scope)
 }
 
 #[tauri::command]
-fn note_get_all_tag_names() -> Result<Vec<String>, String> {
+async fn note_get_all_tag_names(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+) -> Result<Vec<String>, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_get_all_tag_names().await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_get_all_tag_names()
 }
 
@@ -2684,6 +3405,15 @@ mod tests {
 }
 
 #[tauri::command]
-fn note_apply_tag_mapping(mappings: HashMap<String, String>) -> Result<Vec<notes::TagCount>, String> {
+async fn note_apply_tag_mapping(
+    server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
+    mappings: HashMap<String, String>,
+) -> Result<Vec<notes::TagCount>, String> {
+    if let Some(client) = server_client_or(&server_state, "").await {
+        match client.note_apply_tag_mapping(mappings.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(_) => reset_server(&server_state),
+        }
+    }
     notes::note_apply_tag_mapping(mappings)
 }

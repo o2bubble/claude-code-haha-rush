@@ -79,6 +79,27 @@ export const editorStore = {
     notify();
   },
 
+  /** 关闭除 `path` 外的所有标签 */
+  closeOthers(path: string) {
+    _tabs = _tabs.filter((t) => t.path === path);
+    if (!_tabs.some((t) => t.path === _activePath)) _activePath = path;
+    notify();
+  },
+
+  /** 关闭所有非 dirty(未修改/未保存)的标签，保留有未保存改动的 */
+  closeUnmodified() {
+    _tabs = _tabs.filter((t) => t.dirty);
+    if (!_tabs.some((t) => t.path === _activePath)) _activePath = _tabs[0]?.path ?? null;
+    notify();
+  },
+
+  /** 关闭全部标签 */
+  closeAll() {
+    _tabs = [];
+    _activePath = null;
+    notify();
+  },
+
   setContent(path: string, content: string) {
     const tab = _tabs.find((t) => t.path === path);
     if (!tab || tab.deleted) return;

@@ -71,6 +71,9 @@ pub enum GuardEvent {
         queue_len: usize,
         user_interruption: bool,
     },
+    /// agent 回合进行中（streaming 变 true）。守卫据此在 Watching 下"跳过"回合卡死计时——
+    /// 合法的长回合（单回合 15min+）不是僵尸；TurnEnded 到来时清该标志。
+    Working,
     /// 心跳（兜底超时检测, 由运行时在确认超时后喂入）
     Tick,
 }
@@ -147,6 +150,8 @@ pub fn guard_reduce(state: &GuardState, ev: &GuardEvent) -> (GuardState, Vec<Gua
             (next, actions)
         }
         GuardEvent::Stop => (GuardState::default(), vec![]),
+        // 回合进行中是纯运行时标记(见 GuardRuntime::handle), reducer 不动状态
+        GuardEvent::Working => (state.clone(), vec![]),
         GuardEvent::TurnEnded { last_assistant_text, queue_len, user_interruption } => match state.status {
             GuardStatus::Off => (state.clone(), vec![]),
             // 战斗回合结束 → 发验收
@@ -280,6 +285,9 @@ struct GuardInner {
     asking_since: Mutex<Option<Instant>>,
     /// 最近一次回合活动(Start/TurnEnded/Stop); 用于 Watching 卡死检测
     last_activity: Mutex<Option<Instant>>,
+    /// agent 回合是否进行中（Working→true, TurnEnded→false）。Watching 卡死检测
+    /// 在回合进行中跳过——合法长回合(streaming 15min+)不是僵尸, 别误判 Pause。
+    in_turn: Mutex<bool>,
 }
 
 impl Default for GuardRuntime {
@@ -289,6 +297,7 @@ impl Default for GuardRuntime {
                 state: Mutex::new(GuardState::default()),
                 asking_since: Mutex::new(None),
                 last_activity: Mutex::new(None),
+                in_turn: Mutex::new(false),
             }),
             tx: Mutex::new(None),
         }
@@ -320,11 +329,18 @@ impl GuardRuntime {
                                 .lock()
                                 .unwrap()
                                 .map_or(false, |t| t.elapsed() >= Duration::from_millis(ACCEPT_TIMEOUT_MS)),
-                            GuardStatus::Watching => inner
-                                .last_activity
-                                .lock()
-                                .unwrap()
-                                .map_or(true, |t| t.elapsed() >= Duration::from_millis(TURN_STALL_TIMEOUT_MS)),
+                            GuardStatus::Watching => {
+                                // 回合进行中(streaming)不算僵尸——跳过; 只有空闲却无回合活动才判死
+                                if *inner.in_turn.lock().unwrap() {
+                                    false
+                                } else {
+                                    inner
+                                        .last_activity
+                                        .lock()
+                                        .unwrap()
+                                        .map_or(true, |t| t.elapsed() >= Duration::from_millis(TURN_STALL_TIMEOUT_MS))
+                                }
+                            }
                             _ => false,
                         }
                     };
@@ -338,6 +354,16 @@ impl GuardRuntime {
     }
 
     fn handle(inner: &std::sync::Arc<GuardInner>, app: &tauri::AppHandle, ev: GuardEvent) {
+        // Working: 回合进行中标记 — 不是 reducer 事件, 只更新回合基线, 让 Watching 卡死检测跳过。
+        if matches!(ev, GuardEvent::Working) {
+            *inner.in_turn.lock().unwrap() = true;
+            *inner.last_activity.lock().unwrap() = Some(Instant::now());
+            return;
+        }
+        // TurnEnded: 回合结束 → 清除进行中标记。
+        if matches!(ev, GuardEvent::TurnEnded { .. }) {
+            *inner.in_turn.lock().unwrap() = false;
+        }
         let mut state = inner.state.lock().unwrap();
         let (next, actions) = guard_reduce(&state, &ev);
         // 验收计时基线: 进入 Asking 起算, 离开 Asking 清零

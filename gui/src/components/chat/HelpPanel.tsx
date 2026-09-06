@@ -75,15 +75,15 @@ function LayoutDiagram() {
       <div style={{ display: "grid", gridTemplateColumns: "140px 1fr 140px", gridTemplateRows: "1fr 48px", gap: 4, height: 160, ...userSelectNone }}>
         <div style={{ background: "var(--accent-subtle)", borderRadius: "4px 0 0 0", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontSize: 10, color: "var(--accent)", fontWeight: 600, padding: 8, textAlign: "center", lineHeight: 1.5 }}>
           左侧面板<br />
-          <span style={{ fontWeight: 400, fontSize: 9, opacity: 0.7 }}>会话 · 文件 · 计划<br />子代理 · 技能 · 笔记</span>
+          <span style={{ fontWeight: 400, fontSize: 9, opacity: 0.7 }}>{t("help.zoneLeft")}<br />{t("help.zoneLeftSubA")}<br />{t("help.zoneLeftSubB")}</span>
         </div>
         <div style={{ background: "var(--bg-hover)", borderRadius: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--fg-muted)", fontWeight: 600, textAlign: "center", lineHeight: 1.5 }}>
           中心区域<br />
-          <span style={{ fontWeight: 400, fontSize: 9, opacity: 0.6 }}>编辑器 · 超级桌面</span>
+          <span style={{ fontWeight: 400, fontSize: 9, opacity: 0.6 }}>{t("help.zoneCenterSub")}</span>
         </div>
         <div style={{ background: "var(--accent-subtle)", borderRadius: "0 4px 0 0", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontSize: 10, color: "var(--accent)", fontWeight: 600, padding: 8, textAlign: "center", lineHeight: 1.5 }}>
           右侧面板<br />
-          <span style={{ fontWeight: 400, fontSize: 9, opacity: 0.7 }}>聊天消息<br />输入区域</span>
+          <span style={{ fontWeight: 400, fontSize: 9, opacity: 0.7 }}>{t("help.zoneRight")}<br />{t("help.zoneRightSub")}</span>
         </div>
         <div style={{ background: "var(--semantic-success-subtle, #e8f5e9)", borderRadius: "0 0 4px 4px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "var(--semantic-success)", fontWeight: 600, gridColumn: "1 / -1" }}>
           底部面板 — 终端
@@ -101,16 +101,16 @@ function ChatSplitDiagram() {
     <div style={{ ...diagramBox, padding: 8 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 3, height: 120, ...userSelectNone }}>
         <div style={{ flex: 1, background: "var(--bg-hover)", borderRadius: 4, padding: 8, display: "flex", flexDirection: "column", gap: 4 }}>
-          <div style={{ background: "var(--accent-subtle)", borderRadius: 4, padding: "4px 8px", fontSize: 9, color: "var(--accent)", alignSelf: "flex-start", maxWidth: "70%" }}>这是 AI 的回复...</div>
-          <div style={{ background: "var(--bg-surface)", borderRadius: 4, padding: "4px 8px", fontSize: 9, color: "var(--fg-muted)", alignSelf: "flex-end", maxWidth: "60%" }}>用户的消息</div>
-          <div style={{ background: "var(--accent-subtle)", borderRadius: 4, padding: "4px 8px", fontSize: 9, color: "var(--accent)", alignSelf: "flex-start", maxWidth: "75%" }}>工具调用: 编辑文件 app.tsx</div>
+          <div style={{ background: "var(--accent-subtle)", borderRadius: 4, padding: "4px 8px", fontSize: 9, color: "var(--accent)", alignSelf: "flex-start", maxWidth: "70%" }}>{t("help.demoAiReply")}</div>
+          <div style={{ background: "var(--bg-surface)", borderRadius: 4, padding: "4px 8px", fontSize: 9, color: "var(--fg-muted)", alignSelf: "flex-end", maxWidth: "60%" }}>{t("help.demoUserMsg")}</div>
+          <div style={{ background: "var(--accent-subtle)", borderRadius: 4, padding: "4px 8px", fontSize: 9, color: "var(--accent)", alignSelf: "flex-start", maxWidth: "75%" }}>{t("help.demoToolCall")}</div>
         </div>
         <div style={{ height: 32, background: "var(--bg-surface)", borderRadius: 4, border: "1px solid var(--border-light)", display: "flex", alignItems: "center", padding: "0 10px", fontSize: 10, color: "var(--fg-muted)" }}>
-          <span style={{ opacity: 0.5 }}>输入消息... @文件 Enter 发送</span>
+          <span style={{ opacity: 0.5 }}>{t("help.demoInputHint")}</span>
         </div>
       </div>
       <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 6 }}>
-        上方消息区实时展示对话流，下方输入框发送消息，粘贴文本/文件自动转为引用芯片。
+        {t("help.chatDiagramDesc")}
       </div>
     </div>
   );
@@ -173,7 +173,7 @@ function EditorTabsDiagram() {
         </div>
       </div>
       <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 6 }}>
-        多标签页 · 语法高亮 (Monaco Editor) · 行号 · Ctrl+S 保存
+        {t("help.editorDiagramDesc")}
       </div>
     </div>
   );
@@ -199,7 +199,7 @@ function TerminalTabsDiagram() {
         </div>
       </div>
       <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 6 }}>
-        多标签终端 · AI 命令实时输出 · xterm.js 模拟
+        {t("help.terminalDiagramDesc")}
       </div>
     </div>
   );

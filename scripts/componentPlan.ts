@@ -27,7 +27,7 @@ export interface PlanInput {
 }
 
 export const KNOWN_COMPONENTS = [
-  "gui", "claude", "bun", "tools", "python", "git", "extensions", "updater",
+  "gui", "server", "claude", "bun", "tools", "python", "git", "extensions", "updater",
 ] as const;
 
 /** 平台默认动作（全量构建语义）。mac 上 git 用系统（官方无便携发行版），
@@ -50,6 +50,7 @@ function artifactFor(platform: Platform, name: string, action: ComponentAction):
   if (action === "system" || action === "skip") return "none";
   switch (name) {
     case "gui": return platform === "windows" ? "exe" : "app";
+    case "server": return platform === "windows" ? "exe" : "binary"; // GUI server daemon, 随 GUI 同目录
     case "claude": return platform === "windows" ? "exe" : "binary";
     case "bun": return platform === "windows" ? "exe" : "binary";
     case "updater": return "exe";

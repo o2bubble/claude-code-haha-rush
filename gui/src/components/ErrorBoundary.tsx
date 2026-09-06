@@ -13,6 +13,12 @@ interface State {
 
 export class ErrorBoundary extends React.Component<Props, State> {
   state: State = { error: null };
+  // 一次性自动重试：懒加载/异步竞态导致的"临时渲染错"重试即恢复(如编辑器 Monaco 加载时序)。
+  // 每次错误周期仅自动重试一次；失败后靠手动重试(重置此标记)再允许一次自动重试，避免死循环。
+  autoRetried = false;
+  // 瞬时 hydration 错(#300/#310, 如 Monaco 重挂/重渲染竞态)的静默重试次数——这类错误
+  // 高发但重试即恢复, 不应每次都弹"面板加载失败"打扰用户; 超过上限才落手动 fallback。
+  transientRetries = 0;
 
   static getDerivedStateFromError(error: Error): State {
     return { error };
@@ -21,9 +27,26 @@ export class ErrorBoundary extends React.Component<Props, State> {
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     const label = this.props.panelName ? ` [${this.props.panelName}]` : "";
     console.error(`[ErrorBoundary${label}]`, error, info.componentStack);
+    const isTransientHydration = /does not match server-rendered HTML|Hydration failed|Text content did not match/.test(
+      String(error?.message || ""),
+    );
+    if (isTransientHydration) {
+      // 高发瞬时错: 静默重试, 每次隔一点延迟避免风暴; 试 2 次仍失败才落手动 fallback。
+      if (this.transientRetries < 2) {
+        this.transientRetries++;
+        setTimeout(() => this.setState({ error: null }), 120 * this.transientRetries);
+        return;
+      }
+    } else if (!this.autoRetried) {
+      this.autoRetried = true;
+      // 让错误先记录，下一帧重置重渲染——transient 竞态此时通常已恢复
+      setTimeout(() => this.setState({ error: null }), 0);
+      return;
+    }
   }
 
   handleRetry = () => {
+    this.autoRetried = false;
     this.setState({ error: null });
   };
 

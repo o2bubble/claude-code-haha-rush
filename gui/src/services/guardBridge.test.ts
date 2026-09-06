@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   getGuardStatus, guardActive, guardStart, guardStop, handleGuardAction,
   registerGuardChatApi, ACCEPT_TEXT, RESUME_TEXT, shouldReportTurnEnded,
-  findLastReportableAssistant,
+  findLastReportableAssistant, isSuppressExpired,
 } from "./guardBridge";
 
 const mockInvoke = vi.fn();
@@ -14,10 +14,11 @@ vi.mock("../stores/statusMsgStore", () => ({
   addStatusMessage: vi.fn(),
 }));
 
-// chatStore streaming 状态可控
+// chatStore streaming/backendBusy 状态可控
 let mockStreaming = false;
+let mockBackendBusy: boolean | undefined = undefined;
 vi.mock("../stores/chatStore", () => ({
-  getChatState: () => ({ streaming: mockStreaming, messages: [] }),
+  getChatState: () => ({ streaming: mockStreaming, backendBusy: mockBackendBusy, messages: [] }),
 }));
 
 const mockSend = vi.fn();
@@ -27,6 +28,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockInvoke.mockResolvedValue({});
   mockStreaming = false;
+  mockBackendBusy = undefined;
   registerGuardChatApi({ sendMessage: mockSend, releaseQueue: mockRelease });
   void guardStop(); // 回初始态(最终态 off)
 });
@@ -69,6 +71,16 @@ describe("handleGuardAction", () => {
     expect(mockRelease).not.toHaveBeenCalled();
   });
 
+  it("releaseNext is skipped when backendBusy=true even if streaming is false (interrupt desync)", () => {
+    // interrupt() 乐观清 streaming→false 但后端 turn 未收尾 (backendBusy=true)。
+    // 若只用 streaming 判"空闲"→ 放行 sendDrain 撞后端 busy 丢弃队首。
+    // 改用 backendBusy 后: 仍忙 → 不放行。
+    mockStreaming = false;
+    mockBackendBusy = true;
+    handleGuardAction({ type: "releaseNext" });
+    expect(mockRelease).not.toHaveBeenCalled();
+  });
+
   it("exit returns off", () => {
     handleGuardAction({ type: "sendAccept" });
     handleGuardAction({ type: "exit" });
@@ -99,6 +111,28 @@ describe("readiness watcher decision", () => {
   it("does not report within the 2s dedup window after dispatch report", () => {
     expect(shouldReportTurnEnded(true, false, 2000, 0)).toBe(false);
     expect(shouldReportTurnEnded(true, false, 3000, 1500)).toBe(false);
+  });
+
+  it("does not report when suppressed (interrupt optimistic flip is not a turn end)", () => {
+    // interrupt() 乐观置 streaming=false 而后端 turn 仍 busy:
+    // watcher 误报 → 验收 force 直发撞 busy("A prompt is already being processed")
+    expect(shouldReportTurnEnded(true, false, 3000, 0, true)).toBe(false);
+  });
+
+  it("suppression only gates the false flip, not the working report", () => {
+    // 抑制只影响上报判定; streaming 翻回 true(新回合)由 watcher 解除抑制
+    expect(shouldReportTurnEnded(false, true, 3000, 0, true)).toBe(false); // 翻转判定本就不报
+    expect(shouldReportTurnEnded(true, true, 3000, 0, true)).toBe(false);
+  });
+
+  it("suppress expiry unlocks the report (interrupt no-op fallback)", () => {
+    // interrupt no-op(后端本就空闲) → 权威信号永不来 → 3s 过期后解除抑制,
+    // watcher 恢复正常补报(此刻后端必然空闲, 不会撞 busy)
+    expect(isSuppressExpired(true, 1000, 1000 + 2999)).toBe(false);
+    expect(isSuppressExpired(true, 1000, 1000 + 3001)).toBe(true);
+    expect(isSuppressExpired(false, 1000, 1000 + 3001)).toBe(false);
+    // 过期后 shouldReportTurnEnded 不再被抑制
+    expect(shouldReportTurnEnded(true, false, 5000, 0, false)).toBe(true);
   });
 });
 

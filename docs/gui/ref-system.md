@@ -97,7 +97,7 @@ The `@ref{...}` syntax is the GUI's universal resource locator. Users send refer
 @ref{desktop-item:form/<uuid>}
 ```
 
-**When user sends this**: Call `desktop_get_items` MCP tool with the UUID to read the block content, then act on it.
+**When user sends this**: Call `desktop_get_items` MCP tool to read the block content, then act on it. Pass the item's raw id (the part **after** the leading `<type>/` — the item id is a bare UUID with no `/`). The tool also tolerates the full `type/<uuid>` form (it strips the leading type segment automatically), so either works.
 
 **Action**: Activates the Super Desktop panel, focuses and pans to the target item (blue glow animation 3s pulse). The item UUID comes from `desktop_get_items` MCP tool output.
 

@@ -127,7 +127,9 @@ export function SelectionToolbar({ container }: SelectionToolbarProps) {
   if (!enabled || !sel || !pos) return null;
 
   const clear = () => {
-    window.getSelection()?.removeAllRanges();
+    // 不 removeAllRanges：发送/回复的 CHAT_INSERT_TEXT handler 已在 composer 放好光标，
+    // 这里再清全局 selection 会把刚放的光标抹掉。工具栏用 setSel(null) 隐藏；消息区选区
+    // 会在 composer 聚焦时被自然替换（复制路径在 handleCopy 里单独清）。
     setSel(null);
     setPaths([]);
     setShowPaths(false);
@@ -137,9 +139,16 @@ export function SelectionToolbar({ container }: SelectionToolbarProps) {
     eventBus.emit(Events.CHAT_INSERT_TEXT, { text: sel.text, appendEnd: true });
     clear();
   };
+  const handleReply = () => {
+    // 回复引用：换行(若当前有内容) + 目标文本原样复制 + 末尾追加「」+ 光标停在「」中间待输入回复
+    eventBus.emit(Events.CHAT_INSERT_TEXT, { text: sel.text + "「", replySuffix: "」", newlineBefore: true });
+    clear();
+  };
   const handleCopy = () => {
     navigator.clipboard.writeText(sel.text).catch(() => {});
     clear();
+    // 复制不聚焦 composer（消息区选区保留），这里显式清掉选区高亮
+    window.getSelection()?.removeAllRanges();
   };
 
   const btnStyle = (primary: boolean): React.CSSProperties => ({
@@ -174,6 +183,7 @@ export function SelectionToolbar({ container }: SelectionToolbarProps) {
       }}
     >
       <button onClick={handleSend} style={btnStyle(true)}>{t("message.sendToChatInput")}</button>
+      <button onClick={handleReply} style={btnStyle(false)}>{t("message.reply")}</button>
       <span style={{ width: 1, height: 14, backgroundColor: "var(--border-medium)" }} />
       <button onClick={handleCopy} style={btnStyle(false)}>{t("message.copy")}</button>
 

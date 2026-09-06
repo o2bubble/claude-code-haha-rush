@@ -6,6 +6,7 @@ import type { Desktop, DesktopItem, Connection, ItemContent } from "../types/des
 import { pushSnapshot as pushSnapshotRaw, undo as undoRaw, redo as redoRaw } from "./desktopHistoryStore";
 import type { DesktopSnapshot, DesktopStateLike } from "./desktopHistoryStore";
 import { setSelection } from "../components/desktop/selectionStore";
+import { addStatusMessage } from "./statusMsgStore";
 import { getItemType } from "../services/itemTypeRegistry";
 
 // ─── Tauri invoke (dynamic import) ───
@@ -53,6 +54,10 @@ export function shouldAnimateViewport(): boolean {
 }
 let _nextZIndex = 100;
 let _saveTimer: ReturnType<typeof setTimeout> | null = null;
+// 变更集：notify 后仍未落盘的桌面 id。scheduleSave/forceSaveDesktop 按**脏桌面**
+// 逐个保存整快照——不能只存 getActiveDesktop()：MCP 可以指定任意 desktopId 变更
+// 非激活桌面，只存激活桌面会让那些条目"内存有、盘上无"且 API 照样返回成功。
+const _dirtyDesktops = new Set<string>();
 
 // ─── History helpers (wrap desktopHistoryStore, passing internal state) ───
 
@@ -102,6 +107,22 @@ export function getDesktopItem(itemId: string): DesktopItem | undefined {
   return undefined;
 }
 
+/** Owning desktop id of an item (for dirty-marking after item-scoped mutations). */
+function ownerDesktopIdOfItem(itemId: string): string | undefined {
+  for (const d of desktops) {
+    if (d.items.some((i) => i.id === itemId)) return d.id;
+  }
+  return undefined;
+}
+
+/** Owning desktop id of a connection (for dirty-marking after connection mutations). */
+function ownerDesktopIdOfConnection(connectionId: string): string | undefined {
+  for (const d of desktops) {
+    if (d.connections.some((c) => c.id === connectionId)) return d.id;
+  }
+  return undefined;
+}
+
 // ─── DataBus sync (Leaf windows) ───
 
 /** Replace entire desktop state from DataBus sync (Hub receiving from Leaf, or Leaf receiving from Hub). Emits EventBus only — no DataBus publish — to prevent infinite loop. */
@@ -127,13 +148,34 @@ async function fetchDesktops(): Promise<void> {
   _loading = true;
   notifyLoadChange();
   try {
+    // 未落盘的本地变更先 flush 再拉服务端——否则 500ms 防抖窗内的
+    // 新建条目会被服务端旧快照整体覆盖（create_item 假成功的放大器）。
+    // _refetching 期间 scheduleSave 被抑制，手动补 flush 不成环。
+    if (_dirtyDesktops.size > 0) await flushDirtyDesktops();
     const records = await withTimeout(
       tauriInvoke("db_get_desktops"),
       LOAD_TIMEOUT_MS,
       "加载桌面数据超时"
     );
     if (records && Array.isArray(records) && records.length > 0) {
-      desktops = records.map((r: any) => recordToDesktop(r));
+      // 保留本地已存在桌面的视口（pan/zoom + 网格）——跨 GUI refetch（server:data-changed）
+      // 或自 echo 时，服务端记录的 view 可能比本地旧（500ms 防抖保存尚未落库 / 他窗并发
+      // 改动）。无条件用服务端 view 重建会让用户刚做的缩放/平移"闪回"回旧值。items/
+      // connections/name 仍以服务端为准，只有视图保持本地（视图是本地交互态）。
+      const prevById = new Map(desktops.map((d) => [d.id, d]));
+      desktops = records.map((r: any) => {
+        const rec = recordToDesktop(r);
+        const prev = prevById.get(rec.id);
+        if (prev) {
+          rec.panX = prev.panX;
+          rec.panY = prev.panY;
+          rec.zoom = prev.zoom;
+          rec.showGrid = prev.showGrid;
+          rec.gridSize = prev.gridSize;
+          rec.snapToGrid = prev.snapToGrid;
+        }
+        return rec;
+      });
       activeDesktopId = desktops[0].id;
       // Restore max zIndex
       _nextZIndex = 100;
@@ -164,6 +206,10 @@ async function fetchDesktops(): Promise<void> {
 }
 
 let _loadPromise: Promise<void> | null = null;
+// True while mirroring server state (cross-GUI refetch). Suppresses the save that
+// notifyDesktopChanged would otherwise trigger — otherwise refetch → save →
+// db_changed broadcast → refetch ... creates an infinite A⇄B sync loop.
+let _refetching = false;
 
 /** Load the bound workspace's desktops once. Resolves only AFTER the persisted
  *  list has been fetched (waits for BACKEND_PORT_READY — the workspace may not
@@ -204,6 +250,16 @@ export function loadDesktops(): Promise<void> {
 /** 是否已加载过桌面（面板据此跳过重复 loading，直接显示 store 里的缓存数据） */
 export function hasLoadedDesktops(): boolean {
   return _loadedOnce;
+}
+
+/** 强制重新加载（跨 GUI db_changed refetch 用）——绕过 load-once 守卫，重新拉最新。 */
+export async function reloadDesktops(): Promise<void> {
+  _refetching = true;
+  try {
+    await fetchDesktops();
+  } finally {
+    _refetching = false;
+  }
 }
 
 /** 清除缓存的加载 promise，允许面板「重试」时重新走一遍完整加载流程 */
@@ -292,7 +348,7 @@ export function createDesktop(name: string): Desktop {
   };
   desktops = [...desktops, d];
   if (!activeDesktopId) activeDesktopId = d.id;
-  notifyDesktopChanged();
+  notifyDesktopChanged(d.id);
   return d;
 }
 
@@ -314,7 +370,7 @@ export function renameDesktop(id: string, name: string): void {
   desktops = desktops.map((d) =>
     d.id === id ? { ...d, name, updatedAt: Date.now() } : d
   );
-  notifyDesktopChanged();
+  notifyDesktopChanged(id);
 }
 
 // ─── Viewport ───
@@ -326,7 +382,7 @@ export function updateDesktopViewport(
   desktops = desktops.map((d) =>
     d.id === id ? { ...d, ...partial, updatedAt: Date.now() } : d
   );
-  notifyDesktopChanged();
+  notifyDesktopChanged(id);
 }
 
 export function clearDesktop(id: string): void {
@@ -335,7 +391,7 @@ export function clearDesktop(id: string): void {
     d.id === id ? { ...d, items: [], connections: [], updatedAt: Date.now() } : d
   );
   registeredItemIds.clear();
-  notifyDesktopChanged();
+  notifyDesktopChanged(id);
 }
 
 // ─── Item mutations ───
@@ -366,7 +422,7 @@ export function addItem(
       ? { ...d, items: [...d.items, full], updatedAt: Date.now() }
       : d
   );
-  notifyDesktopChanged();
+  notifyDesktopChanged(desktopId);
   return full;
 }
 
@@ -384,13 +440,16 @@ export function updateItem(
     ),
     updatedAt: Date.now(),
   }));
-  notifyDesktopChanged();
+  notifyDesktopChanged(ownerDesktopIdOfItem(itemId));
 }
 
 export function removeItem(itemId: string): void {
   for (const d of desktops) {
     if (d.items.some((i) => i.id === itemId)) { _push(d.id); break; }
   }
+  // 删除后项已移除，ownerDesktopIdOfItem 必返回 undefined → scheduleSave 退化
+  // 标激活桌面脏、真实 owner 永不落盘（删非激活桌面的项=假成功）。删除前先捕获 owner。
+  const ownerId = ownerDesktopIdOfItem(itemId);
   desktops = desktops.map((d) => ({
     ...d,
     items: d.items.filter((i) => i.id !== itemId),
@@ -400,7 +459,7 @@ export function removeItem(itemId: string): void {
     updatedAt: Date.now(),
   }));
   registeredItemIds.delete(itemId);
-  notifyDesktopChanged();
+  notifyDesktopChanged(ownerId);
 }
 
 export function moveItem(itemId: string, x: number, y: number): void {
@@ -412,7 +471,7 @@ export function moveItem(itemId: string, x: number, y: number): void {
     updatedAt: Date.now(),
   }));
   eventBus.emit(Events.DESKTOP_ITEM_MOVED, { itemId, x, y });
-  notifyDesktopChanged();
+  notifyDesktopChanged(ownerDesktopIdOfItem(itemId));
 }
 
 export function resizeItem(itemId: string, width: number, height: number): void {
@@ -425,7 +484,7 @@ export function resizeItem(itemId: string, width: number, height: number): void 
     ),
     updatedAt: Date.now(),
   }));
-  notifyDesktopChanged();
+  notifyDesktopChanged(ownerDesktopIdOfItem(itemId));
 }
 
 /** Move multiple items in a single store update. Caller pushes history once. */
@@ -438,7 +497,7 @@ export function batchMoveItems(updates: Map<string, { x: number; y: number }>): 
     }),
     updatedAt: Date.now(),
   }));
-  notifyDesktopChanged();
+  notifyDesktopChanged(ownerDesktopIdOfItem([...updates.keys()][0]));
 }
 
 export function bringItemToFront(itemId: string): void {
@@ -449,7 +508,7 @@ export function bringItemToFront(itemId: string): void {
     ),
     updatedAt: Date.now(),
   }));
-  notifyDesktopChanged();
+  notifyDesktopChanged(ownerDesktopIdOfItem(itemId));
 }
 
 // ─── Connection mutations ───
@@ -470,7 +529,7 @@ export function addConnection(
       ? { ...d, connections: [...d.connections, full], updatedAt: Date.now() }
       : d
   );
-  notifyDesktopChanged();
+  notifyDesktopChanged(desktopId);
   return full;
 }
 
@@ -478,12 +537,15 @@ export function removeConnection(connectionId: string): void {
   for (const d of desktops) {
     if (d.connections.some((c) => c.id === connectionId)) { _push(d.id); break; }
   }
+  // 删除后连线已移除，ownerDesktopIdOfConnection 必返回 undefined → scheduleSave
+  // 退化标激活桌面脏。删除前先捕获 owner。
+  const ownerId = ownerDesktopIdOfConnection(connectionId);
   desktops = desktops.map((d) => ({
     ...d,
     connections: d.connections.filter((c) => c.id !== connectionId),
     updatedAt: Date.now(),
   }));
-  notifyDesktopChanged();
+  notifyDesktopChanged(ownerId);
 }
 
 export function updateConnection(
@@ -500,7 +562,7 @@ export function updateConnection(
     ),
     updatedAt: Date.now(),
   }));
-  notifyDesktopChanged();
+  notifyDesktopChanged(ownerDesktopIdOfConnection(connectionId));
 }
 
 /** Restore desktop state from a snapshot (undo/redo). Does NOT push a snapshot. */
@@ -513,7 +575,7 @@ export function restoreSnapshot(
       ? { ...d, items: snap.items, connections: snap.connections, panX: snap.panX, panY: snap.panY, zoom: snap.zoom, updatedAt: Date.now() }
       : d
   );
-  notifyDesktopChanged();
+  notifyDesktopChanged(desktopId);
 }
 
 // ─── Batch / search / smart-place ───
@@ -699,36 +761,56 @@ function desktopToRecord(d: Desktop): any {
   };
 }
 
-function scheduleSave(): void {
+function scheduleSave(dirtyDesktopId?: string): void {
+  // 标脏的是**被改的桌面**；无参调用（视口/激活切换等）退回激活桌面。
+  const target = dirtyDesktopId
+    ? (desktops.find((d) => d.id === dirtyDesktopId)?.id ?? dirtyDesktopId)
+    : getActiveDesktop()?.id;
+  if (target) _dirtyDesktops.add(target);
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(() => {
-    const active = getActiveDesktop();
-    if (active) {
-      const record = desktopToRecord(active);
-      tauriInvoke("db_save_desktop", { desktop: record }).catch(() => {});
-    }
+    _saveTimer = null;
+    void flushDirtyDesktops();
   }, 500);
 }
 
-/** Force immediate persistence — call after MCP/batch mutations. */
+/** Persist every dirty desktop (whole-snapshot per desktop). Resolves when all
+ *  pending writes settle — MCP mutations await this so "API success" means
+ *  actually on disk. */
+async function flushDirtyDesktops(): Promise<void> {
+  if (_dirtyDesktops.size === 0) return;
+  const ids = [..._dirtyDesktops];
+  _dirtyDesktops.clear();
+  await Promise.all(ids.map(async (id) => {
+    const d = desktops.find((x) => x.id === id);
+    if (!d) return;
+    try {
+      const record = desktopToRecord(d);
+      const superseded = (await tauriInvoke("db_save_desktop", { desktop: record })) as boolean;
+      if (superseded) {
+        addStatusMessage("该桌面已被其他窗口修改，已用最新覆盖", "warn");
+      }
+    } catch {
+      // 写失败 → 重新标记脏，下次 schedule/flush 重试
+      _dirtyDesktops.add(id);
+    }
+  }));
+}
+
+/** Force immediate persistence — call after MCP/batch mutations. Awaits until
+ *  every dirty desktop is on disk. */
 export async function forceSaveDesktop(): Promise<void> {
   if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
-  const active = getActiveDesktop();
-  if (active) {
-    try {
-      const record = desktopToRecord(active);
-      await tauriInvoke("db_save_desktop", { desktop: record });
-    } catch {}
-  }
+  await flushDirtyDesktops();
 }
 
 // ─── Notification ───
 
-function notifyDesktopChanged(): void {
+function notifyDesktopChanged(dirtyDesktopId?: string): void {
   const payload = { desktops: [...desktops], activeDesktopId };
   eventBus.emit(Events.DESKTOP_CHANGED, payload, { sticky: true });
   // Publish to DataBus for cross-window sync (Leaf → Hub and Hub → Leaf)
   dataBus.publish("desktop.list", payload.desktops, { sticky: true });
   dataBus.publish("desktop.items", payload.activeDesktopId, { sticky: true });
-  scheduleSave();
+  if (!_refetching) scheduleSave(dirtyDesktopId);
 }

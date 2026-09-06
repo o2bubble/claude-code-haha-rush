@@ -67,7 +67,7 @@ import {
   getModelMaxOutputTokens,
   getSonnet1mExpTreatmentEnabled,
 } from '../../utils/context.js'
-import { resolveAppliedEffort } from '../../utils/effort.js'
+import { resolveAppliedEffort, type EffortLevel } from '../../utils/effort.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { errorMessage } from '../../utils/errors.js'
 import { computeFingerprintFromMessages } from '../../utils/fingerprint.js'
@@ -180,6 +180,7 @@ import { calculateUSDCost } from 'src/utils/modelCost.js'
 import { endQueryProfile, queryCheckpoint } from 'src/utils/queryProfiler.js'
 import {
   modelSupportsAdaptiveThinking,
+  modelSupportsReasoning,
   modelSupportsThinking,
   type ThinkingConfig,
 } from 'src/utils/thinking.js'
@@ -443,8 +444,26 @@ function configureEffortParams(
   extraBodyParams: Record<string, unknown>,
   betas: string[],
   model: string,
+  thinkingOn: boolean,
 ): void {
   if (!modelSupportsEffort(model) || 'effort' in outputConfig) {
+    return
+  }
+
+  // 3P models that think via the Claude `thinking` block (e.g. GLM via
+  // /api/anthropic): effort rides on a TOP-LEVEL `reasoning_effort` field,
+  // NOT `output_config.effort`. Sending output_config.effort to these
+  // gateways either errors (GLM 1210 on 'medium') or silently suppresses the
+  // thinking stream entirely (200 with zero thinking_delta — measured on
+  // open.bigmodel.cn). GLM 5.3-series only accepts low/high/max, so remap
+  // medium→high. reasoning_effort is only meaningful while thinking is on;
+  // when thinking is off there is nothing to grade — skip.
+  if (modelSupportsThinking(model) && !modelSupportsReasoning(model)) {
+    if (!thinkingOn) return
+    if (effortValue === undefined) return
+    if (typeof effortValue !== 'string') return // numeric override is ant-only/output_config territory
+    const mapped = effortValue === 'medium' ? 'high' : effortValue
+    extraBodyParams.reasoning_effort = mapped
     return
   }
 
@@ -691,6 +710,10 @@ export type Options = {
   skipCacheWrite?: boolean
   temperatureOverride?: number
   effortValue?: EffortValue
+  // 3P relay (DeepSeek etc.) that controls thinking via `reasoning:{effort}`
+  // (none = off, else intensity). Set by ideMode when the model is
+  // reasoning-capable; supersedes the Claude `thinking` block.
+  reasoningEffort?: EffortLevel | 'none'
   mcpTools: Tools
   hasPendingMcpServers?: boolean
   queryTracking?: QueryChainTracking
@@ -947,6 +970,30 @@ function isToolResult(
   block: BetaContentBlockParam,
 ): block is BetaToolResultBlockParam {
   return block.type === 'tool_result'
+}
+
+/**
+ * Strips `thinking` / `redacted_thinking` content blocks from ASSISTANT messages.
+ * Some Anthropic-compatible relays (e.g. qnaigc/GLM-type gateways) reject thinking
+ * blocks in history with "content[0].type类型错误" → 502; Anthropic itself accepts
+ * them but replayed thinking is unnecessary (the chain-of-thought text is preserved
+ * in the model's own context). Stripping is safe for both — this matches upstream
+ * Claude Code behavior of not replaying assistant thinking.
+ */
+export function stripThinkingFromAssistantMessages(
+  messages: (UserMessage | AssistantMessage)[],
+): (UserMessage | AssistantMessage)[] {
+  return messages.map(msg => {
+    if (msg.message.role !== 'assistant') return msg
+    const content = msg.message.content
+    if (!Array.isArray(content)) return msg
+    const stripped = content.filter(
+      b => b.type !== 'thinking' && b.type !== 'redacted_thinking',
+    )
+    return stripped.length === content.length
+      ? msg
+      : { ...msg, message: { ...msg.message, content: stripped } }
+  })
 }
 
 /**
@@ -1300,6 +1347,10 @@ async function* queryModel(
   // tool_uses and strips orphaned tool_results referencing non-existent tool_uses.
   messagesForAPI = ensureToolResultPairing(messagesForAPI)
 
+  // Strip assistant thinking blocks — some Anthropic-compatible relays (qnaigc/GLM
+  // gateways) reject them ("content[0].type类型错误" → 502). Safe for Anthropic too.
+  messagesForAPI = stripThinkingFromAssistantMessages(messagesForAPI)
+
   // Strip advisor blocks — the API rejects them without the beta header.
   if (!betas.includes(ADVISOR_BETA_HEADER)) {
     messagesForAPI = stripAdvisorBlocks(messagesForAPI)
@@ -1566,6 +1617,8 @@ async function* queryModel(
       extraBodyParams,
       betasParams,
       options.model,
+      thinkingConfig.type !== 'disabled' &&
+        !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_THINKING),
     )
 
     configureTaskBudgetParams(
@@ -1597,19 +1650,39 @@ async function* queryModel(
       thinkingConfig.type !== 'disabled' &&
       !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_THINKING)
     let thinking: BetaMessageStreamParams['thinking'] | undefined = undefined
+    // 3P reasoning-capable provider (e.g. DeepSeek): thinking on/off + intensity
+    // ride on `reasoning:{effort}`. Mutually exclusive with the Claude `thinking`
+    // block — never send both to the same provider.
+    const reasoningParams = options.reasoningEffort
+      ? { effort: options.reasoningEffort }
+      : undefined
 
     // IMPORTANT: Do not change the adaptive-vs-budget thinking selection below
     // without notifying the model launch DRI and research. This is a sensitive
     // setting that can greatly affect model quality and bashing.
-    if (hasThinking && modelSupportsThinking(options.model)) {
-      if (
+    if (!reasoningParams && modelSupportsThinking(options.model)) {
+      if (!hasThinking) {
+        // Thinking OFF (GUI default). Some 3P adaptive models (e.g. qwen3.8-flash)
+        // fall back to their own default reasoning when the request omits the
+        // `thinking` field entirely, producing a huge run of thinking deltas that
+        // crowds out the visible text (text cut off at stop_reason:max_tokens).
+        // Send an explicit {type:'disabled'} so they don't self-activate thinking.
+        thinking = {
+          type: 'disabled',
+        } satisfies BetaMessageStreamParams['thinking']
+      } else if (
         !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING) &&
         modelSupportsAdaptiveThinking(options.model)
       ) {
         // For models that support adaptive thinking, always use adaptive
         // thinking without a budget.
+        // 3P gateways behind the Claude-compatible surface may not implement
+        // the `adaptive` value (GLM docs: only enabled/disabled) — they treat
+        // unknown values leniently, but normalize to `enabled` so the wire
+        // format stays within spec (GLM 5.3 is force-think anyway, so
+        // enabled ≡ always-think).
         thinking = {
-          type: 'adaptive',
+          type: modelSupportsReasoning(options.model) ? 'adaptive' : 'enabled',
         } satisfies BetaMessageStreamParams['thinking']
       } else {
         // For models that do not support adaptive thinking, use the default
@@ -1696,7 +1769,7 @@ async function* queryModel(
 
     lastRequestBetas = betasParams
 
-    return {
+    const params = {
       model: normalizeModelStringForAPI(options.model),
       messages: addCacheBreakpoints(
         messagesForAPI,
@@ -1714,6 +1787,7 @@ async function* queryModel(
       metadata: getAPIMetadata(),
       max_tokens: maxOutputTokens,
       thinking,
+      ...(reasoningParams && { reasoning: reasoningParams }),
       ...(temperature !== undefined && { temperature }),
       ...(contextManagement &&
         useBetas &&
@@ -1726,6 +1800,25 @@ async function* queryModel(
       }),
       ...(speed !== undefined && { speed }),
     }
+
+    // Untouchable final guard: the API requires max_tokens > thinking.budget_tokens
+    // (qwen/3P endpoints reject equality with InvalidParameter). The per-branch
+    // clamps above (:1634, adjustParamsForNonStreaming) work for their own paths,
+    // but max_tokens and the thinking budget can be computed from *different*
+    // sources (maxOutputTokens vs thinkingConfig.budgetTokens) and diverge. Cap
+    // budget to max_tokens - 1 here so every request body that leaves this
+    // function obeys the constraint, regardless of which path built it.
+    if (
+      params.thinking?.type === 'enabled' &&
+      params.thinking.budget_tokens !== undefined &&
+      params.max_tokens <= params.thinking.budget_tokens
+    ) {
+      params.thinking = {
+        ...params.thinking,
+        budget_tokens: Math.max(1, params.max_tokens - 1),
+      }
+    }
+    return params
   }
 
   // Compute log scalars synchronously so the fire-and-forget .then() closure
@@ -1755,6 +1848,11 @@ async function* queryModel(
         fastMode: isFastMode,
         previousRequestId,
       })
+      //stderr: GUI 的 backend.rs stdout 读取循环 30s 超时后停止, 但 stderr 线程
+      //常驻 → 诊断走 stderr 才能进 claude-code-gui.log([IDE stderr] 前缀)
+      console.error(
+        `[req] model=${options.model} thinking=${logThinkingType} budget=${(queryParams.thinking as {budget_tokens?: number} | undefined)?.budget_tokens ?? '-'} msgs=${logMessagesLength} betas=${logBetas.join(',') || '-'} output_effort=${logEffortValue ?? '-'} reasoning_effort=${(queryParams.reasoning_effort as string) ?? '-'} reasoning_field=${queryParams.reasoning ? JSON.stringify(queryParams.reasoning) : '-'}`,
+      )
     })
   }
 

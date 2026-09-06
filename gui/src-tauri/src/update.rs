@@ -17,23 +17,16 @@ pub struct RemoteManifest {
 }
 
 /// Info for a single component from the remote manifest.
+/// 单形状 struct：wire 上无"文件 vs 目录"判别字段，且客户端从不对目录做 hash 校验
+/// （sha256 只当"版本标识"用于 local/remote 比对），此前 enum 的 Dir 变体在
+/// untagged 下永远解不出来（字段与 Exe 完全相同，Exe 先匹配）——是零行为死臂。
+/// 收敛为 struct，接口说真话。
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum ComponentInfo {
-    Exe {
-        sha256: String,
-        size: u64,
-        #[serde(default)]
-        post_install: Option<PostInstallHook>,
-    },
-    /// Directory component — sha256 is a metadata hash (relative_path:size pairs).
-    /// Compare locally with the same algorithm; ignore if file content-only changes.
-    Dir {
-        sha256: String,
-        size: u64,
-        #[serde(default)]
-        post_install: Option<PostInstallHook>,
-    },
+pub struct ComponentInfo {
+    pub sha256: String,
+    pub size: u64,
+    #[serde(default)]
+    pub post_install: Option<PostInstallHook>,
 }
 
 /// Optional hook executed after a component is installed.
@@ -460,6 +453,8 @@ fn component_artifact_path(install: &Path, name: &str, platform: &str) -> Option
     let is_win = platform == "windows";
     let rel = match name {
         "gui" => if is_win { "claude-code-gui.exe" } else { "Claude Code.app" },
+        // GUI server 守护进程 — 必须与 gui.exe 同目录(find_server_exe 从 exe 旁发现)
+        "server" => if is_win { "claude-gui-server.exe" } else { "claude-gui-server" },
         "claude" => if is_win { "claude.exe" } else { "claude" },
         "bun" => if is_win { "bun.exe" } else { "bun" },
         "tools" => "bin",
@@ -476,6 +471,24 @@ fn get_component_path(name: &str) -> Option<PathBuf> {
     let install = get_install_dir();
     let path = component_artifact_path(&install, name, platform_str())?;
     if path.exists() { Some(path) } else { None }
+}
+
+/// 组件更新优先级（越小越先更新）。依赖强的先装，避免"新 GUI + 旧 server"不配套：
+/// server 必须先于 gui(新 GUI 依赖 server 的 publish/claim/ack RPC；旧 GUI 配新 server 兼容)。
+/// 其余按"解释器/核心在前、纯数据在后"排序。
+fn component_priority(name: &str) -> u32 {
+    match name {
+        "server" => 0,
+        "gui" => 1,
+        "updater" => 2,
+        "claude" => 3,
+        "bun" => 4,
+        "tools" => 5,
+        "python" => 6,
+        "git" => 7,
+        "extensions" => 8,
+        _ => 50,
+    }
 }
 
 /// Find a file by name walking a directory tree.
@@ -513,6 +526,28 @@ fn hook_description(hook: &PostInstallHook) -> String {
 /// Execute a post-install hook. The component's zip has already been extracted
 /// to `install_dir` (or temp_dir for exe components).
 fn execute_post_install(hook: &PostInstallHook, work_dir: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    fn shell_command() -> std::process::Command {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let mut c = std::process::Command::new("cmd");
+        c.creation_flags(CREATE_NO_WINDOW);
+        c
+    }
+    #[cfg(not(windows))]
+    fn shell_command() -> std::process::Command {
+        std::process::Command::new("/bin/sh")
+    }
+    fn run_shell(cmd: &mut std::process::Command) -> Result<(), String> {
+        let output = cmd.output().map_err(|e| format!("Failed to run post-install: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::warn!("Post-install exited with {}: {}", output.status, stderr);
+            return Err(format!("Post-install failed: {}", stderr));
+        }
+        Ok(())
+    }
+
     match hook {
         PostInstallHook::Script { path, .. } => {
             let script_path = work_dir.join(path);
@@ -520,44 +555,26 @@ fn execute_post_install(hook: &PostInstallHook, work_dir: &std::path::Path) -> R
                 return Err(format!("Post-install script not found: {}", script_path.display()));
             }
             log::info!("Running post-install script: {}", script_path.display());
+            let mut cmd = shell_command();
+            cmd.current_dir(work_dir);
+            // Windows: cmd /c <script>；macOS/Linux: sh <script>
             #[cfg(windows)]
-            use std::os::windows::process::CommandExt;
-            #[cfg(windows)]
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            let mut cmd = std::process::Command::new("cmd");
-            #[cfg(windows)]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let output = cmd
-                .args(["/c", &script_path.to_string_lossy()])
-                .current_dir(work_dir)
-                .output()
-                .map_err(|e| format!("Failed to run post-install script: {}", e))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Post-install script exited with {}: {}", output.status, stderr);
-                return Err(format!("Post-install script failed: {}", stderr));
-            }
+            cmd.args(["/c"]).arg(&script_path);
+            #[cfg(not(windows))]
+            cmd.arg(&script_path);
+            run_shell(&mut cmd)?;
             log::info!("Post-install script completed successfully");
             Ok(())
         }
         PostInstallHook::Command { run, .. } => {
             log::info!("Running post-install command: {}", run);
+            let mut cmd = shell_command();
+            // Windows: cmd /c <run>；macOS/Linux: sh -c <run>
             #[cfg(windows)]
-            use std::os::windows::process::CommandExt;
-            #[cfg(windows)]
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            let mut cmd = std::process::Command::new("cmd");
-            #[cfg(windows)]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let output = cmd
-                .args(["/c", run])
-                .output()
-                .map_err(|e| format!("Failed to run post-install command: {}", e))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!("Post-install command exited with {}: {}", output.status, stderr);
-                return Err(format!("Post-install command failed: {}", stderr));
-            }
+            cmd.args(["/c", run]);
+            #[cfg(not(windows))]
+            cmd.args(["-c", run]);
+            run_shell(&mut cmd)?;
             log::info!("Post-install command completed successfully");
             Ok(())
         }
@@ -568,9 +585,13 @@ fn execute_post_install(hook: &PostInstallHook, work_dir: &std::path::Path) -> R
 
 #[tauri::command]
 pub async fn check_for_updates(base_url: String) -> Result<UpdateCheckResult, String> {
+    // 平台化更新：服务器按 platform 返回对应 manifest（mac 组件集 gui/claude/bun/tools/
+    // python/extensions；windows 全量含 git/updater）。Windows 客户端可省略参数（默认 windows）。
+    let platform = if cfg!(target_os = "macos") { "macos" } else { "windows" };
     let url = format!(
-        "{}/api/updates/latest",
-        base_url.trim_end_matches('/')
+        "{}/api/updates/latest?platform={}",
+        base_url.trim_end_matches('/'),
+        platform
     );
     // Run blocking HTTP on a separate thread — Tauri sync commands block the main thread
     let (tx, rx) = std::sync::mpsc::channel();
@@ -609,18 +630,11 @@ pub async fn check_for_updates(base_url: String) -> Result<UpdateCheckResult, St
     // Iterate the REMOTE manifest directly — no hardcoded component list, so a
     // newly-published component (e.g. updater) shows up without a client rebuild.
     for (name, info) in &manifest.components {
-        let (remote_sha, remote_size, desc, hook_json) = match info {
-            ComponentInfo::Exe { sha256, size, post_install } => {
-                let d = post_install.as_ref().map(hook_description);
-                let h = post_install.as_ref().and_then(|h| serde_json::to_string(h).ok());
-                (sha256.clone(), *size, d, h)
-            }
-            ComponentInfo::Dir { sha256, size, post_install } => {
-                let d = post_install.as_ref().map(hook_description);
-                let h = post_install.as_ref().and_then(|h| serde_json::to_string(h).ok());
-                (sha256.clone(), *size, d, h)
-            }
-        };
+        let ComponentInfo { sha256, size, post_install } = info;
+        let remote_sha = sha256.clone();
+        let remote_size = *size;
+        let desc = post_install.as_ref().map(hook_description);
+        let hook_json = post_install.as_ref().and_then(|h| serde_json::to_string(h).ok());
 
         let installed = get_component_path(name).is_some();
         // Compare against local manifest JSON — no filesystem hash computation.
@@ -644,12 +658,21 @@ pub async fn check_for_updates(base_url: String) -> Result<UpdateCheckResult, St
         });
     }
 
+    // 按优先级排序：依赖强的先更新，避免 GUI 先于 server 造成"新 GUI+旧 server"不配套。
+    components.sort_by_key(|c| component_priority(&c.name));
+
     Ok(UpdateCheckResult {
         version: manifest.version,
         release_notes: manifest.release_notes,
         published_at: manifest.published_at,
         components,
     })
+}
+
+/// GUI 组件的下载进度回调（固定 "gui"，供 prepare_gui_update/mac 复用）。
+/// 消除三处 `Some(crate::make_update_progress_cb("gui".to_string()))` 的重复。
+fn gui_progress() -> Option<crate::ProgressCb> {
+    Some(crate::make_update_progress_cb("gui".to_string()))
 }
 
 #[tauri::command]
@@ -672,7 +695,11 @@ pub async fn download_and_install_component(
         .transpose()
         .map_err(|e| format!("Invalid post_install JSON: {}", e))?;
 
-    crate::download_and_extract(&download_url, &temp_dir)?;
+    crate::download_and_extract(
+        &download_url,
+        &temp_dir,
+        Some(crate::make_update_progress_cb(component_name.clone())),
+    )?;
 
     let result = match component_name.as_str() {
         "gui" => {
@@ -769,7 +796,11 @@ pub async fn prepare_gui_update(
     let install_dir = get_install_dir();
     let temp_dir = std::env::temp_dir().join("claude-update-gui");
 
-    crate::download_and_extract(&download_url, &temp_dir)?;
+    crate::download_and_extract(
+        &download_url,
+        &temp_dir,
+        gui_progress(),
+    )?;
 
     let new_exe = temp_dir.join("claude-code-gui.exe");
     if !new_exe.exists() {
@@ -842,7 +873,11 @@ fn prepare_gui_update_mac(
     let install_dir = get_install_dir();
     let temp_dir = std::env::temp_dir().join("claude-update-gui");
 
-    crate::download_and_extract(download_url, &temp_dir)?;
+    crate::download_and_extract(
+        download_url,
+        &temp_dir,
+        gui_progress(),
+    )?;
 
     let app_bundle = walkdir_find(&temp_dir, "Claude Code.app")
         .ok_or("New Claude Code.app not found in downloaded zip")?;
@@ -945,6 +980,41 @@ mod tests {
 
     fn artifact(platform: &str, name: &str) -> Option<PathBuf> {
         component_artifact_path(Path::new("/opt/claude"), name, platform)
+    }
+
+    /// 远程 manifest 的组件 JSON 能解析成 ComponentInfo struct（含/不含 post_install）。
+    /// 此前是 untagged enum (Exe/Dir)，且 Dir 永远解不出来（字段与 Exe 相同被先匹配）。
+    /// 收敛为 struct 后锁定反序列化行为。
+    #[test]
+    fn component_info_deserializes_from_manifest() {
+        // 无 post_install（常见组件）
+        let plain: ComponentInfo =
+            serde_json::from_str(r#"{"sha256":"abc","size":123}"#).unwrap();
+        assert_eq!(plain.sha256, "abc");
+        assert_eq!(plain.size, 123);
+        assert!(plain.post_install.is_none());
+
+        // 含 post_install（command 型 hook，如 env 设置）
+        let with_hook: ComponentInfo = serde_json::from_str(
+            r#"{"sha256":"def","size":456,"post_install":{"type":"command","run":"set X=1","description":"set X"}}"#,
+        )
+        .unwrap();
+        assert_eq!(with_hook.sha256, "def");
+        assert_eq!(with_hook.size, 456);
+        assert!(matches!(with_hook.post_install, Some(PostInstallHook::Command { ref run, .. }) if run == "set X=1"));
+
+        // 完整 RemoteManifest 也能解析（走真实组件集）
+        let manifest: RemoteManifest = serde_json::from_value(serde_json::json!({
+            "version": "2026.09.04.1",
+            "components": {
+                "gui": {"sha256": "g", "size": 100},
+                "server": {"sha256": "s", "size": 200, "post_install": {"type": "command", "run": "echo hi"}}
+            }
+        }))
+        .unwrap();
+        assert_eq!(manifest.components.len(), 2);
+        assert_eq!(manifest.components["gui"].sha256, "g");
+        assert!(manifest.components["server"].post_install.is_some());
     }
 
     #[test]

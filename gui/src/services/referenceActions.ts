@@ -102,7 +102,15 @@ async function openFileAtLine(path: string, line?: number): Promise<boolean> {
     }
     return true;
   } catch {
-    addStatusMessage(`Cannot open: ${path}`, "error");
-    return false;
+    // 编辑器打不开（二进制/超大/特殊文件，readFile 失败）→ 回退到资源管理器打开并提示。
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("open_in_explorer", { path });
+      addStatusMessage(`无法在编辑器打开 ${name}，已在资源管理器中打开`, "info");
+      return true;
+    } catch {
+      addStatusMessage(`Cannot open: ${path}`, "error");
+      return false;
+    }
   }
 }

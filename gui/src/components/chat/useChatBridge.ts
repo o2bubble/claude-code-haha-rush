@@ -38,6 +38,7 @@ export function useChatBridge(port: number | null) {
     respondToPermission: chatSession.respondToPermission,
     interrupt: chatSession.interrupt,
     compact: chatSession.compact,
+    wakeStream: chatSession.wakeStream,
     listSessions: chatSession.listSessions,
     loadSession: chatSession.loadSession,
     newSession: chatSession.newSession,
@@ -56,6 +57,14 @@ export function requestSessionList() {
 }
 export function switchSession(id: string) {
   send("resume_session", { session_id: id });
+}
+/** 启动意图: 标记已有明确目标会话(抑制"自动加载最近会话") */
+export function setIntentTargeted(v: boolean) {
+  chatSession.setIntentTargeted(v);
+}
+/** 启动意图: 一步打开目标会话(不先切最近), 置 autoLoaded 防回跳 */
+export function launchIntentSession(id: string) {
+  chatSession.launchIntentSession(id);
 }
 export function createSession() {
   chatSession.resetSession();

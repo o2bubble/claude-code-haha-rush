@@ -397,9 +397,10 @@ fn mac_git_check() -> DiagnosticCheck {
             )
         }
         _ => DiagnosticCheck::new(
-            "mac_git", CheckStatus::Fail, "Git (macOS)",
-            "未检测到系统 Git。安装方式：xcode-select --install（Apple 官方，弹系统安装窗）\
-             或 brew install git。装完重启 GUI。".to_string(),
+            "mac_git", CheckStatus::Warn, "Git (macOS)",
+            "未检测到系统 Git（可选，仅作提示）。macOS 自带终端可完成日常操作；\
+             仅当需要 git 命令（clone/commit/分支）时才需安装：\
+             xcode-select --install 或 brew install git，装完重启 GUI。".to_string(),
         ),
     }
 }
@@ -2033,11 +2034,6 @@ fn plan_var_fix(
 /// 覆盖 git（usr/bin 供 bash、bin 供 git 可执行）与 python（解释器 + pip 脚本）。
 const PATH_SUFFIXES: &[&str] = &["", "\\bin", "\\git\\usr\\bin", "\\git\\bin", "\\python", "\\python\\Scripts"];
 
-/// 系统注册表 PATH 精简目标（新策略）：只保留安装根 + git\usr\bin（裸 bash 防 WSL
-/// 截胡）。其余 claude 子目录条目（\bin\python\python\Scripts\git\bin）由 GUI 启动
-/// 进程级 setvar 前置提供（子进程继承），不再持久化到系统 PATH。
-const SYS_PATH_SUFFIXES: &[&str] = &["", "\\git\\usr\\bin"];
-
 /// 系统 PATH 精简（纯函数，可单测）：删除冗余 claude 子目录条目，只保留
 /// %CLAUDE_CODE_HAHA_HOME%（根）与 %CLAUDE_CODE_HAHA_HOME%\git\usr\bin。
 /// 返回 Some(精简后 PATH)；无冗余返回 None（调用方据此跳过提权写）。
@@ -2338,6 +2334,17 @@ pub enum EnvOp {
 /// 经 Update.exe 提权执行(HKLM 写入需管理员), 并更新当前进程 env(本会话立即生效)。
 #[tauri::command]
 pub fn fix_environment_vars() -> Result<Vec<EnvVarFix>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 用系统环境管理（进程级 setenv，见 lib.rs apply_process_env），无注册表，
+        // 不需要 Windows 式环境变量修复。此前会因"系统注册表缺失"构造 HKLM 写 → 走
+        // Update.exe 提权链路（mac 无 Update.exe）→ 报错。直接返回"无需修复"。
+        return Ok(vec![EnvVarFix {
+            name: "(macOS)".into(),
+            problem: "macOS 使用系统环境管理，无注册表 PATH/环境变量需修复".into(),
+            action: "无需操作".into(),
+        }]);
+    }
     let mut fixes = Vec::new();
     let mut ops: Vec<EnvOp> = Vec::new();
     let Some(install_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
@@ -2417,7 +2424,6 @@ pub fn fix_environment_vars() -> Result<Vec<EnvVarFix>, String> {
         let (user_git, sys_git) = read_registry_env("CLAUDE_CODE_GIT_BASH_PATH");
         if user_git.is_some() || sys_git.is_some() {
             let mut parts: Vec<String> = vec!["新策略进程级提供，注册表值为历史遗留".into()];
-            let mut action = "删除注册表值(reg delete)".to_string();
             if sys_git.is_some() {
                 ops.push(EnvOp::Delete { name: "CLAUDE_CODE_GIT_BASH_PATH".into() });
             }
@@ -2428,7 +2434,7 @@ pub fn fix_environment_vars() -> Result<Vec<EnvVarFix>, String> {
             if sys_git.is_some() {
                 parts.push("系统级残留".into());
             }
-            action = "删除系统+用户级遗留(进程由 GUI 启动提供)".into();
+            let action = "删除系统+用户级遗留(进程由 GUI 启动提供)".into();
             fixes.push(EnvVarFix {
                 name: "CLAUDE_CODE_GIT_BASH_PATH".into(),
                 problem: parts.join("；"),
@@ -2444,7 +2450,7 @@ pub fn fix_environment_vars() -> Result<Vec<EnvVarFix>, String> {
         if let Some(v) = user_shell.as_deref().or(sys_shell.as_deref()) {
             let exp = expand_env_vars(v, |n| std::env::var(n).ok());
             if exp.starts_with(&install_dir_str) {
-                let mut parts: Vec<String> = vec!["指向安装目录 git bash — 历史遗留".into()];
+                let parts: Vec<String> = vec!["指向安装目录 git bash — 历史遗留".into()];
                 if user_shell.is_some() {
                     ops.push(EnvOp::DeleteUser { name: "SHELL".into() });
                 }

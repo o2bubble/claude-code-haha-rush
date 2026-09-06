@@ -7,17 +7,18 @@ interface Props {
   item: DesktopItem;
 }
 
-const FIELD_TYPES: { value: FormFieldType; label: string }[] = [
-  { value: "text", label: "文本" },
-  { value: "textarea", label: "多行文本" },
-  { value: "number", label: "数字" },
-  { value: "checkbox", label: "复选框" },
-  { value: "select", label: "下拉选择" },
-  { value: "date", label: "日期" },
-  { value: "switch", label: "开关" },
-  { value: "radio", label: "单选组" },
-  { value: "color", label: "颜色" },
-  { value: "slider", label: "滑块" },
+// labelKey: 渲染时经 t() 取值，跟随当前语言
+const FIELD_TYPES: { value: FormFieldType; labelKey: string }[] = [
+  { value: "text", labelKey: "desktop.formItem.typeText" },
+  { value: "textarea", labelKey: "desktop.formItem.typeTextarea" },
+  { value: "number", labelKey: "desktop.formItem.typeNumber" },
+  { value: "checkbox", labelKey: "desktop.formItem.typeCheckbox" },
+  { value: "select", labelKey: "desktop.formItem.typeSelect" },
+  { value: "date", labelKey: "desktop.formItem.typeDate" },
+  { value: "switch", labelKey: "desktop.formItem.typeSwitch" },
+  { value: "radio", labelKey: "desktop.formItem.typeRadio" },
+  { value: "color", labelKey: "desktop.formItem.typeColor" },
+  { value: "slider", labelKey: "desktop.formItem.typeSlider" },
 ];
 
 const DEFAULT_VALUES: Record<FormFieldType, unknown> = {
@@ -347,7 +348,7 @@ function FormItemImpl({ item }: Props) {
       <div style={{ ...rowS, backgroundColor: "var(--bg-surface)", gap: 4, flexWrap: "wrap", justifyContent: "center" }}>
         <select value={newType} onChange={(e) => setNewType(e.target.value as FormFieldType)}
           style={{ ...ctrlS, width: "auto", flexShrink: 0 }}>
-          {FIELD_TYPES.map((ft) => <option key={ft.value} value={ft.value}>{ft.label}</option>)}
+          {FIELD_TYPES.map((ft) => <option key={ft.value} value={ft.value}>{t(ft.labelKey)}</option>)}
         </select>
         <input autoFocus type="text" value={newName} placeholder={t("desktop.formItem.fieldName")}
           onChange={(e) => setNewName(e.target.value)}

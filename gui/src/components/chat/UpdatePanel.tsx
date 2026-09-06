@@ -1,7 +1,7 @@
-import React, { memo, useState, useCallback } from "react";
+import React, { memo, useState, useCallback, useEffect } from "react";
 import { t } from "../../i18n";
 import { EmptyState } from "../SharedStates";
-import { updateService, setUpdateAvailability, type ComponentStatus, type UpdateCheckResult } from "../../services/updateService";
+import { updateService, setUpdateAvailability, REQUIRED_COMPONENTS, type ComponentStatus, type UpdateCheckResult } from "../../services/updateService";
 import { addStatusMessage } from "../../stores/statusMsgStore";
 
 // ── Component display names ──
@@ -17,7 +17,9 @@ const COMPONENT_LABELS: Record<string, string> = {
   updater: "update.component.updater",
 };
 
-const COMPONENT_ORDER = ["gui", "claude", "bun", "tools", "python", "git", "extensions", "updater"];
+// server 必须列在 gui 前(强依赖)：新 GUI 依赖新 server 的 publish/claim/ack RPC，
+// 旧 GUI 配新 server 兼容 → 更新时 server 先到位，最终"新GUI+新server"配套。
+const COMPONENT_ORDER = ["server", "gui", "claude", "bun", "tools", "python", "git", "extensions", "updater"];
 
 /** Label for a component — i18n if known, else fall back to the raw name so a
  *  newly-published component still renders even before labels exist. */
@@ -38,7 +40,9 @@ function groupComponents(components: ComponentStatus[]) {
   const optIn: ComponentStatus[] = [];
   const upToDate: ComponentStatus[] = [];
   for (const c of components) {
-    if (c.needs_update && c.installed) updates.push(c);
+    // 必需组件即使从未安装也归"必须更新"（server 等），不放可忽略的 opt-in 区。
+    const required = REQUIRED_COMPONENTS.includes(c.name as any);
+    if (c.needs_update && (c.installed || required)) updates.push(c);
     else if (c.needs_update && !c.installed) optIn.push(c);
     else upToDate.push(c);
   }
@@ -124,9 +128,36 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
   const [downloading, setDownloading] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [errorMsg, setErrorMsg] = useState("");
+  /** 下载进度（组件名 → 0-100）与速度（MB/s），由 Rust 的 update-download-progress 事件更新 */
+  const [progress, setProgress] = useState<Record<string, number>>({});
+  const [speed, setSpeed] = useState<Record<string, number>>({});
   /** Staging path + Update.exe path returned by prepareGuiUpdate — reused by the
    *  restart button so it does NOT re-download the GUI zip. */
   const [updaterPath, setUpdaterPath] = useState<string | null>(null);
+
+  // 监听 Rust 下载进度事件，按 component 名写进 progress/speed map。
+  // 事件是全局广播（app.emit），本面板只关心自身发起的组件下载；多组件并发时靠 component 路由。
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let mounted = true;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const stop = await listen<{ component: string; percent: number; speedBytesPerSec: number }>(
+        "update-download-progress",
+        (event) => {
+          if (!mounted) return;
+          const { component, percent, speedBytesPerSec } = event.payload;
+          if (!component) return;
+          setProgress((prev) => ({ ...prev, [component]: Math.round(percent) }));
+          if (typeof speedBytesPerSec === "number" && speedBytesPerSec >= 0) {
+            setSpeed((prev) => ({ ...prev, [component]: speedBytesPerSec / (1024 * 1024) }));
+          }
+        },
+      );
+      unlisten = stop;
+    })();
+    return () => { mounted = false; unlisten?.(); };
+  }, []);
 
   const handleCheck = useCallback(async () => {
     setState("checking");
@@ -195,8 +226,15 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
           </div>
         </div>
         {isDownloading && (
-          <div style={S.progressBar}>
-            <div style={S.progressFill(60)} />
+          <div>
+            <div style={S.progressBar}>
+              <div style={S.progressFill(progress[name] ?? 0)} />
+            </div>
+            {typeof speed[name] === "number" && (
+              <div style={{ fontSize: "calc(var(--font-scale, 1) * 10px)", color: "var(--fg-muted)", marginTop: 2, paddingLeft: 2 }}>
+                {Math.round(progress[name] ?? 0)}% · {t("update.installStatus.downloadSpeed", { speed: speed[name].toFixed(1) })}
+              </div>
+            )}
           </div>
         )}
         {comp.post_install_description && (
@@ -236,6 +274,8 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
         setErrors((prev) => ({ ...prev, [name]: e?.toString() ?? String(e) }));
       } finally {
         setDownloading((prev) => { const n = new Set(prev); n.delete(name); return n; });
+        setProgress((prev) => { const n = { ...prev }; delete n[name]; return n; });
+        setSpeed((prev) => { const n = { ...prev }; delete n[name]; return n; });
       }
     }
 

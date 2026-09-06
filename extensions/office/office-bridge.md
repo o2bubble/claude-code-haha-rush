@@ -25,6 +25,31 @@ server 在 GUI 启动时自动注册到 `~/.claude.json`（user scope，stdio �
 | Windows | Python 代码，用 `xl`/`wd`/`ppt` COM 对象（见下方预定义变量） |
 | macOS | AppleScript（osascript），如 `tell application "Microsoft Excel" to set value of cell 1 of row 1 to "hi"` |
 
+## macOS — 操作前先查 .sdef 字典（重点）
+
+AI 对 AppleScript 属性名不熟，**写脚本前先读对应 app 的 Scripting Definition 字典**（`.sdef`，mac Office 自带），确认元素/属性/命令名再写，不要臆造：
+
+- Word: `/Applications/Microsoft Word.app/Contents/Resources/Word.sdef`
+- Excel: `/Applications/Microsoft Excel.app/Contents/Resources/Excel.sdef`
+- PowerPoint: `/Applications/Microsoft PowerPoint.app/Contents/Resources/PowerPoint.sdef`
+- WPS: 类似 `.../Contents/Resources/*.sdef`（通过 `office_get_context` 拿到 app 路径后定位）
+
+读 `.sdef` 的方式：`sdef "/Applications/Microsoft Word.app"`（打印字典）、或 `plutil -convert xml1 -o - "<path>.sdef"`；不确定的元素属性，先用 `office_execute` 跑只读探测，如 `properties of <element>` / `count of <collection>` 读回来确认。
+
+## macOS — AppleScript 已踩的坑
+
+- ❌ Word 文本：`set text of paragraph N ...` → 报"成功"但**不写入**；text range 无 `text` 属性，应改用 **`content`**
+- ❌ `set content of active document` → `-10006`（active document 的 content 是 missing value）
+- ❌ `make new text` → `-2710`，AppleScript 不支持该类
+- ❌ 逐段 `set content` + `make new paragraph` → text object 连着整个主文本 story，会**文字串接/错位、段数乱变**
+- ⚠️ Excel 一条脚本连续读多格（`A1 & B1 & ...`）可能 `-10006`，要 `try/on error` 或**一次只读一格**
+- ⚠️ PPT `make new presentation` 后 `count of slides` = **0**，要先 `make new slide at end of active presentation`
+- ⚠️ **AppleScript `try` 块必须多行**，单行报 `-2741`
+- ⚠️ **少用中间变量**、少用 `repeat ... count` 循环，多用 `return <表达式>` 直接取值（否则 `-2753 变量未定义`）
+- ⚠️ **mac 不需要写 `return`/`result` 变量**（那是 Windows COM 的约定），写了反而触发 `-2753`
+
+**大原则**：先查 `.sdef` 确认属性 → 用真实属性 → 读回验证。不确定就先跑只读探测（`properties of ...`）确认再改，不要边猜边写。
+
 ## Windows — office_execute 预定义变量
 
 进入 `office_execute`（Windows）时，以下变量已就绪：

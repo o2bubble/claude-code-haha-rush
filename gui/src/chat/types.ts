@@ -25,6 +25,8 @@ export type ChatEffect =
   | { type: "plan.clear" }
   | { type: "subagent.upsert"; agent: SubAgentInfo }
   | { type: "subagent.transcript"; taskId: string; messages: SubAgentMessage[]; error?: string }
+  | { type: "subagent.transcript.append"; taskId: string; messages: SubAgentMessage[]; total?: number }
+  | { type: "subagent.error"; taskId: string; message?: string }
   | { type: "subagent.clear" }
   | { type: "emit.fileChanged"; path: string }
   | { type: "command.resumeSession"; sessionId: string }

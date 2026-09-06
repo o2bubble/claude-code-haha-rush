@@ -165,30 +165,31 @@ export async function localSearch(
     signal?: AbortSignal
   } = {},
 ): Promise<LocalSearchHit[]> {
-  const { signal, cleanup } = createCombinedAbortSignal(opts.signal, {
-    timeoutMs: LOCAL_SEARCH_TIMEOUT_MS,
-  })
-  try {
-    const attempts: Array<() => Promise<LocalSearchHit[]>> = [
-      () => queryDuckDuckGo(query, signal),
-      () => queryBing(query, signal),
-    ]
-    for (const attempt of attempts) {
-      try {
-        const filtered = filterAndDedupe(
-          await attempt(),
-          opts.allowed_domains,
-          opts.blocked_domains,
-        )
-        if (filtered.length > 0) return filtered
-      } catch (e) {
-        logError(e)
-      }
+  // 每个 source 独立 signal——上一个失败/超时不传染给下一个。此前 DDG 不可达会 abort
+  // 共享 signal，把本来可达的 Bing 也 abort 了 → 两个全失败、报"no results"。
+  // 优先 Bing（此网络区域可达、cn.bing 解析稳定），DDG 兜底。
+  const attempts: Array<(signal: AbortSignal) => Promise<LocalSearchHit[]>> = [
+    (signal) => queryBing(query, signal),
+    (signal) => queryDuckDuckGo(query, signal),
+  ]
+  for (const attempt of attempts) {
+    const { signal, cleanup } = createCombinedAbortSignal(opts.signal, {
+      timeoutMs: LOCAL_SEARCH_TIMEOUT_MS,
+    })
+    try {
+      const filtered = filterAndDedupe(
+        await attempt(signal),
+        opts.allowed_domains,
+        opts.blocked_domains,
+      )
+      if (filtered.length > 0) return filtered
+    } catch (e) {
+      logError(e)
+    } finally {
+      cleanup()
     }
-    throw new Error(
-      'Both DuckDuckGo and Bing search returned no results (unreachable or empty).',
-    )
-  } finally {
-    cleanup()
   }
+  throw new Error(
+    'Both Bing and DuckDuckGo search returned no results (unreachable or empty).',
+  )
 }

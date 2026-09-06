@@ -61,6 +61,9 @@ export const Events = {
   // Workspace
   WORKSPACE_OPEN_SELECTOR: "workspace.openSelector",
 
+  // Files
+  FILE_REVEAL: "file.reveal",
+
   // Desktop
   DESKTOP_CHANGED: "desktop.changed",
   DESKTOP_ITEM_MOVED: "desktop.itemMoved",
@@ -91,6 +94,13 @@ export interface BackendStateChangedPayload {
 
 export interface BackendPortReadyPayload {
   port: number;
+}
+
+export interface FileRevealPayload {
+  /** 要在文件树中定位/选中的绝对路径 */
+  path: string;
+  /** 工作区根路径；非空时仅在该工作区内的文件才定位目录树 */
+  rootPath?: string;
 }
 
 export interface ToastPayload {
@@ -151,6 +161,10 @@ export interface ChatInsertTextPayload {
   atStart?: boolean;
   /** 为 true 时追加到输入框末尾（划词/快捷提示多次发送层层追加） */
   appendEnd?: boolean;
+  /** 回复引用：插入 text 后再补 suffix（如 《》的半边），光标停在 text 与 suffix 之间（书名号中间） */
+  replySuffix?: string;
+  /** 回复引用专用：插入前若当前输入框已有内容则先换行，让引用独占一行 */
+  newlineBefore?: boolean;
 }
 
 export interface ChatAddReferencePayload {

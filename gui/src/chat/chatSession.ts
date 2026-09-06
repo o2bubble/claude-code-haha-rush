@@ -10,8 +10,10 @@ import {
   addMessage,
   updateLastAssistant,
   replaceState,
+  isChatReady,
+  type EffortLevelUI,
 } from "../stores/chatStore";
-import { getSettings, updateSettings } from "../stores/settingsStore";
+import { getSettings, updateSettings, saveSettings } from "../stores/settingsStore";
 import { clear as clearTerminal } from "../stores/terminalStore";
 import { clearPlan } from "../stores/planStore";
 import { clearSubAgents } from "../stores/subAgentStore";
@@ -22,10 +24,11 @@ import {
   resumeQueue as resumeQueueStore, sendNowAt as sendNowAtStore,
 } from "../stores/msgQueueStore";
 import type { QueuedMsg } from "../stores/msgQueueState";
+import { DEFAULT_STALL_WAKE_PROMPT } from "../utils/streamStallDecision";
 import { BackendService } from "../services/backendService";
 import {
   registerGuardChatApi, reportGuardTurnEnded, guardActive, guardStop as guardStopBridge,
-  markGuardReported, markUserInterruptedTurn, clearUserInterruptedTurn,
+  markGuardReported, markUserInterruptedTurn, clearUserInterruptedTurn, suppressWatcherReport,
 } from "../services/guardBridge";
 import { wsDiagAdd } from "../services/wsDiag";
 
@@ -43,7 +46,7 @@ async function checkFirstInstance(): Promise<boolean> {
   return _isFirstInstance ?? true;
 }
 import { dataBus } from "../services/dataBus";
-import { chatReduce } from "./chatReduce";
+import { chatReduce, isBackendBusy } from "./chatReduce";
 import { applyStoreEffects } from "./effects";
 import type { WireMessage } from "./types";
 
@@ -54,6 +57,8 @@ export interface ChatSession {
   sendMessage(content: string): void;
   respondToPermission(allowed: boolean, always?: boolean, updatedInput?: any): void;
   compact(): void;
+  /** 流卡死唤醒: 中断当前流 + 发醒词让 AI 继续未完成的工作 */
+  wakeStream(): void;
   listSessions(): void;
   loadSession(sessionId: string): void;
   newSession(): void;
@@ -64,6 +69,10 @@ export interface ChatSession {
   queueResume(): void;
   /** 队列: 立即发送某条(提队首; 暂停则恢复 auto; 空闲则立即消化) */
   queueSendNow(index: number): void;
+  /** 启动意图: 标记已有明确的意图目标会话(抑制"自动加载最近会话"一步到位) */
+  setIntentTargeted(v: boolean): void;
+  /** 启动意图: 直接打开目标会话(不先切最近), 并置 autoLoaded 防后续回跳 */
+  launchIntentSession(sessionId: string): void;
 }
 
 export function createChatSession(): ChatSession {
@@ -82,6 +91,16 @@ export function createChatSession(): ChatSession {
   let pendingDrain: QueuedMsg | null = null;
   let pendingDrainRetries = 0;
   let pendingDrainTimer: ReturnType<typeof setTimeout> | null = null;
+  // 跨 GUI 会话列表同步: 记录最近一次 session_list 的签名; 只在列表真正变化时
+  // 中继给 server(避免 refetch 回显触发无限 A⇄B 互刷)。
+  let _lastSessionsSig: string | null = null;
+  // 启动意图模式: 已有明确的目标会话(open_session)。置 true 抑制"自动加载最近会话",
+  // 使新实例一步打开意图目标而非先跳最近再切目标。
+  let _intentTargeted = false;
+
+  function relaySessionsChanged() {
+    import("@tauri-apps/api/core").then(({ invoke }) => invoke("notify_sessions_changed").catch(() => {}));
+  }
 
   function clearPendingDrain() {
     pendingDrain = null;
@@ -95,9 +114,10 @@ export function createChatSession(): ChatSession {
   function sendDrain(msg: QueuedMsg) {
     send("user", { content: msg.text });
     if (pendingDrainTimer) clearTimeout(pendingDrainTimer);
-    // 看门狗: 既无 error 也无回合(后端卡住) → 放弃, 别让 pendingDrain 堵死后续消化
+    // 看门狗: 既无 error 也无回合(后端卡住) → 放弃, 别让 pendingDrain 堵死后续消化。
+    // 用权威 backendBusy（等子代理时 streaming 可能波动，后端却仍忙，不该放弃）。
     pendingDrainTimer = setTimeout(() => {
-      if (pendingDrain && pendingDrain.id === msg.id && !getChatState().streaming) {
+      if (pendingDrain && pendingDrain.id === msg.id && !isBackendBusy(getChatState())) {
         clearPendingDrain();
       }
     }, 12000);
@@ -137,7 +157,7 @@ export function createChatSession(): ChatSession {
     }
     pendingDrainRetries++;
     setTimeout(() => {
-      if (pendingDrain && !getChatState().streaming) sendDrain(pendingDrain);
+      if (pendingDrain && !isBackendBusy(getChatState())) sendDrain(pendingDrain);
     }, 400);
   }
 
@@ -191,6 +211,15 @@ export function createChatSession(): ChatSession {
         msg.type = "set_permission_mode";
         msg.mode = p.mode;
         break;
+      case "set_thinking_mode":
+        msg.type = "set_thinking_mode";
+        msg.enabled = p.enabled;
+        if (p.effort !== undefined) msg.effort = p.effort;
+        break;
+      case "set_effort":
+        msg.type = "set_effort";
+        msg.level = p.level;
+        break;
       case "list_tasks":
         msg.type = "list_tasks";
         break;
@@ -238,21 +267,59 @@ export function createChatSession(): ChatSession {
       savedPermissionMode: getSettings().permissionMode,
     });
     replaceState(nextState);
+    // 唤醒/守卫发送时序：等后端真正就绪(ready/result)再发，防撞 busy。
+    // 必须在 replaceState 之后——reducer 已把 backendBusy 清 false，flush 读到
+    // 权威空闲信号才直发（早于 replaceState 会读到旧的乐观 streaming）。
+    if (turnEndedMsg) { flushPendingWake(); flushPendingGuard(); }
+    // 跨 GUI 同步：后端确认列表变化(session_created/session_renamed) 或 session_list
+    // 内容真的变了(create/rename/delete 都会触发) → 中继给 server 广播，其他 GUI
+    // 重新拉取自己的列表。session_list 只在签名变化时中继，避免 refetch 回显死循环。
+    const sessType = innerMsg.type;
+    if (sessType === "session_created" || sessType === "session_renamed") {
+      relaySessionsChanged();
+    } else if (sessType === "session_list" || sessType === "sessions_updated") {
+      // 签名"排序后比较"，顺序不敏感：仅会话**集合**变化(新建/删除/改名 → id/title 变)才跨实例中继。
+      // 切到某会话只是后端把它排到最前(recency 重排)，集合不变 → 不中继 → 别处不跟着重排。
+      const sig = JSON.stringify(
+        (innerMsg.sessions || []).map((x: any) => ((x.sessionId || x.id || "") + "|" + (x.title || ""))).sort(),
+      );
+      if (_lastSessionsSig === null) {
+        _lastSessionsSig = sig; // 首次列表 → 只记录不中继（其他实例加载时自会呈现）
+      } else if (_lastSessionsSig !== sig) {
+        _lastSessionsSig = sig;
+        relaySessionsChanged();
+      }
+    }
     // 队列: 同步活跃会话(切/载会话时队列跟着切); 切会话停守卫(守卫绑定单一会话)
     if (nextState.sessionId && nextState.sessionId !== prevSessionId) {
       setActiveSession(nextState.sessionId);
       if (guardActive()) void guardStopBridge();
+      // 切会话 → 清掉未发的唤醒醒词/守卫消息，避免误发到新会话
+      if (pendingWakeTimer) { clearTimeout(pendingWakeTimer); pendingWakeTimer = null; }
+      pendingWakePrompt = null;
+      wakeTurnInFlight = false;
+      if (pendingGuardTimer) { clearTimeout(pendingGuardTimer); pendingGuardTimer = null; }
+      pendingGuardSend = null;
     }
     if (nextState.streaming) {
       clearPendingDrain(); // 已起回合 → 消化消息被后端接住
     } else if (prevStreaming) {
       // 回合结束(streaming true→false) → 自动消化下一条 + 上报守卫(激活时)
+      // 唤醒醒词的回合刚结束 → 此时才恢复队列(interrupt 暂停过)。
+      // error 翻转除外: 后端 turn 可能仍 busy(同守卫 dedup 的理由), 此时 resume
+      // + drain 会撞 busy 丢消息——保持 paused, 等权威 ready/用户手动恢复。
+      if (wakeTurnInFlight && msg.type !== "error") {
+        wakeTurnInFlight = false;
+        queueResume();
+      }
       maybeDrain();
-      markGuardReported(); // 去重: 就绪 watcher 2s 内不再补报
-      // error 导致的中途复位不算真回合结束: 后端原 turn 可能仍在 busy, 此刻
-      // 上报守卫会过早 SendAccept 撞 busy, 且错误文本会被当成验收回复解析。
-      // 守卫只在权威 result/status:ready(下方 turnEndedMsg 分支)时才验收。
-      if (msg.type !== "error") void reportGuardTurnEnded();
+      // 去重: 就绪 watcher 2s 内不再补报。⚠️ 仅非 error 翻转执行——error 中途复位
+      // 不是真回合结束(后端 turn 可能仍 busy), 若在此解除 interrupt 抑制/盖 dedup 章,
+      // error 过后 watcher 会立刻误报验收(re-撞 busy)。error 复位什么都不做。
+      if (msg.type !== "error") {
+        markGuardReported();
+        void reportGuardTurnEnded();
+      }
     } else if (guardActive() && turnEndedMsg) {
       // 非流式回合(result/status:ready 权威结束信号直达, streaming 未翻转):
       // 守卫必须感知回合结束才能验收, 否则卡在 Watching
@@ -262,7 +329,9 @@ export function createChatSession(): ChatSession {
     for (const cmd of applyStoreEffects(effects)) {
       switch (cmd.type) {
         case "command.resumeSession":
-          if (!_autoLoaded && getSettings().autoLoadLatestSession !== false) {
+          // 启动意图模式(已有明确目标会话)时跳过"自动加载最近会话"——否则新实例
+          // 先切到最近会话、再被 runIntent 切到意图目标, 造成两次跳变。
+          if (!_autoLoaded && getSettings().autoLoadLatestSession !== false && !_intentTargeted) {
             _autoLoaded = true;
             // 非首个 GUI 实例不自动加载最近会话（await 后再决定，时序安全）
             void (async () => {
@@ -336,6 +405,15 @@ export function createChatSession(): ChatSession {
         send("set_permission_mode", { mode: savedMode });
         updateChatState({ permissionMode: savedMode });
       }
+      // Restore persisted thinking/effort — the backend holds these as process
+      // memory (default off) and restarts silently drop them, leaving the
+      // toolbar showing "on" while requests go out without thinking. Same
+      // lifecycle as permissionMode above.
+      const savedThinking = getSettings().thinkingModeEnabled ?? true; // 默认开(未点过开关的老用户)
+      const savedEffort = getSettings().effort;
+      send("set_thinking_mode", { enabled: savedThinking, ...(savedThinking && savedEffort && { effort: savedEffort }) });
+      updateChatState({ thinkingModeEnabled: savedThinking });
+      if (savedEffort) updateChatState({ effort: savedEffort as never });
       dispatch({ type: "status", status: "connected" });
     };
     ws.onmessage = (e) => {
@@ -387,6 +465,10 @@ export function createChatSession(): ChatSession {
     // otherwise no-op and leave the UI stuck showing the stop button forever.
     updateChatState({ streaming: false });
     updateLastAssistant((m) => ({ ...m, streaming: false }));
+    // 守卫 watcher 别把这次"乐观翻转"当回合结束上报——后端 turn 仍 busy, 此刻验收
+    // force 直发会撞 busy("A prompt is already being processed")且消息丢失。
+    // 验收由权威 turnEndedMsg(result/status:ready)分支接管。
+    suppressWatcherReport();
     interruptQueue(); // 打断 → 队列暂停, 停止自动消化
     send("interrupt");
   }
@@ -406,7 +488,14 @@ export function createChatSession(): ChatSession {
       send("user", { content });
       return;
     }
-    if (getChatState().streaming) {
+    // 后端未就绪(WS 未连接) 或会话列表未加载时静默拒绝：此时 send() 会把消息推进
+    // messageQueue 排队、用户气泡却先出现 → 假发送。静默 return（不加气泡、不入队），
+    // 用户可见反馈由 UI 层 disabled 按钮 + ChatStatusBar 状态点承担。
+    if (!isChatReady()) {
+      return;
+    }
+    const st = getChatState();
+    if (isBackendBusy(st)) {
       if (enqueueMessage(content) === "full") {
         addStatusMessage("队列已满", "warn");
       }
@@ -421,19 +510,83 @@ export function createChatSession(): ChatSession {
     send("user", { content });
   }
 
-  // 守卫执行 API 注入: sendMessage 强制直发(绕过 streaming 入队门)
-  registerGuardChatApi({ sendMessage: (t) => sendMessage(t, { force: true }), releaseQueue: guardReleaseQueue });
+  // 守卫执行 API 注入: sendMessage 走 sendForceWhenIdle(空闲直发; 忙则暂存等后端就绪, 防撞 busy)
+  registerGuardChatApi({ sendMessage: sendForceWhenIdle, releaseQueue: guardReleaseQueue });
 
   /** 恢复 auto + 空闲时立即消化。 */
   function queueResume() {
     resumeQueueStore();
-    if (!getChatState().streaming) maybeDrain();
+    if (!isBackendBusy(getChatState())) maybeDrain();
+  }
+
+  // 唤醒时序：interrupt() 是乐观的——前端立即清 streaming，但后端 `busy`
+  // (ideMode.ts) 要等 turn 真正结束、广播 status:ready/result 后才置 false。
+  // 若 interrupt 后立即 force 直发醒词，会撞后端 "A prompt is already being
+  // processed. Interrupt it first."（守卫也有同样问题）。所以醒词改为"待发"，
+  // 等后端就绪信号(turnEndedMsg)到达时再 flush，附 3s 兜底(interrupt 为 no-op 时)。
+  let pendingWakePrompt: string | null = null;
+  let pendingWakeTimer: ReturnType<typeof setTimeout> | null = null;
+  // 醒词已发出、其回合尚未结束 → 队列保持 paused。等醒词回合结束(streaming
+  // true→false 翻转)再 queueResume+drain。否则 queueResume 当场 maybeDrain 会
+  // 把队首消息和醒词几乎同时砸向后端：时序 inverted 时队列内容抢在醒词前被
+  // 放出去(用户看到"中断后队列直接泄出")；正常时序也会让队首挤进醒词回合尾。
+  let wakeTurnInFlight = false;
+
+  function flushPendingWake(): void {
+    if (pendingWakeTimer) { clearTimeout(pendingWakeTimer); pendingWakeTimer = null; }
+    if (!pendingWakePrompt) return;
+    // 后端权威 busy: interrupt 乐观清 streaming 后此处若误判空闲会撞 busy
+    // ["A prompt is already being processed"]。改判 backendBusy——等 turnEndedMsg
+    // 真正把后端置空闲。3s 兜底处理 interrupt 为 no-op（后端永不广播）的死角。
+    if (isBackendBusy(getChatState())) return;
+    const prompt = pendingWakePrompt;
+    pendingWakePrompt = null;
+    wakeTurnInFlight = true;              // 醒词回合期间队列保持 paused
+    sendMessage(prompt, { force: true }); // 后端已就绪才发，正常不再撞 busy
+    // 队列恢复不在此时执行——等醒词回合 turnEnded 后由 watchQueueGate 统一 resume
+  }
+
+  /**
+   * 流卡死唤醒：中断当前流，并让醒词等后端真正就绪后再发（防撞 busy）。
+   */
+  function wakeStream() {
+    const prompt = getSettings().streamStallWakePrompt ?? DEFAULT_STALL_WAKE_PROMPT;
+    interrupt();                          // 触发后端 abort（在 turn 中）→ 最终广播 ready
+    pendingWakePrompt = prompt;
+    if (pendingWakeTimer) clearTimeout(pendingWakeTimer);
+    // 兜底：interrupt 是 no-op（已无 active turn、不广播 ready）时，3s 后强行发
+    pendingWakeTimer = setTimeout(flushPendingWake, 3000);
+  }
+
+  // 守卫文本发送(验收/继续)的时序：guard-action 经 Rust 裁决 → 事件回调，异步链路
+  // 可能在某个回合(streaming=true)进行中送达。若此刻 force 直发会撞后端 busy
+  // ("A prompt is already being processed")。与唤醒同样的处理：后端在忙 → 暂存，
+  // 等 turnEndedMsg(权威 ready)时 flush；空闲则立即发(守卫原行为不变)。
+  let pendingGuardSend: string | null = null;
+  let pendingGuardTimer: ReturnType<typeof setTimeout> | null = null;
+  function sendForceWhenIdle(text: string): void {
+    if (!isBackendBusy(getChatState())) {
+      sendMessage(text, { force: true });
+      return;
+    }
+    pendingGuardSend = text;
+    if (pendingGuardTimer) clearTimeout(pendingGuardTimer);
+    pendingGuardTimer = setTimeout(flushPendingGuard, 3000);
+  }
+  function flushPendingGuard(): void {
+    if (pendingGuardTimer) { clearTimeout(pendingGuardTimer); pendingGuardTimer = null; }
+    if (!pendingGuardSend) return;
+    // 后端权威 busy: 仍忙则不硬发(会撞 busy 丢消息)，等 turnEndedMsg；guard 看门狗兜底。
+    if (isBackendBusy(getChatState())) return;
+    const text = pendingGuardSend;
+    pendingGuardSend = null;
+    sendMessage(text, { force: true });
   }
 
   /** 立即发送某条: 提队首(暂停则恢复 auto); 空闲则立即消化。 */
   function queueSendNow(index: number) {
     sendNowAtStore(index);
-    if (!getChatState().streaming) maybeDrain();
+    if (!isBackendBusy(getChatState())) maybeDrain();
   }
 
   function respondToPermission(allowed: boolean, always = false, updatedInput?: any) {
@@ -484,6 +637,20 @@ export function createChatSession(): ChatSession {
       }).catch(() => {});
       send("set_permission_mode", { mode });
     });
+    commands.register("SET_THINKING_MODE", (v: { enabled: boolean; effort?: string }) => {
+      updateChatState({ thinkingModeEnabled: v.enabled });
+      // Persist to disk — updateSettings is memory-only, and the backend holds
+      // thinking state as process memory that restarts drop. saveSettings goes
+      // through save_app_settings (global scope: thinking preference follows
+      // the user, not the workspace).
+      void saveSettings({ thinkingModeEnabled: v.enabled, ...(v.effort && { effort: v.effort }) }, "global");
+      send("set_thinking_mode", { enabled: v.enabled, ...(v.effort && { effort: v.effort }) });
+    });
+    commands.register("SET_EFFORT", (level: EffortLevelUI) => {
+      updateChatState({ effort: level });
+      void saveSettings({ effort: level }, "global");
+      send("set_effort", { level });
+    });
     commands.register("SEND_MESSAGE", (content: string) => {
       sendMessage(content);
     });
@@ -500,6 +667,7 @@ export function createChatSession(): ChatSession {
     sendMessage,
     respondToPermission,
     compact: () => send("compact"),
+    wakeStream,
     listSessions: () => send("list_sessions"),
     loadSession: (sessionId: string) => send("load_session", { session_id: sessionId }),
     newSession: () => send("new_session"),
@@ -508,6 +676,12 @@ export function createChatSession(): ChatSession {
     registerCommands,
     queueResume,
     queueSendNow,
+    setIntentTargeted: (v: boolean) => { _intentTargeted = v; },
+    launchIntentSession: (sessionId: string) => {
+      _autoLoaded = true;      // 意图已有明确目标, 之后不再自动切最近(防回跳)
+      _intentTargeted = true;
+      send("resume_session", { session_id: sessionId });
+    },
   };
 }
 

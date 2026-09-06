@@ -5,8 +5,9 @@ import { t } from "../i18n";
 import { editorStore, isPreviewable } from "../stores/editorStore";
 import { fileService } from "../services/fileService";
 import { showCtxMenu } from "./ContextMenu";
-import { useEvent } from "../services/useService";
-import { Events, type SettingsChangedPayload } from "../services/events";
+import { useEvent, useEventHandler } from "../services/useService";
+import { eventBus } from "../services/serviceBus";
+import { Events, type SettingsChangedPayload, type FileRevealPayload } from "../services/events";
 
 export function FileBrowserPanel() {
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
@@ -14,6 +15,13 @@ export function FileBrowserPanel() {
   const showHidden = settingsPayload?.settings?.showHiddenFiles ?? getSettings().showHiddenFiles ?? false;
   const [treeKey, setTreeKey] = useState(0);
   const refreshTree = () => setTreeKey((k) => k + 1);
+
+  // 编辑器"定位目录树" → 文件树展开祖先并选中目标(粘性事件, 面板延迟挂载也能收到)
+  const [revealPath, setRevealPath] = useState<string | null>(null);
+  useEventHandler<FileRevealPayload>(Events.FILE_REVEAL, ({ path }) => {
+    setRevealPath(path);
+    eventBus.clearSticky(Events.FILE_REVEAL);
+  });
 
   if (!rootPath) {
     return (
@@ -57,7 +65,7 @@ export function FileBrowserPanel() {
         {rootPath}
       </div>
       <div style={{ flex: 1, overflow: "auto" }}>
-        <FileTree forceRefresh={treeKey} rootPath={rootPath} showHidden={showHidden} onOpenFile={async (p) => {
+        <FileTree forceRefresh={treeKey} rootPath={rootPath} showHidden={showHidden} revealPath={revealPath} onOpenFile={async (p) => {
           const name = p.split(/[/\\]/).pop() || p;
           if (isPreviewable(p)) {
             editorStore.openPreview(p, name);

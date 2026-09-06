@@ -6,6 +6,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getChatState } from "../stores/chatStore";
+import { isBackendBusy } from "../chat/chatReduce";
 import { getActiveQueue } from "../stores/msgQueueStore";
 import { addStatusMessage } from "../stores/statusMsgStore";
 import { t } from "../i18n";
@@ -45,15 +46,41 @@ let dispatchReportedAt = 0;
 /** dispatch 路径上报时标记, watcher 2s 内不再补报 */
 export function markGuardReported() {
   dispatchReportedAt = Date.now();
+  suppressWatcherReportFlag = false; // 权威信号路径已上报 → 解除 interrupt 抑制
 }
 
-/** 就绪 watcher 判定(纯函数, 可单测): streaming true→false 翻转且近期无 dispatch 上报 */
+// interrupt() 会乐观把 streaming 置 false（后端 turn 仍 busy, 等 abort 完成才广播
+// ready）。watcher 若把这次乐观翻转当"回合结束"上报 → Rust 发验收 → force 直发撞
+// 后端 busy("A prompt is already being processed")验收消息丢失。故 interrupt 后抑制
+// watcher 补报, 交由权威 turnEndedMsg(result/status:ready) 分支上报验收。
+// ⚠️ 兜底: 若 interrupt 是 no-op(后端本就空闲, 永远等不到 ready 广播), 抑制会卡死
+// → 守卫收不到 TurnEnded → 验收静默丢失。故抑制带 3s 过期: 过期后 watcher 视为
+// 可上报(此刻后端必然已空闲, 不会撞 busy)——与醒词路径的 3s 兜底对称。
+const SUPPRESS_TIMEOUT_MS = 3000;
+let suppressWatcherReportFlag = false;
+let suppressSetAt = 0;
+
+/** chatSession interrupt() 调用: 抑制 watcher 对这次乐观 streaming 翻转的误报 */
+export function suppressWatcherReport() {
+  suppressWatcherReportFlag = true;
+  suppressSetAt = Date.now();
+}
+
+/** 抑制是否已过期(纯函数, 可单测): 超时视为后端已空闲, 解除抑制 */
+export function isSuppressExpired(suppressed: boolean, setAt: number, now: number): boolean {
+  return suppressed && now - setAt > SUPPRESS_TIMEOUT_MS;
+}
+
+/** 就绪 watcher 判定(纯函数, 可单测): streaming true→false 翻转且近期无 dispatch
+ *  上报, 且未被 interrupt 抑制(乐观翻转不算回合结束) */
 export function shouldReportTurnEnded(
   prev: boolean | undefined,
   cur: boolean,
   now: number,
   lastDispatch: number,
+  suppressed = false,
 ): boolean {
+  if (suppressed) return false;
   return prev === true && cur === false && now - lastDispatch > 2000;
 }
 
@@ -62,8 +89,19 @@ function startGuardWatcher() {
   watcherTimer = setInterval(() => {
     if (status === "off") return;
     const s = getChatState().streaming;
-    // streaming true→false(回合结束/就绪)且 dispatch 未刚上报过 → 补报
-    if (shouldReportTurnEnded(prevStreaming, s, Date.now(), dispatchReportedAt)) {
+    // streaming false→true(回合开始) → 守卫在 Watching 下跳过回合卡死计时(合法长回合不误判)
+    if (prevStreaming === false && s === true) {
+      suppressWatcherReportFlag = false; // 新回合开始 → 解除抑制(上轮 interrupt 已消化)
+      void reportGuardWorking();
+    }
+    // 抑制过期(interrupt no-op, 等不到权威信号) → 解除, 让下方判定正常补报。
+    // 此刻距 interrupt 已超 3s, 后端必然已空闲, 补报的验收不会撞 busy。
+    if (isSuppressExpired(suppressWatcherReportFlag, suppressSetAt, Date.now())) {
+      suppressWatcherReportFlag = false;
+    }
+    // streaming true→false(回合结束/就绪)且 dispatch 未刚上报过 → 补报。
+    // interrupt 的乐观翻转被抑制: 那次 false 是假的(后端仍 busy), 验收等权威 ready。
+    if (shouldReportTurnEnded(prevStreaming, s, Date.now(), dispatchReportedAt, suppressWatcherReportFlag)) {
       markGuardReported();
       void reportGuardTurnEnded();
     }
@@ -102,9 +140,9 @@ export function handleGuardAction(action: GuardActionMsg) {
       break;
     case "releaseNext":
       status = "watching";
-      // agent 忙(streaming)时不放行 — 等回合结束由郑重 Watching→验收接管,
+      // agent 忙(后端权威 busy)时不放行 — 等回合结束由郑重 Watching→验收接管,
       // 避免 sendDrain 被 busy-reject 后丢弃队首消息
-      if (getChatState().streaming) break;
+      if (isBackendBusy(getChatState())) break;
       chatApi?.releaseQueue();
       break;
     case "exit":
@@ -144,6 +182,7 @@ export function findLastReportableAssistant(messages: Array<{ role?: string; con
 export function resetGuardReported() {
   lastReportedMsgId = "";
   turnByUserInterruption = false;
+  suppressWatcherReportFlag = false;
 }
 
 /** 当前回合是否由用户手动插话引起(区别对验收消息的回复)。
@@ -159,6 +198,17 @@ export function markUserInterruptedTurn() {
 /** 自动回合(守卫控制/队列)结束后复位 — 也可调 resetGuardReported 一并清 */
 export function clearUserInterruptedTurn() {
   turnByUserInterruption = false;
+}
+
+/** 上报回合开始(streaming true→): 守卫据此在 Watching 下跳过回合卡死计时 */
+export async function reportGuardWorking() {
+  if (status === "off") return;
+  try {
+    await invoke("guard_event", { event: { type: "working" } });
+  } catch (e) {
+    // 上报失败不致命(心跳兜底)
+    console.warn("[guard] working invoke failed:", e);
+  }
 }
 
 /** 上报回合结束(Rust 裁决器只在 TurnEnded 推进) */
@@ -191,6 +241,8 @@ export async function guardStart() {
     status = "watching";
     prevStreaming = getChatState().streaming;
     startGuardWatcher();
+    // 守卫启动时若已在回合中(streaming true) → 标记进行中, 避免 Watching 卡死误判
+    if (getChatState().streaming) void reportGuardWorking();
     notify();
     addStatusMessage(t("guard.started"), "info");
     // 无任何任务在途时明确告知用户守卫在等什么

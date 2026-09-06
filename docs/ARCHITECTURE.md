@@ -48,7 +48,7 @@
 | **前端表现层** | 布局树渲染、面板、UI 组件、i18n | `LayoutRenderer` `Toolbar` `panelDefs.tsx` `stores/*` | §2 |
 | **前端通信层** | 窗口内事件、跨窗口数据、后端 WS、跨面板命令 | `serviceBus.ts` `dataBus*.ts` `useChatBridge.ts` | §3 |
 | **Tauri 后端层** | Tauri 命令、设置持久化、SQLite、内嵌 MCP、更新、诊断 | `lib.rs` `settings.rs` `db.rs` `mcp.rs` `update.rs` `diagnostics.rs` | §4 |
-| **后端集成层** | 后端生命周期、会话、权限、Profile 环境 | `backendService.ts` `chatSession.ts` `claude-profile.ts` | §5 |
+| **后端集成层** | 后端生命周期、会话、权限、AI 网关兼容、Profile 环境 | `backendService.ts` `chatSession.ts` `claude-profile.ts` `api/claude.ts` | §5 |
 | **外部服务层** | 更新/技能服务器、记忆 MCP、笔记、反馈 | `updateService.ts` `skillMarketplace.ts` `notes.rs` | §6 |
 | **数据与持久化** | 工作区分层设置、多实例、窗口状态、SQLite | `settings.rs` §4.2 分层、`data.db` | §7 |
 | **关键功能模块** | 超级桌面、消息虚拟滚动、命令面板、技能 | `desktop/*` `MessageList.tsx` `useCommandPalette` | §8 |
@@ -68,6 +68,7 @@
 - **布局预设**：`LAYOUT_PRESETS` 注册表（default/chat/dense）+ `applyLayoutPreset(id)`；工具栏 `LayoutPresetDropdown`（缩略图预览 + 确认弹窗）。
 - **布局模式**（`layoutMode` store，全局 + DataBus 同步）：工具栏 `Grid3x3` 进入布局编辑态——每面板右上角绿色浮动 chip（拖动/分割四向/浮动/关闭/更多菜单）、分割线加宽 + 双箭头抓柄、面板绿色 outline + 拖拽高亮、顶部横幅 + `Esc` / 右下角「完成布局」胶囊退出。纯呈现层：拖拽/分割/浮动复用 `layoutStore` 现有操作，零新接口。
 - **复合组（compound group）**：`TabInstance.children` 承载合并进来的面板——`mergeIntoTab` 把源 tab 合并进目标 tab（首次合并图标变 `compoundGroup`，源是复合组则展开全部子面板），子面板可拖拽排序（`moveChild`）。**自动解散**：`removeChildFromCompound`/`moveChildBetweenTabs`/`removeChildFromFloatingTab` 移出后剩 ≤1 个子面板 → 复合组自动解散且图标/标题回归该面板（不残留 `compoundGroup` 图标）。**手动解散**：右键菜单「解散分组」`dissolveCompoundGroup` 把复合 tab 拆成同组 N 个独立 tab（保留活动子面板，`children < 2` 时禁用）。
+- **折叠（collapse）与图标栏**：activity 风格组点活动图标 `toggleGroupCollapse`（expanded ↔ collapsed，只改 `visibility` 不动 sizes）。折叠组渲染成固定图标栏（宽 48/高 35，`flex:0 0 auto`，高度稳定不自移）；`SplitView.showDivider` **不因 collapsed 隐藏**——折叠组后面的分隔条照常渲染，否则兄弟面板在该 split 内失去唯一可拖手柄。图标按钮 `flexShrink:0`（空间不足不被压间距）；`IconOverflowBar` 用 `ResizeObserver` 量可用空间，放不下的 tab 收进末尾「…」菜单（点击切过去，保留 ReorderHandle 拖拽重排）。
 
 ### 2.2 面板系统 (Panels)
 
@@ -98,6 +99,7 @@
 - **字体缩放**：CSS 变量 `--font-scale`，UI 文本用 `calc(var(--font-scale,1) * Xpx)`；≤10px 工具尺寸/编辑器/等宽不缩放。
 - **消息区增强**：左侧时间线 `TimeLineBar`（按天分桶省略静默日、悬停展开 350ms 防抖、拖动秒级定位；右侧滚动条易误触故放左）+ 每条消息时间显示（今天时分/跨天带日期，随 `messageTimeline` 开关）。上下文告警 `ContextWarningPopover`：已用百分比 ≥ 阈值（默认 90）时状态栏进度条上方弹浮动提示（带箭头、关闭 ✕、去设置），触发时进度条脉冲 + 数字变红；状态机纯函数 `utils/contextWarning.ts`（idle/showing/dismissed，设置 `contextWarningEnabled/Percent`）。
 - **划词工具栏** `SelectionToolbar`（设置 `msgSelectionToolbar`，默认开）：消息容器内划词弹出浮动条——「发送到聊天」/「复制」/「📂 路径下拉」。路径用 `pathDetector.ts` 检出：`findPathsWithWorkspace(text, workDir)` **先转义工作区路径中的空格**（`escapePathSpaces` 用占位符替换，防含空格工作区被拆成两个路径）→ PATH_REGEX（含分隔符才匹配）→ 还原去重；相对路径按工作区根解析 + 规范化。📂 展开列表逐项调 `open_in_explorer`，**打开前存在性检查**——路径不存在弹「路径不存在」toast（不开资源管理器）。交互契约：点击工具栏内不因 `selectionchange` 清空关闭（守卫：记录最近 mousedown 是否在工具栏内），点外部/Esc/滚动关闭。
+- **ErrorBoundary**（`ErrorBoundary.tsx`，面板级包裹）：普通错误一次性自动重试；**瞬时 hydration 错**（#300/#310，message 含 "server-rendered HTML"/"Hydration failed"）静默重试最多 2 次（间隔递增）才落手动 fallback。⚠️ hooks 必须全部在组件提前 return 之前——条件 hooks（数量随状态变化）在 prod minify 后即表现为 #300/#310（EditorPanel 案例）。
 
 ---
 
@@ -174,7 +176,7 @@
 - **网络连通**：内网更新服务器 + 云服务器（HTTP）+ MCP（读本实例动态端口）+ API BaseURL（TCP，不碰凭据）；「内网不通+云通」时面板给「切换到云服务器」一键按钮（持久化两 URL + 自动重探）。
 - **一键修复**（诊断面板按分类给出）：
   - 「修复环境与 Profile」→ `fix_environment_vars` + `fix_profiles`。前者按纯函数 `plan_var_fix`（Write/Remove/Keep，单测接缝）规划动作：`CLAUDE_CODE_HAHA_HOME`/`CLAUDE_CODE_GIT_BASH_PATH` 归位 + PATH 按安装目录实际存在的组件补全（根/bin/git\usr\bin/git\bin/python/python\Scripts），且 **git\usr\bin 提到 PATH 最前**（防 WSL bash 截胡）；写 **HKCU 用户级**——注册表用 `%CLAUDE_CODE_HAHA_HOME%` 引用（`REG_EXPAND_SZ`，Windows 构建进程环境时自动展开、安装目录迁移跟随），进程用展开值；**Remove 分支清理废弃旧值**（如安装目录缺少 bash.exe 时删除用户级残留 `CLAUDE_CODE_GIT_BASH_PATH`——残留旧值优先于系统级被 Windows 读取，永久干扰 SHELL/bash 解析；PATH 修复幂等，无实际变化不重写注册表/进程）。后者检测激活无效（指向不存在/缺凭据/未激活）时自动切到第一个有凭据 profile，写 `~/.claude/.env.active` + 工作区 `active-profile` 双标记（读侧优先级一致）。有改动后提示重启 GUI/IDE 生效（用户级对已运行进程不生效）。
-  - 「重启 IDE 后台」→ `fix_restart_ide_backend`（`taskkill` 杀残留 claude/bun + 按当前工作区重启）。
+  - 「重启 IDE 后台」→ `fix_restart_ide_backend`（杀残留 `--ide-mode` 进程 + 按当前工作区重启）。它是 fire-and-forget（不刷新前端 `BackendService._state`），面板修复按钮随后调 `BackendService.start()` 重新 poll 新端口并刷新状态，避免"看起来没重启成功"。
   - **失败即诊断**：后端状态进入 `error`（含启动超时）时前端自动 `activatePanel("diagnostics")`（5s 防抖 + 面板已开跳过），用户不用找入口。
 
 ### 4.6 更新系统 (update.rs) — 见 §6.1
@@ -204,12 +206,20 @@
 - `AskUserQuestion`：设 `pendingControlRequest` → 浮窗 → `respondToPermission` → 清理。
 - 权限模式持久化：`permissionMode` 必须进 TS AppSettings（否则周期布局保存覆盖回 default）+ `save_permission_mode` 即时写盘；`permission_mode_changed` 有竞态守卫（后端 init 广播 default 时忽略已保存的非默认）。
 
-### 5.4 Profile 环境 (claude-profile.ts ↔ lib.rs)
+### 5.4 AI 网关兼容性（CLI 引擎 src/services/api/claude.ts）
+
+- **Anthropic 兼容端点光谱**：DeepSeek `/anthropic` = 原生协议复刻（零改动）；qnaigc/one-api 系 = 转换代理（Anthropic→OpenAI 转换器常缺新字段）。按最弱转换器做通用兼容，不 per-model。
+- **thinking 块剥离**：`stripThinkingFromAssistantMessages` 发送前剥离 assistant 消息里的 thinking/redacted_thinking 块——GLM 等模型响应总带 thinking 块存进 history，重放被网关拒（`content[0].type类型错误`→502）；对 Anthropic 官方无害（本就不该重放）。tool_use/tool_result 多数网关认，不剥。
+- **能力互斥**：`thinking` 块（modelSupportsThinking）与 `reasoning:{effort}`（modelSupportsReasoning，DeepSeek 式）互斥，由 profile 能力 env 决定走哪条（勾选入口见 §5.5）；final guard 保证 `max_tokens > thinking.budget_tokens`（3P 端点硬校验）。
+- **TPM 预占限流陷阱**：one-api 系网关按「非缓存输入 + max_tokens」**预占**限流额度（非实际计量）——profile 的 MAX_TOKENS 给实际需要的量（16-32K），别按模型上限给；太小则长编辑截断分多轮反而重放大上下文。
+
+### 5.5 Profile 环境 (claude-profile.ts ↔ lib.rs)
 
 - **Profile 文件统一用户级**：只认 `~/.claude/.env.profiles/*.env`（全局共享，跨项目列表一致）。旧版曾按「IDE 脚本项目根→工作区→用户级」碰运气复用已存在目录，导致 profile 散落各项目、跨项目找不到；启动 `migrate_legacy_profiles()` 自动把旧位置 `*.env` 复制到用户级（同名不覆盖，旧目录保留不删）。
 - **激活标记（各工作区独立）**：解析优先工作区 `<work_dir>/.claude/active-profile`（GUI 切换写入，per-workspace 记忆，互不覆盖）→ `~/.claude/.env.active`（CLI 兼容兜底）→ 兜底第一个 profile。写读路径必须一致——历史 bug：`switch_model_profile` 写工作区标记但 `resolve_active_profile` 读安装根，导致工作区标记成死代码、全局 `.env.active` 被各工作区互相覆盖。
 - **`resolve_active_profile()` 共享解析器**（后端 `apply_active_profile` 与诊断共用，杜绝兜底漂移）。
 - `MANAGED_KEYS`（17 键）TS/Rust 单一来源，clear-then-rewrite 防残留；switch 写工作区 `settings.local.json` env + 工作区/用户双标记，default 写用户 `settings.json` env + 标记。
+- **模型能力声明（profile 勾选，告别手写 env）**：ProfileDialog 自定义 provider 表单提供「模型能力」勾选（thinking / adaptive_thinking / effort / max_effort / reasoning），勾选自动写三个 `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL_SUPPORTED_CAPABILITIES` env；编辑回读（`parseCapabilities`）。后端 `get3PModelCapabilityOverride` 按它判定 `modelSupportsThinking/Reasoning/Effort`，GUI 工具栏据此显示思考/effort 档位。不勾 = 后端按模型名默认判断。编辑已有 profile 时按钮显示「保存」（`editingId` 区分），新建显示「创建」。
 
 ---
 
@@ -275,7 +285,7 @@
 
 无限画布面板：9 种内容类型（text/table/chart/graphic/ref/filegroup/image/form/drawing），拖拽连线、多桌面标签、粘贴/拖放、AI 经 MCP 访问。
 
-- **数据**：`desktopStore`（desktops/items/connections，SQLite 防抖保存）+ `desktopHistoryStore`（每桌面 100 步快照，undo/redo，不 import desktopStore 防循环）+ `selectionStore`（画布本地临时选择）。
+- **数据**：`desktopStore`（desktops/items/connections，SQLite 防抖保存）+ `desktopHistoryStore`（每桌面 100 步快照，undo/redo，不 import desktopStore 防循环）+ `selectionStore`（画布本地临时选择）。**跨 GUI refetch 保留本地视口**：`fetchDesktops` 重建 desktops 时保留本地已有桌面的 panX/panY/zoom + 网格设置（视口是本地交互态，服务端记录可能比本地旧——500ms 防抖未落库/他窗并发），仅 items/connections/name 跟随服务端，否则用户刚做的缩放/平移会被打回（"闪回"）。
 - **画布**：CSS transform（`translate scale`，无库），光标中心缩放（0.1-5x，原生 wheel `{passive:false}`），指针捕获拖拽。
 - **连线**：4 锚点、几何吸附、`ConnectionOverlay` SVG 在 transform 外（避免裁剪）。
 - **graphic 图形**：支持 **Mermaid 文本**（`GraphicContent.mermaid` 字段，mermaid.js 懒加载完整渲染、主题跟随、双击编辑、AI 直接写 Mermaid 建/改图、搜索按文本匹配）；旧 nodes/edges 结构化图兼容保留。渲染/缩放/判别集中 `utils/graphicContent.ts` 纯函数。
@@ -367,6 +377,7 @@ bun run scripts/build.ts [--rebuild] [--quick] [--gui-only] [--components a,b,c]
 11 步：装依赖 → 编译 `claude.exe`（bun compile）→ `cargo tauri build --no-bundle`（GUI，含前端）→ 更新器 → 运行时（bun/scripts）→ 扩展（COM bridge/记忆 MCP）→ CLI 工具 → Python 3.12 → PortableGit → IDE 扩展 + 启动脚本 →（`--release`）manifest + 8 组件 zip 到 `dist/release/<version>/`。
 `--gui-only`（配合 `--quick --release`）：只重打 `gui.zip`，其余 7 组件 zip 从上一 release 目录复制复用，并强制用 `target/release` 最新 gui exe——只改 GUI 时秒级发布（跳过 python/git 等大组件重复压缩）。
 `--components <a,b,c>`（`--release` 时）：显式指定重建/重打的组件（如 `claude,gui`），其余组件复用上一 release 目录 zip 与现有 dist 产物（产物已存在则保留），未选组件不强构建（跳过 cargo/bun compile）。发布只改动的组件时用，避免全量重复压缩。
+`--notes "..."`：**发布必须带**——release_notes 按 `\n\n---\n\n` 累积拼接上一版 manifest，但裁到**最新 5 条**（`MAX_RELEASE_NOTES=5`，本版在前）；忘传则当版没有自己的 note（只剩历史）。note 条目按惯例带日期标题（`## 2026.MM.DD.N — 摘要`）。
 
 ### 10.2 dist/ 布局
 

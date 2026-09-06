@@ -692,6 +692,7 @@ async function* queryLoop(
               ),
               queryTracking,
               effortValue: appState.effortValue,
+              reasoningEffort: appState.reasoningEffort,
               advisorModel: appState.advisorModel,
               skipCacheWrite,
               agentId: toolUseContext.agentId,

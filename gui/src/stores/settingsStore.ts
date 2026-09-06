@@ -37,6 +37,9 @@ export interface AppSettings {
   autoLoadLatestSession?: boolean;
   forceChineseThinking?: boolean;
   permissionMode?: string;
+  /** 思考开关/effort 档 — 后端重启会丢内存态, GUI 重连时据此重发 set_thinking_mode */
+  thinkingModeEnabled?: boolean;
+  effort?: string;
   skillRegistryUrl?: string;
   updateServerUrl?: string;
   /** Main window state persistence */
@@ -68,9 +71,17 @@ export interface AppSettings {
   /** 上下文告警阈值百分比(默认 90, 即剩余 10%) */
   contextWarningPercent?: number;
   /** 自定义压缩提示词（gui 键，后端 compactConfig 读取）：text 空 = 不启用 */
-  customCompactPrompt?: { mode: "append" | "replace"; text: string };
+  customCompactPrompt?: {
+    mode: "append" | "replace";
+    text: string;
+    /** 预设标识（'none'|'handoff'|'custom'）。识别靠 presetId 不靠 text 字符串相等，
+     *  改预设模板后旧设置仍能识别并自动刷新 text。缺省=旧结构，按 text 推导。 */
+    presetId?: "none" | "handoff" | "custom";
+  };
   /** 压缩时提取脚本路径（默认 handoff 脚本，后端 compactConfig 读取） */
   compactExtractScript?: string;
+  /** 流卡死中断后的唤醒提示词：发给 AI 让它检查会话、继续未完成的内容。空=用默认 */
+  streamStallWakePrompt?: string;
 }
 
 let settings: AppSettings = {
@@ -174,6 +185,9 @@ export async function saveSettings(
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("save_app_settings", { patch, scope: scope ?? "workspace" });
+      // 跨 GUI 同步：任意设置(收藏/快捷提示/主题/工作区覆盖)保存后广播给其他实例，
+      // 对方 reloadSettings 重读共享文件。收藏(workspace)与快捷提示(global)都走这里。
+      invoke("notify_settings_changed").catch(() => {});
     } catch (e) {
       console.error("saveSettings failed:", e);
     }

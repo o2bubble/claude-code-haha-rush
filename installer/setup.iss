@@ -55,6 +55,7 @@ Name: "addpath"; Description: "将 Claude Code 添加到系统 PATH（推荐）"
 [Files]
 ; Core executables at root (always installed)
 Source: "..\dist\claude-code-gui.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: gui
+Source: "..\dist\claude-gui-server.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: gui
 Source: "..\dist\Update.exe";          DestDir: "{app}"; Flags: ignoreversion; Components: gui
 Source: "..\dist\claude.exe";          DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\bun.exe";             DestDir: "{app}"; Flags: ignoreversion
@@ -416,8 +417,8 @@ begin
         EnvAddPathTo(EnvRoot, EnvSub, HomeVar + '\python', HomePath + '\python');
         Log('addpath: python\Scripts');
         EnvAddPathTo(EnvRoot, EnvSub, HomeVar + '\python\Scripts', HomePath + '\python\Scripts');
-        Log('addpath: python note');
-        InjectPythonNote(ExpandConstant('{app}'));
+        // @python-env.md 注入已移交 GUI 启动 sync_python_env()（mac/win 统一、幂等、内容平台化），
+        // setup 不再处理——避免 setup 装静态 %CLAUDE_CODE_HAHA_HOME% 路径与 GUI 动态生成冲突。
       end;
 
       // Prepending LAST puts git\usr\bin at the very front of PATH, so a bare

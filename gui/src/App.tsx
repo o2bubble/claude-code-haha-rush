@@ -17,6 +17,7 @@ import { setLanguage, t } from "./i18n";
 import { eventBus } from "./services/serviceBus";
 import { Events, type BackendStateChangedPayload } from "./services/events";
 import { BackendService } from "./services/backendService";
+import { startSessionStatusSync } from "./services/sessionStatusSync";
 import { commands } from "./services/serviceBus";
 import { Commands } from "./services/commands";
 import { toggleGroupHidden, restoreLayout, serializeLayout, getSkipSave, refreshAllTitles, activatePanel, findTabByPanelId, getTree } from "./stores/layoutStore";
@@ -26,6 +27,9 @@ import { addStatusMessage } from "./stores/statusMsgStore";
 import CommandPalette from "./components/CommandPalette";
 import { useCommandPalette } from "./components/useCommandPalette";
 import ToastContainer from "./components/ToastContainer";
+import { reloadDesktops } from "./stores/desktopStore";
+import { loadSessionList, loadMorePlans, resetPagination } from "./stores/planHistoryStore";
+import { chatSession } from "./chat/chatSession";
 
 let _bridgeStarted = false;
 /** 启动动画时间线: 1.5s 打字 + 0.3s 停顿 → 1.8s 点亮叙事点+镜头展开 → +0.5s 过渡完成 (~2.3s) */
@@ -60,6 +64,41 @@ export default function App() {
       if (findTabByPanelId(getTree(), "diagnostics")) return; // 用户正在看，不打扰
       activatePanel("diagnostics");
     });
+  }, []);
+
+  // ── 跨 GUI 数据同步：server 下推 db_changed → 本 GUI refetch（仅他 GUI 的变更）──
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let alive = true;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => {
+        if (!alive) return;
+        listen("server:data-changed", (e: any) => {
+          const change = e?.payload as { entity?: string } | undefined;
+          if (change?.entity === "desktop") {
+            void reloadDesktops();
+          } else if (change?.entity === "plan") {
+            // 刷新计划历史时间线 + 计划记录（跨 GUI 另一实例改了计划）
+            resetPagination();
+            void loadSessionList();
+            void loadMorePlans();
+          } else if (change?.entity === "note") {
+            eventBus.emit(Events.NOTES_CHANGED as any, {});
+          } else if (change?.entity === "session") {
+            chatSession.listSessions();
+          } else if (change?.entity === "settings") {
+            void reloadSettings();
+          }
+        }).then((un) => {
+          if (alive) unlisten = un;
+          else un();
+        });
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
   }, []);
 
   // ── 外部链接全局拦截：左键→内置窗口；Ctrl/Cmd/中键→系统浏览器；右键→菜单 ──
@@ -204,15 +243,20 @@ export default function App() {
             w.outerPosition(),
             w.isMaximized(),
           ]).then(([size, pos, maximized]) => {
+            // pos can be Windows' off-screen sentinel (-32000,-32000) while the OS
+            // hasn't placed the window yet. Persisting it hides the GUI on the next
+            // launch (Rust restores the sentinel). Only record an on-screen position;
+            // otherwise leave it null so Rust centers the window.
+            const posOk = pos && Number.isFinite(pos.x) && Number.isFinite(pos.y) && pos.x > -30000 && pos.y > -30000;
             s.windowWidth = size.width;
             s.windowHeight = size.height;
-            s.windowX = pos.x;
-            s.windowY = pos.y;
+            s.windowX = posOk ? pos.x : undefined;
+            s.windowY = posOk ? pos.y : undefined;
             s.windowMaximized = maximized;
             import("@tauri-apps/api/core").then(({ invoke }) => {
               invoke("save_window_state", {
                 width: size.width, height: size.height,
-                x: pos.x, y: pos.y, maximized,
+                x: posOk ? pos.x : null, y: posOk ? pos.y : null, maximized,
               }).catch(() => {});
             }).catch(() => {});
           }).catch(() => {});
@@ -246,15 +290,26 @@ export default function App() {
             showSelector();
           }
         };
+        const launchNormal = () => {
+          import("@tauri-apps/api/core").then(({ invoke }) =>
+            invoke<string | null>("get_cli_workspace").then((cliWs) => {
+              if (cliWs) enterWorkspace(cliWs);
+              else autoEnterOrSelector();
+            }).catch(() => autoEnterOrSelector())
+          ).catch(() => autoEnterOrSelector());
+        };
         import("@tauri-apps/api/core").then(({ invoke }) => {
-          invoke<string | null>("get_cli_workspace").then((cliWs) => {
-            if (cliWs) {
-              enterWorkspace(cliWs);
+          // Intent mode runs first — it replaces landing / cli-ws entirely.
+          invoke<boolean>("get_startup_intent_mode").then((intentMode) => {
+            if (intentMode) {
+              invoke<string | null>("get_startup_intent_id").then((intentId) => {
+                void handleIntentLaunch(intentId ?? "");
+              });
             } else {
-              autoEnterOrSelector();
+              launchNormal();
             }
-          }).catch(() => autoEnterOrSelector());
-        }).catch(() => autoEnterOrSelector());
+          }).catch(() => launchNormal());
+        }).catch(() => launchNormal());
       }
     });
     return eventBus.on(Events.LANGUAGE_CHANGED, () => setLangKey((k) => k + 1));
@@ -337,6 +392,9 @@ export default function App() {
 
     void BackendService.bind(workDir);
 
+    // 跨 GUI 会话状态同步：上报本实例激活会话 + 订阅其他实例状态（server 通道）
+    startSessionStatusSync(workDir);
+
     // Background update check (5s delay, non-blocking, silent on error).
     // Result drives the toolbar red-dot badge via setUpdateAvailability.
     setTimeout(() => {
@@ -350,6 +408,97 @@ export default function App() {
         }).catch(() => { /* silent fail — don't bother user */ });
       }).catch(() => {});
     }, 5000);
+  }
+
+  // ── Startup intent (--intent <id>) ──
+  // Launched with --intent: skip landing, claim the intent on the server, bind
+  // the workspace the payload names, execute the kind (open_session / focus_panel),
+  // then ack. On any failure degrade to the workspace selector + a toast.
+  const intentHandledRef = useRef(false);
+
+  // Poll `fn` until it returns truthy (up to `attempts` × `gapMs`) — shared by
+  // the backend-ready wait and the claim-on-server wait.
+  async function retryUntil(fn: () => Promise<any>, attempts = 40, gapMs = 300): Promise<any> {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const v = await fn();
+        if (v) return v;
+      } catch { /* not ready yet */ }
+      await new Promise((r) => setTimeout(r, gapMs));
+    }
+    return null;
+  }
+
+  async function runIntent(kind: string, payload: any, intentId: string) {
+    const ack = (result: any) => {
+      import("@tauri-apps/api/core").then(({ invoke }) =>
+        invoke("ack_startup_intent", { intentId, result }).catch(() => {}));
+    };
+    if (kind === "open_session" && payload.session_id) {
+      const sessId = payload.session_id as string;
+      // §6.2: wait for the session list to be loaded before resolving a session.
+      const ready = await retryUntil(async () => {
+        const { getChatState } = await import("./stores/chatStore");
+        return getChatState().sessionsLoaded;
+      });
+      if (!ready) {
+        ack({ ok: false, kind, error: "sessions never loaded" });
+        return;
+      }
+      import("./components/chat/useChatBridge").then(({ launchIntentSession, setIntentTargeted, requestSessionList }) => {
+        requestSessionList();
+        launchIntentSession(sessId);   // 一步打开目标，不先切最近
+        setIntentTargeted(false);      // 目标已指定并加载，释放抑制
+        ack({ ok: true, kind, session_id: sessId });
+      }).catch(() => ack({ ok: false, kind, error: "no bridge" }));
+    } else if (kind === "focus_panel" && payload.panel_id) {
+      activatePanel(payload.panel_id as string);
+      ack({ ok: true, kind, panel_id: payload.panel_id });
+    } else {
+      ack({ ok: false, kind, error: "unknown kind or missing id" });
+    }
+  }
+
+  async function handleIntentLaunch(intentId: string) {
+    if (intentHandledRef.current) return;
+    intentHandledRef.current = true;
+    setShowWorkspaceSelector(false);
+    setAppReady(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      // Claim on the server (which Rust pre-ensured). Retry briefly: the server
+      // may still be spawning / the claim may race another instance.
+      const rec = await retryUntil(async () => {
+        const r = await invoke<any>("claim_startup_intent", { intentId }).catch(() => null);
+        return r ? (r.payload ?? r) : null;
+      });
+      const payload = rec?.payload ?? rec;
+      if (!payload) {
+        addStatusMessage("意图未兑现（server 不可用或意图已失效）", "warn");
+        setShowWorkspaceSelector(true);
+        return;
+      }
+      const ws = payload.workspace as string | undefined;
+      const kind = payload.kind as string;
+      // open_session 意图：提前标记目标会话，抑制 backend connect 后 session_list
+      // 到达时的"自动加载最近会话"——否则新实例先切最近、再被 runIntent 切目标，
+      // 造成两次跳变（应一步到位）。必须在 bind/connect 之前设置。
+      if (kind === "open_session") {
+        import("./components/chat/useChatBridge").then(({ setIntentTargeted }) => setIntentTargeted(true));
+      }
+      // Bind the workspace the intent names (starts the backend). Reuse the
+      // normal launch path so the bridge/data-layer setup is identical.
+      if (ws) {
+        const cs = getSettings();
+        const merged = [ws, ...(cs.workspaces ?? [])].filter((w: string, i: number, a: string[]) => a.indexOf(w) === i);
+        setWorkspaceList(merged);
+        await handleWorkspaceLaunch(ws, merged);
+      }
+      await runIntent(kind, payload, intentId);
+    } catch (e) {
+      addStatusMessage("意图未兑现", "warn");
+      setShowWorkspaceSelector(true);
+    }
   }
 
   // Listen for UI font size changes
@@ -470,16 +619,17 @@ export default function App() {
           w.isMaximized(),
         ]);
         const s = getSettings();
+        const posOk = pos && Number.isFinite(pos.x) && Number.isFinite(pos.y) && pos.x > -30000 && pos.y > -30000;
         s.windowWidth = size.width;
         s.windowHeight = size.height;
-        s.windowX = pos.x;
-        s.windowY = pos.y;
+        s.windowX = posOk ? pos.x : undefined;
+        s.windowY = posOk ? pos.y : undefined;
         s.windowMaximized = maximized;
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("save_window_state", {
           width: size.width, height: size.height,
-          x: maximized ? null : pos.x,
-          y: maximized ? null : pos.y,
+          x: maximized || !posOk ? null : pos.x,
+          y: maximized || !posOk ? null : pos.y,
           maximized,
         }).catch(() => {});
       } catch {}

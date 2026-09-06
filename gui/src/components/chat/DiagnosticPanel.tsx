@@ -229,7 +229,12 @@ export const DiagnosticPanel: React.FC = memo(function DiagnosticPanel() {
     try {
       const msg = await diagnosticsService.fixRestartIdeBackend();
       addStatusMessage(msg, "success");
-      await new Promise((r) => setTimeout(r, 1500));
+      // fix_restart_ide_backend 是 fire-and-forget：杀进程+异步重启后立即返回，
+      // 前端 BackendService._state 不会自动刷新——再读 buildBackendCategory() 只会拿到
+      // 旧状态（"运行中@旧端口"或旧 error），看起来像"没重启成功"。这里走 BackendService.start()
+      // 重新 poll get_ide_port 并更新 state（内部 quick-poll 失败会 fallback 到
+      // restart_ide_backend + 完整轮询），再刷新面板才能真正反映新端口。
+      await BackendService.start();
       setReport((prev) => (prev ? { ...prev, categories: [buildBackendCategory(), ...prev.categories.filter((c) => c.id !== "backend")] } : prev));
     } catch (e) {
       addStatusMessage(String(e), "error");

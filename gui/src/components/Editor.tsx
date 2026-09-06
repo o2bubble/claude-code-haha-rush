@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { t } from "../i18n";
 import Editor, { type OnMount, loader } from "@monaco-editor/react";
 import { detectLanguageForMonaco } from "../utils/detectLanguage";
@@ -10,6 +10,7 @@ import { useEvent } from "../services/useService";
 import { Events, type SettingsChangedPayload } from "../services/events";
 import { eventBus } from "../services/serviceBus";
 import { setActiveEditor } from "../utils/editorCommands";
+import { revealFileInTree } from "../utils/revealFile";
 
 // Lazy-configure Monaco to use local files instead of CDN
 let monacoReady = false;
@@ -71,7 +72,7 @@ interface EditorProps {
   readOnly?: boolean;
 }
 
-export default function MonacoEditor({ path, name, content, onChange, readOnly }: EditorProps) {
+export default memo(function MonacoEditor({ path, name, content, onChange, readOnly }: EditorProps) {
   const [ready, setReady] = useState(monacoReady);
   const [isDark, setIsDark] = useState(
     () => typeof document !== "undefined" && isDarkTheme(document.documentElement.dataset.theme)
@@ -96,6 +97,20 @@ export default function MonacoEditor({ path, name, content, onChange, readOnly }
 
   const sp = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const s = sp?.settings ?? getSettings();
+
+  // options 对象用 useMemo 稳定身份——否则父组件每次重渲染都新建对象,
+  // 打爆 @monaco-editor/react <Editor>(memo) 的 memo, 导致本不该发生的子重渲染
+  // (进而推高 #300/#310 瞬时 hydration 竞态概率)。
+  const editorOptions = useMemo<import("monaco-editor").editor.IStandaloneEditorConstructionOptions>(() => ({
+    minimap: { enabled: true },
+    fontSize: s.editorFontSize ?? 14,
+    lineNumbers: "on",
+    tabSize: s.editorTabSize ?? 4,
+    wordWrap: s.editorWordWrap ? "on" : "off",
+    scrollBeyondLastLine: false,
+    automaticLayout: true,
+    readOnly: readOnly ?? false,
+  }), [s.editorFontSize, s.editorTabSize, s.editorWordWrap, readOnly]);
 
   const handleMount: OnMount = (editor, monaco) => {
     // 注册活动编辑器实例供命令面板读取 getSupportedActions
@@ -140,7 +155,7 @@ export default function MonacoEditor({ path, name, content, onChange, readOnly }
     // ── Send to chat via @ref{file:path:line} ──
     editor.addAction({
       id: "send-line-to-chat",
-      label: "发送到聊天",
+      label: t("files.sendToChat"),
       contextMenuGroupId: "9_cutcopypaste",
       contextMenuOrder: 2.5,
       run: () => {
@@ -150,6 +165,19 @@ export default function MonacoEditor({ path, name, content, onChange, readOnly }
         eventBus.emit("chat.addReference", {
           reference: { type: "file", path: pathRef.current, startLine: start, endLine: end },
         });
+      },
+    });
+
+    // ── 定位目录树 / 在资源管理器中打开 ──
+    // 当前打开文件在**本工作区**内 → 在文件树中定位(展开祖先+选中)；不在工作区
+    // → fallback 到"在资源管理器中打开"(目录树定位找不到区外的文件)。
+    editor.addAction({
+      id: "reveal-in-file-tree",
+      label: t("editor.revealInTree"),
+      contextMenuGroupId: "9_cutcopypaste",
+      contextMenuOrder: 2.6,
+      run: () => {
+        revealFileInTree(pathRef.current);
       },
     });
   };
@@ -183,16 +211,7 @@ export default function MonacoEditor({ path, name, content, onChange, readOnly }
       theme={isDark ? "vs-dark" : "vs"}
       onMount={handleMount}
       onChange={readOnly ? undefined : handleChange}
-      options={{
-        minimap: { enabled: true },
-        fontSize: s.editorFontSize ?? 14,
-        lineNumbers: "on",
-        tabSize: s.editorTabSize ?? 4,
-        wordWrap: s.editorWordWrap ? "on" : "off",
-        scrollBeyondLastLine: false,
-        automaticLayout: true,
-        readOnly: readOnly ?? false,
-      }}
+      options={editorOptions}
     />
   );
-}
+});

@@ -70,9 +70,11 @@ export function updateProgressFromMessage(tracker: ProgressTracker, message: Mes
     return;
   }
   const usage = message.message.usage;
-  // Keep latest input (it's cumulative in the API), sum outputs
-  tracker.latestInputTokens = usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
-  tracker.cumulativeOutputTokens += usage.output_tokens;
+  // Keep latest input (it's cumulative in the API), sum outputs.
+  // GLM-style gateways may omit usage entirely — treat missing fields as 0
+  // so the panel's token display stays absent (0 → hidden) instead of NaN.
+  tracker.latestInputTokens = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+  tracker.cumulativeOutputTokens += usage.output_tokens ?? 0;
   for (const content of message.message.content) {
     if (content.type === 'tool_use') {
       tracker.toolUseCount++;

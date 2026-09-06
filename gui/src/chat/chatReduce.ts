@@ -4,8 +4,14 @@
 // Faithful port of useChatBridge's ~24 handlers — behaviour is unchanged.
 
 import type { ChatState, ChatMessage, ChatEffect, WireMessage, ReduceCtx } from "./types";
+import type { EffortLevelUI } from "../stores/chatStore";
 import { extractPlanTasks, isPlanTool } from "./planExtract";
 import { mergeSessionMessages } from "./sessionMerge";
+
+const EFFORT_LEVELS: EffortLevelUI[] = ["low", "medium", "high", "max"];
+function isEffortLevelUI(v: unknown): v is EffortLevelUI {
+  return typeof v === "string" && (EFFORT_LEVELS as readonly string[]).includes(v);
+}
 
 export interface ReduceResult {
   nextState: ChatState;
@@ -17,6 +23,7 @@ export function emptyChatState(): ChatState {
   return {
     messages: [],
     streaming: false,
+    compacting: false,
     connected: false,
     sessionId: null,
     sessions: [],
@@ -36,9 +43,24 @@ export function emptyChatState(): ChatState {
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
     model: "",
+    thinkingModeEnabled: false,
+    effort: null,
+    modelCapabilities: null,
     // 最近一次流式活动的时间戳（null=尚无）；无响应提示据此计算卡顿秒数
     lastStreamEventAt: null,
+    // 后端权威忙闲信号（status 广播携带 busy 布尔写入）。undefined = 后端尚无信号
+    // （初始化/WS 半开），回落 streaming；true/false 后即用权威值。
+    backendBusy: undefined,
   };
+}
+
+/**
+ * 后端是否忙（权威信号）。`backendBusy === undefined`（后端尚无信号，初始化或
+ * WS 半开）时回落乐观 streaming——保持旧行为；有了布尔后即用权威值，消除
+ * interrupt 乐观清空/等子代理静默/error 卡 true 三类 streaming 误判。
+ */
+export function isBackendBusy(s: ChatState): boolean {
+  return s.backendBusy === undefined ? s.streaming : s.backendBusy;
 }
 
 /**
@@ -86,6 +108,8 @@ function buildSubAgentInfo(msg: any, status: string): ChatEffect {
       status: status as any,
       toolCount: msg.tool_uses ?? 0,
       tokenCount: msg.total_tokens ?? 0,
+      lastTool: (msg.last_tool as string | undefined) ?? undefined,
+      startTime: (msg.start_time as number | undefined) ?? undefined,
     },
   };
 }
@@ -122,9 +146,13 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
   const t = inner.type;
 
   // 流式活动推进 lastStreamEventAt（无响应提示的数据源）。tool_progress 也算
-  // 活动（长 bash 工具不是卡死）；status/context_window 等周期性消息不算，
-  // 防止掩盖真实卡停。
-  if (msg.type === "stream_event" || t === "tool_progress") {
+  // 活动（长 bash 工具不是卡死）；task_*（子代理运行/进度）同样——主回合等在
+  // 子代理结果上时流静默 ≠ 卡死（实测长 Task 运行会被误弹「是否中断」甚至自动
+  // 唤醒）；status/context_window 等周期性消息不算，防止掩盖真实卡停。
+  const isSubAgentActivity =
+    t === "task_started" || t === "task_progress" ||
+    t === "task_completed" || t === "task_messages";
+  if (msg.type === "stream_event" || t === "tool_progress" || isSubAgentActivity) {
     set({ lastStreamEventAt: now() });
   }
 
@@ -214,13 +242,21 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       break;
     case "result":
       setStreaming(false);
+      set({ backendBusy: false }); // result 是权威 turn 结束信号 → 后端空闲
       break;
     case "error":
       // 必须复位全局 streaming：某些路径（上游中断/看门狗降级失败/断连）error 后
       // 没有 result 兜底，不复位会让 GUI 永远停在 streaming=true（状态栏"工作中"，
       // 用户只能手动中断+继续来"激活"——即"输出莫名卡死"）。result 仍会覆盖为 false。
       setStreaming(false);
+      set({ compacting: false, backendBusy: false });
       pushMessage({ id: uuid(), role: "assistant", content: `Error: ${inner.message || "Unknown error"}`, timestamp: now() });
+      break;
+    case "task_error":
+      // 任务级错误（如 load_agent_transcript/kill_task 打在已结束的任务上）——
+      // 绝不能动全局 streaming，也不进聊天气泡：否则主回合还在跑时 GUI 会被
+      // 误标"就绪"，用户下一条消息撞 busy（"A prompt is already being processed"）。
+      effects.push({ type: "subagent.error", taskId: inner.task_id, message: inner.message });
       break;
     case "tool_progress": {
       if (!inner.data) break;
@@ -288,17 +324,33 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       break;
     }
     case "status": {
-      if (inner.status === "ready") setStreaming(false);
-      if (inner.status === "thinking") set({ streaming: true });
-      if (inner.status === "compacting") set({ streaming: true });
-      // WS 断开/重连：回合已死（WS 是唯一通道），必须复位 streaming。
-      // 否则流式中断连后 GUI 永远停在"工作中"（"输出莫名卡死"，只能手动中断+继续复活）。
-      // connected 兜底覆盖"半开连接"（服务器剔除 client 但没发 close，onclose 不触发）的场景。
-      if (inner.status === "disconnected" || inner.status === "connected") setStreaming(false);
+      // backendBusy 权威源：**只认 status 事件携带的显式 busy 布尔**（后端 ideMode 广播）。
+      // 缺省（子命令如 rewind/refresh 的裸 ready/thinking 不带 busy）不改 backendBusy ——
+      // 它们只是局部命令完成，不代表主 turn 结束，清了会误判空闲直发撞 busy。
+      // 仅真正持有 global busy 的 turn（compact/handleUserPrompt）广播才带 busy 布尔。
+      const busy = (inner as { busy?: boolean }).busy;
+      if (inner.status === "ready") {
+        setStreaming(false);
+        set({ compacting: false, ...(busy !== undefined ? { backendBusy: busy } : {}) });
+      }
+      if (inner.status === "thinking") set({ streaming: true, ...(busy !== undefined ? { backendBusy: busy } : {}) });
+      // compacting: 压缩会话中(compacting→compact_boundary)。压缩期流无事件、lastStreamEventAt 停更，
+      // 置此标志抑制"流卡死决策期"——压缩不是卡死。
+      if (inner.status === "compacting") set({ streaming: true, lastStreamEventAt: now(), compacting: true, ...(busy !== undefined ? { backendBusy: busy } : {}) });
+      // interrupt：中断瞬间。backendBusy 仍 true（turn 还没收尾，abort 后 finally 才 ready）。
+      // 不碰 streaming（interrupt() 已乐观清）—— 仅维持权威 busy，防随后的 gate 误判空闲直发撞 busy。
+      if (inner.status === "interrupting") { if (busy !== undefined) set({ backendBusy: busy }); }
+      // WS 断开：回合已死（WS 是唯一通道），必须复位 streaming + 清 backendBusy
+      //（后端无法响应，判空闲合理——否则流式中断连后 GUI 永远停在"工作中"）。
+      if (inner.status === "disconnected") { setStreaming(false); set({ compacting: false, backendBusy: false }); }
+      // WS 重连(connected)：清 streaming（半开连接兜底）但**不清 backendBusy**——重连
+      // 成功 ≠ 后端空闲，后端可能还在跑上一 turn（等子代理/未收尾），清了会误判空闲直发
+      // 撞 busy。backendBusy 交给后续 ready/thinking 广播决定。
+      if (inner.status === "connected") { setStreaming(false); set({ compacting: false }); }
       break;
     }
     case "system": {
-      if (inner.subtype === "compact_boundary") set({ streaming: false });
+      if (inner.subtype === "compact_boundary") set({ streaming: false, compacting: false });
       if (inner.subtype === "slash_commands" && inner.commands) set({ slashCommands: inner.commands });
       break;
     }
@@ -355,6 +407,7 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
         ...s,
         messages: [],
         streaming: false,
+        compacting: false,
         sessionId: null,
         tasks: [],
       };
@@ -399,6 +452,16 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       const status =
         t === "task_completed" ? inner.status || "completed" : "running";
       effects.push(buildSubAgentInfo(inner, status));
+      break;
+    }
+    case "task_messages": {
+      // 推送式 transcript 增量（后端 broadcastTaskStateChanges 随状态/进度广播）
+      effects.push({
+        type: "subagent.transcript.append",
+        taskId: inner.task_id,
+        messages: (inner.messages || []).map((m: any) => ({ role: m.role, content: m.content, timestamp: m.timestamp })),
+        total: inner.total,
+      });
       break;
     }
     case "agent_transcript":
@@ -455,6 +518,19 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
         }
         set({ permissionMode: inner.mode });
       }
+      break;
+    }
+    case "thinking_mode_changed": {
+      if (typeof inner.enabled === "boolean") set({ thinkingModeEnabled: inner.enabled });
+      if (isEffortLevelUI(inner.effort)) set({ effort: inner.effort });
+      break;
+    }
+    case "effort_changed": {
+      if (isEffortLevelUI(inner.value)) set({ effort: inner.value });
+      break;
+    }
+    case "model_capabilities": {
+      if (inner.capability) set({ modelCapabilities: inner.capability });
       break;
     }
     case "file_edit":

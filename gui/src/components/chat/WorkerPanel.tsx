@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useBackend, BackendService } from "../../services/backendService";
 import { useMcpStatus } from "../../services/mcpBridge";
 import { useEventHandler, useEvent } from "../../services/useService";
@@ -35,11 +35,30 @@ const sectionLabel: React.CSSProperties = {
   fontFamily: "var(--font-sans)", textTransform: "uppercase" as const,
 };
 
+/** GUI server 存活状态：轮询 get_gui_server_status（只读不拉起），重启后立即刷新。 */
+function useGuiServerStatus() {
+  const [st, setSt] = useState<{ connected: boolean; port: number; rev: number }>({ connected: false, port: 8766, rev: 0 });
+  const refresh = useCallback(async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const r = await invoke<any>("get_gui_server_status");
+      setSt((p) => ({ connected: !!r?.connected, port: r?.port ?? 8766, rev: p.rev + 1 }));
+    } catch { /* server 查询失败 = 视为未连 */ }
+  }, []);
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, 2000);
+    return () => clearInterval(id);
+  }, [refresh]);
+  return { ...st, refresh };
+}
+
 export function WorkerPanel() {
   const payload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
   const tasks: BackgroundTask[] = payload?.state?.tasks ?? getChatState().tasks;
   const backend = useBackend();
   const mcp = useMcpStatus();
+  const guiServer = useGuiServerStatus();
 
   const runningTasks = tasks.filter((t) => t.status === "running");
   const doneTasks = tasks.filter((t) => t.status !== "running");
@@ -127,6 +146,39 @@ export function WorkerPanel() {
           {mcp.error}
         </div>
       )}
+
+      {/* GUI Server (daemon) */}
+      <div style={sectionLabel}>{t("worker.guiServer")}</div>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
+        borderBottom: "1px solid var(--border-light)",
+      }}>
+        <span style={{
+          width: 8, height: 8, borderRadius: "50%",
+          backgroundColor: guiServer.connected ? "var(--semantic-success)" : "var(--fg-muted)",
+          flexShrink: 0,
+        }} />
+        <span style={{ flex: 1, color: guiServer.connected ? "var(--semantic-success)" : "var(--fg-muted)", fontWeight: 500 }}>
+          {guiServer.connected ? t("worker.statusRunning") : t("worker.statusStopped")}
+        </span>
+        <span style={{ color: "var(--fg-muted)", fontSize: 10 }}>{t("worker.port")} {guiServer.port}</span>
+        <button
+          onClick={() => { void (async () => {
+            try {
+              const { invoke } = await import("@tauri-apps/api/core");
+              await invoke("restart_gui_server");
+            } finally { guiServer.refresh(); }
+          })(); }}
+          title={t("worker.restartGuiServer")}
+          style={{
+            border: "1px solid var(--border-medium)", borderRadius: 3, fontSize: 10,
+            backgroundColor: "var(--bg-root)", cursor: "pointer", padding: "2px 6px",
+            fontFamily: "inherit",
+          }}
+        >
+          ↻
+        </button>
+      </div>
 
       {/* Active tasks */}
       {runningTasks.length > 0 && (

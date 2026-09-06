@@ -3,6 +3,7 @@ import { getStroke } from "perfect-freehand";
 import type { DesktopItem, DrawingContent, DrawElement } from "../../types/desktop";
 import { updateItem } from "../../stores/desktopStore";
 import { isSelected } from "./selectionStore";
+import { t } from "../../i18n";
 
 interface Pt { x: number; y: number; }
 
@@ -479,7 +480,7 @@ export function DrawItem({ item }: { item: DesktopItem }) {
               cursor: "pointer", fontSize: 12, color: "var(--fg-primary)",
               fontFamily: "var(--font-sans)",
             }}
-          >✏️ 编辑</button>
+          >{t("desktop.formItem.edit")}</button>
         )}
       </div>
     );
@@ -558,7 +559,7 @@ export function DrawItem({ item }: { item: DesktopItem }) {
         <span style={{ width: 1, height: 16, background: "var(--border-medium)", margin: "0 2px" }} />
 
         <button style={{ ...S.smallBtn, color: "var(--accent)", fontWeight: 600 }}
-          onClick={() => setEditing(false)}>完成</button>
+          onClick={() => setEditing(false)}>{t("desktop.formItem.done")}</button>
       </div>
     </div>
   );

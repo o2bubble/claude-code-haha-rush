@@ -9,7 +9,7 @@ import { ConnectionOverlay } from "./ConnectionOverlay";
 import { eventBus } from "../../services/serviceBus";
 import { Events } from "../../services/events";
 import type { DesktopItemSelectedPayload, SettingsChangedPayload } from "../../services/events";
-import { saveClipboardItem, isRealFilePath } from "../../services/clipboardService";
+import { saveClipboardItem, isRealFilePath, resolvePaste, collectPaste, defaultReadDir } from "../../services/clipboardService";
 import { useEvent } from "../../services/useService";
 import { isSelected, setSelection, clearSelection, getSelectedIds, useSelection } from "./selectionStore";
 import { setCurrentViewerItemId } from "../../services/desktopItemViewerRegistry";
@@ -494,86 +494,45 @@ function SuperDesktopCanvasImpl({ desktop, searchMatchedIds }: Props) {
 
       const pos = getViewportCenter();
 
-      // ── Images from clipboard ──
-      const items = e.clipboardData.items;
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (item.type.startsWith("image/")) {
-          const blob = item.getAsFile();
-          if (blob && workDir) {
-            const filePath = await saveClipboardItem(blob, workDir);
-            if (filePath) {
-              const name = filePath.split(/[/\\]/).pop() || "image";
-              addItem(desktop.id, {
-                x: pos.x,
-                y: pos.y,
-                width: 400,
-                height: 300,
-                content: { type: "image", path: filePath } as ImageContent,
-                label: name,
-              });
-            }
-          }
-          return;
-        }
-      }
+      const { files, images, text } = collectPaste(e);
+      const decision = await resolvePaste({
+        files,
+        images,
+        text,
+        pathExists: isRealFilePath,
+        readDir: defaultReadDir,
+      });
 
-      // ── Files from clipboard ──
-      const files = e.clipboardData.files;
-      if (files.length > 0 && workDir) {
-        const refs: FileGroupContent["files"] = [];
-        for (let i = 0; i < files.length; i++) {
-          const filePath = await saveClipboardItem(files[i], workDir, files[i].name);
-          if (filePath) {
-            const name = filePath.split(/[/\\]/).pop() || files[i].name;
-            refs.push({ type: "file", path: filePath, label: name });
-          }
-        }
-        if (refs.length > 0) createFileGroup(pos, refs);
+      if (decision.kind === "refs") {
+        createFileGroup(pos, decision.refs);
         return;
       }
-
-      // ── Text paste ──
-      const plain = e.clipboardData.getData("text/plain");
-      if (!plain) return;
-
-      // Check if it's a real file path
-      const path = plain.trim();
-      const isPath = await isRealFilePath(path);
-      if (isPath) {
-        // Try directory first, fall back to file
-        try {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const entries = await invoke<any[]>("read_dir", { path });
-          if (entries.length > 0) {
-            const name = path.split(/[/\\]/).pop() || path;
-            // Root dir first so it can be sent to agent, then children
-            const refs: FileGroupContent["files"] = [
-              { type: "dir" as const, path, label: name },
-              ...entries.map((e) => ({
-                type: e.is_dir ? "dir" as const : "file" as const,
-                path: e.path,
-                label: e.name,
-              })),
-            ];
-            createFileGroup(pos, refs);
-            return;
+      if (decision.kind === "saveImages") {
+        for (const item of decision.items) {
+          const filePath = await saveClipboardItem(item.blob, workDir, item.name);
+          if (filePath) {
+            const name = filePath.split(/[/\\]/).pop() || "image";
+            addItem(desktop.id, {
+              x: pos.x,
+              y: pos.y,
+              width: 400,
+              height: 300,
+              content: { type: "image", path: filePath } as ImageContent,
+              label: name,
+            });
           }
-        } catch { /* not a dir, treat as file */ }
-        // Single file
-        const name = path.split(/[/\\]/).pop() || path;
-        createFileGroup(pos, [{ type: "file", path, label: name }]);
-      } else {
-        // Create TextItem
-        addItem(desktop.id, {
-          x: pos.x,
-          y: pos.y,
-          width: 300,
-          height: 200,
-          content: { type: "text", format: "plain", text: plain },
-          label: t("desktop.pastedText"),
-        });
+        }
+        return;
       }
+      // inlineText → TextItem
+      addItem(desktop.id, {
+        x: pos.x,
+        y: pos.y,
+        width: 300,
+        height: 200,
+        content: { type: "text", format: "plain", text: decision.text },
+        label: t("desktop.pastedText"),
+      });
     },
     [getViewportCenter, createFileGroup, workDir, desktop.id],
   );
@@ -594,21 +553,9 @@ function SuperDesktopCanvasImpl({ desktop, searchMatchedIds }: Props) {
             const name = f.name || f.path.split(/[/\\]/).pop() || f.path;
             const isDir = !f.type && !name.includes("."); // rough check — fallback to invocation
             if (isDir) {
-              // Enumerate directory
-              try {
-                const { invoke } = await import("@tauri-apps/api/core");
-                const entries = await invoke<any[]>("read_dir", { path: f.path });
-                for (const entry of entries) {
-                  refs.push({
-                    type: entry.is_dir ? "dir" : "file",
-                    path: entry.path,
-                    label: entry.name,
-                  });
-                }
-                continue;
-              } catch {
-                // Fall through to file ref on failure
-              }
+              // 目录作为单个树根节点，由 FileGroupItem 懒加载 read_dir 逐级展开子项（不再平铺一级子项）。
+              refs.push({ type: "dir", path: f.path, label: name });
+              continue;
             }
             // Single image file → ImageItem
             const imageExts = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"];

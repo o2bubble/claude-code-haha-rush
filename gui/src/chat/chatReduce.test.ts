@@ -3,7 +3,7 @@
 // asserts nextState + effects. Deterministic via injected now/uuid.
 
 import { describe, it, expect } from "vitest";
-import { chatReduce, emptyChatState, computeStreamStall } from "./chatReduce";
+import { chatReduce, emptyChatState, computeStreamStall, isBackendBusy } from "./chatReduce";
 import type { ChatState, ReduceCtx } from "./types";
 
 const ctx: ReduceCtx = { now: () => 1234567890, uuid: () => "gen-id" };
@@ -92,15 +92,32 @@ describe("chatReduce — streaming FSM", () => {
     r = reduce({ type: "result" }, r.nextState);
     expect(r.nextState.streaming).toBe(false);
     expect(r.nextState.messages[0].streaming).toBe(false);
+    expect(r.nextState.backendBusy).toBe(false); // result=权威 turn 结束 → 后端空闲
   });
 
-  it("status ready resets, thinking/compacting starts", () => {
-    let r = reduce({ type: "status", status: "thinking" }, { ...emptyChatState(), streaming: false });
+  it("status ready resets, thinking/compacting starts (with busy field)", () => {
+    let r = reduce({ type: "status", status: "thinking", busy: true }, { ...emptyChatState(), streaming: false });
     expect(r.nextState.streaming).toBe(true);
-    r = reduce({ type: "status", status: "compacting" }, r.nextState);
+    expect(r.nextState.backendBusy).toBe(true);
+    r = reduce({ type: "status", status: "compacting", busy: true }, r.nextState);
     expect(r.nextState.streaming).toBe(true);
-    r = reduce({ type: "status", status: "ready" }, r.nextState);
+    expect(r.nextState.backendBusy).toBe(true);
+    r = reduce({ type: "status", status: "ready", busy: false }, r.nextState);
     expect(r.nextState.streaming).toBe(false);
+    expect(r.nextState.backendBusy).toBe(false);
+  });
+
+  it("bare status (no busy field) does NOT change backendBusy (sub-command ready ≠ turn end)", () => {
+    // 子命令如 rewind/plugin_refresh 广播裸 ready（不带 busy）——只是局部命令完成，
+    // 若清 busy 会误判主 turn 空闲直发撞 busy。必须保持 backendBusy 现值。
+    let r = reduce({ type: "status", status: "thinking", busy: true });
+    expect(r.nextState.backendBusy).toBe(true);
+    r = reduce({ type: "status", status: "ready" }, r.nextState); // 裸 ready
+    expect(r.nextState.backendBusy).toBe(true); // 未被清（主 turn 仍忙）
+    expect(r.nextState.streaming).toBe(false);  // 但 streaming 复位
+    r = reduce({ type: "status", status: "thinking" }, { ...r.nextState }); // 裸 thinking
+    expect(r.nextState.backendBusy).toBe(true); // 保持
+    expect(r.nextState.streaming).toBe(true);
   });
 
   it("system slash_commands sets the command list; compact_boundary resets streaming", () => {
@@ -405,6 +422,7 @@ describe("chatReduce — tasks, subagents, permission, misc", () => {
     expect(r.nextState.streaming).toBe(true);
     r = reduce({ type: "stream_event", event: { type: "error", message: "boom" } }, r.nextState);
     expect(r.nextState.streaming).toBe(false);
+    expect(r.nextState.backendBusy).toBe(false); // error 后必须判后端空闲（防假 busy 卡消息）
     expect(r.nextState.messages[r.nextState.messages.length - 1].content).toBe("Error: boom");
   });
 
@@ -414,6 +432,23 @@ describe("chatReduce — tasks, subagents, permission, misc", () => {
     expect(r.nextState.streaming).toBe(false);
   });
 
+  it("task_error does NOT reset streaming nor add a chat bubble (busy-desync regression)", () => {
+    // 根因: load_agent_transcript/kill_task 打在已结束任务上时, 后端曾走全局
+    // error 通道 → GUI 复位 streaming 显示"就绪", 但主回合仍 busy → 用户下一条
+    // 消息撞 "A prompt is already being processed"。task_error 必须只发 store 效果。
+    let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } });
+    expect(r.nextState.streaming).toBe(true);
+    // backendBusy 权威 busy 也不能被任务级错误污染（主回合可能仍在跑）
+    const busyBefore = r.nextState.backendBusy;
+    r = reduce({ type: "task_error", scope: "load_agent_transcript", task_id: "t1", message: "Task not found: t1" }, r.nextState);
+    expect(r.nextState.streaming).toBe(true);
+    expect(r.nextState.backendBusy).toBe(busyBefore); // 未变
+    expect(r.nextState.messages).toHaveLength(1); // 只有 message_start 那条, 无 Error 气泡
+    expect(r.effects).toEqual([
+      { type: "subagent.error", taskId: "t1", message: "Task not found: t1" },
+    ]);
+  });
+
   it("status disconnected DURING streaming resets streaming (WS drop must not stick)", () => {
     // 流式中 WS 断开 → onclose → status:disconnected。此时回合已死（WS 是唯一通道），
     // 必须复位 streaming，否则重连后 GUI 永远停在"工作中"——只能手动中断+继续复活。
@@ -421,15 +456,23 @@ describe("chatReduce — tasks, subagents, permission, misc", () => {
     expect(r.nextState.streaming).toBe(true);
     r = reduce({ type: "status", status: "disconnected" }, r.nextState);
     expect(r.nextState.streaming).toBe(false);
+    expect(r.nextState.backendBusy).toBe(false); // WS 断开 → 回合死，判后端空闲
     expect(r.nextState.connected).toBeUndefined; // 不断言无关字段
   });
 
-  it("status connected resets streaming too (half-open drop where onclose never fired)", () => {
+  it("status connected resets streaming but NOT backendBusy (reconnect ≠ idle)", () => {
     // 半开连接：服务器把 client 从集合剔除但没发 close → GUI 收不到 disconnected；
-    // 重连 onopen 发 connected 必须兜底复位，否则永远卡死。
-    let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } });
+    // 重连 onopen 发 connected 必须兜底复位 streaming，否则永远卡死。
+    // 但 backendBusy 不能清——重连成功 ≠ 后端空闲（后端可能还在跑上一 turn/等子代理），
+    // 清了会误判空闲直发撞 busy。backendBusy 交给后续 ready/thinking 决定。
+    let r = reduce({ type: "status", status: "thinking", busy: true });
+    expect(r.nextState.backendBusy).toBe(true);
     r = reduce({ type: "status", status: "connected" }, r.nextState);
     expect(r.nextState.streaming).toBe(false);
+    expect(r.nextState.backendBusy).toBe(true); // 保持（未被清）
+    r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } });
+    r = reduce({ type: "status", status: "connected" }, r.nextState);
+    expect(r.nextState.backendBusy).toBeUndefined; // message_start 不设 backendBusy，connected 也不清 → 保持 undefined
   });
 
   it("unknown message types are no-ops", () => {
@@ -467,5 +510,27 @@ describe("computeStreamStall — 无响应提示", () => {
     let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } }, base, { now: () => 111 });
     r = reduce({ type: "status", status: "ready" }, r.nextState, { now: () => 999 });
     expect(r.nextState.lastStreamEventAt).toBe(111);
+  });
+  it("task_progress/task_messages DO advance lastStreamEventAt (sub-agent running ≠ stall)", () => {
+    // 子代理运行中主回合流静默 — 后端推 task_progress/task_messages 说明子代理还在干。
+    // 实测这期间会误弹「是否中断」甚至 120s 自动唤醒。必须算活动。
+    let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } }, base, { now: () => 111 });
+    r = reduce({ type: "task_progress", task_id: "t1", tool_uses: 1 }, r.nextState, { now: () => 222 });
+    expect(r.nextState.lastStreamEventAt).toBe(222);
+    r = reduce({ type: "task_messages", task_id: "t1", messages: [{ role: "assistant", content: "x" }] }, r.nextState, { now: () => 333 });
+    expect(r.nextState.lastStreamEventAt).toBe(333);
+  });
+});
+
+describe("isBackendBusy — authoritative busy with streaming fallback", () => {
+  it("undefined (no backend signal) falls back to streaming", () => {
+    expect(isBackendBusy({ ...emptyChatState(), streaming: true, backendBusy: undefined })).toBe(true);
+    expect(isBackendBusy({ ...emptyChatState(), streaming: false, backendBusy: undefined })).toBe(false);
+  });
+  it("explicit true/false wins over streaming (authoritative)", () => {
+    // interrupt 后: streaming 被乐观清 false, 但后端仍 busy → 必须判 busy
+    expect(isBackendBusy({ ...emptyChatState(), streaming: false, backendBusy: true })).toBe(true);
+    // error 后: streaming 可能残留 true, 但后端已空闲 → 判空闲
+    expect(isBackendBusy({ ...emptyChatState(), streaming: true, backendBusy: false })).toBe(false);
   });
 });

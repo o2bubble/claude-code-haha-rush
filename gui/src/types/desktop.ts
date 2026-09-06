@@ -122,6 +122,10 @@ export interface TableColumn {
   id: string;
   name: string;
   width?: number;
+  /** 多级表头：有 children 即组表头（叶子列才承载 cells 数据） */
+  children?: TableColumn[];
+  /** 列冻结（AG Grid pinned） */
+  pinned?: "left" | "right";
 }
 
 export interface TableRow {
@@ -129,10 +133,25 @@ export interface TableRow {
   cells: Record<string, string>; // keyed by column id
 }
 
+/** 单元格/表头样式（AI 友好平直语法，全可选） */
+export interface TableCell {
+  color?: string;      // 前景色
+  bgColor?: string;    // 背景色
+  bold?: boolean;
+  italic?: boolean;
+  align?: "left" | "center" | "right";
+  /** 跨列合并（该格向右占几列，1 = 不合并） */
+  colSpan?: number;
+}
+
 export interface TableContent {
   type: "table";
   columns: TableColumn[];
   rows: TableRow[];
+  /** key = `${rowId}:${colId}`；缺省无样式（旧数据兼容） */
+  cellStyles?: Record<string, TableCell>;
+  /** 列级数字格式（key = colId），如 "0,0.00" 千分位两位小数、"0%" 百分比 */
+  formats?: Record<string, string>;
 }
 
 export type ItemContent = TextContent | ChartContent | GraphicContent | RefContent | FileGroupContent | ImageContent | FormContent | DrawingContent | TableContent;

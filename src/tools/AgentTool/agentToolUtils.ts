@@ -55,6 +55,7 @@ import {
 } from '../../utils/permissions/yoloClassifier.js'
 import { emitTaskProgress as emitTaskProgressEvent } from '../../utils/task/sdkProgress.js'
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
+import { isTransientApiErrorMessage } from './transientApiError.js'
 import { getTokenCountFromUsage } from '../../utils/tokens.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../ExitPlanModeTool/constants.js'
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME } from './constants.js'
@@ -534,6 +535,88 @@ export function extractPartialResult(
 
 type SetAppState = (f: (prev: AppState) => AppState) => void
 
+/** Drain one agent stream run into the tracker + retained messages. Shared by the
+ *  first run and the transient-API-error retry, which previously duplicated this
+ *  ~40-line loop wholesale. `onToolProgress` lets the caller emit task progress
+ *  (first run passes it; retry omits it — no double task-progress emit). */
+async function drainStream(
+  stream: AsyncGenerator<MessageType, void>,
+  ctx: {
+    agentMessages: MessageType[]
+    tracker: ProgressTracker
+    rootSetAppState: SetAppState
+    taskId: string
+    resolveActivity: ReturnType<typeof createActivityDescriptionResolver>
+    tools: ToolUseContext['options']['tools']
+    onToolProgress?: (message: MessageType) => void
+  },
+): Promise<void> {
+  for await (const message of stream) {
+    ctx.agentMessages.push(message)
+    // Append immediately when UI holds the task (retain). Bootstrap reads
+    // disk in parallel and UUID-merges the prefix — disk-write-before-yield
+    // means live is always a suffix of disk, so merge is order-correct.
+    ctx.rootSetAppState(prev => {
+      const t = prev.tasks[ctx.taskId]
+      if (!isLocalAgentTask(t) || !t.retain) return prev
+      const base = t.messages ?? []
+      return {
+        ...prev,
+        tasks: {
+          ...prev.tasks,
+          [ctx.taskId]: { ...t, messages: [...base, message] },
+        },
+      }
+    })
+    updateProgressFromMessage(
+      ctx.tracker,
+      message,
+      ctx.resolveActivity,
+      ctx.tools,
+    )
+    updateAsyncAgentProgress(
+      ctx.taskId,
+      getProgressUpdate(ctx.tracker),
+      ctx.rootSetAppState,
+    )
+    ctx.onToolProgress?.(message)
+  }
+}
+
+/** Shared failure epilogue: mark the task failed + enqueue the failed
+ * notification. Used by the API-error-terminal path and the catch handler
+ * so the two failure shapes stay in lockstep. */
+async function failAgentAndNotify({
+  taskId,
+  errorText,
+  description,
+  toolUseContext,
+  rootSetAppState,
+  getWorktreeResult,
+}: {
+  taskId: string
+  errorText: string
+  description: string
+  toolUseContext: ToolUseContext
+  rootSetAppState: SetAppState
+  getWorktreeResult: () => Promise<{
+    worktreePath?: string
+    worktreeBranch?: string
+  }>
+}): Promise<void> {
+  failAsyncAgent(taskId, errorText, rootSetAppState)
+  const worktreeResult = await getWorktreeResult()
+  enqueueAgentNotification({
+    taskId,
+    description,
+    status: 'failed',
+    error: errorText,
+    setAppState: rootSetAppState,
+    toolUseId: toolUseContext.toolUseId,
+    ...worktreeResult,
+  })
+}
+
 /**
  * Drives a background agent from spawn to terminal notification.
  * Shared between AgentTool's async-from-start path and resumeAgentBackground.
@@ -584,48 +667,89 @@ export async function runAsyncAgentLifecycle({
           stopSummarization = stop
         }
       : undefined
-    for await (const message of makeStream(onCacheSafeParams)) {
-      agentMessages.push(message)
-      // Append immediately when UI holds the task (retain). Bootstrap reads
-      // disk in parallel and UUID-merges the prefix — disk-write-before-yield
-      // means live is always a suffix of disk, so merge is order-correct.
-      rootSetAppState(prev => {
-        const t = prev.tasks[taskId]
-        if (!isLocalAgentTask(t) || !t.retain) return prev
-        const base = t.messages ?? []
-        return {
-          ...prev,
-          tasks: {
-            ...prev.tasks,
-            [taskId]: { ...t, messages: [...base, message] },
-          },
+    await drainStream(makeStream(onCacheSafeParams), {
+      agentMessages,
+      tracker,
+      rootSetAppState,
+      taskId,
+      resolveActivity,
+      tools: toolUseContext.options.tools,
+      onToolProgress: message => {
+        const lastToolName = getLastToolUseName(message)
+        if (lastToolName) {
+          emitTaskProgress(
+            tracker,
+            taskId,
+            toolUseContext.toolUseId,
+            description,
+            metadata.startTime,
+            lastToolName,
+          )
         }
-      })
-      updateProgressFromMessage(
-        tracker,
-        message,
-        resolveActivity,
-        toolUseContext.options.tools,
-      )
-      updateAsyncAgentProgress(
-        taskId,
-        getProgressUpdate(tracker),
-        rootSetAppState,
-      )
-      const lastToolName = getLastToolUseName(message)
-      if (lastToolName) {
-        emitTaskProgress(
-          tracker,
-          taskId,
-          toolUseContext.toolUseId,
-          description,
-          metadata.startTime,
-          lastToolName,
-        )
-      }
-    }
+      },
+    })
 
     stopSummarization?.()
+
+    // A query that ends with a synthetic API-error assistant message (timeout,
+    // rate limit, auth failure…) terminates the generator NORMALLY — no throw —
+    // so without this check the agent would be marked completed with the error
+    // text as its "result" (GUI panel showing green "completed" on a dead run).
+    // Transient errors (timeout/rate limit/server error) get ONE in-process
+    // retry first — the agent's turn never ended, so a fresh stream run on the
+    // same task resumes it with no user-visible hiccup; a second failure (or a
+    // deterministic error like auth/billing) routes to the failed path.
+    const lastMessage = agentMessages.at(-1)
+    if (lastMessage?.type === 'assistant' && lastMessage.isApiErrorMessage) {
+      const apiErrorText =
+        extractTextContent(lastMessage.message.content, '\n') ||
+        'Unknown API error'
+      if (isTransientApiErrorMessage(lastMessage)) {
+        logForDebugging(
+          `[runAsyncAgentLifecycle] Agent ${taskId} hit transient API error, retrying once: ${apiErrorText}`,
+        )
+        agentMessages.length = 0
+        await drainStream(makeStream(undefined), {
+          agentMessages,
+          tracker,
+          rootSetAppState,
+          taskId,
+          resolveActivity,
+          tools: toolUseContext.options.tools,
+        })
+        const retryLast = agentMessages.at(-1)
+        const retryIsApiError =
+          retryLast?.type === 'assistant' && retryLast.isApiErrorMessage
+        if (retryIsApiError) {
+          const retryErrorText =
+            extractTextContent(retryLast!.message.content, '\n') ||
+            apiErrorText
+          logForDebugging(
+            `[runAsyncAgentLifecycle] Agent ${taskId} retry also failed: ${retryErrorText}`,
+          )
+          await failAgentAndNotify({
+            taskId,
+            errorText: retryErrorText,
+            description,
+            toolUseContext,
+            rootSetAppState,
+            getWorktreeResult,
+          })
+          return
+        }
+        // Retry recovered — fall through to the normal completion path below.
+      } else {
+        await failAgentAndNotify({
+          taskId,
+          errorText: apiErrorText,
+          description,
+          toolUseContext,
+          rootSetAppState,
+          getWorktreeResult,
+        })
+        return
+      }
+    }
 
     const agentResult = finalizeAgentTool(agentMessages, taskId, metadata)
 
@@ -701,16 +825,13 @@ export async function runAsyncAgentLifecycle({
       return
     }
     const msg = errorMessage(error)
-    failAsyncAgent(taskId, msg, rootSetAppState)
-    const worktreeResult = await getWorktreeResult()
-    enqueueAgentNotification({
+    await failAgentAndNotify({
       taskId,
+      errorText: msg,
       description,
-      status: 'failed',
-      error: msg,
-      setAppState: rootSetAppState,
-      toolUseId: toolUseContext.toolUseId,
-      ...worktreeResult,
+      toolUseContext,
+      rootSetAppState,
+      getWorktreeResult,
     })
   } finally {
     clearInvokedSkillsForAgent(agentIdForCleanup)

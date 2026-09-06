@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from "react";
-import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope } from "lucide-react";
-import { getTree, findParentSplit, toggleGroupHidden, addFloatingPanel, getFloatingPanels, bringFloatingToFront, findTabByPanelId, applyLayoutPreset, LAYOUT_PRESETS, togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
+import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope, Copy, Brain, Gauge } from "lucide-react";
+import { getTree, findParentSplit, toggleGroupHidden, toggleRightPanel, addFloatingPanel, getFloatingPanels, bringFloatingToFront, findTabByPanelId, applyLayoutPreset, LAYOUT_PRESETS, togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
 import { iconFor } from "../utils/icons";
 import { getRecent, sortByRecent } from "../utils/recentUsage";
 import { getChatState } from "../stores/chatStore";
@@ -330,6 +330,117 @@ function PermModeDropdown() {
   );
 }
 
+// ── Thinking mode dropdown (3P reasoning-capable models: DeepSeek etc.) ──
+
+function ThinkingDropdown() {
+  const payload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
+  const state = payload?.state ?? getChatState();
+  const cap = state.modelCapabilities;
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useClickOutside(ref, open, () => setOpen(false));
+
+  // Only show for models that report thinking support (Claude `thinking` block
+  // or 3P `reasoning` field). Hide while capabilities haven't arrived yet.
+  if (!cap || (!cap.thinking && !cap.reasoning)) return null;
+
+  const check = state.thinkingModeEnabled;
+  const label = check ? t("toolbar.thinkingOn") : t("toolbar.thinkingOff");
+
+  const options = [
+    { id: true, label: t("toolbar.thinkingOn") },
+    { id: false, label: t("toolbar.thinkingOff") },
+  ];
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        type="button"
+        title={t("toolbar.thinkingMode")}
+        style={{ ...btn(check), ...DROPDOWN_TRIGGER_BTN }}
+        onClick={() => setOpen(!open)}
+      >
+        <Brain size={13} />
+        <span>{label}</span>
+        <span style={DROPDOWN_ARROW}>▼</span>
+      </button>
+      {open && (
+        <div style={{ ...DROPDOWN_MENU_BASE, left: 0, minWidth: 140 }}>
+          {options.map((o) => (
+            <div
+              key={String(o.id)}
+              onClick={() => { commands.execute("SET_THINKING_MODE", { enabled: o.id, effort: state.effort ?? undefined }); setOpen(false); }}
+              style={{
+                ...DROPDOWN_ITEM_BASE,
+                backgroundColor: o.id === check ? "var(--accent-subtle)" : "transparent",
+                color: o.id === check ? "var(--accent)" : "var(--fg-primary)",
+              }}
+            >
+              {o.label}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Effort strength dropdown ──
+
+function EffortDropdown() {
+  const payload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
+  const state = payload?.state ?? getChatState();
+  const cap = state.modelCapabilities;
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useClickOutside(ref, open, () => setOpen(false));
+
+  // Only show when the model supports the effort parameter (or reasoning).
+  if (!cap || !(cap.effort || cap.reasoning)) return null;
+
+  const effort = state.effort;
+  // Reasoning-capable providers (DeepSeek) accept low/high/max, not 'medium'
+  // (Claude-native supports all four) — GUI decides the tiers, so drop medium.
+  const baseLevels = cap.reasoning ? ["low", "high"] : ["low", "medium", "high"];
+  const levels: Array<{ id: string }> = baseLevels.map((id) => ({ id }));
+  if (cap.maxEffort) levels.push({ id: "max" });
+
+  const current = levels.find((l) => l.id === (effort ?? cap.defaultEffort));
+  const label = current ? t(`toolbar.effort_${current.id}`) : t("toolbar.effortAuto");
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        type="button"
+        title={t("toolbar.effort")}
+        style={{ ...btn(false), ...DROPDOWN_TRIGGER_BTN }}
+        onClick={() => setOpen(!open)}
+      >
+        <Gauge size={13} />
+        <span>{label}</span>
+        <span style={DROPDOWN_ARROW}>▼</span>
+      </button>
+      {open && (
+        <div style={{ ...DROPDOWN_MENU_BASE, left: 0, minWidth: 140 }}>
+          {levels.map((l) => (
+            <div
+              key={l.id}
+              onClick={() => { commands.execute("SET_EFFORT", l.id); setOpen(false); }}
+              style={{
+                ...DROPDOWN_ITEM_BASE,
+                backgroundColor: l.id === (effort ?? cap.defaultEffort) ? "var(--accent-subtle)" : "transparent",
+                color: l.id === (effort ?? cap.defaultEffort) ? "var(--accent)" : "var(--fg-primary)",
+              }}
+            >
+              {t(`toolbar.effort_${l.id}`)}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Model profile dropdown ──
 
 interface ModelProfile {
@@ -368,9 +479,14 @@ function ModelDropdown() {
       if (payload?.state?.connected) setSwitching(false);
       const backendModel = payload?.state?.model;
       if (backendModel && profiles.length > 0) {
-        const matched = profiles.find((p) => p.model === backendModel);
-        if (matched) {
-          setActive(matched.id);
+        // 只在 model 名唯一时才按 model 反推 active。同名(多个 profile 共用同一
+        // model 字符串)下 find() 会永远命中第一条, 把用户刚切到的 profile 覆盖回
+        // 第一条(如 deepseek-v4-flash-vision-exp 同名的官方/自定义两条)——
+        // 这是"切换后仍显示官方"的根源。重复时不猜, 交给 active-profile 标记
+        // (list_model_profiles().active) 与用户点击决定。
+        const matches = profiles.filter((p) => p.model === backendModel);
+        if (matches.length === 1) {
+          setActive(matches[0].id);
           setSwitching(false);
         }
       }
@@ -446,6 +562,29 @@ function ModelDropdown() {
 
 // ── System terminal launcher ──
 
+function NewInstanceButton() {
+  async function openNew() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("spawn_gui_instance");
+    } catch (e) {
+      console.warn("spawn new instance failed:", e);
+    }
+  }
+  return (
+    <button
+      type="button"
+      title={t("toolbar.newInstance")}
+      aria-label={t("toolbar.newInstance")}
+      style={{ ...btn(false), ...DROPDOWN_TRIGGER_BTN }}
+      onClick={openNew}
+    >
+      <Copy size={13} />
+      <span style={{ marginLeft: 5, fontSize: 11, fontWeight: 500, whiteSpace: "nowrap" }}>{t("toolbar.newInstanceShort")}</span>
+    </button>
+  );
+}
+
 function TerminalDropdown() {
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const workDir = settingsPayload?.settings?.workDir ?? "";
@@ -458,14 +597,21 @@ function TerminalDropdown() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("open_system_terminal", { terminalType: type, workDir });
-    } catch { console.warn("Tauri not available"); }
+    } catch (e) {
+      // 把底层错误(如 macOS 自动化权限被拒)显示给用户，而不是静默 console.warn。
+      const msg = e instanceof Error ? e.message : String(e);
+      addStatusMessage(t("toolbar.terminalOpenFailed") + msg, "error");
+    }
   }
 
-  const terminals = [
-    { id: "cmd", label: "Command Prompt" },
-    { id: "powershell", label: "PowerShell" },
-    { id: "git-bash", label: "Git Bash" },
-  ];
+  const isMac = /mac/i.test(navigator.platform || "");
+  const terminals = isMac
+    ? [{ id: "terminal", label: "Terminal (macOS)" }]
+    : [
+        { id: "cmd", label: "Command Prompt" },
+        { id: "powershell", label: "PowerShell" },
+        { id: "git-bash", label: "Git Bash" },
+      ];
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
@@ -827,7 +973,7 @@ export default function Toolbar() {
           title={t(key)}
           aria-label={t(key)}
           style={btn(isVisible(id))}
-          onClick={() => toggleGroupHidden(id)}
+          onClick={() => id === "chat-split" ? toggleRightPanel() : toggleGroupHidden(id)}
         >
           <Icon size={16} style={{ pointerEvents: "none" }} />
         </button>
@@ -924,6 +1070,8 @@ export default function Toolbar() {
       </div>
 
       <PermModeDropdown />
+      <ThinkingDropdown />
+      <EffortDropdown />
       <ModelDropdown />
       <button
         type="button"
@@ -936,6 +1084,7 @@ export default function Toolbar() {
       </button>
       <PanelDropdown />
       <TerminalDropdown />
+      <NewInstanceButton />
       <button
         type="button"
         title={t("update.title")}

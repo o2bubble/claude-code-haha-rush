@@ -88,6 +88,8 @@ interface FileTreeProps {
   selectedPath?: string | null;
   onSelect?: (path: string | null) => void;
   forceRefresh?: number;
+  /** 定位到目录树：展开祖先链并选中该文件（编辑器右键"定位目录树"） */
+  revealPath?: string | null;
 }
 
 const S = {
@@ -129,9 +131,9 @@ function sortFileEntries(entries: FileEntry[]): FileEntry[] {
   return sorted;
 }
 
-function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath, selectedPath, onSelect, treeVersion }: {
+function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath, selectedPath, onSelect, treeVersion, revealPath }: {
   entry: FileEntry; depth: number; showHidden: boolean; onOpenFile: (path: string) => void; refreshParent: () => void; rootPath: string;
-  selectedPath?: string | null; onSelect?: (path: string | null) => void; treeVersion?: number;
+  selectedPath?: string | null; onSelect?: (path: string | null) => void; treeVersion?: number; revealPath?: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FileEntry[] | null>(null);
@@ -141,6 +143,28 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
   const [renameValue, setRenameValue] = useState("");
   const [deletePending, setDeletePending] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const nodeRef = useRef<HTMLDivElement>(null);
+
+  // 定位目录树：若本目录是 revealPath 的祖先 → 自动展开并加载子项
+  const norm = (p: string) => p.replace(/\\/g, "/");
+  const revealNorm = revealPath ? norm(revealPath) : null;
+  const entryNorm = norm(entry.path);
+  const isRevealAncestor = !!entry.isDir && !!revealNorm && revealNorm.startsWith(entryNorm + "/");
+  const isRevealTarget = !!revealNorm && revealNorm === entryNorm;
+
+  useEffect(() => {
+    if (isRevealAncestor && !expanded) {
+      setExpanded(true);
+      if (children === null || children.length === 0) refresh();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRevealAncestor]);
+
+  // 定位到目标文件后滚入视野
+  useEffect(() => {
+    if (isRevealTarget) nodeRef.current?.scrollIntoView({ block: "center" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRevealTarget]);
 
   const refresh = useCallback(async () => {
     if (!entry.isDir) return;
@@ -227,7 +251,7 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
           });
         }},
         { label: t("files.openInTerminal"), action: () => {
-          invokeTauri("open_system_terminal", { terminalType: isWin() ? "powershell" : "git-bash", workDir: dirPath, claudeLaunch: false }).catch(() => {});
+          invokeTauri("open_system_terminal", { terminalType: isWin() ? "powershell" : (/mac/i.test(navigator.platform || "") ? "terminal" : "git-bash"), workDir: dirPath, claudeLaunch: false }).catch(() => {});
         }},
       ];
 
@@ -297,6 +321,7 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
   return (
     <>
       <div
+        ref={nodeRef}
         data-file-node="true"
         onClick={(e) => {
           if (renaming) return;
@@ -349,12 +374,17 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
 
 // ── Root component ──
 
-function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh }: FileTreeProps) {
+function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath }: FileTreeProps) {
   const [rootEntries, setRootEntries] = useState<FileEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState<"file" | "dir" | null>(null);
   const [createName, setCreateName] = useState("");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+
+  // 编辑器"定位目录树"→ 选中目标(展开祖先在 DirNode 内自动处理)
+  useEffect(() => {
+    if (revealPath) setSelectedPath(revealPath);
+  }, [revealPath]);
   const [deleteTarget, setDeleteTarget] = useState<{ path: string; name: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
@@ -528,7 +558,7 @@ function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh }: FileTreeP
         <div style={S.empty}>{t("files.emptyFolder")}</div>
       )}
       {rootEntries && rootEntries.map((entry) => (
-        <DirNode key={entry.path} entry={entry} depth={0} showHidden={showHidden} onOpenFile={onOpenFile} refreshParent={refreshRoot} rootPath={rootPath || ""} selectedPath={selectedPath} onSelect={setSelectedPath} treeVersion={treeVersion} />
+        <DirNode key={entry.path} entry={entry} depth={0} showHidden={showHidden} onOpenFile={onOpenFile} refreshParent={refreshRoot} rootPath={rootPath || ""} selectedPath={selectedPath} onSelect={setSelectedPath} treeVersion={treeVersion} revealPath={revealPath} />
       ))}
       {deleteTarget && (
         <ConfirmOverlay

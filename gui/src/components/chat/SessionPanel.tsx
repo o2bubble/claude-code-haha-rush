@@ -1,5 +1,5 @@
 import React, { memo, useState, useEffect, useCallback, useRef } from "react";
-import { ListChecks, Folder, FolderInput, Plus, Pencil, Trash2, ChevronRight, ChevronDown } from "lucide-react";
+import { ListChecks, Folder, FolderInput, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ExternalLink, ArrowUpRight } from "lucide-react";
 import type { Session } from "../../stores/chatStore";
 import { getChatState } from "../../stores/chatStore";
 import { getSettings, updateSettings, saveSettings } from "../../stores/settingsStore";
@@ -18,10 +18,12 @@ import {
   renameSession,
 } from "./useChatBridge";
 import { t } from "../../i18n";
+import { addStatusMessage } from "../../stores/statusMsgStore";
 import { commands } from "../../services/serviceBus";
 import { Commands } from "../../services/commands";
 import { useEvent } from "../../services/useService";
 import { Events, type ChatStateChangedPayload, type SettingsChangedPayload } from "../../services/events";
+import { subscribeSessionStatus, getSessionOpenElsewhere } from "../../stores/sessionStatusStore";
 
 // ── Confirm Dialog (single or batch) ──
 
@@ -85,12 +87,16 @@ function dialogBtn(bg: string, border: string, color: string): React.CSSProperti
 function SessionPanelImpl() {
   const payload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
   const chatState = payload?.state ?? getChatState();
+  // 跨 GUI 会话状态索引变化 → 重渲染列表（标记"↑另一窗口打开"+工作/空闲圆点）
+  const [, setStatusRev] = useState(0);
+  useEffect(() => subscribeSessionStatus(() => setStatusRev((r) => r + 1)), []);
   const sessions = chatState.sessions;
   const connected = chatState.connected;
   // Re-render when settings change — favorites live in settings, and a
   // workspace (re)bind reloads them from the bound workspace's local file.
   useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
+  const [confirmOpenElsewhere, setConfirmOpenElsewhere] = useState<Session | null>(null);
   const [batchDeleteCount, setBatchDeleteCount] = useState(0);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -115,8 +121,39 @@ function SessionPanelImpl() {
     if (favs.has(id)) favs.delete(id); else favs.add(id);
     const list = [...favs];
     updateSettings({ favoriteSessionIds: list });
+    // 保存经 saveSettings → 内部 notify_settings_changed 广播给其他实例跨 GUI 同步。
     saveSettings({ favoriteSessionIds: list }, "workspace");
     setTick((t) => t + 1);
+  }, []);
+
+  // ── 启动意图：在新窗口打开会话（发起方）──
+  // Publish 意图到 server + spawn `--intent <id>` 新 GUI，然后轮询直到 done。
+  const openInNewWindow = useCallback(async (sessionId: string) => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const ws = getSettings().workDir ?? "";
+      const intentId = crypto.randomUUID();
+      await invoke("publish_startup_intent", {
+        intentId,
+        payload: { workspace: ws, kind: "open_session", session_id: sessionId },
+      });
+      await invoke("spawn_intent_gui", { intentId });
+      addStatusMessage(t("sessions.openedInNewWindow"), "info");
+      // 轮询：新实例 claim→执行→ack 后 status=done/expired。
+      for (let i = 0; i < 60; i++) {
+        try {
+          const st = await invoke<any>("query_intent_status", { intentId });
+          if (st?.status === "done") {
+            addStatusMessage(t("sessions.targetOpened"), "info");
+            return;
+          }
+          if (st?.status === "expired") return; // 新实例未能兑现
+        } catch { return; } // 意图已被 GC → 停止轮询
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } catch (e) {
+      addStatusMessage(t("sessions.openFailed"), "warn");
+    }
   }, []);
 
   // ── 会话文件夹（设置开关开启时生效；工作区作用域，同收藏）──
@@ -274,12 +311,17 @@ function SessionPanelImpl() {
   const renderSessionRow = (s: Session) => {
     // 当前会话高亮：优先后端 is_active，兜底前端 sessionId（后端不总是下发激活标记）
     const isCurrent = s.isActive || s.id === chatState.sessionId;
+    const openElsewhere = getSessionOpenElsewhere(s.id, getSettings().workDir ?? "");
+    const elsewhereWorking = openElsewhere.some((e) => e.state === "working");
     return (
     <div
       key={s.id}
       onClick={() => {
         if (selectMode) {
           toggleSelect(s.id);
+        } else if (openElsewhere.length > 0 && !isCurrent) {
+          // 已在另一窗口打开（且不是当前会话）→ 软警告，用户确认才切换（best-effort）
+          setConfirmOpenElsewhere(s);
         } else {
           switchSession(s.id);
           commands.execute(Commands.CHAT_FOCUS_INPUT);
@@ -317,6 +359,21 @@ function SessionPanelImpl() {
           onClick={(e) => e.stopPropagation()}
           style={{ margin: 0, cursor: "pointer" }}
         />
+      )}
+      {/* 跨 GUI 标记：其他实例打开的会话标"↗另一窗口打开"+状态圆点；当前会话只显自己的状态圆点 */}
+      {(isCurrent || openElsewhere.length > 0) && (
+        <span
+          className="session-status-marker"
+          title={isCurrent ? (chatState.streaming ? t("sessions.statusWorking") : t("sessions.statusIdle")) : t("sessions.openElsewhere")}
+          style={{ display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0, marginRight: 1 }}
+        >
+          <span
+            className="session-status-dot"
+            data-working={(isCurrent ? chatState.streaming : elsewhereWorking) ? "1" : "0"}
+            style={{ width: 8, height: 8, borderRadius: "50%", display: "inline-block" }}
+          />
+          {!isCurrent && <ArrowUpRight size={11} style={{ color: "var(--fg-secondary)", opacity: 0.75 }} />}
+        </span>
       )}
       {editingId === s.id ? (
         <input
@@ -412,6 +469,20 @@ function SessionPanelImpl() {
           >
             ×
           </button>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); void openInNewWindow(s.id); }}
+            title={t("sessions.openInNewWindow")}
+            aria-label={t("sessions.openInNewWindow")}
+            style={{
+              ...iconBtnStyle, display: "flex", alignItems: "center",
+              opacity: hoveredId === s.id ? 0.7 : 0,
+              transition: "opacity 0.1s",
+              color: "var(--fg-secondary)", marginLeft: 2,
+            }}
+          >
+            <ExternalLink size={11} />
+          </button>
         </>
       )}
     </div>
@@ -455,8 +526,16 @@ function SessionPanelImpl() {
     if (Object.prototype.hasOwnProperty.call(folderTree.assignments, sid)) {
       saveFolderTree(unassignSession(folderTree, sid));
     }
+    const cur = getChatState();
+    const isActive = cur.sessionId === sid;
     removeSession(sid);
     setDeleteTarget(null);
+    // 删除的是当前打开的会话 → 切到列表里另一个会话（或新建空会话），避免残留已删会话信息
+    if (isActive) {
+      const next = cur.sessions.find((s) => s.id !== sid);
+      if (next) switchSession(next.id);
+      else createSession();
+    }
     setTimeout(requestSessionList, 1000);
   };
 
@@ -475,6 +554,15 @@ function SessionPanelImpl() {
     ids.forEach((id, i) => {
       setTimeout(() => removeSession(id), i * 500);
     });
+    // 批量删除含当前打开的会话 → 切到未删的会话（或新建空会话），避免残留已删会话信息
+    const cur = getChatState();
+    if (cur.sessionId && ids.includes(cur.sessionId)) {
+      const next = cur.sessions.find((s) => !ids.includes(s.id));
+      setTimeout(() => {
+        if (next) switchSession(next.id);
+        else createSession();
+      }, ids.length * 500 + 200);
+    }
     setTimeout(requestSessionList, ids.length * 500 + 1000);
   };
 
@@ -505,6 +593,22 @@ function SessionPanelImpl() {
         fontFamily: "var(--font-sans)", fontSize: "calc(var(--font-scale, 1) * 12px)",
       }}
     >
+      <style>{`
+        .session-status-dot {
+          background: var(--fg-muted);
+          opacity: 0.55;
+          transition: background 0.2s, opacity 0.2s;
+        }
+        .session-status-dot[data-working="1"] {
+          background: var(--semantic-warning);
+          opacity: 1;
+          animation: sess-status-pulse 1.4s ease-in-out infinite;
+        }
+        @keyframes sess-status-pulse {
+          0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--semantic-warning) 45%, transparent); }
+          50% { box-shadow: 0 0 0 4px transparent; }
+        }
+      `}</style>
       {/* Confirm modal */}
       {deleteTarget && (
         <ConfirmDialog
@@ -520,6 +624,33 @@ function SessionPanelImpl() {
           onConfirm={handleBatchDelete}
           onCancel={() => setBatchDeleteCount(0)}
         />
+      )}
+      {/* 软警告：会话已在另一窗口打开，确认后再切换（best-effort 不强制互斥） */}
+      {confirmOpenElsewhere && (
+        <div
+          onClick={() => setConfirmOpenElsewhere(null)}
+          style={{ position: "fixed", inset: 0, zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.3)" }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ backgroundColor: "var(--bg-root)", borderRadius: 8, boxShadow: "0 8px 32px rgba(0,0,0,0.2)", padding: 20, minWidth: 280, maxWidth: 400, fontFamily: "var(--font-sans)" }}>
+            <div style={{ color: "var(--fg-primary)", fontWeight: 600, marginBottom: 8 }}>{t("sessions.openElsewhereTitle")}</div>
+            <div style={{ color: "var(--fg-secondary)", marginBottom: 14 }}>{t("sessions.openElsewhereWarn", { title: confirmOpenElsewhere.title })}</div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" onClick={() => setConfirmOpenElsewhere(null)} style={dialogBtn("var(--bg-root)", "var(--border-medium)", "var(--fg-primary)")}>{t("sessions.cancel")}</button>
+              <button
+                type="button"
+                onClick={() => {
+                  const sid = confirmOpenElsewhere.id;
+                  setConfirmOpenElsewhere(null);
+                  switchSession(sid);
+                  commands.execute(Commands.CHAT_FOCUS_INPUT);
+                }}
+                style={dialogBtn("var(--semantic-error)", "none", "var(--fg-inverse)")}
+              >
+                {t("sessions.openAnyway")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Header */}

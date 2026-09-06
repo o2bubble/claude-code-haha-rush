@@ -44,6 +44,19 @@ PRESETS = {
         },
         "requires_token": True,
     },
+    "deepseek-v4-flash-vision-exp": {
+        "label": "DeepSeek v4 Flash Vision",
+        "description": "DeepSeek v4 Flash Vision (experimental, image input)",
+        "vars": {
+            "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+            "ANTHROPIC_MODEL": "deepseek-v4-flash-vision-exp",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-flash-vision-exp",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash-vision-exp",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-flash-vision-exp",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
+        },
+        "requires_token": True,
+    },
 }
 
 # ── Common defaults (mirrors claude-profile.ts COMMON_DEFAULTS) ────────

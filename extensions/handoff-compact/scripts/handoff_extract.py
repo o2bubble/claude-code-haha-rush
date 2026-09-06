@@ -39,9 +39,16 @@ PROJECTS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "projects")
 # ---------------------------------------------------------------------------
 
 def infer_slug(cwd):
+    # projects 子目录名 = 工作区路径规范化（Windows: C:\a\b -> C--a-b）。这里取
+    # basename（项目名）作特征；find_session_jsonl 兜底时用"忽略 -/_ 的包含匹配"
+    # 来对上盘符前缀（C--Storage-...）等实际目录名，不精确依赖本返回值。
     name = os.path.basename(os.path.normpath(cwd)) or "workspace"
-    name = re.sub(r"[- ]", "_", name)
-    return name
+    return name.replace(" ", "_")
+
+
+def _norm(s):
+    # 忽略连字符与下划线，避免 slug(下划线) 对不上实际目录名(连字符)的歧义。
+    return re.sub(r"[_\-]", "", s).lower()
 
 
 def find_session_jsonl(slug, explicit=None):
@@ -50,6 +57,14 @@ def find_session_jsonl(slug, explicit=None):
             raise FileNotFoundError(f"session jsonl not found: {explicit}")
         return explicit
     cands = glob.glob(os.path.join(PROJECTS_DIR, slug, "*.jsonl"))
+    # 兜底：infer_slug 可能与实际目录名不符（Windows 盘符前缀 C--Storage 等、
+    # 或 bash 下 cwd 为 /c/... 形式）。扫描所有 projects 子目录做归一化包含匹配。
+    if not cands:
+        slug_norm = _norm(slug)
+        for p in glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl")):
+            dname = os.path.basename(os.path.dirname(p))
+            if slug_norm and slug_norm in _norm(dname):
+                cands.append(p)
     cands = [c for c in cands if "edit-history" not in os.path.basename(c)]
     if not cands:
         raise FileNotFoundError(
@@ -125,10 +140,20 @@ def strip_line_numbers(text):
 
 
 def extract_reads(jsonl_path):
-    """返回 [(file_path, content), ...]，按会话顺序。"""
+    """返回 [(file_path, content), ...]，按路径去重（同一路径保留最后一次）、
+    被修改过的文件优先、组内按首次出现顺序。
+
+    去重要点：会话里常反复 Read 同一文件（先读全量、后读改动/再读同段），内容会重复。
+    只保留**最后一次**该路径的 Read 结果（最新状态最有用、最省），避免 N 次重复搬运。
+
+    优先级：被 Edit/Write/NotebookEdit 改过的文件排在前面（预算内先保住，最不可再生），
+    只读没改的排后（易被预算裁剪）。组内保持首次出现顺序（近似时间序）。
+    """
+    _MODIFY_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
     tool_results = {}  # tool_use_id -> content
-    reads = []         # [(file_path, content)]
+    reads = {}         # file_path -> content（保留最后一次）
     pending = []       # [(file_path, tool_use_id)]
+    modified = set()   # 被修改过的文件路径
     with open(jsonl_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -150,6 +175,11 @@ def extract_reads(jsonl_path):
                     fp = (c.get("input") or {}).get("file_path")
                     if fp:
                         pending.append((fp, c.get("id")))
+                elif ctype == "tool_use" and c.get("name") in _MODIFY_TOOLS:
+                    inp = c.get("input") or {}
+                    mp = inp.get("file_path") or inp.get("path")
+                    if mp:
+                        modified.add(mp)
                 elif ctype == "tool_result":
                     uid = c.get("tool_use_id")
                     if uid:
@@ -165,31 +195,52 @@ def extract_reads(jsonl_path):
         clean = strip_line_numbers(res)
         clean = re.sub(r"<system-reminder>.*?</system-reminder>", "", clean, flags=re.S).strip()
         if clean:
-            reads.append((fp, clean))
-    return reads
+            reads[fp] = clean   # 同路径覆盖 => 保留最后一次
+    # 被修改过的文件优先；stable sort 保持组内首现顺序
+    return sorted(reads.items(), key=lambda it: it[0] not in modified)
 
 
 # 5 反引号 fence：Read 内容本身可能含 ``` 三反引号，用更长 fence 包裹防误闭合
 FENCE = "`````"
 
-def reads_section(reads):
+# 单条上限（字符）+ 总量预算（字符）。总量预算是关键：读了再多文件，
+# 原料也压在这个预算内，避免"压缩反而膨胀成几 MB"。预算内优先保留较新/较靠前的路径。
+DEFAULT_MAX_TOTAL = 150_000
+MAX_PER_READ = 4_000
+
+def reads_section(reads, max_total=DEFAULT_MAX_TOTAL):
     if not reads:
         return "### 已读资料原料\n\n（本会话无 Read 工具调用）"
     lines = [
         "### 已读资料原料（Read 结果原文，模型取舍：哪些是核心、怎么提炼）",
         "",
-        "> 每条约 `<第N次> <文件路径>`。这是不可再生资料，供决策/背景引用，模型判断保留还是折叠。",
+        f"> 已按路径去重（每文件保留最后一次）、总量预算 {max_total} 字符内。供决策/背景引用，模型判断保留还是折叠。",
         "",
     ]
+    total = 0
+    dropped = 0
     for i, (fp, content) in enumerate(reads, 1):
+        if total >= max_total:
+            dropped += 1
+            continue
+        per = content[:MAX_PER_READ]
+        note = ""
+        if len(content) > MAX_PER_READ:
+            note = f" ... [截断 {len(content) - len(per)} 字符]"
+        if total + len(per) > max_total:
+            per = per[:max_total - total]
+            note = " ... [截断（总量预算）]"
         lines.append(f"**({i}) {fp}**")
         lines.append("")
         lines.append(FENCE + "text")
-        lines.append(content[:4000])
-        if len(content) > 4000:
-            lines.append(f"...[截断 {len(content) - 4000} 字符]")
+        lines.append(per)
+        if note:
+            lines.append(note)
         lines.append(FENCE)
         lines.append("")
+        total += len(per)
+    if dropped:
+        lines.append(f"（总量预算内省略 {dropped} 条，共 {len(reads)} 条已读）")
     return "\n".join(lines)
 
 
@@ -321,6 +372,8 @@ def main(argv=None):
     ap.add_argument("session", nargs="?", help="会话 JSONL 路径（省略自动定位）")
     ap.add_argument("-o", "--out", default="handoff-extracted.md", help="输出 markdown 路径")
     ap.add_argument("--project", default=None, help="项目 slug（定位会话用）")
+    ap.add_argument("--max-total", type=int, default=DEFAULT_MAX_TOTAL,
+                    help="已读资料原料总量预算（字符，默认 %(default)s）")
     args = ap.parse_args(argv)
 
     cwd = os.getcwd()
@@ -336,7 +389,7 @@ def main(argv=None):
     release_sec = release_snapshot(cwd)
     recent_sec = recent_user_section(jsonl)
     reads = extract_reads(jsonl)
-    reads_sec = reads_section(reads)
+    reads_sec = reads_section(reads, args.max_total)
     out = assemble(cwd, jsonl, git_sec, release_sec, reads_sec, recent_sec)
 
     with open(args.out, "w", encoding="utf-8") as f:

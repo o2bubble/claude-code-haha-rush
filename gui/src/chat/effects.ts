@@ -16,7 +16,7 @@ import {
 } from "../stores/terminalStore";
 import { updatePlan, clearPlan, getPlanTasks } from "../stores/planStore";
 import { saveCurrentPlan } from "../stores/planHistoryStore";
-import { upsertSubAgent, setTranscript, clearSubAgents } from "../stores/subAgentStore";
+import { upsertSubAgent, setTranscript, setTranscriptError, clearSubAgents, appendTranscriptMessages } from "../stores/subAgentStore";
 
 /** Applies store/eventBus effects; returns the command effects for the runner. */
 export function applyStoreEffects(effects: ChatEffect[]): ChatEffect[] {
@@ -55,6 +55,12 @@ export function applyStoreEffects(effects: ChatEffect[]): ChatEffect[] {
         break;
       case "subagent.transcript":
         setTranscript(e.taskId, e.messages, e.error);
+        break;
+      case "subagent.error":
+        setTranscriptError(e.taskId, e.message);
+        break;
+      case "subagent.transcript.append":
+        appendTranscriptMessages(e.taskId, e.messages);
         break;
       case "subagent.clear":
         clearSubAgents();
