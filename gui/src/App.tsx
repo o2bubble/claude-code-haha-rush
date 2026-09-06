@@ -8,9 +8,10 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { WorkspaceSelector } from "./components/chat/WorkspaceSelector";
 import { WelcomeWizard, type WizardSettings } from "./components/chat/WelcomeWizard";
 import { registerPanel } from "./stores/panelRegistry";
-import { scanPlugins, type PluginManifest } from "./services/pluginRegistry";
+import { scanPlugins, setActiveManifests, getActiveManifests } from "./services/pluginRegistry";
 import { registerPluginPanels } from "./services/pluginPanelBridge";
 import { startPluginProcesses, startPluginProcessListener, refreshPluginProcesses } from "./services/pluginProcessBridge";
+import { startPluginEventForwarding } from "./services/pluginCommandBridge";
 import { ALL_PANEL_DEFS } from "./services/panelDefs";
 import { getSettings, loadSettings, reloadSettings, saveSettings, updateSettings } from "./stores/settingsStore";
 import { workspaceBasename } from "./utils/workspace";
@@ -44,7 +45,6 @@ const EXIT_MS = 500;
 // to the same workspace can't re-write its stale layout over this instance's
 // (multi-instance same-workspace clobber).
 let lastPersistedLayout: string | null = null;
-let _pluginManifests: PluginManifest[] | null = null;
 
 export default function App() {
   const [showWorkspaceSelector, setShowWorkspaceSelector] = useState(false);
@@ -576,11 +576,14 @@ export default function App() {
         const { invoke } = await import("@tauri-apps/api/core");
         const entries = (await invoke<{ name: string; manifestJson?: string }[]>("list_plugin_manifests")) ?? [];
         const manifests = scanPlugins(entries);
-        _pluginManifests = manifests; // 存供 WORKSPACE_BOUND 启动插件进程用
+        // 单一真相: 命令桥/事件转发/调色板/Worker 面板全部读这里
+        setActiveManifests(manifests);
         registerPluginPanels(manifests);
         // T3: 启动插件进程状态监听(kill/restart/崩溃的 plugin-process-status 回收)
         await startPluginProcessListener();
         await refreshPluginProcesses();
+        // T4: 贡献事件转发(订阅 Events 枚举 → plugin.<name>.event.<event>)
+        startPluginEventForwarding();
         // 插件面板注册晚于布局恢复时, 标题可能仍是持久化值 → 再刷新一次收敛
         refreshAllTitles();
       } catch (e) {
@@ -605,7 +608,7 @@ export default function App() {
       // T3: 绑定工作区后启动插件声明的后台进程(决策#6 startOn=workspace_bound)
       void (async () => {
         try {
-          const decls = (_pluginManifests ?? [])
+          const decls = getActiveManifests()
             .flatMap((m) => m.processes.filter((p) => p.startOn === "workspace_bound"))
             .map((p) => ({ id: p.id, command: p.command, args: p.args, env: p.env as Record<string, string> | undefined, startOn: p.startOn }));
           if (decls.length > 0) await startPluginProcesses(decls);

@@ -1790,9 +1790,9 @@ Spec: `.scratch/gui-plugin-system/PRD.md` · 第一版只做安全贡献层 + �
 
 **Blocked by:** T1
 
-- [ ] `contributes.commands[]` → GUI 命令调色板（`useCommandPalette`）注册，点按 → 经事件桥发给对应面板/进程
-- [ ] `contributes.events[]` → GUI 生命周期事件（`Events` 枚举）广播到插件
-- [ ] 命令/事件的插件 id 前缀同 T2，避免命名冲突
+- [x] `contributes.commands[]` → GUI 命令调色板（`useCommandPalette`）注册，点按 → 经事件桥发给对应面板/进程（`pluginCommandBridge.executePluginCommand`：eventBus raw 通道 + crossWindowBus 双写，payload 含 `onInvoke`/`args` 供面板映射动作；**工具栏入口留后续**——T6 验收只要求调色板）
+- [x] `contributes.events[]` → GUI 生命周期事件（`Events` 枚举）广播到插件（`startPluginEventForwarding`：Hub 订阅 Events → 转发 `plugin.<name>.event.<evt>`；非枚举值忽略）
+- [x] 命令/事件的插件 id 前缀同 T2，避免命名冲突（`pluginCommandId`/`pluginCommandTopic`/`pluginEventTopic`）
 
 ## T5 — 平台化发布：插件包 + 市场集成（复用技能市场）
 

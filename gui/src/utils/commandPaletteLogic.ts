@@ -1,6 +1,6 @@
 // ── Command Palette 纯逻辑 — 过滤、分组、执行分发（可单测，不依赖 DOM）──
 
-export type PaletteKind = "editor" | "panel" | "command" | "session" | "setting";
+export type PaletteKind = "editor" | "panel" | "command" | "session" | "setting" | "plugin";
 
 export interface PaletteItem {
   id: string;
@@ -26,8 +26,8 @@ export function groupPaletteItems(items: PaletteItem[], query: string, editorFoc
   const matched = items.filter((i) => matchPaletteItem(i, query));
 
   const order: PaletteKind[] = editorFocused
-    ? ["editor", "panel", "command", "session", "setting"]
-    : ["panel", "command", "session", "setting", "editor"];
+    ? ["editor", "panel", "command", "session", "setting", "plugin"]
+    : ["panel", "command", "session", "setting", "plugin", "editor"];
 
   const titles: Record<PaletteKind, string> = {
     editor: "编辑器命令",
@@ -35,6 +35,7 @@ export function groupPaletteItems(items: PaletteItem[], query: string, editorFoc
     command: "AI 命令",
     session: "会话",
     setting: "设置",
+    plugin: "插件命令",
   };
 
   const groups: { kind: PaletteKind; title: string; items: PaletteItem[] }[] = [];

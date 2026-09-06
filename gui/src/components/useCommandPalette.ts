@@ -16,6 +16,8 @@ import { recordRecent, getRecent, sortByRecent } from "../utils/recentUsage";
 import { CATEGORIES } from "./chat/SettingsPanel";
 import { crossWindowBus } from "../services/crossWindowBus";
 import { openSettingsFloat } from "./Toolbar";
+import { executePluginCommand } from "../services/pluginCommandBridge";
+import { getActiveManifests, pluginCommandId } from "../services/pluginRegistry";
 import { t } from "../i18n";
 
 export function useCommandPalette() {
@@ -124,7 +126,19 @@ export function useCommandPalette() {
     // 编辑器命令实时读取（无活动编辑器时为空数组）
     const editor = buildEditorCommandItems();
 
-    return [...panels, ...commands, ...sessions, ...settings, ...editor];
+    // 插件命令：点按 → executePluginCommand（eventBus + crossWindowBus 双写）
+    const pluginCmds: PaletteItem[] = getActiveManifests().flatMap((m) =>
+      (m.contributes?.commands ?? []).map((c) => ({
+        id: pluginCommandId(m.pluginName, c.id),
+        kind: "plugin" as const,
+        label: c.title || c.id,
+        sublabel: `${m.displayName} · ${c.id}`,
+        icon: "grid3x3",
+        run: () => executePluginCommand(m.pluginName, c.id, c.onInvoke),
+      })),
+    );
+
+    return [...panels, ...commands, ...sessions, ...settings, ...pluginCmds, ...editor];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat.slashCommands, chat.sessions, chat.sessionId, skillI18n, open, context]);
 

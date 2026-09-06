@@ -4,13 +4,8 @@
 // (第一版显示插件信息; sandbox:true 的隔离渲染留作后续选项, 见 PRD §10)。
 
 import { registerPanel } from "../stores/panelRegistry";
-import type { PluginManifest, PluginPanel } from "./pluginRegistry";
+import { pluginPanelId, type PluginManifest, type PluginPanel } from "./pluginRegistry";
 import type { PanelView } from "../stores/panelRegistry";
-
-/** 生成插件面板的注册 id（前缀防撞） */
-export function pluginPanelId(pluginName: string, panelId: string): string {
-  return `plugin:${pluginName}:${panelId}`;
-}
 
 /** 插件面板的声明式 render（第一版：显示插件事信息，不加载任意 HTML）。
  *  future: sandbox:true 时改走隔离渲染。 */

@@ -205,3 +205,42 @@ export function scanPlugins(entries: PluginDirEntry[]): PluginManifest[] {
   }
   return result;
 }
+
+// ─── Active manifests — 单一真相（App 注册后供命令桥/进程桥/面板桥共享读）───
+
+let activeManifests: PluginManifest[] = [];
+
+/** 设置当前活动的插件清单（App 扫描后调用一次） */
+export function setActiveManifests(manifests: PluginManifest[]): void {
+  activeManifests = manifests;
+}
+
+/** 读取当前活动的插件清单 */
+export function getActiveManifests(): PluginManifest[] {
+  return activeManifests;
+}
+
+/** 清空（插件目录变化/重扫时先清再设） */
+export function clearActiveManifests(): void {
+  activeManifests = [];
+}
+
+/** 插件贡献面板的注册 id（前缀防撞——T2 起, 与命令/事件 id 的前缀约定集中在此处） */
+export function pluginPanelId(pluginName: string, panelId: string): string {
+  return `plugin:${pluginName}:${panelId}`;
+}
+
+/** 插件贡献命令的注册 id（前缀防撞，同 pluginPanelId） */
+export function pluginCommandId(pluginName: string, commandId: string): string {
+  return `plugin:${pluginName}:${commandId}`;
+}
+
+/** 插件命令的跨窗发布 topic（浮窗经 crossWindowBus 收，命名空间 plugin.<name>.* 由 T0 预留） */
+export function pluginCommandTopic(pluginName: string, commandId: string): string {
+  return `plugin.${pluginName}.command.${commandId}`;
+}
+
+/** 插件订阅 GUI 事件经 Hub 转发后的跨窗 topic */
+export function pluginEventTopic(pluginName: string, event: string): string {
+  return `plugin.${pluginName}.event.${event}`;
+}

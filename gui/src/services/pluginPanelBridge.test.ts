@@ -4,9 +4,9 @@
 // 只测纯字段。
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { pluginPanelId, registerPluginPanels } from "./pluginPanelBridge";
+import { registerPluginPanels } from "./pluginPanelBridge";
+import { pluginPanelId, type PluginManifest } from "./pluginRegistry";
 import { getPanel, getAllPanels } from "../stores/panelRegistry";
-import type { PluginManifest } from "./pluginRegistry";
 
 describe("pluginPanelId — 前缀防撞", () => {
   it("generates plugin:<name>:<panelId>", () => {

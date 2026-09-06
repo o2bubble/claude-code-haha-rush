@@ -17,6 +17,16 @@ class EventBus {
 
   /** Subscribe to an event. Returns unsubscribe function. */
   on(event: EventName, handler: EventHandler): () => void {
+    return this.onRaw(event, handler);
+  }
+
+  /**
+   * Raw subscribe — 接受任意 string topic。T0 的类型收窄只保护内置事件名
+   * (错拼 Events 枚举仍编译报错); 插件动态 topic (`plugin.<name>.*`) 无法进
+   * Events 枚举, 走此通道——命名空间由 `plugin.` 前缀约定隔离(与 FloatingApp
+   * 的跨窗 `plugin.*` 订阅同源一致)。
+   */
+  onRaw(event: string, handler: EventHandler): () => void {
     let set = this.handlers.get(event);
     if (!set) { set = new Set(); this.handlers.set(event, set); }
     set.add(handler);
@@ -36,6 +46,11 @@ class EventBus {
   /** Emit an event. If opts.sticky, new subscribers will immediately receive the latest value.
    *  opts.origin 标记来源（"app"=内置 / 插件名=插件）——为插件系统区分"谁发的"留位。 */
   emit(event: EventName, data?: any, opts?: { sticky?: boolean; origin?: string }): void {
+    this.emitRaw(event, data, opts);
+  }
+
+  /** Raw emit — 任意 string topic(插件命名空间 plugin.*)。语义同 emit。 */
+  emitRaw(event: string, data?: any, opts?: { sticky?: boolean; origin?: string }): void {
     if (opts?.sticky) {
       this.sticky.set(event, { data, sticky: true });
     }

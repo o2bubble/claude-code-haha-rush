@@ -41,6 +41,27 @@ describe("groupPaletteItems", () => {
     expect(groups.map((g) => g.kind)).toEqual(["panel", "command", "session", "editor"]);
   });
 
+  it("插件命令组参与分组（位于设置后、编辑器前）", () => {
+    const plugin = item({ id: "plugin:demo:refresh", kind: "plugin", label: "刷新行情" });
+    const groups = groupPaletteItems([panel, cmd, plugin], "", false);
+    expect(groups.map((g) => g.kind)).toEqual(["panel", "command", "plugin"]);
+    expect(groups[2].items[0].id).toBe("plugin:demo:refresh");
+  });
+
+  it("插件命令出现在设置与编辑器之间", () => {
+    const plugin = item({ id: "plugin:demo:refresh", kind: "plugin", label: "刷新" });
+    const setting = item({ id: "setting-1", kind: "setting", label: "设置" });
+    const editor = item({ id: "editor-1", kind: "editor", label: "Add Cursor" });
+    const groups = groupPaletteItems([editor, setting, plugin], "", false);
+    expect(groups.map((g) => g.kind)).toEqual(["setting", "plugin", "editor"]);
+  });
+
+  it("插件命令组不匹配时被丢弃", () => {
+    const plugin = item({ id: "plugin:demo:refresh", kind: "plugin", label: "刷新" });
+    const groups = groupPaletteItems([plugin], "xyz", false);
+    expect(groups).toHaveLength(0);
+  });
+
   it("只保留有匹配项的组", () => {
     const groups = groupPaletteItems([panel, cmd, editor, sess], "commit", false);
     expect(groups.map((g) => g.kind)).toEqual(["command"]);
