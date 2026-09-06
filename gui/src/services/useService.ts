@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-import { eventBus, commands } from "./serviceBus";
+import { windowBus, commandRegistry } from "./windowBus";
 
 /** Subscribe to an event and return its latest emitted value. Re-renders on each emit. */
 export function useEvent<T = any>(event: string): T | undefined {
@@ -7,7 +7,7 @@ export function useEvent<T = any>(event: string): T | undefined {
   const latestRef = useRef<T | undefined>(undefined);
 
   useEffect(() => {
-    return eventBus.on(event, (data: T) => {
+    return windowBus.on(event, (data: T) => {
       latestRef.current = data;
       setValue(data);
     });
@@ -22,7 +22,7 @@ export function useEventHandler<T = any>(event: string, handler: (data: T) => vo
   handlerRef.current = handler;
 
   useEffect(() => {
-    return eventBus.on(event, (data: T) => {
+    return windowBus.on(event, (data: T) => {
       handlerRef.current(data);
     });
   }, [event]);
@@ -34,7 +34,7 @@ export function useCommand(command: string, handler: (...args: any[]) => void): 
   handlerRef.current = handler;
 
   useEffect(() => {
-    return commands.register(command, (...args: any[]) => {
+    return commandRegistry.register(command, (...args: any[]) => {
       handlerRef.current(...args);
     });
   }, [command]);
@@ -48,7 +48,7 @@ export function useEventLatest<T = any>(event: string): { current: T | undefined
   const ref = useRef<T | undefined>(undefined);
 
   useEffect(() => {
-    return eventBus.on(event, (data: T) => {
+    return windowBus.on(event, (data: T) => {
       ref.current = data;
     });
   }, [event]);

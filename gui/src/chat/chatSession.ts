@@ -3,7 +3,7 @@
 // (chatReduce → replaceState → effect execution) and command registration.
 // The reducer is pure; everything here is connection policy + side effects.
 
-import { commands } from "../services/serviceBus";
+import { commandRegistry } from "../services/windowBus";
 import {
   getChatState,
   updateChatState,
@@ -45,7 +45,7 @@ async function checkFirstInstance(): Promise<boolean> {
   }
   return _isFirstInstance ?? true;
 }
-import { dataBus } from "../services/dataBus";
+import { crossWindowBus } from "../services/crossWindowBus";
 import { chatReduce, isBackendBusy } from "./chatReduce";
 import { applyStoreEffects } from "./effects";
 import type { WireMessage } from "./types";
@@ -231,7 +231,7 @@ export function createChatSession(): ChatSession {
       ws.send(json);
     } else if (ws === null && !p?.port) {
       // Leaf mode — no WebSocket, publish command to DataBus
-      dataBus.publish(`cmd.${type}`, p);
+      crossWindowBus.publish(`cmd.${type}`, p);
     } else {
       if (messageQueue.length < 200) messageQueue.push(json);
       if (!ws) scheduleReconnect(p?.port || 0);
@@ -627,7 +627,7 @@ export function createChatSession(): ChatSession {
   function registerCommands() {
     if (commandsRegistered) return;
     commandsRegistered = true;
-    commands.register("SET_PERMISSION_MODE", (mode: string) => {
+    commandRegistry.register("SET_PERMISSION_MODE", (mode: string) => {
       // Persist immediately — don't wait for backend's permission_mode_changed
       // which would be "default" on fresh start and overwrite user's choice.
       updateChatState({ permissionMode: mode });
@@ -637,7 +637,7 @@ export function createChatSession(): ChatSession {
       }).catch(() => {});
       send("set_permission_mode", { mode });
     });
-    commands.register("SET_THINKING_MODE", (v: { enabled: boolean; effort?: string }) => {
+    commandRegistry.register("SET_THINKING_MODE", (v: { enabled: boolean; effort?: string }) => {
       updateChatState({ thinkingModeEnabled: v.enabled });
       // Persist to disk — updateSettings is memory-only, and the backend holds
       // thinking state as process memory that restarts drop. saveSettings goes
@@ -646,15 +646,15 @@ export function createChatSession(): ChatSession {
       void saveSettings({ thinkingModeEnabled: v.enabled, ...(v.effort && { effort: v.effort }) }, "global");
       send("set_thinking_mode", { enabled: v.enabled, ...(v.effort && { effort: v.effort }) });
     });
-    commands.register("SET_EFFORT", (level: EffortLevelUI) => {
+    commandRegistry.register("SET_EFFORT", (level: EffortLevelUI) => {
       updateChatState({ effort: level });
       void saveSettings({ effort: level }, "global");
       send("set_effort", { level });
     });
-    commands.register("SEND_MESSAGE", (content: string) => {
+    commandRegistry.register("SEND_MESSAGE", (content: string) => {
       sendMessage(content);
     });
-    commands.register("DESKTOP_QUERY_DATA", async (itemId: string, key: string) => {
+    commandRegistry.register("DESKTOP_QUERY_DATA", async (itemId: string, key: string) => {
       const { queryData } = await import("../services/dataRegistry");
       return queryData(itemId, key);
     });

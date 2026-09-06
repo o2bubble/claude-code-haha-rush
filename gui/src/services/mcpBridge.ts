@@ -31,7 +31,7 @@ import {
   forceSaveDesktop,
 } from "../stores/desktopStore";
 import { computeDesktopSummary } from "./desktopSummary";
-import { eventBus } from "./serviceBus";
+import { windowBus } from "./windowBus";
 import { Events } from "./events";
 
 // ─── Types ───
@@ -78,7 +78,7 @@ async function handleMcpRequest(req: McpRequest): Promise<void> {
 
     // Notify NotesPanel if a note was mutated
     const NOTE_MUTATIONS = new Set(["note_create","note_update","note_delete","note_associate","note_disassociate","note_normalize_tags","note_apply_tag_mapping"]);
-    if (NOTE_MUTATIONS.has(toolName)) eventBus.emit(Events.NOTES_CHANGED, {});
+    if (NOTE_MUTATIONS.has(toolName)) windowBus.emit(Events.NOTES_CHANGED, {});
 
     // MCP protocol: tools/call responses must be wrapped in { content: [...] }
     const responsePayload = method === "tools/call"

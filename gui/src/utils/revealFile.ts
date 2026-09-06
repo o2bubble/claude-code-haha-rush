@@ -2,7 +2,7 @@
 // 文件在当前工作区 → 文件树展开祖先并选中(事件 FILE_REVEAL + 激活 files 面板)；
 // 不在工作区 → 打开系统资源管理器并提示(目录树定位找不到区外文件)。
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { getSettings } from "../stores/settingsStore";
 import { activatePanel } from "../stores/layoutStore";
@@ -15,7 +15,7 @@ export function revealFileInTree(path: string) {
   const fp = path.replace(/\\/g, "/");
   const inWorkspace = !!ws && fp !== ws && fp.startsWith(ws + "/");
   if (inWorkspace) {
-    eventBus.emit(Events.FILE_REVEAL, { path, rootPath: ws }, { sticky: true });
+    windowBus.emit(Events.FILE_REVEAL, { path, rootPath: ws }, { sticky: true });
     activatePanel("files");
   } else {
     import("@tauri-apps/api/core").then(({ invoke }) =>

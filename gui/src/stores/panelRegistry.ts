@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import type { IconKey, TabInstance } from "../types/layout";
 
@@ -28,7 +28,7 @@ export function registerPanel(panel: PanelDefinition) {
     return;
   }
   panels.set(panel.id, panel);
-  eventBus.emit(Events.PANEL_REGISTRY_CHANGED, { panels: [...panels.values()] }, { sticky: true });
+  windowBus.emit(Events.PANEL_REGISTRY_CHANGED, { panels: [...panels.values()] }, { sticky: true });
 }
 
 export function getPanel(id: string): PanelDefinition | undefined {

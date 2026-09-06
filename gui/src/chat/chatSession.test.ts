@@ -8,7 +8,7 @@ import { createChatSession } from "./chatSession";
 import { emptyChatState, isBackendBusy } from "./chatReduce";
 import { getChatState, replaceState } from "../stores/chatStore";
 import { _reset as resetTerminal, getEntries } from "../stores/terminalStore";
-import { dataBus } from "../services/dataBus";
+import { crossWindowBus } from "../services/crossWindowBus";
 
 const mocks = vi.hoisted(() => ({
   BackendService: {
@@ -83,10 +83,10 @@ describe("ChatSession — transport", () => {
     expect(ws.sent.some((d) => d.includes('"type":"list_sessions"'))).toBe(true);
   });
 
-  it("leaf mode publishes cmd.* to the dataBus when there is no socket", () => {
+  it("leaf mode publishes cmd.* to the crossWindowBus when there is no socket", () => {
     const s = createChatSession();
     const received: any[] = [];
-    const unsub = dataBus.subscribe("cmd.interrupt", (payload, meta) => {
+    const unsub = crossWindowBus.subscribe("cmd.interrupt", (payload, meta) => {
       received.push({ payload, topic: meta?.topic });
     });
     s.send("interrupt");

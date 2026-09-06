@@ -1,5 +1,5 @@
 import type { IconKey, LayoutNode, SplitNode, TabGroup, TabInstance, FloatingWindow, TauriWindow, Visibility } from "../types/layout";
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { addStatusMessage } from "./statusMsgStore";
 import { getPanel } from "./panelRegistry";
@@ -262,8 +262,8 @@ export function restoreLayout(data: any) {
     group: refreshTitles(tw.group) as TabGroup,
   }));
   _floatingZCounter = Math.max(1000, ...restored.floatingPanels.map((f) => f.zIndex)) + 1;
-  eventBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
-  eventBus.emit(Events.LAYOUT_FLOATING_CHANGED, { floatingPanels: [...floatingPanels] }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_FLOATING_CHANGED, { floatingPanels: [...floatingPanels] }, { sticky: true });
   setTimeout(() => { _skipSave = false; }, 100);
 
   // Restore Tauri native windows (dedup by panelId)
@@ -291,7 +291,7 @@ export function restoreLayout(data: any) {
  *  titles. */
 export function refreshAllTitles() {
   tree = refreshTitles(tree);
-  eventBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
 }
 
 // ── Debounced auto-save flag (save I/O is in App.tsx hook) ──
@@ -316,7 +316,7 @@ export function getTree(): LayoutNode {
 
 export function setTree(newTree: LayoutNode) {
   tree = newTree;
-  eventBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
 }
 
 // ── 悬浮面板状态 ──
@@ -325,8 +325,8 @@ let floatingPanels: FloatingWindow[] = [];
 let _floatingZCounter = 1000;
 
 function notifyFloatingChange() {
-  eventBus.emit(Events.LAYOUT_FLOATING_CHANGED, { floatingPanels: [...floatingPanels] }, { sticky: true });
-  eventBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_FLOATING_CHANGED, { floatingPanels: [...floatingPanels] }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
 }
 
 export function getFloatingPanels(): FloatingWindow[] {
@@ -446,7 +446,7 @@ let tauriWindows: TauriWindow[] = [];
 
 function notifyTauriWindowsChange() {
   // Reuse floating changed event — consumers that care about both can handle it
-  eventBus.emit(Events.LAYOUT_FLOATING_CHANGED, {
+  windowBus.emit(Events.LAYOUT_FLOATING_CHANGED, {
     floatingPanels: [...floatingPanels],
     tauriWindows: [...tauriWindows],
   } as any, { sticky: true });
@@ -765,7 +765,7 @@ function redistributeSizes(groupId: string, toZero: boolean) {
 export function ensureGroupVisible(groupId: string, defaultSize: number = 25) {
   setVisibility(groupId, "expanded");
   redistributeSizes(groupId, false);
-  eventBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
 }
 
 /** 系统锚点 group ID — 只能隐藏不能删除 */
@@ -775,7 +775,7 @@ export const PINNED_GROUPS = new Set(["sidebar-left", "editor-area", "chat-messa
 export function hideGroup(groupId: string) {
   setVisibility(groupId, "hidden");
   redistributeSizes(groupId, true);
-  eventBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
 }
 
 // ── Tab 操作 ──
@@ -1146,7 +1146,7 @@ export function toggleGroupCollapse(groupId: string) {
   const next = cur === "collapsed" ? "expanded" : "collapsed";
   setVisibility(groupId, next);
   if (cur === "hidden") redistributeSizes(groupId, false);
-  eventBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
 }
 
 /** Toolbar 按钮: visible → hidden, hidden → expanded（支持 group 或 split） */
@@ -1171,7 +1171,7 @@ export function toggleGroupHidden(nodeId: string) {
       redistributeSizes(nodeId, false);
     }
   }
-  eventBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
 }
 
 // Shortcuts
@@ -1370,8 +1370,8 @@ export function applyLayoutPreset(id: string): boolean {
   tree = refreshTitles(preset.build());
   floatingPanels = [];
   _floatingZCounter = 1000;
-  eventBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
-  eventBus.emit(Events.LAYOUT_FLOATING_CHANGED, { floatingPanels: [] }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
+  windowBus.emit(Events.LAYOUT_FLOATING_CHANGED, { floatingPanels: [] }, { sticky: true });
   return true;
 }
 

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useEvent, useEventHandler } from "../services/useService";
 import { Events, type ChatStateChangedPayload, type LayoutTreeChangedPayload, type LayoutFloatingChangedPayload, type CommandPaletteOpenPayload } from "../services/events";
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
 import { getChatState } from "../stores/chatStore";
 import { switchSession } from "./chat/useChatBridge";
@@ -14,7 +14,7 @@ import { buildPanelItems, buildCommandItems, buildSessionItems, type SkillI18n }
 import { buildEditorCommandItems } from "../utils/editorCommands";
 import { recordRecent, getRecent, sortByRecent } from "../utils/recentUsage";
 import { CATEGORIES } from "./chat/SettingsPanel";
-import { dataBus } from "../services/dataBus";
+import { crossWindowBus } from "../services/crossWindowBus";
 import { openSettingsFloat } from "./Toolbar";
 import { t } from "../i18n";
 
@@ -89,7 +89,7 @@ export function useCommandPalette() {
       run: () => {
         recordRecent("command", c.id);
         const cmd = c.label.startsWith("/") ? c.label : "/" + c.label;
-        eventBus.emit(Events.CHAT_INSERT_TEXT, { text: cmd + " ", atStart: true });
+        windowBus.emit(Events.CHAT_INSERT_TEXT, { text: cmd + " ", atStart: true });
       },
     }));
 
@@ -113,7 +113,7 @@ export function useCommandPalette() {
         openSettingsFloat();
         // 浮动窗口创建是异步的（Tauri 建 webview），SettingsPanel 可能尚未挂载订阅。
         // 重试发布几次（state channel 无缓存，SettingsPanel 就绪后即收到；setCat 幂等）。
-        const nav = () => dataBus.publish("settings.navigate", { category: c.id });
+        const nav = () => crossWindowBus.publish("settings.navigate", { category: c.id });
         nav();
         const t1 = setTimeout(nav, 150);
         const t2 = setTimeout(nav, 350);

@@ -6,7 +6,7 @@ import { ErrorBoundary } from "../ErrorBoundary";
 import { showCtxMenu } from "../ContextMenu";
 import { DesktopItemView, getAnchorPosition } from "./DesktopItemView";
 import { ConnectionOverlay } from "./ConnectionOverlay";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 import type { DesktopItemSelectedPayload, SettingsChangedPayload } from "../../services/events";
 import { saveClipboardItem, isRealFilePath, resolvePaste, collectPaste, defaultReadDir } from "../../services/clipboardService";
@@ -119,7 +119,7 @@ function SuperDesktopCanvasImpl({ desktop, searchMatchedIds }: Props) {
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null);
 
   useEffect(() => {
-    return eventBus.on(Events.DESKTOP_ITEM_SELECTED, (payload: DesktopItemSelectedPayload) => {
+    return windowBus.on(Events.DESKTOP_ITEM_SELECTED, (payload: DesktopItemSelectedPayload) => {
       const resolvedId = panToItem(payload.itemId);
       if (!resolvedId) return;
       setHighlightedItemId(resolvedId);
@@ -672,7 +672,7 @@ function SuperDesktopCanvasImpl({ desktop, searchMatchedIds }: Props) {
                 for (const id of selectedIds) {
                   const it = desktop.items.find((i) => i.id === id);
                   if (it) {
-                    eventBus.emit(Events.CHAT_ADD_REFERENCE, {
+                    windowBus.emit(Events.CHAT_ADD_REFERENCE, {
                       reference: { type: "desktop-item", path: `${it.content.type}/${it.id}`, label: it.label },
                     });
                   }
@@ -696,7 +696,7 @@ function SuperDesktopCanvasImpl({ desktop, searchMatchedIds }: Props) {
           {
             label: t("desktop.sendToAgent"),
             action: () => {
-              eventBus.emit(Events.CHAT_ADD_REFERENCE, {
+              windowBus.emit(Events.CHAT_ADD_REFERENCE, {
                 reference: {
                   type: "desktop-item",
                   path: `${item.content.type}/${item.id}`,

@@ -1,6 +1,6 @@
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
-import { dataBus } from "../services/dataBus";
+import { crossWindowBus } from "../services/crossWindowBus";
 import { withTimeout, DEFAULT_LOAD_TIMEOUT_MS } from "../services/asyncUtils";
 import type { Desktop, DesktopItem, Connection, ItemContent } from "../types/desktop";
 import { pushSnapshot as pushSnapshotRaw, undo as undoRaw, redo as redoRaw } from "./desktopHistoryStore";
@@ -130,7 +130,7 @@ export function syncDesktopsFromBus(data: Desktop[], activeId: string | null): v
   desktops = data;
   activeDesktopId = activeId;
   // Emit EventBus for local component re-renders (no DataBus publish → no loop)
-  eventBus.emit(Events.DESKTOP_CHANGED, { desktops: [...desktops], activeDesktopId }, { sticky: true });
+  windowBus.emit(Events.DESKTOP_CHANGED, { desktops: [...desktops], activeDesktopId }, { sticky: true });
   scheduleSave();
 }
 
@@ -233,7 +233,7 @@ export function loadDesktops(): Promise<void> {
       clearTimeout(timer);
       resolve();
     };
-    const off = eventBus.on(Events.BACKEND_PORT_READY, () => {
+    const off = windowBus.on(Events.BACKEND_PORT_READY, () => {
       off();
       clearTimeout(timer); // 事件已到，取消兜底定时器，避免并发二次 fetch
       void fetchDesktops().finally(finish);
@@ -269,7 +269,7 @@ export function resetDesktopsLoad(): void {
 }
 
 // 切换工作区后桌面数据需重新加载（新工作区 DB）——重置加载缓存
-eventBus.on(Events.WORKSPACE_BOUND, () => {
+windowBus.on(Events.WORKSPACE_BOUND, () => {
   _loadPromise = null;
   _loadedOnce = false;
 });
@@ -470,7 +470,7 @@ export function moveItem(itemId: string, x: number, y: number): void {
     ),
     updatedAt: Date.now(),
   }));
-  eventBus.emit(Events.DESKTOP_ITEM_MOVED, { itemId, x, y });
+  windowBus.emit(Events.DESKTOP_ITEM_MOVED, { itemId, x, y });
   notifyDesktopChanged(ownerDesktopIdOfItem(itemId));
 }
 
@@ -808,9 +808,9 @@ export async function forceSaveDesktop(): Promise<void> {
 
 function notifyDesktopChanged(dirtyDesktopId?: string): void {
   const payload = { desktops: [...desktops], activeDesktopId };
-  eventBus.emit(Events.DESKTOP_CHANGED, payload, { sticky: true });
+  windowBus.emit(Events.DESKTOP_CHANGED, payload, { sticky: true });
   // Publish to DataBus for cross-window sync (Leaf → Hub and Hub → Leaf)
-  dataBus.publish("desktop.list", payload.desktops, { sticky: true });
-  dataBus.publish("desktop.items", payload.activeDesktopId, { sticky: true });
+  crossWindowBus.publish("desktop.list", payload.desktops, { sticky: true });
+  crossWindowBus.publish("desktop.items", payload.activeDesktopId, { sticky: true });
   if (!_refetching) scheduleSave(dirtyDesktopId);
 }

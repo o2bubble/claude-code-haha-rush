@@ -1,6 +1,6 @@
 // ── Settings store — persisted via Rust to %APPDATA%/claude-code-gui/settings.json ──
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 
 export interface QuickPrompt {
@@ -103,7 +103,7 @@ export function getSettings(): AppSettings {
 
 export function updateSettings(patch: Partial<AppSettings>) {
   settings = { ...settings, ...patch };
-  eventBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
+  windowBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
 }
 
 /** Direct in-memory set without emitting events or persisting.
@@ -147,7 +147,7 @@ export async function loadSettings(): Promise<AppSettings> {
   }
 
   loaded = true;
-  eventBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
+  windowBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
   return settings;
 }
 
@@ -163,7 +163,7 @@ export async function reloadSettings(): Promise<AppSettings> {
       const s: AppSettings = await invoke("get_app_settings");
       settings = s;
       loaded = true;
-      eventBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
+      windowBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
       return settings;
     } catch (e) {
       console.error("reloadSettings failed:", e);
@@ -194,7 +194,7 @@ export async function saveSettings(
   } else {
     localStorage.setItem("claude-code-settings", JSON.stringify(settings));
   }
-  eventBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
+  windowBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
 }
 
 // Get default work directory via Rust (knows user home)

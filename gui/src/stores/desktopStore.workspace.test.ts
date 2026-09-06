@@ -13,7 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { resetDesktopsLoad, hasLoadedDesktops } from "./desktopStore";
 
@@ -21,10 +21,10 @@ describe("desktopStore workspace switch reload contract", () => {
   it("WORKSPACE_BOUND resets the load cache so a reload is possible", () => {
     invokeMock.mockReset();
     resetDesktopsLoad();
-    eventBus.clearSticky(Events.BACKEND_PORT_READY);
+    windowBus.clearSticky(Events.BACKEND_PORT_READY);
 
     // WORKSPACE_BOUND fires on bind → store resets cache.
-    eventBus.emit(Events.WORKSPACE_BOUND, { workDir: "/ws-a" });
+    windowBus.emit(Events.WORKSPACE_BOUND, { workDir: "/ws-a" });
     expect(hasLoadedDesktops()).toBe(false);
   });
 });

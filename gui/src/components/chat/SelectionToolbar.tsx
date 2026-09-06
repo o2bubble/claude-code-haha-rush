@@ -6,7 +6,7 @@
 import React, { useLayoutEffect, useEffect, useRef, useState } from "react";
 import { getSettings } from "../../stores/settingsStore";
 import { addStatusMessage } from "../../stores/statusMsgStore";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { Events, type SettingsChangedPayload } from "../../services/events";
 import { useEvent } from "../../services/useService";
 import { t } from "../../i18n";
@@ -136,12 +136,12 @@ export function SelectionToolbar({ container }: SelectionToolbarProps) {
   };
   const handleSend = () => {
     // appendEnd: 追加到输入框末尾, 多次划词发送层层追加(默认光标分支会被 focus() 塌缩到开头)
-    eventBus.emit(Events.CHAT_INSERT_TEXT, { text: sel.text, appendEnd: true });
+    windowBus.emit(Events.CHAT_INSERT_TEXT, { text: sel.text, appendEnd: true });
     clear();
   };
   const handleReply = () => {
     // 回复引用：换行(若当前有内容) + 目标文本原样复制 + 末尾追加「」+ 光标停在「」中间待输入回复
-    eventBus.emit(Events.CHAT_INSERT_TEXT, { text: sel.text + "「", replySuffix: "」", newlineBefore: true });
+    windowBus.emit(Events.CHAT_INSERT_TEXT, { text: sel.text + "「", replySuffix: "」", newlineBefore: true });
     clear();
   };
   const handleCopy = () => {

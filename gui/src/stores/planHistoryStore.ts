@@ -1,7 +1,7 @@
 // ── Plan history store — DB-backed persistent plan records ──
 
 import { tasksDigest, type PlanTask } from "./planStore";
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 
 export interface PlanRecord {
@@ -29,7 +29,7 @@ let noMore = false;
 let generation = 0;  // bumped on reset to cancel in-flight loads
 
 function notify() {
-  eventBus.emit(Events.PLAN_HISTORY_CHANGED, { records });
+  windowBus.emit(Events.PLAN_HISTORY_CHANGED, { records });
 }
 
 async function tauriInvoke(cmd: string, args?: Record<string, unknown>): Promise<any> {

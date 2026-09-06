@@ -1,6 +1,6 @@
 // ── Sub-agent store — tracks in-process teammates from backend broadcast ──
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 
 export interface SubAgentInfo {
@@ -50,14 +50,14 @@ export function getSubAgentState(): SubAgentState {
 
 export function clearSubAgents() {
   state = { agents: [], expandedAgentId: null, transcripts: {} };
-  eventBus.emit(Events.SUB_AGENTS_CHANGED, { state });
+  windowBus.emit(Events.SUB_AGENTS_CHANGED, { state });
 }
 
 /** Test hook — identical to clearSubAgents(). */
 export const _reset = clearSubAgents;
 
 function notify() {
-  eventBus.emit(Events.SUB_AGENTS_CHANGED, { state: { ...state } });
+  windowBus.emit(Events.SUB_AGENTS_CHANGED, { state: { ...state } });
 }
 
 export function upsertSubAgent(agent: SubAgentInfo) {

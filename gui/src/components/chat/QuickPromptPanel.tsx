@@ -3,7 +3,7 @@ import { Plus, Send, Trash2, Edit3, X, Check } from "lucide-react";
 import { getSettings, updateSettings, saveSettings, type QuickPrompt } from "../../stores/settingsStore";
 import { useEvent } from "../../services/useService";
 import { Events, type SettingsChangedPayload } from "../../services/events";
-import { commands, eventBus } from "../../services/serviceBus";
+import { commandRegistry, windowBus } from "../../services/windowBus";
 import { showCtxMenu } from "../ContextMenu";
 import { t } from "../../i18n";
 
@@ -56,11 +56,11 @@ export default function QuickPromptPanel() {
   };
 
   const sendPrompt = (promptText: string) => {
-    commands.execute("SEND_MESSAGE", promptText);
+    commandRegistry.execute("SEND_MESSAGE", promptText);
   };
 
   const insertToInput = (promptText: string) => {
-    eventBus.emit(Events.CHAT_INSERT_TEXT, { text: promptText, appendEnd: true });
+    windowBus.emit(Events.CHAT_INSERT_TEXT, { text: promptText, appendEnd: true });
   };
 
   const onContextMenu = (e: React.MouseEvent, p: QuickPrompt) => {

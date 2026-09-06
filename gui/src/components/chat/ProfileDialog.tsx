@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Plus, Trash2, Check, Star, X, User, Edit } from "lucide-react";
 import { t } from "../../i18n";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 
 interface ProfileInfo {
@@ -284,7 +284,7 @@ export default function ProfileDialog() {
       setProfiles(result.profiles || []);
       setActiveId(result.active || null);
       // 广播给其他订阅者（如工具栏模型下拉），让新建/删除/切换后即时刷新
-      eventBus.emit(Events.PROFILES_CHANGED, { profiles: result.profiles || [] });
+      windowBus.emit(Events.PROFILES_CHANGED, { profiles: result.profiles || [] });
     } catch { /* Tauri not available */ }
   }, []);
 

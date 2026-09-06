@@ -1,7 +1,7 @@
 import React, { useCallback, useState, useRef } from "react";
 import type { DesktopItem } from "../../types/desktop";
 import type { FileGroupContent } from "../../types/desktop";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 import { t } from "../../i18n";
 
@@ -121,13 +121,13 @@ export function FileGroupItem({ item }: Props) {
   }, [expandedPaths, childCache]);
 
   const sendToAgent = (entry: TreeEntry) => {
-    eventBus.emit(Events.CHAT_ADD_REFERENCE, { reference: entry });
+    windowBus.emit(Events.CHAT_ADD_REFERENCE, { reference: entry });
   };
 
   const sendAllToAgent = () => {
     const files = collectFiles(rootEntries, expandedPaths, childCache);
     for (const f of files) {
-      eventBus.emit(Events.CHAT_ADD_REFERENCE, { reference: f });
+      windowBus.emit(Events.CHAT_ADD_REFERENCE, { reference: f });
     }
   };
 

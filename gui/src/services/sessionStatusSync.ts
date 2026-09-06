@@ -3,7 +3,7 @@
 // get_session_statuses / "server:session-status" / "server:client-left"）。
 // 只同步会话"状态"，不同步内容；按绑定的 workspace 过滤 influx。
 
-import { eventBus } from "./serviceBus";
+import { windowBus } from "./windowBus";
 import { Events } from "./events";
 import { getChatState } from "../stores/chatStore";
 import {
@@ -89,7 +89,7 @@ export function startSessionStatusSync(workDir: string) {
       })
       .catch(() => {});
 
-    eventBus.on(Events.CHAT_STATE_CHANGED, reportIfChanged);
+    windowBus.on(Events.CHAT_STATE_CHANGED, reportIfChanged);
   }
 
   // 初次连接 + 切换工作区都会重拉当前工作区快照（订阅不重复注册）

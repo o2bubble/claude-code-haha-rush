@@ -13,7 +13,7 @@
  * After handshake, BridgeOut forwards DataBus publishes to all matching Leafs.
  */
 
-import { dataBus, type ChannelType, type PublishMeta } from "./dataBus";
+import { crossWindowBus, type ChannelType, type PublishMeta } from "./crossWindowBus";
 
 // ── Wire format ──
 
@@ -121,7 +121,7 @@ async function handleHubMessage(msg: BridgeMessage): Promise<void> {
       });
 
       // Build init snapshot — collect all sticky values matching subscription patterns
-      const allSticky = dataBus.getAllSticky();
+      const allSticky = crossWindowBus.getAllSticky();
       const snapshots: Record<string, unknown> = {};
       for (const [topic, value] of Object.entries(allSticky)) {
         if (msg.subscriptions.some((pat) => topicMatchesForBridge(pat, topic))) {
@@ -164,7 +164,7 @@ async function handleHubMessage(msg: BridgeMessage): Promise<void> {
     case "data":
       // Leaf sent a command/data → re-publish locally via bridgeReceive
       if (msg.topic && msg.payload !== undefined) {
-        dataBus.bridgeReceive(msg.topic, msg.payload, { mergeId: msg.mergeId, fromBridge: true });
+        crossWindowBus.bridgeReceive(msg.topic, msg.payload, { mergeId: msg.mergeId, fromBridge: true });
       }
       break;
   }
@@ -178,7 +178,7 @@ async function handleLeafMessage(msg: BridgeMessage): Promise<void> {
       if (!msg.snapshots) return;
       // Apply all sticky snapshots locally
       for (const [topic, value] of Object.entries(msg.snapshots)) {
-        dataBus.bridgeReceive(topic, value, { fromBridge: true });
+        crossWindowBus.bridgeReceive(topic, value, { fromBridge: true });
       }
       // Acknowledge
       if (_tauriEmit) {
@@ -192,7 +192,7 @@ async function handleLeafMessage(msg: BridgeMessage): Promise<void> {
     case "data": {
       // Hub sent data — apply locally
       if (msg.topic && msg.payload !== undefined) {
-        dataBus.bridgeReceive(msg.topic, msg.payload, { mergeId: msg.mergeId, fromBridge: true });
+        crossWindowBus.bridgeReceive(msg.topic, msg.payload, { mergeId: msg.mergeId, fromBridge: true });
       }
       break;
     }
@@ -235,7 +235,7 @@ export const bridge = {
     });
 
     // Register BridgeOut hook on DataBus
-    dataBus.setBridgeOut(bridgeOut);
+    crossWindowBus.setBridgeOut(bridgeOut);
 
     // Heartbeat: ping all leafs every 5 seconds, cleanup stale ones
     setInterval(() => {
@@ -262,7 +262,7 @@ export const bridge = {
     });
 
     // Subscribe to DataBus locally — commands go to Bridge
-    dataBus.setBridgeOut(async (topic, payload, channel, meta) => {
+    crossWindowBus.setBridgeOut(async (topic, payload, channel, meta) => {
       if (_tauriEmit) {
         await _tauriEmit("bridge", {
           type: "data",
@@ -335,6 +335,6 @@ export const bridge = {
   _reset(): void {
     _leafs.clear();
     _hubStarted = false;
-    dataBus._reset();
+    crossWindowBus._reset();
   },
 };

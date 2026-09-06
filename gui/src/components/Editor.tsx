@@ -8,7 +8,7 @@ import { editorStore } from "../stores/editorStore";
 import { getSettings } from "../stores/settingsStore";
 import { useEvent } from "../services/useService";
 import { Events, type SettingsChangedPayload } from "../services/events";
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { setActiveEditor } from "../utils/editorCommands";
 import { revealFileInTree } from "../utils/revealFile";
 
@@ -120,17 +120,17 @@ export default memo(function MonacoEditor({ path, name, content, onChange, readO
     // Monaco 默认 F1 弹出编辑器原生命令面板；这里重定向到应用统一面板，
     // 焦点在编辑器内时编辑器命令置顶。Ctrl+Shift+P 同理。
     editor.addCommand(monaco.KeyCode.F1, () => {
-      eventBus.emit(Events.COMMAND_PALETTE_OPEN, { context: "editor" });
+      windowBus.emit(Events.COMMAND_PALETTE_OPEN, { context: "editor" });
     });
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, () => {
-      eventBus.emit(Events.COMMAND_PALETTE_OPEN, { context: "editor" });
+      windowBus.emit(Events.COMMAND_PALETTE_OPEN, { context: "editor" });
     });
 
     // ── 覆盖右键菜单 "命令面板" 入口 → 打开统一面板 ──
     // context menu 的 Command Palette 条目执行 editor.action.quickCommand，
     // 这里把该命令重定向到我们的面板（nls 后 label 已显示为中文）。
     monaco.editor.registerCommand("editor.action.quickCommand", () => {
-      eventBus.emit(Events.COMMAND_PALETTE_OPEN, { context: "editor" });
+      windowBus.emit(Events.COMMAND_PALETTE_OPEN, { context: "editor" });
     });
 
     if (!readOnly) {
@@ -162,7 +162,7 @@ export default memo(function MonacoEditor({ path, name, content, onChange, readO
         const sel = editor.getSelection();
         const start = sel?.startLineNumber || editor.getPosition()?.lineNumber || 1;
         const end = sel && !sel.isEmpty() && sel.endLineNumber !== start ? sel.endLineNumber : undefined;
-        eventBus.emit("chat.addReference", {
+        windowBus.emit("chat.addReference", {
           reference: { type: "file", path: pathRef.current, startLine: start, endLine: end },
         });
       },

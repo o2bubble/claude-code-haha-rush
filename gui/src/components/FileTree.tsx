@@ -5,7 +5,7 @@ import { showCtxMenu, type ContextMenuItem } from "./ContextMenu";
 import { useEventHandler } from "../services/useService";
 import { Events } from "../services/events";
 import { t } from "../i18n";
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { getDesktops, addItem, findSmartPlace, loadDesktops, panToItem } from "../stores/desktopStore";
 import { setSelection } from "./desktop/selectionStore";
 import { activatePanel } from "../stores/layoutStore";
@@ -208,7 +208,7 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
     setDeletePending(false);
     try {
       await fileService.deletePath(entry.path);
-      eventBus.emit(Events.FILE_CHANGED, { path: entry.path });
+      windowBus.emit(Events.FILE_CHANGED, { path: entry.path });
     }
     catch (e) { alert(String(e)); }
     refreshParent();
@@ -305,7 +305,7 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
         { separator: true as any },
         { label: t("files.rename"), action: handleRename },
         { label: t("files.sendToChat"), icon: <Send size={12} />, action: () => {
-          eventBus.emit(Events.CHAT_ADD_REFERENCE, { reference: refObj });
+          windowBus.emit(Events.CHAT_ADD_REFERENCE, { reference: refObj });
         }},
         { label: t("files.delete"), action: handleDelete },
       );
@@ -445,7 +445,7 @@ function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath 
     if (!deleteTarget) return;
     try {
       await fileService.deletePath(deleteTarget.path);
-      eventBus.emit(Events.FILE_CHANGED, { path: deleteTarget.path });
+      windowBus.emit(Events.FILE_CHANGED, { path: deleteTarget.path });
     }
     catch (err) { alert(String(err)); }
     setDeleteTarget(null);

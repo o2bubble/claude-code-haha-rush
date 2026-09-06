@@ -7,7 +7,7 @@ import { getTree, setTree } from "./stores/layoutStore";
 import type { TabGroup } from "./types/layout";
 import { t } from "./i18n";
 import { bridge } from "./services/bridge";
-import { startDataBusLeaf } from "./services/dataBusLeaf";
+import { startCrossWindowBusLeaf } from "./services/crossWindowBusLeaf";
 import { ALL_PANEL_DEFS } from "./services/panelDefs";
 import { setCurrentViewerItemId } from "./services/desktopItemViewerRegistry";
 import CommandPalette from "./components/CommandPalette";
@@ -76,7 +76,7 @@ export default function FloatingApp() {
       const subs = ["chat.*", "plan.*", "subagents.*", "terminal.*", "editor.*", "settings.*", "workers.*", "files.*", "desktop.*", "layout.*"];
       await bridge.startLeaf(subs);
       if (cancelled) return;
-      startDataBusLeaf(subs);
+      startCrossWindowBusLeaf(subs);
       setReady(true);
       realMount.current = true;
     })();

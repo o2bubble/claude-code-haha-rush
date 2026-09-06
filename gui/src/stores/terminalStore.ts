@@ -1,6 +1,6 @@
 // Terminal output store
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 
 export interface TerminalEntry {
@@ -19,7 +19,7 @@ let lastEntry: TerminalEntry | null = null;
 let _activeEntryId: string | null = null;
 
 function notify() {
-  eventBus.emit(Events.TERMINAL_CHANGED, { entries, activeEntryId: _activeEntryId });
+  windowBus.emit(Events.TERMINAL_CHANGED, { entries, activeEntryId: _activeEntryId });
 }
 
 export function getEntries(): TerminalEntry[] {

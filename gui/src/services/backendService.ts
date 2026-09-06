@@ -1,7 +1,7 @@
 // BackendService - unified IDE backend lifecycle management
 
 import { useEffect, useState } from "react";
-import { eventBus } from "./serviceBus";
+import { windowBus } from "./windowBus";
 import { Events } from "./events";
 import type { BackendStateChangedPayload, BackendPortReadyPayload } from "./events";
 import { addStatusMessage } from "../stores/statusMsgStore";
@@ -36,7 +36,7 @@ let _state: BackendState = {
 let _cancelPoll: (() => void) | null = null;
 
 function notify() {
-  eventBus.emit(Events.BACKEND_STATE_CHANGED, { ..._state } satisfies BackendStateChangedPayload);
+  windowBus.emit(Events.BACKEND_STATE_CHANGED, { ..._state } satisfies BackendStateChangedPayload);
 }
 
 async function pollForPort(timeoutMs = 30_000): Promise<number> {
@@ -86,7 +86,7 @@ async function startInternal(workDir: string): Promise<void> {
     _state = { status: "running", port, workDir, error: undefined };
     addStatusMessage(`IDE 后端已连接 (端口 ${port})`, "info");
     notify();
-    eventBus.emit(Events.BACKEND_PORT_READY, { port } satisfies BackendPortReadyPayload, { sticky: true });
+    windowBus.emit(Events.BACKEND_PORT_READY, { port } satisfies BackendPortReadyPayload, { sticky: true });
   } catch (e: any) {
     if (_cancelPoll) return;
     _state = { ..._state, status: "error", error: e?.message || String(e) };
@@ -105,7 +105,7 @@ export const BackendService = {
    *  backend port is known. Idempotent for the already-bound workspace. */
   async bind(workDir: string): Promise<void> {
     if (_state.status === "running" && _state.workDir === workDir && _state.port) {
-      eventBus.emit(Events.BACKEND_PORT_READY, { port: _state.port }, { sticky: true });
+      windowBus.emit(Events.BACKEND_PORT_READY, { port: _state.port }, { sticky: true });
       return;
     }
     _cancelPoll?.();
@@ -123,13 +123,13 @@ export const BackendService = {
       // Workspace is bound now (settings state + DB switched). Tell the UI it can
       // reload the workspace's settings/layout right away — don't wait for the
       // backend port, that's the slow part.
-      eventBus.emit(Events.WORKSPACE_BOUND, { workDir }, { sticky: true });
+      windowBus.emit(Events.WORKSPACE_BOUND, { workDir }, { sticky: true });
       const port = result > 0 ? result : await pollForPort();
       if (_cancelPoll) return;
       _state = { status: "running", port, workDir, error: undefined };
       addStatusMessage(`IDE 后端已连接 (端口 ${port})`, "info");
       notify();
-      eventBus.emit(Events.BACKEND_PORT_READY, { port }, { sticky: true });
+      windowBus.emit(Events.BACKEND_PORT_READY, { port }, { sticky: true });
     } catch (e: any) {
       if (_cancelPoll) return;
       _state = { ..._state, status: "error", error: e?.message || String(e) };
@@ -152,7 +152,7 @@ export const BackendService = {
       if (invoke) await invoke("restart_ide_backend");
     } catch {}
     _state = { status: "stopped", port: null, workDir: _state.workDir, error: undefined };
-    eventBus.clearSticky(Events.BACKEND_PORT_READY);
+    windowBus.clearSticky(Events.BACKEND_PORT_READY);
     notify();
   },
 
@@ -171,7 +171,7 @@ export function useBackend(): BackendState {
   const [st, setSt] = useState<BackendState>(BackendService.getState());
 
   useEffect(() => {
-    const unsub = eventBus.on(Events.BACKEND_STATE_CHANGED, (data: BackendStateChangedPayload) => {
+    const unsub = windowBus.on(Events.BACKEND_STATE_CHANGED, (data: BackendStateChangedPayload) => {
       setSt({ ...data });
     });
     return unsub;

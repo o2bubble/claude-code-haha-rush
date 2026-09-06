@@ -1,6 +1,6 @@
 // Simple open-files state for the editor panel
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { activatePanel } from "./layoutStore";
 
@@ -30,7 +30,7 @@ let _tabs: FileTab[] = [];
 let _activePath: string | null = null;
 
 function notify() {
-  eventBus.emit(Events.EDITOR_CHANGED, { tabs: [..._tabs], activePath: _activePath }, { sticky: true });
+  windowBus.emit(Events.EDITOR_CHANGED, { tabs: [..._tabs], activePath: _activePath }, { sticky: true });
 }
 
 export const editorStore = {

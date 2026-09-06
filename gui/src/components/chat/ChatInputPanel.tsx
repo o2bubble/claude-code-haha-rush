@@ -7,7 +7,7 @@ import { useBackend } from "../../services/backendService";
 import { useEvent } from "../../services/useService";
 import { Events, type ChatStateChangedPayload } from "../../services/events";
 import { MsgQueuePanel, MsgQueueFooterCapsule, useQueuePosition, useMsgQueueCollapse } from "./MsgQueuePanel";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { useT, t } from "../../i18n";
 import { addFloatingPanel, removeFloatingPanel, getFloatingPanels, bringFloatingToFront, findTabByPanelId, ensureGroupVisible, setActiveTab } from "../../stores/layoutStore";
 import { setAskQuestionCallbacks, clearAskQuestionCallbacks } from "./AskQuestionFloating";
@@ -21,7 +21,7 @@ import {
 } from "../../utils/contextWarning";
 import { computeStreamStall } from "../../chat/chatReduce";
 import { openSettingsFloat } from "../Toolbar";
-import { dataBus } from "../../services/dataBus";
+import { crossWindowBus } from "../../services/crossWindowBus";
 import { StreamStallDecisionBar } from "./StreamStallDecisionBar";
 import {
   computeStreamStallDecision, enterWaiting, resetToIdle, shouldAutoWake, type StreamStallDecisionState,
@@ -74,7 +74,7 @@ function getContextColor(usedPct: number): string {
 function goToSettings() {
   // 与命令面板一致：浮动窗口异步创建，SettingsPanel 可能尚未挂载订阅，重试发布几次
   openSettingsFloat();
-  const nav = () => dataBus.publish("settings.navigate", { category: "chat", field: "contextWarningPercent" });
+  const nav = () => crossWindowBus.publish("settings.navigate", { category: "chat", field: "contextWarningPercent" });
   nav();
   setTimeout(nav, 150);
   setTimeout(nav, 350);

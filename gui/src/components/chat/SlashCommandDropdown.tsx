@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { t } from "../../i18n";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 import type { SlashCommand } from "../../stores/chatStore";
 
@@ -105,7 +105,7 @@ export function SlashCommandDropdown({ commands, filter, highlightIndex, onHighl
       {/* 升级入口 — 在命令面板中搜索更多 */}
       <div
         onClick={() => {
-          eventBus.emit(Events.COMMAND_PALETTE_OPEN, { query: filter });
+          windowBus.emit(Events.COMMAND_PALETTE_OPEN, { query: filter });
           onClose();
         }}
         style={{

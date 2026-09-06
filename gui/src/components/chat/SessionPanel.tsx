@@ -19,7 +19,7 @@ import {
 } from "./useChatBridge";
 import { t } from "../../i18n";
 import { addStatusMessage } from "../../stores/statusMsgStore";
-import { commands } from "../../services/serviceBus";
+import { commandRegistry } from "../../services/windowBus";
 import { Commands } from "../../services/commands";
 import { useEvent } from "../../services/useService";
 import { Events, type ChatStateChangedPayload, type SettingsChangedPayload } from "../../services/events";
@@ -324,7 +324,7 @@ function SessionPanelImpl() {
           setConfirmOpenElsewhere(s);
         } else {
           switchSession(s.id);
-          commands.execute(Commands.CHAT_FOCUS_INPUT);
+          commandRegistry.execute(Commands.CHAT_FOCUS_INPUT);
         }
       }}
       style={{
@@ -642,7 +642,7 @@ function SessionPanelImpl() {
                   const sid = confirmOpenElsewhere.id;
                   setConfirmOpenElsewhere(null);
                   switchSession(sid);
-                  commands.execute(Commands.CHAT_FOCUS_INPUT);
+                  commandRegistry.execute(Commands.CHAT_FOCUS_INPUT);
                 }}
                 style={dialogBtn("var(--semantic-error)", "none", "var(--fg-inverse)")}
               >

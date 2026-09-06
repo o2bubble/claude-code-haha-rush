@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { t } from "../../i18n";
 import { EmptyState, ErrorState } from "../SharedStates";
 import { useEvent } from "../../services/useService";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 import type { DesktopChangedPayload } from "../../services/events";
 import {
@@ -55,7 +55,7 @@ export function SuperDesktopPanel() {
   // (_loadPromise dedup) and WORKSPACE_BOUND is sticky, so this also covers
   // the first bind before the panel mounts.
   useEffect(() => {
-    return eventBus.on(Events.WORKSPACE_BOUND, () => {
+    return windowBus.on(Events.WORKSPACE_BOUND, () => {
       finishLoad();
     });
   }, [finishLoad]);

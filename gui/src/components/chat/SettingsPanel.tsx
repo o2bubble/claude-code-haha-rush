@@ -12,7 +12,7 @@ import { DEFAULT_STALL_WAKE_PROMPT } from "../../utils/streamStallDecision";
 import { EmptyState } from "../SharedStates";
 import { useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
-import { dataBus } from "../../services/dataBus";
+import { crossWindowBus } from "../../services/crossWindowBus";
 
 // ── 压缩配置：handoff 预设（完整复刻技能总结要求）+ 默认脚本路径（随程序打包在 extensions/） ──
 
@@ -563,7 +563,7 @@ function SettingsPanelImpl() {
 
   // ── 命令面板/「去设置」导航：跳转到指定分类，并可选定位高亮具体字段 ──
   useEffect(() => {
-    return dataBus.subscribe("settings.navigate", (payload) => {
+    return crossWindowBus.subscribe("settings.navigate", (payload) => {
       const p = payload as { category?: string; field?: string } | null;
       if (p?.category && CATEGORIES.some((c) => c.id === p.category)) {
         setCat(p.category);

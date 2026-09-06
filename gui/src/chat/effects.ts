@@ -1,9 +1,9 @@
 // ── Effect runner — applies ChatEffects to the neighbouring stores ──
-// The pure fold cannot touch stores; this module executes the store/eventBus
+// The pure fold cannot touch stores; this module executes the store/windowBus
 // side of an effect list and returns the remaining command effects for the
 // ChatSession runner to handle (they need `send` / connection policy).
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import type { ChatEffect } from "./types";
 import {
@@ -18,7 +18,7 @@ import { updatePlan, clearPlan, getPlanTasks } from "../stores/planStore";
 import { saveCurrentPlan } from "../stores/planHistoryStore";
 import { upsertSubAgent, setTranscript, setTranscriptError, clearSubAgents, appendTranscriptMessages } from "../stores/subAgentStore";
 
-/** Applies store/eventBus effects; returns the command effects for the runner. */
+/** Applies store/windowBus effects; returns the command effects for the runner. */
 export function applyStoreEffects(effects: ChatEffect[]): ChatEffect[] {
   const commands: ChatEffect[] = [];
   for (const e of effects) {
@@ -66,7 +66,7 @@ export function applyStoreEffects(effects: ChatEffect[]): ChatEffect[] {
         clearSubAgents();
         break;
       case "emit.fileChanged":
-        eventBus.emit(Events.FILE_CHANGED, { path: e.path });
+        windowBus.emit(Events.FILE_CHANGED, { path: e.path });
         break;
       default:
         commands.push(e);

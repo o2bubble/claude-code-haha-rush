@@ -14,11 +14,11 @@ import { workspaceBasename } from "./utils/workspace";
 import { normalizeTheme, isDarkTheme } from "./utils/themeUtils";
 import { resolveLinkAction, isNavigableHref } from "./utils/linkOpen";
 import { setLanguage, t } from "./i18n";
-import { eventBus } from "./services/serviceBus";
+import { windowBus } from "./services/windowBus";
 import { Events, type BackendStateChangedPayload } from "./services/events";
 import { BackendService } from "./services/backendService";
 import { startSessionStatusSync } from "./services/sessionStatusSync";
-import { commands } from "./services/serviceBus";
+import { commandRegistry } from "./services/windowBus";
 import { Commands } from "./services/commands";
 import { toggleGroupHidden, restoreLayout, serializeLayout, getSkipSave, refreshAllTitles, activatePanel, findTabByPanelId, getTree } from "./stores/layoutStore";
 import { openSettingsFloat, openHelpFloat } from "./components/Toolbar";
@@ -56,7 +56,7 @@ export default function App() {
   // ── 后端启动失败/超时 → 自动打开诊断面板（防抖 + 已打开则跳过）──
   const autoDiagAtRef = useRef(0);
   useEffect(() => {
-    return eventBus.on(Events.BACKEND_STATE_CHANGED, (data: BackendStateChangedPayload) => {
+    return windowBus.on(Events.BACKEND_STATE_CHANGED, (data: BackendStateChangedPayload) => {
       if (data.status !== "error") return;
       const now = Date.now();
       if (now - autoDiagAtRef.current < 5000) return; // 连续失败防抖
@@ -83,7 +83,7 @@ export default function App() {
             void loadSessionList();
             void loadMorePlans();
           } else if (change?.entity === "note") {
-            eventBus.emit(Events.NOTES_CHANGED as any, {});
+            windowBus.emit(Events.NOTES_CHANGED as any, {});
           } else if (change?.entity === "session") {
             chatSession.listSessions();
           } else if (change?.entity === "settings") {
@@ -312,7 +312,7 @@ export default function App() {
         }).catch(() => launchNormal());
       }
     });
-    return eventBus.on(Events.LANGUAGE_CHANGED, () => setLangKey((k) => k + 1));
+    return windowBus.on(Events.LANGUAGE_CHANGED, () => setLangKey((k) => k + 1));
   }, []);
 
   // ── Wizard completion: persist settings → show workspace selector ──
@@ -379,7 +379,7 @@ export default function App() {
     // before spawning the backend, so this ordering is belt-and-suspenders).
     if (!_bridgeStarted) {
       _bridgeStarted = true;
-      import("./services/dataBusHub").then((m) => m.startDataBusHub());
+      import("./services/crossWindowBusHub").then((m) => m.startCrossWindowBusHub());
       import("./services/bridge").then((m) => m.bridge.startHub());
       import("./services/mcpBridge").then((m) => m.startMcpBridge());
       import("./services/guardBridge").then((m) => m.subscribeGuardActions());
@@ -517,11 +517,11 @@ export default function App() {
   useEffect(() => {
     const unregs: (() => void)[] = [];
 
-    unregs.push(commands.register(Commands.LAYOUT_TOGGLE_LEFT, () => toggleGroupHidden("sidebar-left")));
-    unregs.push(commands.register(Commands.LAYOUT_TOGGLE_RIGHT, () => toggleGroupHidden("chat-split")));
-    unregs.push(commands.register(Commands.LAYOUT_TOGGLE_BOTTOM, () => toggleGroupHidden("bottom-panel")));
-    unregs.push(commands.register(Commands.SETTINGS_OPEN, () => openSettingsFloat()));
-    unregs.push(commands.register(Commands.BACKEND_RESTART, () => BackendService.restart()));
+    unregs.push(commandRegistry.register(Commands.LAYOUT_TOGGLE_LEFT, () => toggleGroupHidden("sidebar-left")));
+    unregs.push(commandRegistry.register(Commands.LAYOUT_TOGGLE_RIGHT, () => toggleGroupHidden("chat-split")));
+    unregs.push(commandRegistry.register(Commands.LAYOUT_TOGGLE_BOTTOM, () => toggleGroupHidden("bottom-panel")));
+    unregs.push(commandRegistry.register(Commands.SETTINGS_OPEN, () => openSettingsFloat()));
+    unregs.push(commandRegistry.register(Commands.BACKEND_RESTART, () => BackendService.restart()));
 
     return () => unregs.forEach((fn) => fn());
   }, []);
@@ -554,8 +554,8 @@ export default function App() {
         } catch { /* Tauri not available */ }
       }, 1000);
     };
-    const offTree = eventBus.on(Events.LAYOUT_TREE_CHANGED, schedule);
-    const offFloating = eventBus.on(Events.LAYOUT_FLOATING_CHANGED, schedule);
+    const offTree = windowBus.on(Events.LAYOUT_TREE_CHANGED, schedule);
+    const offFloating = windowBus.on(Events.LAYOUT_FLOATING_CHANGED, schedule);
     return () => { offTree(); offFloating(); };
   }, []);
 
@@ -571,7 +571,7 @@ export default function App() {
   // do NOT wait for the IDE backend to finish booting (that's seconds). WORKSPACE_BOUND
   // is sticky, so a listener registered after the event still receives it.
   useEffect(() => {
-    return eventBus.on(Events.WORKSPACE_BOUND, () => {
+    return windowBus.on(Events.WORKSPACE_BOUND, () => {
       reloadSettings()
         .then((s) => {
           if (s.layoutTree) {

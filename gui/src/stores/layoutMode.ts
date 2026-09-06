@@ -8,8 +8,8 @@ const listeners = new Set<Listener>();
 function notify() {
   listeners.forEach((fn) => fn());
   // Publish to DataBus for cross-window sync (dynamic import to avoid circular deps)
-  import("../services/dataBus").then(({ dataBus }) => {
-    dataBus.publish("layout.mode", _enabled, { sticky: true });
+  import("../services/crossWindowBus").then(({ crossWindowBus }) => {
+    crossWindowBus.publish("layout.mode", _enabled, { sticky: true });
   }).catch(() => {});
 }
 

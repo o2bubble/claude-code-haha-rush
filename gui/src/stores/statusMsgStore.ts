@@ -1,6 +1,6 @@
 // ── Status messages store — for StatusBar notification log ──
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 
 export interface StatusMessage {

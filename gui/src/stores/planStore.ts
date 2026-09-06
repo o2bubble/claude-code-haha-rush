@@ -1,6 +1,6 @@
 // ── Plan store — tracks agent task plan from TodoWrite tool_use blocks ──
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { getChatState } from "./chatStore";
 
@@ -45,12 +45,12 @@ export function updatePlan(newTasks: PlanTask[]) {
   }
 
   tasks = newTasks;
-  eventBus.emit(Events.PLAN_UPDATED, { tasks }, { sticky: true });
+  windowBus.emit(Events.PLAN_UPDATED, { tasks }, { sticky: true });
 }
 
 export function clearPlan() {
   tasks = [];
-  eventBus.emit(Events.PLAN_UPDATED, { tasks: [] }, { sticky: true });
+  windowBus.emit(Events.PLAN_UPDATED, { tasks: [] }, { sticky: true });
 }
 
 /** Test hook — identical to clearPlan(). */

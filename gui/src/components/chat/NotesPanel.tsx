@@ -6,7 +6,7 @@ import { t } from "../../i18n";
 import { addStatusMessage } from "../../stores/statusMsgStore";
 import { useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { showCtxMenu, type ContextMenuItem } from "../ContextMenu";
 import { NoteEditor, type NoteData, type SaveState } from "./NoteEditor";
 
@@ -490,7 +490,7 @@ export default function NotesPanel() {
   const onRowContext = (e: ReactMouseEvent, n: NoteSummary) => {
     e.preventDefault();
     const items: ContextMenuItem[] = [
-      { label: t("notes.sendToChat"), action: () => eventBus.emit("chat.addReference", { reference: { type: "note", path: n.id, label: n.title || t("notes.untitled") } }) },
+      { label: t("notes.sendToChat"), action: () => windowBus.emit("chat.addReference", { reference: { type: "note", path: n.id, label: n.title || t("notes.untitled") } }) },
       { label: t("notes.sendToDesktopMenu"), action: () => sendToDesktop(n.id) },
       { separator: true },
     ];

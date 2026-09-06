@@ -22,14 +22,14 @@ import {
   loadDesktops, resetDesktopsLoad, createDesktop, setActiveDesktop,
   addItem, removeItem, forceSaveDesktop,
 } from "./desktopStore";
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 
 const saves = () => invokeMock.mock.calls.filter((c: unknown[]) => c[0] === "db_save_desktop");
 
 async function seedDesktops() {
   resetDesktopsLoad();
-  eventBus.clearSticky(Events.BACKEND_PORT_READY);
+  windowBus.clearSticky(Events.BACKEND_PORT_READY);
   invokeMock.mockResolvedValue([
     { id: "d-a", name: "A", pan_x: 0, pan_y: 0, zoom: 1, show_grid: true, grid_size: 20, snap_to_grid: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), items: [], connections: [] },
     { id: "d-b", name: "B", pan_x: 0, pan_y: 0, zoom: 1, show_grid: true, grid_size: 20, snap_to_grid: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), items: [], connections: [] },
@@ -37,7 +37,7 @@ async function seedDesktops() {
   // 真实时序：面板 mount 先订阅(loadDesktops)，后端起来后才 emit port ready。
   // 先 emit 后订阅 replay 路径在测试环境不稳定 → 按生产顺序写。
   const p = loadDesktops();
-  eventBus.emit(Events.BACKEND_PORT_READY, { port: 1 }, { sticky: true });
+  windowBus.emit(Events.BACKEND_PORT_READY, { port: 1 }, { sticky: true });
   await p;
   invokeMock.mockClear();  // 清掉 seed 的 db_get_desktops 记录，后续阶段只看 db_save_desktop
 }

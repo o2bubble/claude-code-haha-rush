@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObjec
 import { createPortal } from "react-dom";
 import { Bold, Italic, Strikethrough, Code, Heading1, Heading2, Heading3, List, ListOrdered, Quote, Table, MoreHorizontal, Minus, Link, X } from "lucide-react";
 import { t } from "../../i18n";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { showCtxMenu } from "../ContextMenu";
 
 // ─── Types ───
@@ -293,7 +293,7 @@ export function NoteEditor({ note, scopeOptions, saveState, onChange, onDelete, 
   const removeTag = (tag: string) => update({ tags: note.tags.filter((x) => x !== tag) });
 
   const selectionMenu = (x: number, y: number, sel: string) => showCtxMenu(x, y, [
-    { label: t("notes.sendSelectionToChat"), action: () => eventBus.emit("chat.addReference", { reference: { type: "note", path: note.id, label: sel.slice(0, 60) } }) },
+    { label: t("notes.sendSelectionToChat"), action: () => windowBus.emit("chat.addReference", { reference: { type: "note", path: note.id, label: sel.slice(0, 60) } }) },
   ]);
   const getSelectionText = () => {
     const view: any = editorRef.current?.ctx?.get?.("prosemirrorView");

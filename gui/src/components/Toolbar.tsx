@@ -12,7 +12,7 @@ import { t } from "../i18n";
 import { layoutMode } from "../stores/layoutMode";
 import { useEvent, useEventHandler } from "../services/useService";
 import { Events, type LayoutTreeChangedPayload, type ChatStateChangedPayload, type PanelRegistryChangedPayload, type SettingsChangedPayload, type UpdateAvailabilityPayload } from "../services/events";
-import { commands, eventBus } from "../services/serviceBus";
+import { commandRegistry, windowBus } from "../services/windowBus";
 import { addStatusMessage } from "../stores/statusMsgStore";
 
 let floatSettingsId: string | null = null;
@@ -312,7 +312,7 @@ function PermModeDropdown() {
           {PERM_MODES.map((m) => (
             <div
               key={m.value}
-              onClick={() => { commands.execute("SET_PERMISSION_MODE", m.value); setOpen(false); }}
+              onClick={() => { commandRegistry.execute("SET_PERMISSION_MODE", m.value); setOpen(false); }}
               style={{
                 ...DROPDOWN_ITEM_BASE,
                 padding: "6px 12px",
@@ -369,7 +369,7 @@ function ThinkingDropdown() {
           {options.map((o) => (
             <div
               key={String(o.id)}
-              onClick={() => { commands.execute("SET_THINKING_MODE", { enabled: o.id, effort: state.effort ?? undefined }); setOpen(false); }}
+              onClick={() => { commandRegistry.execute("SET_THINKING_MODE", { enabled: o.id, effort: state.effort ?? undefined }); setOpen(false); }}
               style={{
                 ...DROPDOWN_ITEM_BASE,
                 backgroundColor: o.id === check ? "var(--accent-subtle)" : "transparent",
@@ -425,7 +425,7 @@ function EffortDropdown() {
           {levels.map((l) => (
             <div
               key={l.id}
-              onClick={() => { commands.execute("SET_EFFORT", l.id); setOpen(false); }}
+              onClick={() => { commandRegistry.execute("SET_EFFORT", l.id); setOpen(false); }}
               style={{
                 ...DROPDOWN_ITEM_BASE,
                 backgroundColor: l.id === (effort ?? cap.defaultEffort) ? "var(--accent-subtle)" : "transparent",
@@ -470,12 +470,12 @@ function ModelDropdown() {
 
   // Reload when profiles change (created/deleted/switched in the manager)
   useEffect(() => {
-    return eventBus.on(Events.PROFILES_CHANGED, loadProfiles);
+    return windowBus.on(Events.PROFILES_CHANGED, loadProfiles);
   }, [loadProfiles]);
 
   // Sync active profile from chatStore.model after backend restart
   useEffect(() => {
-    const unsub = eventBus.on(Events.CHAT_STATE_CHANGED, (payload: any) => {
+    const unsub = windowBus.on(Events.CHAT_STATE_CHANGED, (payload: any) => {
       if (payload?.state?.connected) setSwitching(false);
       const backendModel = payload?.state?.model;
       if (backendModel && profiles.length > 0) {
@@ -991,7 +991,7 @@ export default function Toolbar() {
           gap: 5,
           maxWidth: 175,
         }}
-        onClick={() => eventBus.emit(Events.WORKSPACE_OPEN_SELECTOR)}
+        onClick={() => windowBus.emit(Events.WORKSPACE_OPEN_SELECTOR)}
       >
         <FolderOpen size={16} style={{ pointerEvents: "none", flexShrink: 0 }} />
         {workspaceName && (
@@ -1013,7 +1013,7 @@ export default function Toolbar() {
         title={t("toolbar.commandPalette")}
         aria-label={t("toolbar.commandPalette")}
         style={btn(false)}
-        onClick={() => eventBus.emit(Events.COMMAND_PALETTE_OPEN, { context: "global" })}
+        onClick={() => windowBus.emit(Events.COMMAND_PALETTE_OPEN, { context: "global" })}
       >
         <Search size={15} style={{ pointerEvents: "none" }} />
       </button>

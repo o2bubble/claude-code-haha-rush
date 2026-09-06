@@ -2,7 +2,7 @@ import { useState, useRef } from "react";
 import { t } from "../../i18n";
 import { getSettings } from "../../stores/settingsStore";
 import { submitFeedback } from "../../services/feedbackService";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 
 // ── Image resize utility ──

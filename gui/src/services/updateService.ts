@@ -1,7 +1,7 @@
 // updateService.ts — Update check + download API (delegates HTTP to Rust backend)
 
 import { getSettings } from "../stores/settingsStore";
-import { eventBus } from "./serviceBus";
+import { windowBus } from "./windowBus";
 import { Events } from "./events";
 
 // Latest known update availability — drives the toolbar red-dot badge.
@@ -32,7 +32,7 @@ export function hasRealUpdate(components: ComponentStatus[]): boolean {
 export function setUpdateAvailability(hasUpdate: boolean, version: string): void {
   _hasUpdate = hasUpdate;
   _updateVersion = hasUpdate ? version : "";
-  eventBus.emit(Events.UPDATE_AVAILABILITY_CHANGED, { hasUpdate: _hasUpdate, version: _updateVersion }, { sticky: true });
+  windowBus.emit(Events.UPDATE_AVAILABILITY_CHANGED, { hasUpdate: _hasUpdate, version: _updateVersion }, { sticky: true });
 }
 
 export interface ComponentStatus {

@@ -6,7 +6,7 @@ import { Events, type ChatStateChangedPayload, type SettingsChangedPayload } fro
 import { getChatState, updateChatState, type SlashCommand } from "../../stores/chatStore";
 import { getSettings, updateSettings, saveSettings } from "../../stores/settingsStore";
 import { addFloatingPanel, getFloatingPanels, bringFloatingToFront } from "../../stores/layoutStore";
-import { commands } from "../../services/serviceBus";
+import { commandRegistry } from "../../services/windowBus";
 import { setSkillDialogCallbacks } from "./SkillDialogFloating";
 import { skillMarketplace, type PackageSummary, type PackageDetail } from "../../services/skillMarketplace";
 import { requestPluginRefresh } from "./useChatBridge";
@@ -271,7 +271,7 @@ function _SkillsPanel() {
     setSkillDialogCallbacks(
       floatId,
       (text) => {
-        commands.execute("SEND_MESSAGE", text);
+        commandRegistry.execute("SEND_MESSAGE", text);
         updateChatState({ activeSkillDialog: null });
         floatRef.current = null;
       },

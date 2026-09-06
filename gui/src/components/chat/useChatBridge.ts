@@ -1,7 +1,7 @@
 // ── useChatBridge — thin facade over the ChatSession singleton ──
 // Keeps the exact hook return shape and standalone export names so every
 // caller (ChatInputPanel, ChatMessagesPanel, SessionPanel, TasksPanel,
-// SubAgentPanel, SkillsPanel, referenceActions, dataBusHub) is unchanged.
+// SubAgentPanel, SkillsPanel, referenceActions, crossWindowBusHub) is unchanged.
 
 import { useEffect, useRef } from "react";
 import { chatSession } from "../../chat/chatSession";

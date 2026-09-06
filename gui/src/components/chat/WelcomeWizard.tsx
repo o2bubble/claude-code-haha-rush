@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { t, setLanguage, getLanguage, type Language } from "../../i18n";
 import { getSettings } from "../../stores/settingsStore";
 import { withTimeout, DEFAULT_LOAD_TIMEOUT_MS } from "../../services/asyncUtils";
-import { eventBus } from "../../services/serviceBus";
+import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 
 export type ServerProfile = "intranet" | "public";
@@ -386,7 +386,7 @@ function StepProfile({ value, onChange }: { value: string | null; onChange: (id:
           };
           await invoke("create_profile", { profileName: id, envVars: vars });
         }
-        eventBus.emit(Events.PROFILES_CHANGED, {});
+        windowBus.emit(Events.PROFILES_CHANGED, {});
         const first = [...selectedModels][0];
         onChange(first);
       } else {
@@ -405,7 +405,7 @@ function StepProfile({ value, onChange }: { value: string | null; onChange: (id:
           profileName: name,
           envVars: vars,
         });
-        eventBus.emit(Events.PROFILES_CHANGED, {});
+        windowBus.emit(Events.PROFILES_CHANGED, {});
         onChange(name);
       }
     } catch (e: any) {

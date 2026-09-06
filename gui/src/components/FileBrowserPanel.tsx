@@ -6,7 +6,7 @@ import { editorStore, isPreviewable } from "../stores/editorStore";
 import { fileService } from "../services/fileService";
 import { showCtxMenu } from "./ContextMenu";
 import { useEvent, useEventHandler } from "../services/useService";
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events, type SettingsChangedPayload, type FileRevealPayload } from "../services/events";
 
 export function FileBrowserPanel() {
@@ -20,7 +20,7 @@ export function FileBrowserPanel() {
   const [revealPath, setRevealPath] = useState<string | null>(null);
   useEventHandler<FileRevealPayload>(Events.FILE_REVEAL, ({ path }) => {
     setRevealPath(path);
-    eventBus.clearSticky(Events.FILE_REVEAL);
+    windowBus.clearSticky(Events.FILE_REVEAL);
   });
 
   if (!rootPath) {

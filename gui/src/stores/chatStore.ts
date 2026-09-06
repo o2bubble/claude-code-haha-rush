@@ -1,6 +1,6 @@
 // Chat state - module-level singleton
 
-import { eventBus } from "../services/serviceBus";
+import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { emptyChatState } from "../chat/chatReduce";
 
@@ -125,7 +125,7 @@ export function isChatReady(s?: ChatState): boolean {
 
 export function updateChatState(partial: Partial<ChatState>) {
   state = { ...state, ...partial };
-  eventBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
+  windowBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
 }
 
 export function addMessage(msg: ChatMessage) {
@@ -133,20 +133,20 @@ export function addMessage(msg: ChatMessage) {
   // re-emitting the same message) must not add the same message twice.
   if (msg.id && state.messages.some((m) => m.id === msg.id)) return;
   state = { ...state, messages: [...state.messages, msg] };
-  eventBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
+  windowBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
 }
 
 /** Replace the entire message list in one emit — for bulk loads (session restore). */
 export function setMessages(msgs: ChatMessage[]) {
   state = { ...state, messages: msgs, streaming: false };
-  eventBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
+  windowBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
 }
 
 /** Replace the entire chat state in one emit — used by the chatReduce runner
  *  to apply a fold result (single emit per wire message). */
 export function replaceState(next: ChatState) {
   state = { ...next };
-  eventBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
+  windowBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
 }
 
 export function updateLastAssistant(fn: (m: ChatMessage) => ChatMessage) {
@@ -158,10 +158,10 @@ export function updateLastAssistant(fn: (m: ChatMessage) => ChatMessage) {
     }
   }
   state = { ...state, messages: msgs };
-  eventBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
+  windowBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
 }
 
 export function clearMessages() {
   state = { ...state, messages: [] };
-  eventBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
+  windowBus.emit(Events.CHAT_STATE_CHANGED, { state: { ...state } }, { sticky: true });
 }

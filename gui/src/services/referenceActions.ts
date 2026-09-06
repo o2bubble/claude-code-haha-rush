@@ -60,10 +60,10 @@ export async function openReference(ref: Reference): Promise<boolean> {
         setActiveTab(found.groupId, found.tabId);
       }
       // Emit event to focus the item
-      const { eventBus } = await import("./serviceBus");
+      const { windowBus } = await import("./windowBus");
       const { Events } = await import("./events");
       const itemId = ref.path.includes("/") ? ref.path.split("/").slice(1).join("/") : ref.path;
-      eventBus.emit(Events.DESKTOP_ITEM_SELECTED, { itemId });
+      windowBus.emit(Events.DESKTOP_ITEM_SELECTED, { itemId });
       return true;
     }
     case "note": {
@@ -75,9 +75,9 @@ export async function openReference(ref: Reference): Promise<boolean> {
         setActiveTab(found.groupId, found.tabId);
       }
       // Emit event to load the note
-      const { eventBus } = await import("./serviceBus");
+      const { windowBus } = await import("./windowBus");
       const { Events } = await import("./events");
-      eventBus.emit(Events.NOTE_SELECTED, { noteId: ref.path });
+      windowBus.emit(Events.NOTE_SELECTED, { noteId: ref.path });
       return true;
     }
     default:
