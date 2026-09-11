@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Code</title>
+  <link rel="stylesheet" href="/src/tokens.css" />
+  <style>
+    /* 启动动画由 React 覆盖层(App.tsx)渲染, keyframes 单一来源在 tokens.css;
+       这里只留基础样式。html 背景来自 tokens.css 的 --bg-root, JS 加载期有主题底色 */
+    html, body, #root { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

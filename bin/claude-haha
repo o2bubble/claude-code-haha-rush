@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ORIGINAL_CWD="${ORIGINAL_CWD:-$PWD}"
+cd "$ROOT_DIR"
+
+# Profile env chain: user default → project override (last wins).
+# Skip in IDE mode — the extension manages its own env.
+PROFILE_OPTS=()
+if [[ "$*" != *"--ide-mode"* ]]; then
+  [ -f "$HOME/.claude/profile.env" ] && PROFILE_OPTS+=(--env-file="$HOME/.claude/profile.env")
+  [ -f ".claude/profile.env" ]          && PROFILE_OPTS+=(--env-file="$ROOT_DIR/.claude/profile.env")
+fi
+
+# Force recovery CLI (simple readline REPL, no Ink TUI)
+if [[ "${CLAUDE_CODE_FORCE_RECOVERY_CLI:-0}" == "1" ]]; then
+  exec env ORIGINAL_CWD="$ORIGINAL_CWD" bun --env-file="$ROOT_DIR/.env" "${PROFILE_OPTS[@]}" "$ROOT_DIR/src/localRecoveryCli.ts" "$@"
+fi
+
+# Default: full CLI with Ink TUI
+exec env ORIGINAL_CWD="$ORIGINAL_CWD" bun --env-file="$ROOT_DIR/.env" "${PROFILE_OPTS[@]}" "$ROOT_DIR/src/entrypoints/cli.tsx" "$@"

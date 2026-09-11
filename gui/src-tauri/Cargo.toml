@@ -1,0 +1,47 @@
+[package]
+name = "claude-code-gui"
+version = "1.0.0-preview"
+edition = "2021"
+
+[package.metadata.windows]
+windows-subsystem = "windows"
+
+[lib]
+name = "claude_code_gui_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+log = "0.4"
+env_logger = "0.11"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+base64 = "0.22"
+arboard = "3"
+zip = "0.6"
+reqwest = { version = "0.12", features = ["blocking"] }
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["std"] }
+jsonrpsee = { version = "0.24", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+claude-gui-shared = { path = "shared" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_Security",
+    # Native process-tree kill (prockill) — replaces spawning taskkill, which
+    # pops 0xc0000142 at early logon / during shutdown.
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }

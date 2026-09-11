@@ -1,0 +1,17 @@
+__pycache__
+*.pyc
+.venv
+venv
+.env
+*.db
+.git
+Dockerfile
+docker-compose.yml
+config.example.json
+setup.ps1
+setup.sh
+README.md
+
+# Web dev files (only dist/ is needed in image)
+web/node_modules
+

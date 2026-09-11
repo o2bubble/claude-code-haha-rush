@@ -1,0 +1,77 @@
+<idea-plugin xmlns:xi="http://www.w3.org/2001/XInclude">
+    <id>com.claude.code.ide</id>
+    <name>Claude Code</name>
+    <vendor url="https://github.com/anthropics/claude-code">Claude Code</vendor>
+
+    <description><![CDATA[
+        AI-powered coding assistant powered by Claude. Chat with Claude directly
+        inside your IDE — ask questions, edit files, run commands, and search
+        your codebase without leaving the editor.
+
+        This plugin communicates with a locally-running Claude Code backend
+        via Bun, supporting any Anthropic-compatible API endpoint.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <!-- ============================================================
+         Tool Window
+         ============================================================ -->
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="Claude Code"
+            anchor="right"
+            secondary="false"
+            icon="AllIcons.Actions.NoteBookmark"
+            factoryClass="com.claude.code.toolwindow.ClaudeCodeToolWindowFactory"
+            doNotActivateOnStart="false"/>
+
+        <!-- Project-level service: one Claude Code process per open project -->
+        <projectService
+            serviceImplementation="com.claude.code.ClaudeCodeService"/>
+
+        <!-- Settings state persistence -->
+        <applicationService
+            serviceImplementation="com.claude.code.settings.ClaudeCodeSettings"/>
+
+        <!-- Settings page -->
+        <applicationConfigurable
+            parentId="tools"
+            instance="com.claude.code.settings.ClaudeCodeConfigurable"
+            id="com.claude.code.settings"
+            displayName="Claude Code"/>
+    </extensions>
+
+    <!-- ============================================================
+         Editor & Context Menu Actions
+         ============================================================ -->
+    <actions>
+        <!-- Editor context menu: send selected text -->
+        <action id="ClaudeCode.SendSelection"
+                class="com.claude.code.actions.SendSelectionAction"
+                text="Send to Claude Code"
+                description="Send selected text to Claude Code chat">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <keyboard-shortcut keymap="$default"
+                               first-keystroke="alt shift L"/>
+        </action>
+
+        <!-- Project view context menu: add files/folders to chat -->
+        <action id="ClaudeCode.AddToChat"
+                class="com.claude.code.actions.AddToChatAction"
+                text="Add to Claude Chat"
+                description="Add selected file or folder to Claude Code chat">
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+        </action>
+
+        <!-- Editor context menu: send whole file to chat -->
+        <action id="ClaudeCode.SendFile"
+                class="com.claude.code.actions.SendFileAction"
+                text="Send File to Claude Code"
+                description="Send the current file to Claude Code chat">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <keyboard-shortcut keymap="$default"
+                               first-keystroke="alt shift F"/>
+        </action>
+    </actions>
+</idea-plugin>

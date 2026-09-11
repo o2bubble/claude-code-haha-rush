@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Git 查看器</title>
+<style>
+  :root {
+    --bg: #20242f; --bg2: #161a23; --fg: #e6e9f0; --fg-muted: #8b93a7;
+    --border: #2c3547; --accent: #5aa8ff; --accent-subtle: rgba(90,168,255,.14);
+    --success: #4ecb71; --danger: #f0666e; --table-alt: #232a3a;
+  }
+  /* 亮色主题: 初始 URL theme=light 或推送切换时启用(html 加 class) */
+  html.theme-light {
+    --bg: #f3f5f9; --bg2: #ffffff; --fg: #1f2430; --fg-muted: #5b6474;
+    --border: #d8dee8; --accent: #2563eb; --accent-subtle: rgba(37,99,235,.12);
+    --success: #15803d; --danger: #dc2626; --table-alt: #eef1f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg); color: var(--fg); font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px;
+  }
+  /* 顶部 tab 栏 */
+  .tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .tab {
+    padding: 6px 14px; cursor: pointer; color: var(--fg-muted); font-size: 11px;
+    border-radius: 6px 6px 0 0; border: 1px solid transparent; border-bottom: none; user-select: none;
+  }
+  .tab.active { color: var(--fg); background: var(--bg2); border-color: var(--border); }
+  .tab:hover { color: var(--fg); }
+  .body { flex: 1; display: flex; min-height: 0; }
+  .list-col { width: 100%; overflow: auto; background: var(--bg2); }
+  .row { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; border-bottom: 1px solid var(--border); }
+  .row:hover { background: var(--accent-subtle); }
+  .row.active { background: var(--accent-subtle); outline: 1px solid var(--accent); }
+  .st { display: inline-flex; width: 26px; font-weight: 600; font-size: 10px; justify-content: center; border-radius: 3px; flex-shrink: 0; }
+  .st.M { color: #ffb454; background: rgba(255,180,84,.14); }
+  .st.D { color: var(--danger); background: rgba(240,102,110,.16); }
+  .st.A { color: var(--success); background: rgba(78,203,113,.16); }
+  .st.U { color: var(--fg-muted); background: rgba(139,147,167,.16); }
+  .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  pre {
+    margin: 0; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 11px;
+    line-height: 1.55; white-space: pre; overflow-x: auto; color: var(--fg);
+  }
+  .code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .h { font-weight: 600; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  /* 自动刷新时刻：让"数据是新的"这件事可见（否则用户不知道它在自动更新） */
+  .h-time { font-weight: 400; font-size: 10px; color: var(--fg-muted); flex-shrink: 0; }
+  .empty { color: var(--fg-muted); padding: 16px; text-align: center; }
+  .commit { padding: 5px 8px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; gap: 8px; align-items: baseline; }
+  .commit:hover { background: var(--accent-subtle); }
+  .hash { color: var(--accent); font-family: ui-monospace, monospace; font-size: 10px; flex-shrink: 0; }
+  .subject { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .refs { color: var(--success); font-size: 10px; }
+  /* 发送 chip 按钮 */
+  .send-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 4px;
+    padding: 3px 8px; font-size: 10px; cursor: pointer; margin-left: auto; flex-shrink: 0; opacity: 0;
+    transition: opacity .15s;
+  }
+  .row:hover .send-btn, .commit:hover .send-btn { opacity: 1; }
+  .send-btn:hover { filter: brightness(1.1); }
+  /* diff 头部 */
+  .dhead { background: var(--bg2); padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 8px; font-family: ui-monospace, monospace; font-size: 10px; color: var(--fg-muted); }
+  .toolbar { padding: 4px 8px; display: flex; gap: 6px; align-items: center; border-left: 1px solid var(--border); background: var(--bg2); }
+  .btn { background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 10px; }
+  .btn:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+  <div class="tabs">
+    <div class="tab active" data-tab="work">工作区</div>
+    <div class="tab" data-tab="history">提交历史</div>
+    <div class="tab" data-tab="branches">分支</div>
+  </div>
+  <div class="body">
+    <div class="list-col" id="listCol"></div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+  var params = new URLSearchParams(location.search);
+  var port = params.get("port");
+  var API = port ? "http://127.0.0.1:" + port : null;
+  var current = { tab: "work", file: null, commitRef: null };
+
+  // ── 主题跟随: 初始 URL theme + 宿主 postMessage 推送切换（主 UI 亮/暗跟随）──
+  function applyTheme(theme) {
+    if (theme === "light") document.documentElement.classList.add("theme-light");
+    else document.documentElement.classList.remove("theme-light");
+  }
+  applyTheme(params.get("theme"));
+  window.addEventListener("message", function (e) {
+    var d = e.data;
+    if (d && d.source === "plugin:host" && d.kind === "theme" && d.payload && d.payload.theme) {
+      applyTheme(d.payload.theme);
+    }
+  });
+
+  function el(tag, cls, text) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (text != null) d.textContent = text;
+    return d;
+  }
+  function statusClass(s) {
+    var c = (s || "").charAt(0);
+    return ["M", "D", "A", "U", "R"].includes(c) ? c : "U";
+  }
+
+  async function api(path) {
+    if (!API) throw new Error("无进程端口——进程未启动");
+    var r = await fetch(API + path);
+    if (!r.ok) {
+      var b = await r.text().catch(function(){ return ""; });
+      return Promise.reject(new Error("HTTP " + r.status + " " + b.slice(0, 200)));
+    }
+    return r.json();
+  }
+
+  // diff 细节: 列表选中 → 上行 open-diff → 独立 diff 面板(host 渲染, PRD §4.3)。
+  // 本 iframe 不再渲染 diff 细节(detailCol 移除)——列表错误直接显示在列表内。
+  function detailError(msg) {
+    var list = document.getElementById("listCol");
+    if (!list) return;
+    if (list.querySelector(".empty")) return; // 已有提示
+    list.appendChild(el("div", "empty", msg));
+  }
+
+  // ── send to chat / open diff (postMessage 上行) ──
+  function sendToChat(kind, payload) {
+    if (!window.parent || window.parent === window) return;
+    window.parent.postMessage(
+      { source: "plugin:viewer:git-viewer", kind: kind, payload: payload },
+      "*"
+    );
+  }
+  // 打开本插件的浮窗面板(通用平台机制 open-panel): 宿主开浮窗 + 参数传给目标 iframe;
+  // diff 渲染完全在 diff-view.html(插件侧)——改样式只需发插件版本, 不动 GUI。
+  function openDiff(targetKind, target, title) {
+    if (!window.parent || window.parent === window) return;
+    window.parent.postMessage(
+      {
+        source: "plugin:viewer:git-viewer",
+        kind: "open-panel",
+        payload: {
+          panelId: "diff-view",
+          title: "Git diff",
+          width: 640,
+          height: 520,
+          params: targetKind === "commit" ? { ref: target, title: title } : { file: target, title: title },
+        },
+      },
+      "*"
+    );
+  }
+
+  // ── 列表头（含"更新于"时刻，见自动刷新段）──
+  function buildHead(title) {
+    var h = el("div", "h");
+    h.appendChild(el("span", null, title));
+    hTimeEl = el("span", "h-time", "");
+    h.appendChild(hTimeEl);
+    return h;
+  }
+
+  // ── 工作区 tab ──
+  function renderWork(data) {
+    var list = document.getElementById("listCol");
+    var keepScroll = list.scrollTop;
+    list.innerHTML = "";
+    list.appendChild(buildHead("改动文件"));
+    if (!data.files.length) { list.appendChild(el("div", "empty", "工作区干净（无改动）")); detailError("工作区干净"); list.scrollTop = keepScroll; return; }
+    data.files.forEach(function (f) {
+      var row = el("div", "row");
+      row.appendChild(el("span", "st " + statusClass(f.status), f.status.charAt(0)));
+      row.appendChild(el("span", "name", f.file));
+      var send = el("button", "send-btn", "发送到聊天");
+      send.onclick = function (e) {
+        e.stopPropagation();
+        api("/api/diff?file=" + encodeURIComponent(f.file)).then(function (d) {
+          sendToChat("diff", { file: f.file, diff: d.diff });
+        });
+      };
+      row.appendChild(send);
+      row.onclick = function () {
+        activeRow(row);
+        current.file = f.file;
+        openDiff("diff", f.file, f.file);
+      };
+      if (current.file === f.file) row.classList.add("active"); // 重渲染后保留选中行
+      list.appendChild(row);
+    });
+    list.scrollTop = keepScroll;
+  }
+
+  // ── 历史 tab ──
+  function renderHistory(data) {
+    var list = document.getElementById("listCol");
+    var keepScroll = list.scrollTop;
+    list.innerHTML = "";
+    list.appendChild(buildHead("提交历史"));
+    if (!data.commits.length) { list.appendChild(el("div", "empty", "无提交")); list.scrollTop = keepScroll; return; }
+    data.commits.forEach(function (c) {
+      var row = el("div", "commit");
+      row.appendChild(el("span", "hash", c.hash));
+      row.appendChild(el("span", "subject", c.subject));
+      if (c.refs) row.appendChild(el("span", "refs", c.refs));
+      var send = el("button", "send-btn", "发送到聊天");
+      send.onclick = function (e) {
+        e.stopPropagation();
+        api("/api/show?ref=" + encodeURIComponent(c.hash)).then(function (d) {
+          sendToChat("commit", { ref: c.hash, head: d.head, diff: d.diff });
+        });
+      };
+      row.appendChild(send);
+      row.onclick = function () {
+        activeRow(row);
+        current.commitRef = c.hash;
+        openDiff("commit", c.hash, (c.refs || "") + " " + c.subject);
+      };
+      if (current.commitRef === c.hash) row.classList.add("active");
+      list.appendChild(row);
+    });
+    list.scrollTop = keepScroll;
+  }
+
+  // ── 分支 tab ──
+  function renderBranches(data) {
+    var list = document.getElementById("listCol");
+    var keepScroll = list.scrollTop;
+    list.innerHTML = "";
+    list.appendChild(buildHead("分支"));
+    if (!data.branches.length) { list.appendChild(el("div", "empty", "无分支")); list.scrollTop = keepScroll; return; }
+    data.branches.forEach(function (b) {
+      var row = el("div", "row");
+      row.appendChild(el("span", "st " + (b.current ? "A" : "U"), b.current ? "✓" : ""));
+      row.appendChild(el("span", "name", b.name));
+      list.appendChild(row);
+    });
+    list.scrollTop = keepScroll;
+  }
+
+  var RENDERERS = { work: renderWork, history: renderHistory, branches: renderBranches };
+
+  /** 渲染错误态（列表为空时才用，见 refresh） */
+  function renderError(tab, e) {
+    var list = document.getElementById("listCol");
+    list.innerHTML = "";
+    list.appendChild(buildHead(tab === "work" ? "改动文件" : tab === "history" ? "提交历史" : "分支"));
+    list.appendChild(el("div", "empty", "无法连接进程: " + String(e.message || e)));
+  }
+
+  // ── 自动刷新（伪实时轮询）──
+  // 平台只向插件面板转发 theme/params，不会推"git 数据变了"事件，故面板轮询本插件
+  // 自己的本地 HTTP —— 服务端每次请求现算 git（Cache-Control: no-store），拉到即最新。
+  // 两条纪律，避免"自动刷新"本身变成干扰：
+  //   ① 数据签名未变 → 不重建 DOM（无闪烁、不丢选中行与滚动位置），只刷新"更新于"时刻
+  //   ② 面板不可见（切走 tab / 窗口最小化）→ 跳过本次；重新可见 → 立即拉一次
+  var REFRESH_MS = 10000;
+  var lastSig = null;
+  var hTimeEl = null;       // 当前列表头的"更新于"元素（每次重渲染会替换）
+  var inFlightTab = null;   // 正在拉取的 tab（防同一 tab 并发重复渲染）
+
+  function stampTime() {
+    if (!hTimeEl) return;
+    var d = new Date();
+    var p = function (n) { return (n < 10 ? "0" : "") + n; };
+    hTimeEl.textContent = "更新于 " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+
+  function fetchTab(tab) {
+    if (tab === "work") return api("/api/status");
+    if (tab === "history") return api("/api/log?limit=30");
+    return api("/api/branches");
+  }
+
+  /** 拉当前 tab 数据并渲染。force=true（首次/切 tab）时即使签名未变也重建。 */
+  async function refresh(force) {
+    if (!API) return;
+    var tab = current.tab;
+    // 同 tab 已有请求在飞 → 跳过（轮询与 visibilitychange 可能撞上，重复渲染会闪）。
+    // 不同 tab（用户刚切走）放行：旧请求回来时会因 tab 不匹配自行丢弃。
+    if (inFlightTab === tab && !force) return;
+    inFlightTab = tab;
+    try {
+      var data = await fetchTab(tab);
+      if (tab !== current.tab) return;                 // 拉取期间用户切了 tab → 丢弃
+      var s = JSON.stringify(data);
+      if (!force && s === lastSig) { stampTime(); return; }  // 无变化：只更新时间戳
+      lastSig = s;
+      RENDERERS[tab](data);
+      stampTime();
+    } catch (e) {
+      // 偶发失败（进程重启瞬间/抖动）不清空已有内容——只有列表完全为空时才显示错误，
+      // 否则用户会看到列表莫名变空又变回。
+      if (tab === current.tab && !document.getElementById("listCol").children.length) {
+        renderError(tab, e);
+      }
+    } finally {
+      if (inFlightTab === tab) inFlightTab = null;
+    }
+  }
+
+  // ── tab 切换 ──
+  var tabs = document.querySelectorAll(".tab");
+  tabs.forEach(function (t) {
+    t.onclick = function () {
+      tabs.forEach(function (x) { x.classList.remove("active"); });
+      t.classList.add("active");
+      current.tab = t.dataset.tab;
+      lastSig = null;          // 换 tab：新列表还没有签名，强制重建
+      refresh(true);
+    };
+  });
+  function activeRow(row) {
+    document.querySelectorAll(".row.active, .commit.active").forEach(function (x) { x.classList.remove("active"); });
+    row.classList.add("active");
+  }
+
+  // 轮询 + 可见性：不可见时跳过（省 git 调用），恢复可见立即拉一次
+  // （否则切回来要等最多 REFRESH_MS 才看到新数据）。
+  setInterval(function () { if (!document.hidden) refresh(false); }, REFRESH_MS);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) refresh(false);
+  });
+
+  // ── 初始 ──
+  if (!API) { detailError("插件进程未运行（无端口）。检查 Worker 面板进程状态。"); }
+  refresh(true);
+})();
+</script>
+</body>
+</html>

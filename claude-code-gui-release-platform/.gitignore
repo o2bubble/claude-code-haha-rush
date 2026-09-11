@@ -1,0 +1,6 @@
+__pycache__/
+# registry.db 存 api_keys 的 key_hash（凭据）。用通配连同 SQLite 的
+# -wal / -shm 附属文件与 .bak.* 备份一起忽略 —— 只写 `registry.db`
+# 会把 WAL 文件暴露在 git status 里（有写入时 WAL 含真实数据）。
+registry.db*
+.venv/

@@ -1,0 +1,12 @@
+services:
+  release-platform:
+    build: .
+    container_name: release-platform
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./skills-store:/app/skills-store
+      - ./updates-store:/app/updates-store
+      - ./feedback-images:/app/feedback-images
+      - ./registry.db:/app/registry.db
+    restart: unless-stopped

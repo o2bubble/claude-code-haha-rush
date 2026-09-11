@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{CSP_SOURCE}} 'unsafe-inline'; font-src {{CSP_SOURCE}}; script-src 'nonce-{{NONCE}}'; img-src {{CSP_SOURCE}} https: data:;">
+  <link rel="stylesheet" href="{{FA_CSS_URI}}">
+  <title>Claude Code Chat</title>
+  <script nonce="{{NONCE}}">
+    var __localeData = {{LOCALE_DATA}};
+    function __t(key, params) {
+      var val = __localeData[key];
+      if (!val) return key;
+      if (params) {
+        for (var k in params) {
+          if (params.hasOwnProperty(k)) {
+            val = val.replace(new RegExp("\\{" + k + "\\}", "g"), String(params[k]));
+          }
+        }
+      }
+      return val;
+    }
+  </script>
+  <style nonce="{{NONCE}}">{{TOKENS_CSS}}</style>
+  <style nonce="{{NONCE}}">{{STYLES_NEW_CSS}}</style>
+  <style nonce="{{NONCE}}">{{HLJS_CSS}}</style>
+</head>
+<body>
+  <!-- New UI root — built programmatically by app-new.js -->
+  <div id="app"></div>
+
+  <!-- Overlay / dialog containers (appended by components as needed) -->
+  <div id="overlay-root"></div>
+
+  <script nonce="{{NONCE}}">{{HLJS_JS}}</script>
+  <script nonce="{{NONCE}}">{{MARKED_JS}}</script>
+  <script nonce="{{NONCE}}">{{MARKED_HIGHLIGHT_JS}}</script>
+  <script nonce="{{NONCE}}">
+{{APP_NEW_JS}}
+  </script>
+</body>
+</html>

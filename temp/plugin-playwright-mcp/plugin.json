@@ -1,0 +1,19 @@
+{
+  "pluginName": "playwright-mcp",
+  "displayName": "Playwright MCP 浏览器自动化",
+  "version": "0.1.1",
+  "apiVersion": "1.0",
+  "description": "为 AI 配置 Playwright MCP 服务器（浏览器自动化/网页操作/E2E 测试）。ai-guided 形态：AI 按文档检测依赖（需 nodejs 插件）、探测已装浏览器（用户选择）、写入 ~/.claude.json MCP 注册、验证并引导重启。安装后新会话即可用 mcp__playwright__* 工具。",
+  "icon": "compass",
+  "category": "integration",
+  "dependencies": [
+    "nodejs"
+  ],
+  "installType": "ai-guided",
+  "contributes": {
+    "panels": [],
+    "commands": [],
+    "events": []
+  },
+  "processes": []
+}

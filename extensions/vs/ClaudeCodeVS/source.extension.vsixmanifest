@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0"
+    xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011"
+    xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata>
+    <Identity Id="ClaudeCodeVS.A1B2C3D4-E5F6-7890-ABCD-EF1234567890" Version="0.2.12" Language="en-US" Publisher="Claude Code IDE" />
+    <DisplayName>Claude Code</DisplayName>
+    <Description xml:space="preserve">AI-powered coding assistant powered by Claude. Chat, edit, refactor, and debug right inside Visual Studio.</Description>
+    <License>LICENSE.txt</License>
+    <Icon>Resources\Icon128x128.png</Icon>
+    <PreviewImage>Resources\Icon128x128.png</PreviewImage>
+    <Tags>claude, ai, agent, chat, coding-assistant, copilot</Tags>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.0,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+  </Installation>
+  <Assets>
+    <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%;PkgdefProjectOutputGroup|" />
+  </Assets>
+  <Dependencies>
+    <Dependency Id="Microsoft.Framework.NDP" DisplayName=".NET Framework" d:Source="Manual" Version="[4.7.2,)" />
+  </Dependencies>
+  <Prerequisites>
+    <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.0,)" DisplayName="Visual Studio core editor" />
+  </Prerequisites>
+</PackageManifest>

@@ -1,0 +1,45 @@
+# Codemagic macOS 构建 — 免费 macOS runner（替代 GitHub Actions 付费 macOS）
+# 用法：连接本仓库到 codemagic.io 后，push 到 main 或手动触发即跑 build.ts mac 管线。
+# 产物作为 Codemagic artifact 下载。
+
+workflows:
+  macos-build:
+    name: macOS Build (build.ts)
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      # build.ts 下载 bun/tools/python 用公开 URL，无需 GitHub token
+      vars: {}
+    scripts:
+      - name: Install Bun
+        script: |
+          curl -fsSL https://bun.sh/install | bash
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun --version
+
+      - name: Install deps
+        script: |
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun install
+          cd gui && bun install && cd ..
+
+      - name: Install Rust + Tauri CLI
+        script: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install tauri-cli --locked
+
+      - name: Full macOS build
+        script: |
+          export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:$PATH"
+          bun run scripts/build.ts --platform macos --release ci-build --notes "Codemagic macOS CI build"
+
+    artifacts:
+      - dist/Claude*.app
+      - dist/claude
+      - dist/release/ci-build/manifest.json
+      - dist/release/ci-build/*.zip
+
+    triggering:
+      events:
+        - push

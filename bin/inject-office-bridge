@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if command -v bun >/dev/null 2>&1; then
+  exec bun run "$ROOT/scripts/inject-office-bridge.ts" "$@"
+fi
+if [ -x "$ROOT/../runtime/bun/bun" ]; then
+  exec "$ROOT/../runtime/bun/bun" run "$ROOT/scripts/inject-office-bridge.ts" "$@"
+fi
+echo "[ERROR] bun not found. Please install bun or run: bun run scripts/inject-office-bridge.ts" >&2
+exit 1

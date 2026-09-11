@@ -1,0 +1,42 @@
+{
+  "_comment": "Add to ~/.claude/settings.json under the top-level \"mcpServers\" key. See the existing entry for your codegraph/playwright MCP servers in that file for format reference.",
+
+  "_local_stdio": {
+    "mcpServers": {
+      "memory": {
+        "command": "python",
+        "args": [
+          "extensions/memory/server.py",
+          "--db-path",
+          "~/claude-memory.db"
+        ]
+      }
+    }
+  },
+
+  "_remote_sse": {
+    "mcpServers": {
+      "memory": {
+        "type": "sse",
+        "url": "http://your-server-ip:8080/sse"
+      }
+    }
+  },
+
+  "_hybrid_both": {
+    "mcpServers": {
+      "memory-local": {
+        "command": "python",
+        "args": [
+          "extensions/memory/server.py",
+          "--db-path",
+          "~/claude-memory.db"
+        ]
+      },
+      "memory-remote": {
+        "type": "sse",
+        "url": "http://your-server-ip:8080/sse"
+      }
+    }
+  }
+}

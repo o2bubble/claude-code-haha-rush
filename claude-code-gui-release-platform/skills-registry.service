@@ -1,0 +1,13 @@
+[Unit]
+Description=Claude Code GUI Release Platform
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/claude-code-gui-release-platform
+ExecStart=python3 -m uvicorn main:app --host 0.0.0.0 --port 8765
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

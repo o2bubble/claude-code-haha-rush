@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Code Chat</title>
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="styles-new.css">
+  <link rel="stylesheet" href="github-dark-dimmed.min.css">
+</head>
+<body>
+  <div id="app"></div>
+  <div id="overlay-root"></div>
+
+  <!-- Libraries (must load before app code) -->
+  <script src="highlight.bundle.js"></script>
+  <script src="marked.umd.js"></script>
+  <script src="marked-highlight.umd.js"></script>
+
+  <!-- WebView2 adapter (replaces api.js) -->
+  <script src="webview-adapter.js"></script>
+
+  <!-- Core utils (dependency order matching provider.ts L614-622) -->
+  <script src="locale.js"></script>
+  <script src="state.js"></script>
+  <script src="dom.js"></script>
+
+  <!-- Components -->
+  <script src="session-panel.js"></script>
+  <script src="message-stream.js"></script>
+  <script src="input-area.js"></script>
+  <script src="context-bar.js"></script>
+  <script src="selection-preview.js"></script>
+  <script src="status-bar.js"></script>
+  <script src="tasks-panel.js"></script>
+  <script src="plan-panel.js"></script>
+
+  <!-- Overlays -->
+  <script src="permission-prompt.js"></script>
+  <script src="rewind-points.js"></script>
+  <script src="toast.js"></script>
+  <script src="file-picker.js"></script>
+  <script src="emoji-picker.js"></script>
+  <script src="slash-autocomplete.js"></script>
+  <script src="markdown-editor.js"></script>
+  <script src="quick-command-manager.js"></script>
+  <script src="side-question.js"></script>
+  <script src="context-detail.js"></script>
+  <script src="queue-panel.js"></script>
+  <script src="history-browser.js"></script>
+
+  <!-- App entry point -->
+  <script src="app-new.js"></script>
+
+  <!-- Diagnostic: verify C# bridge works -->
+  <script>
+    setTimeout(function() {
+      try {
+        if (window.chrome && window.chrome.webview) {
+          // Send as JSON string for VS2026 SDK compatibility
+          // (VS2026 postMessage(object) silently swallows without throwing)
+          window.chrome.webview.postMessage(JSON.stringify({type: "diag_bridge_ok", hasChromeWebview: true}));
+        } else {
+          window.chrome.webview.postMessage(JSON.stringify({type: "diag_bridge_ok", hasChromeWebview: false}));
+        }
+      } catch(e) {
+        // Fallback: try standard postMessage (VS Code style)
+        window.postMessage({type: "diag_fallback"}, "*");
+      }
+    }, 500);
+  </script>
+</body>
+</html>

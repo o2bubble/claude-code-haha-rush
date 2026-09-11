@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleDisplayName</key>
+	<string>Claude Code</string>
+	<key>CFBundleExecutable</key>
+	<string>claude-code-gui</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.claudecode.gui</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Claude Code</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0-preview</string>
+	<key>CFBundleVersion</key>
+	<string>1.0.0-preview</string>
+	<key>CSResourcesFileMapped</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>10.13</string>
+	<key>CFBundleIconFile</key>
+	<string>icon.icns</string>
+	<key>LSRequiresCarbon</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- ATS: 技能库/反馈走 WKWebView fetch 到明文 http 服务器（http://123.56.66.84:8765）。
+	     macOS 默认 ATS 拦截 http 明文 → 技能面板"不通"（更新服务走 Rust 不受影响）。
+	     允许任意加载，让 webview 能访问明文 http 更新/技能库服务器。 -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

@@ -1,0 +1,16 @@
+{
+  "displayName": "Claude Code IDE",
+  "description": "Claude Code VS Code 扩展 — 聊天、Agent 操作与 IDE 上下文集成",
+  "command.startChat": "Claude Code: 开始聊天",
+  "command.sendSelection": "Claude Code: 发送选区到聊天",
+  "command.sendFile": "Claude Code: 发送当前文件到聊天",
+  "command.explainCode": "Claude Code: 解释所选代码",
+  "command.addToChat": "Claude Code: 添加到聊天",
+  "viewContainer.title": "Claude Code Chat",
+  "view.name": "聊天",
+  "configuration.title": "Claude Code IDE",
+  "config.cliPath.description": "Claude Code 仓库根目录路径 (含 bin/claude-ide.cmd)。留空则从安装目录、工作区或 PATH 自动检测。",
+  "config.autoSendContext.description": "自动发送活动文件和选区作为上下文",
+  "config.maxFilesInContext.description": "包含在上下文中的最大打开文件数",
+  "config.language.description": "界面语言。\"auto\" 跟随 VS Code 的显示语言。"
+}

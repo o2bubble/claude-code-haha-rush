@@ -1,0 +1,61 @@
+/* ═══════════════════════════════════════════════════
+   DESIGN TOKENS — Semantic Color System
+   Dark theme = default (:root)
+   Light theme = body.vscode-light
+   ═══════════════════════════════════════════════════ */
+
+:root {
+  --bg:        #0d1117;
+  --surface:   #161b22;
+  --surface-2: #1c2333;
+  --surface-3: #21262d;
+  --fg:        #e6edf3;
+  --fg-2:      #b1bac4;
+  --fg-3:      #848d97;
+  --border:    #30363d;
+  --border-2:  #484f58;
+  --accent:    #58a6ff;
+  --accent-bg: rgba(88,166,255,0.10);
+  --accent-em: #1f6feb;
+  --green:     #3fb950;
+  --green-bg:  rgba(63,185,80,0.12);
+  --yellow:    #d29922;
+  --yellow-bg: rgba(210,153,34,0.12);
+  --red:       #f85149;
+  --red-bg:    rgba(248,81,73,0.12);
+  --purple:    #bc8cff;
+  --purple-bg: rgba(188,140,255,0.10);
+  --orange:    #f0883e;
+  --code-bg:   #0a0c10;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+
+  --radius:   6px;
+  --radius-sm: 4px;
+}
+
+body.vscode-light {
+  --bg:        #ffffff;
+  --surface:   #f6f8fa;
+  --surface-2: #eef1f5;
+  --surface-3: #e8ecf0;
+  --fg:        #1f2328;
+  --fg-2:      #656d76;
+  --fg-3:      #8b949e;
+  --border:    #d0d7de;
+  --border-2:  #bbb;
+  --accent:    #0969da;
+  --accent-bg: rgba(9,105,218,0.08);
+  --accent-em: #0969da;
+  --green:     #1a7f37;
+  --green-bg:  rgba(26,127,55,0.10);
+  --yellow:    #9a6700;
+  --yellow-bg: rgba(154,103,0,0.10);
+  --red:       #cf222e;
+  --red-bg:    rgba(207,34,46,0.10);
+  --purple:    #8250df;
+  --purple-bg: rgba(130,80,223,0.08);
+  --orange:    #bf4b00;
+  --code-bg:   #f0f2f4;
+}

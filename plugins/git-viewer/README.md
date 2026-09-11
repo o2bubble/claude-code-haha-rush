@@ -1,0 +1,33 @@
+# Git 查看器 (git-viewer)
+
+GUI 的**只读 Git 查看工具**——纯查看, 绝不写 git(无 commit/push/rebase/stash)。
+
+## 功能
+
+| Tab | 内容 | 动作 |
+|-----|------|------|
+| 工作区 | `git status --porcelain` 改动文件列表 | 点文件 → diff  |
+| 提交历史 | `git log --oneline --decorate` 提交列表 | 点提交 → 该提交 diff |
+| 分支 | `git branch --format=...` 分支列表 | 选中(只读) |
+
+- **自动刷新**: 面板每 10s 拉一次当前 tab 数据（标题栏显示「更新于 HH:MM:SS」）。
+  数据没变时只刷新时刻、不重建列表 —— 不闪烁、不丢选中行与滚动位置。
+  窗口最小化/后台时暂停轮询，切回来立即刷新一次。
+- **发送到聊天**: 选中 diff / 提交内容旁边有「发送到聊天」按钮 → 以 `@ref{paste}` chip 插入聊天输入框。
+- **AI 可直接读取**: 经 MCP 工具 `git_view_diff` / `git_history` / `git_branches` —— AI 不经面板呈现 diff 给用户审阅。
+
+## 安全模型
+
+- 进程 git 只读白名单 (status/diff/log/branches/show)
+- `execFile` 无 shell + 参数校验(禁 `..`/绝对路径/`-` 前缀)
+- 只绑 `127.0.0.1`, 不暴露局域网
+- 面板 iframe 沙箱(禁弹窗/顶层导航)
+
+## 依赖
+
+- `nodejs` 插件(进程运行时)
+- git(GUI 安装包自带; 未装时面板提示「请先安装 git」)
+
+## 安装
+
+插件市场安装后侧栏出现「Git 查看器」; 装于工作区绑定时进程自动启动。

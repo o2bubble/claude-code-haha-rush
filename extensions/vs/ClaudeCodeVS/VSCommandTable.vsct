@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable">
+
+  <Extern href="stdidcmd.h"/>
+  <Extern href="vsshlids.h"/>
+
+  <Commands package="guidClaudeCodePackage">
+    <Buttons>
+      <!-- View > Other Windows > Claude Code -->
+      <Button guid="guidClaudeCodePackageCmdSet" id="ShowChatWindowId"
+              priority="0x0100" type="Button">
+        <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS1"/>
+        <Icon guid="guidImages" id="bmpPic1"/>
+        <Strings>
+          <ButtonText>Claude Code</ButtonText>
+        </Strings>
+      </Button>
+
+      <!-- Text Editor context menu: Send Selection -->
+      <Button guid="guidClaudeCodePackageCmdSet" id="SendSelectionToChatId"
+              priority="0x0100" type="Button">
+        <Parent guid="guidClaudeCodePackageCmdSet" id="EditorContextGroup"/>
+        <Strings>
+          <ButtonText>Send Selection to Claude Code</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+
+    <Groups>
+      <!-- Group in the text editor context menu -->
+      <Group guid="guidClaudeCodePackageCmdSet" id="EditorContextGroup"
+             priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN"/>
+      </Group>
+
+      <!-- Groups in Solution Explorer context menus -->
+      <Group guid="guidClaudeCodePackageCmdSet" id="SolutionExplorerItemGroup"
+             priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_ITEMNODE"/>
+      </Group>
+      <Group guid="guidClaudeCodePackageCmdSet" id="SolutionExplorerFolderGroup"
+             priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_FOLDERNODE"/>
+      </Group>
+      <Group guid="guidClaudeCodePackageCmdSet" id="SolutionExplorerProjectGroup"
+             priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_PROJNODE"/>
+      </Group>
+      <Group guid="guidClaudeCodePackageCmdSet" id="SolutionExplorerMultiGroup"
+             priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_XPROJ_MULTIITEM"/>
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <!-- Solution Explorer context menu: Add to Chat -->
+      <Button guid="guidClaudeCodePackageCmdSet" id="AddToChatId"
+              priority="0x0100" type="Button">
+        <Parent guid="guidClaudeCodePackageCmdSet" id="SolutionExplorerItemGroup"/>
+        <Strings>
+          <ButtonText>Add to Claude Code Chat</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidClaudeCodePackageCmdSet" id="AddFolderToChatId"
+              priority="0x0100" type="Button">
+        <Parent guid="guidClaudeCodePackageCmdSet" id="SolutionExplorerFolderGroup"/>
+        <Strings>
+          <ButtonText>Add to Claude Code Chat</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidClaudeCodePackageCmdSet" id="AddProjectToChatId"
+              priority="0x0100" type="Button">
+        <Parent guid="guidClaudeCodePackageCmdSet" id="SolutionExplorerProjectGroup"/>
+        <Strings>
+          <ButtonText>Add to Claude Code Chat</ButtonText>
+        </Strings>
+      </Button>
+      <Button guid="guidClaudeCodePackageCmdSet" id="AddMultiToChatId"
+              priority="0x0100" type="Button">
+        <Parent guid="guidClaudeCodePackageCmdSet" id="SolutionExplorerMultiGroup"/>
+        <Strings>
+          <ButtonText>Add to Claude Code Chat</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+
+  </Commands>
+
+  <Symbols>
+    <!-- Package GUID — matches ClaudeCodePackage.PackageGuidString -->
+    <GuidSymbol name="guidClaudeCodePackage" value="{1A2B3C4D-5E6F-7890-ABCD-EF0123456789}" />
+
+    <!-- Command set GUID — matches CommandID param in ShowToolWindowCommand.cs -->
+    <GuidSymbol name="guidClaudeCodePackageCmdSet" value="{B1C2D3E4-F5A6-7890-BCDE-F12345678901}">
+      <IDSymbol name="ShowChatWindowId" value="0x0100" />
+      <IDSymbol name="SendSelectionToChatId" value="0x0200" />
+      <IDSymbol name="EditorContextGroup" value="0x0300" />
+      <IDSymbol name="SolutionExplorerItemGroup" value="0x0400" />
+      <IDSymbol name="SolutionExplorerFolderGroup" value="0x0401" />
+      <IDSymbol name="SolutionExplorerProjectGroup" value="0x0402" />
+      <IDSymbol name="SolutionExplorerMultiGroup" value="0x0403" />
+      <IDSymbol name="AddToChatId" value="0x0500" />
+      <IDSymbol name="AddFolderToChatId" value="0x0501" />
+      <IDSymbol name="AddProjectToChatId" value="0x0502" />
+      <IDSymbol name="AddMultiToChatId" value="0x0503" />
+    </GuidSymbol>
+
+    <GuidSymbol name="guidImages" value="{C1D2E3F4-A5B6-7890-CDEF-012345678902}">
+      <IDSymbol name="bmpPic1" value="1" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>
