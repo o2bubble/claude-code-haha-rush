@@ -155,6 +155,11 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
 
 ### 发布版本 (dist/release)
 - 2026.09.10.5 ~ 2026.09.10.9（含 bun/claude/extensions/git/gui/python/server/tools/updater zip + manifest）
+- **2026.09.12.5**（笔记面板 FTS5 + jieba + 两段式查重；仅 gui/server 重建，其余复用 .4）
+  —— 已上传云 `123.56.66.84:8765`；**96 未上传**（内网不通）
+- ⚠️ 发布时 `dist/release/` 若为空（换机器），需先从 `GET /api/updates/latest` 拉回上一版
+  manifest 落盘，否则 build.ts 的 `prevNotes` 取不到基底、更新面板的累积说明会断代。
+  本次即如此处理（拉回 .4 的 manifest 作为基底，见脚本 `prevNotes` 逻辑）
 
 ### 构建命令
 - GUI：`cd gui/src-tauri && cargo tauri build --no-bundle`
