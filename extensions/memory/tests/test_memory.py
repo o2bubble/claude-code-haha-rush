@@ -125,6 +125,8 @@ def _memories_from(result) -> list[dict]:
 
 class TestTokenizer(unittest.TestCase):
     def test_index_expands_subwords(self):
+        if tokenizer.get_tokenizer_status() != "jieba":
+            self.skipTest("jieba not installed — bigram fallback has no whole-word tokens")
         tokens = tokenizer.tokenize_for_index("人工智能的分支").split()
         self.assertIn("智能", tokens)      # cut_for_search subword
         self.assertIn("人工智能", tokens)  # whole word
@@ -295,6 +297,42 @@ class TestFtsSearch(unittest.TestCase):
     def test_score_in_unit_range(self):
         hits = self.store.fts_search("人工智能", limit=5)
         self.assertTrue(0.0 < hits[0]["score"] < 1.0)
+
+    def test_scope_exact_matches_only_that_scope(self):
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        self.store.add_memory("fact", "海豚计划乙", "项目乙里的海豚说明。", scope="project:beta")
+        hits = self.store.fts_search("海豚计划", scope=["project:alpha"], limit=5)
+        self.assertEqual([h["title"] for h in hits], ["海豚计划甲"])
+
+    def test_scope_prefix_matches_all_in_namespace(self):
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        self.store.add_memory("fact", "海豚计划乙", "项目乙里的海豚说明。", scope="project:beta")
+        self.store.add_memory("fact", "海豚计划丙", "全局的海豚说明。", scope="global")
+        hits = self.store.fts_search("海豚计划", scope=["project:*"], limit=5)
+        self.assertEqual(sorted(h["title"] for h in hits), ["海豚计划乙", "海豚计划甲"])
+
+    def test_scope_prefix_with_no_match_returns_empty_not_everything(self):
+        # Regression: a prefix matching nothing must not silently drop the
+        # filter and return the whole corpus.
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        hits = self.store.fts_search("海豚计划", scope=["domain:*"], limit=5)
+        self.assertEqual(hits, [])
+
+    def test_scope_prefix_mixed_with_exact(self):
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        self.store.add_memory("fact", "海豚计划丙", "全局的海豚说明。", scope="global")
+        hits = self.store.fts_search("海豚计划", scope=["project:*", "global"], limit=5)
+        self.assertEqual(sorted(h["title"] for h in hits), ["海豚计划丙", "海豚计划甲"])
+
+    def test_scope_blank_entries_match_nothing(self):
+        hits = self.store.fts_search("海豚", scope=["", "  "], limit=5)
+        self.assertEqual(hits, [])
+
+    def test_scope_prefix_like_wildcards_are_escaped(self):
+        # A literal % in the prefix must not act as a LIKE wildcard.
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        hits = self.store.fts_search("海豚计划", scope=["pro%"], limit=5)
+        self.assertEqual(hits, [])
 
 
 # ---------------------------------------------------------------------------

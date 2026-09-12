@@ -2007,7 +2007,7 @@ Without embeddings, `hybrid` mode degrades to:
 | | Intranet (Primary) | Cloud |
 |---|-------------------|-------|
 | Server | **192.168.186.96** | 123.56.66.84 |
-| MCP URL | `http://192.168.186.96:40020/mcp` | `http://123.56.66.84:8080/mcp` |
+| MCP URL | `http://192.168.186.96:14020/mcp` | `http://123.56.66.84:8080/mcp` |
 | API URL | `http://192.168.186.96:40021` | `http://123.56.66.84:40021` |
 | Container | `claude-memory` | `claude-memory` |
 | Data | `/data/claude-memory/claude-memory.db` | `/data/memory/claude-memory.db` |

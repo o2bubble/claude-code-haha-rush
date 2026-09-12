@@ -67,6 +67,12 @@ async function main() {
   const RELEASE_VER = RELEASE_IDX >= 0 ? process.argv[RELEASE_IDX + 1] : null
   const NOTES_IDX = process.argv.indexOf('--notes')
   const NOTES = NOTES_IDX >= 0 ? process.argv[NOTES_IDX + 1] : ''
+  // --expect-prev <version>: 声明"上一发行版本号"（服务器上真正在跑的上一版）。
+  // 复用未改动组件的 zip 时校验来源版本一致——防止本地 dist/release 缺失该版本时
+  // 静默复用更老版本的包（2026.09.12.1 事故：bun/python 等被换成 09.04 的旧包，
+  // sha 全变 → 用户端全量"有更新"）。
+  const EXPECT_PREV_IDX = process.argv.indexOf('--expect-prev')
+  const EXPECT_PREV = EXPECT_PREV_IDX >= 0 ? process.argv[EXPECT_PREV_IDX + 1] : null
 
   // ── Component selection ──
   // Known components: gui, claude, bun, updater (exe) + tools, python, git, extensions (dir).
@@ -93,6 +99,35 @@ async function main() {
   // selected(name): 显式选中 → 强制重建；want(name): 产物该存在 → 未选中时复用现有/上一版本
   const selected = (name: string) => COMPONENT_SET !== null && COMPONENT_SET.has(name)
   const want = (name: string) => COMPONENT_SET === null || COMPONENT_SET.has(name)
+
+  // --expect-prev 前置校验（仅"部分构建+复用"场景相关）：本地 dist/release 里最"新"的
+  // 版本目录必须就是声明的上一发行版——否则未选中组件会静默复用更老的包
+  //（2026.09.12.1 事故：本地最新是 09.04.11，09.10.x 的 zip 缺失 → bun/python 等被换成
+  //  09.04 的旧包，sha 全变，用户端全量"有更新"）。构建前快速失败，避免白跑编译。
+  if (EXPECT_PREV && COMPONENT_SET !== null && RELEASE_VER) {
+    const releasesDir = join(DIST, 'release')
+    const localPrev = (() => {
+      if (!existsSync(releasesDir)) return null
+      const prevs = readdirSync(releasesDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && d.name !== RELEASE_VER && /^\d{4}\.\d{2}\.\d{2}(\.\d+)?$/.test(d.name))
+        .map((d) => d.name)
+        .sort((a, b) => {
+          const pa = a.split('.').map(Number), pb = b.split('.').map(Number)
+          for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+            const na = pa[i] ?? 0, nb = pb[i] ?? 0
+            if (na !== nb) return na - nb
+          }
+          return 0
+        })
+      return prevs.length ? prevs[prevs.length - 1] : null
+    })()
+    if (localPrev !== EXPECT_PREV) {
+      console.error(`[Error] --expect-prev ${EXPECT_PREV} but local prev release is ${localPrev ?? '(none)'}.`)
+      console.error(`        Fetch that version's component zips into dist/release/${EXPECT_PREV}/ first,`)
+      console.error(`        or omit --expect-prev (only needed when reusing unselected components).`)
+      process.exit(1)
+    }
+  }
 
   const TOTAL_STEPS = RELEASE_VER ? 11 : 10
 
@@ -358,7 +393,7 @@ async function main() {
   // Memory MCP Server — Python source + frontend + skills
   // Skip wheels/ (183MB), model/ (88MB), docker images, temp files
   for (const f of [
-    'server.py', 'store.py', 'search_engine.py', 'api.py', 'embeddings.py', 'normalize.py',
+    'server.py', 'store.py', 'search_engine.py', 'api.py', 'tokenizer.py', 'normalize.py',
     'requirements.txt', 'Dockerfile', 'docker-compose.yml', 'config.example.json', '.dockerignore',
   ]) {
     copy(`extensions/memory/${f}`, `memory/${f}`)
@@ -765,6 +800,11 @@ async function main() {
     console.log(`    ${p.name}: ${p.action}${p.artifact !== 'none' ? ` (${p.artifact})` : ''}${p.requiresMacTools ? ` — brew: ${p.requiresMacTools.join(' ')}` : ''}`)
   }
 
+  // 读取 JSON（失败返回 null——调用方按可选处理，不中断构建）
+  function readJsonSafe(path: string): { components?: Record<string, { sha256?: string; size?: number }> } | null {
+    try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
+  }
+
   // SHA256 for single files
   function sha256File(path: string): string {
     const buf = readFileSync(path)
@@ -947,6 +987,10 @@ async function main() {
   // 目录组件（mac 的 gui=.app、python/tools 等）之前用 dirSize()（未压缩目录总大小），
   // 与实际分发下载的压缩 zip 差数倍 —— 客户端据此显示"动辄上G"。改为 zip 实际大小。
   const zipSizes: Record<string, number> = {}
+  // 复用组件的 sha 覆盖表：复用的 zip 来自 prevRelDir，其内容 sha 就是 prevManifest
+  // 记录值——必须沿用。不能等会去算 dist/ 源文件（未重建组件的 dist/ 可能是本地
+  // 遗留的其它版本 → sha 错误 → 用户端全量误提示更新，09.12.1 事故同类）。
+  const reusedSha: Record<string, string> = {}
   const compress = (name: string, src: { kind: 'file' | 'dir'; path: string }) => {
     const srcPath = join(DIST, src.path)
     const zipPath = join(RELEASE_DIR, `${name}.zip`)
@@ -956,8 +1000,28 @@ async function main() {
         console.log(`  ${name}.zip (kept existing)`); return
       }
       if (prevRelDir) {
+        // 复用来源校验：声明了 --expect-prev 时，来源版本必须一致——否则本地缺该版本
+        // 会静默复用更老的包（2026.09.12.1 事故根因），此处直接报错停止。
+        if (EXPECT_PREV && prevLabel !== EXPECT_PREV) {
+          console.error(`  [Error] --expect-prev ${EXPECT_PREV} but local prev release is ${prevLabel}.`)
+          console.error(`          Fetch that version's component zips into dist/release/${EXPECT_PREV}/ first`)
+          console.error(`          (or omit --expect-prev if a full build is intended).`)
+          process.exit(1)
+        }
         const prevZip = join(prevRelDir, `${name}.zip`)
         if (existsSync(prevZip)) {
+          // 复用 zip 的完整性校验：zip 实际字节数必须与来源 manifest 记录的 size 一致
+          // （manifest 的 size = zip 字节数）。挡住半途替换/损坏的脏包。
+          const prevManifest = readJsonSafe(join(prevRelDir, 'manifest.json'))
+          const recSize = prevManifest?.components?.[name]?.size
+          const recSha = prevManifest?.components?.[name]?.sha256
+          const zipSize = statSync(prevZip).size
+          if (typeof recSize === 'number' && recSize !== zipSize) {
+            console.error(`  [Error] ${name}.zip in ${prevLabel} is ${zipSize} bytes but manifest records ${recSize}.`)
+            console.error(`          Refusing to reuse a mismatched component zip.`)
+            process.exit(1)
+          }
+          if (recSha) reusedSha[name] = recSha
           copyFileSync(prevZip, zipPath)
           zipSizes[name] = statSync(zipPath).size
           console.log(`  ${name}.zip (reused from ${prevLabel})`)
@@ -994,10 +1058,16 @@ async function main() {
   // 回填 Manifest 各组件 size 为实际压缩 zip 字节数（目录组件在 848-852 处用 dirSize
   // 未压缩目录总大小，虚标数倍）。zip 此刻已全部生成，逐一改写 manifest 对象并重写
   // 三个副本：release/<ver>/、dist/、.app/Contents/MacOS/（mac 内嵌）。
+  // 复用组件的 sha 同时覆盖为来源 manifest 的值（见 reusedSha 注释）——不能沿用
+  // dist/ 源文件算出的 hash。
   let manifestRewritten = false
   for (const name of Object.keys(manifestComponents)) {
     if (zipSizes[name] !== undefined && manifestComponents[name] && typeof manifestComponents[name] === 'object') {
       ;(manifestComponents[name] as { size: number }).size = zipSizes[name]
+      if (reusedSha[name]) {
+        ;(manifestComponents[name] as { sha256: string }).sha256 = reusedSha[name]
+        console.log(`  [manifest] ${name}: sha kept from reused zip (${reusedSha[name].slice(0, 16)})`)
+      }
       manifestRewritten = true
     }
   }

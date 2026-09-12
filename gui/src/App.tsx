@@ -22,8 +22,8 @@ import { BackendService } from "./services/backendService";
 import { startSessionStatusSync } from "./services/sessionStatusSync";
 import { commandRegistry } from "./services/windowBus";
 import { Commands } from "./services/commands";
-import { toggleGroupHidden, restoreLayout, serializeLayout, getSkipSave, refreshAllTitles, activatePanel, findTabByPanelId, getTree } from "./stores/layoutStore";
-import { openSettingsFloat, openHelpFloat } from "./components/Toolbar";
+import { toggleGroupHidden, restoreLayout, serializeLayout, getSkipSave, refreshAllTitles, activatePanel } from "./stores/layoutStore";
+import { openSettingsFloat, openHelpFloat, openDiagnosticsFloat } from "./components/Toolbar";
 import { useEventHandler } from "./services/useService";
 import { addStatusMessage } from "./stores/statusMsgStore";
 import CommandPalette from "./components/CommandPalette";
@@ -55,7 +55,7 @@ export default function App() {
   const [appReady, setAppReady] = useState(false);
   const [uiFontSize, setUiFontSize] = useState<number>(100);
 
-  // ── 后端启动失败/超时 → 自动打开诊断面板（防抖 + 已打开则跳过）──
+  // ── 后端启动失败/超时 → 自动打开诊断面板（浮动窗口，防抖 + 已打开则跳过）──
   const autoDiagAtRef = useRef(0);
   useEffect(() => {
     return windowBus.on(Events.BACKEND_STATE_CHANGED, (data: BackendStateChangedPayload) => {
@@ -63,8 +63,8 @@ export default function App() {
       const now = Date.now();
       if (now - autoDiagAtRef.current < 5000) return; // 连续失败防抖
       autoDiagAtRef.current = now;
-      if (findTabByPanelId(getTree(), "diagnostics")) return; // 用户正在看，不打扰
-      activatePanel("diagnostics");
+      // 浮动面板（与工具栏入口一致）——启动失败是"打断式"场景，不占用主布局
+      openDiagnosticsFloat();
     });
   }, []);
 

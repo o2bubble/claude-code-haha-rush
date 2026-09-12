@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Memory MCP Server — dual transport (stdio + Streamable HTTP), 9 tools.
+"""Memory MCP Server — dual transport (stdio + Streamable HTTP), 10 tools.
 
 Usage:
   python server.py                           # stdio transport
@@ -150,7 +150,7 @@ TOOL_DEFS = [
     {
         "name": "memory_update",
         "description": "Update an existing memory. Only provided fields are changed; others stay unchanged."
-        " If title or content changes, the embedding and content_hash are recomputed automatically."
+        " If title or content changes, the content_hash and version are recomputed automatically."
         " Use this to merge new knowledge into existing memories instead of creating duplicates.",
         "inputSchema": {
             "type": "object",
@@ -205,7 +205,9 @@ TOOL_DEFS = [
                 "scope": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Filter by scopes. Supports prefix: 'domain:*'",
+                    "description": "Filter by scopes. Exact match by default; a trailing '*'"
+                    " matches by prefix (e.g. 'project:*' for every project scope,"
+                    " 'domain:rust' for exactly that one).",
                 },
                 "type": {
                     "type": "array",
@@ -225,8 +227,9 @@ TOOL_DEFS = [
     {
         "name": "memory_get",
         "description": "Get a single memory by ID with full content, tags, content_hash,"
-        " and all associations (both directions)."
-        " Automatically records access for importance tracking.",
+        " and all associations (both directions). Also returns content_refs and referenced_by"
+        " (memory:// links parsed from content)."
+        " Increments the memory's access_count (used for 'most accessed' ordering in the web UI).",
         "inputSchema": {
             "type": "object",
             "properties": {

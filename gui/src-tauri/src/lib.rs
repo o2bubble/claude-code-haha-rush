@@ -157,6 +157,67 @@ fn ensure_db<'a>(
 }
 
 
+/// 前置工具目录到 PATH（平台化）。Windows: bin / git\usr\bin / git\bin / python / python\Scripts；
+/// macOS: bin（自包含工具 rg/fd/jq/yq/shellcheck）。目录不存在则跳过。
+pub(crate) fn prepend_tool_dirs(install_dir: &std::path::Path, orig: &str) -> String {
+    let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
+    // ⚠️ 后缀必须用相对路径（无前导分隔符）：Windows 上 Path::join("\\bin")
+    // 解析为「当前盘根 \bin」(C:\bin) 而非 install_dir\bin——旧写法带前导
+    // 反斜杠导致 bin/python/python\Scripts 永远 is_dir=false 被跳过，
+    // fd/jq/yq（装于 bin/）一直进不了 PATH。
+    let suffixes: &[&str] = if cfg!(target_os = "windows") {
+        &["", "bin", "git\\usr\\bin", "git\\bin", "python", "python\\Scripts"]
+    } else {
+        &["", "bin"]
+    };
+    let mut dirs: Vec<String> = Vec::new();
+    for sfx in suffixes {
+        // 空后缀 = install_dir 本身（join("") 会产生尾部反斜杠，避免重复条目）
+        let d = if sfx.is_empty() { install_dir.to_path_buf() } else { install_dir.join(sfx) };
+        if d.is_dir() {
+            dirs.push(d.to_string_lossy().to_string());
+        }
+    }
+    for entry in orig.split(sep).filter(|s| !s.is_empty()) {
+        if !dirs.iter().any(|d| d.eq_ignore_ascii_case(entry)) {
+            dirs.push(entry.to_string());
+        }
+    }
+    dirs.join(&sep.to_string())
+}
+
+/// 定位 git 的真实 bash.exe（`git\usr\bin\bash.exe`，非 shim）——供
+/// CLAUDE_CODE_GIT_BASH_PATH 使用。优先安装目录自带 git；否则探系统
+/// Git for Windows 常见安装位置（开发机/精简安装无自带 git 时）。
+/// 返回 None = 找不到——后端将回退 PATH 查找（可能被 WSL bash 截胡）。
+/// 供 GUI 启动的 apply_process_env 与诊断修复共用（单一定位逻辑）。
+/// 注：区别于 find_git_bash()（找 git-bash.exe 给终端用，另一用途）。
+pub(crate) fn find_git_usrin_bash(install_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let bundled = install_dir.join("git").join("usr").join("bin").join("bash.exe");
+    if bundled.is_file() {
+        return Some(bundled);
+    }
+    let rel = std::path::Path::new("Git").join("usr").join("bin").join("bash.exe");
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"] {
+        if let Ok(base) = std::env::var(key) {
+            let p = std::path::Path::new(&base).join(&rel);
+            if p.is_file() {
+                candidates.push(p);
+            }
+        }
+    }
+    // 用户级安装: %LOCALAPPDATA%/Programs/Git/usr/bin/bash.exe
+    if let Ok(la) = std::env::var("LOCALAPPDATA") {
+        let p = std::path::Path::new(&la)
+            .join("Programs").join("Git").join("usr").join("bin").join("bash.exe");
+        if p.is_file() {
+            candidates.push(p);
+        }
+    }
+    candidates.into_iter().next()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let log_dir = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -249,36 +310,11 @@ pub fn run() {
         // git\usr\bin\bash.exe，防 WSL bash 截胡）；未设置才回退 PATH 找 git 的
         // bin\bash.exe（shim）。进程级设上，系统注册表就不必再持久化该变量（新策略
         // 只留 CLAUDE_CODE_HAHA_HOME）。仅在真实 bash 存在时设——缺失则回退逻辑兜底。
-        let bash = install_dir.join("git").join("usr").join("bin").join("bash.exe");
-        if bash.is_file() {
+        if let Some(bash) = find_git_usrin_bash(&install_dir) {
             std::env::set_var("CLAUDE_CODE_GIT_BASH_PATH", &bash);
         }
         let orig = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", prepend_tool_dirs(&install_dir, &orig));
-    }
-
-    /// 前置工具目录到 PATH（平台化）。Windows: bin / git\usr\bin / git\bin / python / python\Scripts；
-    /// macOS: bin（自包含工具 rg/fd/jq/yq/shellcheck）。目录不存在则跳过。
-    fn prepend_tool_dirs(install_dir: &std::path::Path, orig: &str) -> String {
-        let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
-        let suffixes: &[&str] = if cfg!(target_os = "windows") {
-            &["", "\\bin", "\\git\\usr\\bin", "\\git\\bin", "\\python", "\\python\\Scripts"]
-        } else {
-            &["", "/bin"]
-        };
-        let mut dirs: Vec<String> = Vec::new();
-        for sfx in suffixes {
-            let d = install_dir.join(sfx);
-            if d.is_dir() {
-                dirs.push(d.to_string_lossy().to_string());
-            }
-        }
-        for entry in orig.split(sep).filter(|s| !s.is_empty()) {
-            if !dirs.iter().any(|d| d.eq_ignore_ascii_case(entry)) {
-                dirs.push(entry.to_string());
-            }
-        }
-        dirs.join(&sep.to_string())
     }
 
     tauri::Builder::default()
@@ -3925,6 +3961,32 @@ async fn note_get_all_tag_names(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── prepend_tool_dirs: 安装目录子目录必须用相对后缀（Windows join 语义）──
+
+    /// 回归：suffix 带前导反斜杠时 Path::join 会解析成盘根（C:\bin）而非
+    /// install_dir\bin → bin/python 永远进不了 PATH（fd/jq/yq 找不到）。
+    /// 本测试用真实临时目录验证子目录被正确前置。
+    #[test]
+    fn prepend_tool_dirs_includes_subdirs_with_relative_suffix() {
+        let base = std::env::temp_dir().join(format!("prepend_dirs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for sub in ["bin", "python"] {
+            std::fs::create_dir_all(base.join(sub)).unwrap();
+        }
+        // 把 base 当成 install_dir 传入（内部只看这些子目录是否存在）
+        let out = prepend_tool_dirs(&base, "ORIG");
+        let parts: Vec<&str> = out.split(if cfg!(target_os = "windows") { ';' } else { ':' }).collect();
+
+        let base_s = base.to_string_lossy().to_string();
+        let expect_bin = format!("{}{}bin", base_s, std::path::MAIN_SEPARATOR);
+        let expect_py = format!("{}{}python", base_s, std::path::MAIN_SEPARATOR);
+        assert!(parts.iter().any(|p| *p == expect_bin), "bin subdir missing: {:?}", parts);
+        assert!(parts.iter().any(|p| *p == expect_py), "python subdir missing: {:?}", parts);
+        // 原始条目保留在尾部
+        assert_eq!(parts.last(), Some(&"ORIG"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     // ── 更新安装时保护 runtimes 目录（安装产物跨覆盖保留）──
 

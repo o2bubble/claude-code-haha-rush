@@ -56,6 +56,37 @@ def _unpack_embedding(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{n}f", blob))
 
 
+def _scope_condition(scope: list[str]) -> tuple[str, list[Any]]:
+    """Build a WHERE fragment matching any of the given scopes.
+
+    Exact values match exactly; values ending in '*' are prefix matches
+    ('project:*' → scope LIKE 'project:%'). The wildcard is compiled into the
+    SQL rather than expanded into a separate lookup query, so a prefix that
+    matches nothing yields an empty result set instead of silently dropping
+    the filter (which would return everything).
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    for raw in scope:
+        s = (raw or "").strip()
+        if not s:
+            continue
+        if s.endswith("*"):
+            prefix = s[:-1]
+            # Escape LIKE's own wildcards so a literal % or _ in the prefix
+            # can't widen the match.
+            escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("m.scope LIKE ? ESCAPE '\\'")
+            params.append(f"{escaped}%")
+        else:
+            clauses.append("m.scope = ?")
+            params.append(s)
+    if not clauses:
+        # Every entry was blank — match nothing rather than everything.
+        return "1=0", []
+    return "(" + " OR ".join(clauses) + ")", params
+
+
 def _open_db(db_path: str) -> sqlite3.Connection:
     """Open (or create) the SQLite database and apply the schema."""
     conn = sqlite3.connect(db_path)
@@ -137,9 +168,12 @@ def _open_db(db_path: str) -> sqlite3.Connection:
 def _ensure_meta(conn: sqlite3.Connection) -> None:
     row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     if row is None:
-        # Fresh database — schema is already current.
+        # Fresh database — schema is already current. server.py and api.py open
+        # the same file concurrently, so both may find the row missing and race
+        # to insert it; the loser would hit "UNIQUE constraint failed". Let the
+        # last writer win instead of raising.
         conn.execute(
-            "INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
+            "INSERT OR IGNORE INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
         )
         return
 
@@ -763,8 +797,9 @@ class MemoryStore:
         ]
         params: list[Any] = [fts_q]
         if scope:
-            conditions.append(f"m.scope IN ({','.join('?' * len(scope))})")
-            params.extend(scope)
+            cond, scope_params = _scope_condition(scope)
+            conditions.append(cond)
+            params.extend(scope_params)
         if type:
             conditions.append(f"m.type IN ({','.join('?' * len(type))})")
             params.extend(type)
@@ -812,9 +847,9 @@ class MemoryStore:
         params: list[Any] = []
 
         if scope:
-            scope_ph = ",".join("?" * len(scope))
-            conditions.append(f"m.scope IN ({scope_ph})")
-            params.extend(scope)
+            cond, scope_params = _scope_condition(scope)
+            conditions.append(cond)
+            params.extend(scope_params)
         if type:
             type_ph = ",".join("?" * len(type))
             conditions.append(f"m.type IN ({type_ph})")
@@ -903,9 +938,9 @@ class MemoryStore:
         ]
 
         if scope:
-            scope_ph = ",".join("?" * len(scope))
-            conditions.append(f"m.scope IN ({scope_ph})")
-            params.extend(scope)
+            cond, scope_params = _scope_condition(scope)
+            conditions.append(cond)
+            params.extend(scope_params)
         if type:
             type_ph = ",".join("?" * len(type))
             conditions.append(f"m.type IN ({type_ph})")

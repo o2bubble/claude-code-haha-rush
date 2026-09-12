@@ -7,7 +7,8 @@
 
 - **分支**: `main`（`8e84f04`）；远端全同步（gitee `main` = `8e84f040`；gitee `github-clean` = GitHub `main` = `a2fc887e`，私有快照分支）。
 - **本批主题**: **Memory MCP 检索层重写**（FTS5 + jieba + RRF，修复"假语义检索"）+ **密钥泄露闭环** + **仓库瘦身**（offline-tools 移出）。
-- **Memory 服务（96）**: 容器 `claude-memory` 已跑新版，端口 **`14020`(MCP) / `40021`(Web)**（40020 因落在内核 ephemeral 端口范围被征用，已迁移）；303 条记忆迁移成功；真机验收 6 项全过。
+- **Memory 服务（96）**: 容器 `claude-memory` 已跑新版，端口 **`14020`(MCP) / `40021`(Web)**（40020 因落在内核 ephemeral 端口范围被征用，已迁移；**仅 96 改了**，云仍是 8080）；303 条记忆迁移成功；真机验收 6 项全过。
+- **Memory 服务（云 123.56.66.84）**: 2026-09-12 **已从 7-30 旧版升级到 `claude-memory:20260912`**，端口不变（`8080` MCP / `40021` Web），18 条记忆完整保留。流程 = 本地构建镜像 → workbench 上传 → 云端 `docker load` + compose 切 `image:`（**线上永不构建**，见 `docs/memory-deploy-playbook.md`）。回滚镜像 `rollback-20260730` + 库备份 `claude-memory.db.bak.20260912` 均保留在云上。
 - **凭据脱敏收尾（`e9495ca`）**: 文档/源码中最后的明文凭据已清理（详见「脱敏收尾」条）。
 
 ## 决策留痕表
@@ -27,9 +28,14 @@
 - 影响：`store.py` 迁移链扩展；**多进程并发迁移用 `BEGIN IMMEDIATE` 串行化**（真机暴露竞态：server.py + api.py 同时迁移撞 duplicate column）。
 - 留痕：SPEC §6；测试 `test_concurrent_migration`。
 
-### 决策：MCP 端口 40020 → 14020（本批）
-- 为什么：40020 落在内核 ephemeral 端口范围（32768-60999），96 上有持续连接风暴，源端口分配征用了它 → Docker bind 失败（41020/42020 同样被污染）。
-- 影响：`docker-compose.yml` 改 `14020:8080`；`~/.claude.json` 的 memory MCP url 同步改。**40021（Web/REST）没动**。
+### 决策：MCP 端口 40020 → 14020（仅 96，本批）
+- 为什么：40020 落在 Linux 内核 ephemeral 端口范围（32768-60999），96 上有持续连接风暴，源端口分配征用了它 → Docker bind 失败（41020/42020 同样被污染）。
+- 影响：**只改了 96 服务器的运行配置 + 本机 `~/.claude.json` 的 memory MCP url。**
+  ⚠️ 2026-09-12 核实修正：`extensions/memory/docker-compose.yml` **并未**改成 `14020`，仍是
+  `40020:8080`；云服务器 `123.56.66.84` 也没改（实测容器仍是 `8080:8080`）。三处端口现状：
+  仓库 compose / 云 = **40020↔8080**，96 = **14020↔8080**。
+- 补充：40020 属于 Linux ephemeral 范围，但在 **Windows 客户端**上是安全的（Windows 动态端口
+  范围默认 49152-65535），所以本地/云用 40020 没问题，无需为新端口改 compose。
 - 留痕：服务器配置 + 用户全局配置（无 commit）。
 
 ### 决策：github-clean 重建为全新孤儿快照（本批）
@@ -127,7 +133,7 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
 
 ### Memory 服务（96）
 - 容器 `claude-memory`，镜像 `192.168.186.96:5000/claude-memory:latest`
-- 端口 `14020`→容器 8080(MCP) / `40021`(Web+REST)；宿主库 `/data/claude-memory/claude-memory.db`
+- 端口 `14020`→容器 8080(MCP) / `40021`(Web+REST)；96 宿主库 `/data/claude-memory/claude-memory.db`（云为 `/data/memory/claude-memory.db`，挂载路径两边不同）
 - 数据 303 条（fact 83 / experience 87 / lesson 133）；`capabilities={fts:true, jieba:true, tags:true, like_fallback:false, embedding:false}`
 - 部署前备份：`claude-memory.db.bak.20260911`
 
@@ -146,9 +152,13 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
 
 ## 待办
 
-- [ ] **重启 Claude Code** —— 当前会话 MCP 仍连旧端口 40020；重启后连 `14020` 用上新 FTS5 检索
-- [ ] **Web UI 复核** —— `http://192.168.186.96:40021/` 搜索走新 FTS5 + jieba
-- [ ] **云上跟进** —— `123.56.66.84` 的 memory 服务未同步本次升级（按惯例）
+- [x] **本地接入 memory MCP** —— 2026-09-12 完成：`~/.claude.json` 指向 `http://123.56.66.84:8080/mcp`
+      （**无需改配置** —— 服务端升级后自动生效，无需重启）；3 个 skills 已装新版（旧版备份在
+      `~/claude-skills-backup-20260912/`）
+- [ ] **96 同步本次修复** —— 96 的 `14020` 那份是"升级但无本次修复"版本：缺 scope 前缀搜索、
+      `_ensure_meta` 并发保护、打包清单修正。端口映射是 `14020:8080`，别照抄云。见部署手册 §8
+- [ ] **Web UI 复核** —— `http://123.56.66.84:40021/` 搜索走新 FTS5 + jieba
+- [x] **云上跟进** —— 2026-09-12 完成（本地构建镜像 → workbench 上传 → 云端切换，见部署手册）
 - [x] **云 server root 密码轮换** —— 已完成（新值在内部凭据笔记；96 内网密码无需轮换）
 - [ ] （可选）**向量路** —— SPEC §10 预留：加 OpenAI 兼容 embedding 客户端 + 第三路进 `rrf_merge`，约 150 行
 - [ ] （可选）**web 密码构建注入** —— 见「未提交改动」条
@@ -172,6 +182,7 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
 | 测试 | `extensions/memory/tests/test_memory.py` | 43 单测 |
 | 脚本 | `scripts/sync-github-clean.sh` | 快照同步（已移除 offline-tools 特殊处理） |
 | 架构 | `docs/ARCHITECTURE.md` · `docs/agents/issue-tracker.md` | 架构与工单约定 |
+| **部署** | `docs/memory-deploy-playbook.md` | **memory 服务发版手册**（本地构建→workbench 上传→云端切换；含 WAL 备份/代理/竞态三个坑） |
 | PRD（本地） | `.scratch/gui-plugin-system/PRD.md` | 插件系统完整 PRD（gitignore 不入库） |
 
 ## Suggested skills

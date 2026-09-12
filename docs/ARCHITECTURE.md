@@ -34,7 +34,7 @@
                    │ HTTPS / HTTP
         ┌──────────┴──────────────┬───────────────┬───────────────┐
     AI API                   更新/技能服务器       记忆 MCP        云镜像
-   (ANTHROPIC_BASE_URL)   (96:8765 / 云:8765)   (40020/40021)    (备选更新源)
+   (ANTHROPIC_BASE_URL)   (96:8765 / 云:8765)   (14020·40020/40021) (备选更新源)
 ```
 
 **关键数据流**：后端（`claude.exe`）是唯一 WebSocket 源 → `useChatBridge` 收消息 → 调 Store 变更 → Store 发 EventBus → 组件 `useEvent` 重渲染；子窗口（Leaf）无 WS，数据经 DataBus 桥接镜像。写数据走 Tauri `invoke` → Rust 命令（设置/DB/MCP/更新/诊断）。
@@ -243,7 +243,7 @@
 
 ### 6.3 记忆 MCP / 笔记
 
-- **记忆 MCP**（轻量版，FastAPI）：无 embedding（关键词+标签+importance），`apply_tag_mapping` LLM 归一化；intranet `40020/mcp` / 云 `8080/mcp`。
+- **记忆 MCP**（轻量版，FastAPI）：无 embedding（FTS5 BM25 + jieba 分词 + 标签，RRF 融合；`strategy` 字段显式报告降级路径），写入为两段式契约（预检 → agent 决策），`apply_tag_mapping` LLM 归一化；intranet `14020/mcp`（96 因 ephemeral 端口冲突迁移；仓库 compose 与云仍为 40020/8080）/ 云 `8080/mcp`。
 - **笔记**（内置 `notes.rs`）：`~/.claude/notes/notes.db`，Markdown + Milkdown 编辑器、标签、作用域、加权关联；9 个 MCP 工具经内嵌 MCP 服务器调用。
 
 ### 6.4 反馈 (feedbackService.ts + skills-server)

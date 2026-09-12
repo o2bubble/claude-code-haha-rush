@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from normalize import apply_tag_mapping
 from search_engine import hybrid_search
-from store import MemoryStore
+from store import MemoryStore, _scope_condition
 
 # ---------------------------------------------------------------------------
 # Globals
@@ -211,15 +211,15 @@ def _register_routes(app: FastAPI) -> None:
                 params: list = []
                 if type_list:
                     ph = ",".join("?" * len(type_list))
-                    conditions.append(f"type IN ({ph})")
+                    conditions.append(f"m.type IN ({ph})")
                     params.extend(type_list)
                 if scope_list:
-                    ph = ",".join("?" * len(scope_list))
-                    conditions.append(f"scope IN ({ph})")
-                    params.extend(scope_list)
+                    cond, scope_params = _scope_condition(scope_list)
+                    conditions.append(cond)
+                    params.extend(scope_params)
                 rowset = set()
                 cur = store._conn.execute(
-                    f"SELECT id FROM memories WHERE {' AND '.join(conditions)}", params
+                    f"SELECT id FROM memories m WHERE {' AND '.join(conditions)}", params
                 )
                 for r in cur.fetchall():
                     rowset.add(r["id"])

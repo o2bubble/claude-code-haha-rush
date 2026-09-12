@@ -270,13 +270,30 @@ async function getClaudeCodeSnapshotContent(): Promise<string> {
   // Get the appropriate PATH based on platform
   let pathValue = process.env.PATH
   if (getPlatform() === 'windows') {
-    // On Windows with git-bash, read the Cygwin PATH
-    const cygwinResult = await execa('echo $PATH', {
-      shell: true,
-      reject: false,
-    })
+    // On Windows with git-bash, read the Cygwin PATH.
+    // ⚠️ 必须用 git-bash 本体执行 echo（shell:true 在 Windows 走的是 cmd.exe，
+    // 只会回显字面量 "$PATH" → snapshot 里 PATH 被写成空值 → 之后所有命令
+    // 丢掉 /usr/bin 等 Git 目录（grep/tail/ls 全部 command not found）。
+    // ⚠️ 还必须带 -l（login）：只有 login shell 走 /etc/profile，才会把
+    // /mingw64/bin:/usr/local/bin:/usr/bin:/bin 等 Git 工具目录拼进 PATH；
+    // 非 login 探测拿到的 PATH 缺这些目录，grep/tail/ls 依旧找不到。
+    // 优先用 CLAUDE_CODE_GIT_BASH_PATH（引擎已解析的真实 git bash），
+    // 退路才是 cmd — 但此时校验输出不像 PATH 就整体回退 process.env.PATH。
+    const gitBash = process.env.CLAUDE_CODE_GIT_BASH_PATH
+    const cygwinResult = gitBash
+      ? await execa(gitBash, ['-l', '-c', 'echo $PATH'], { reject: false })
+      : await execa('echo $PATH', { shell: true, reject: false })
     if (cygwinResult.exitCode === 0 && cygwinResult.stdout) {
-      pathValue = cygwinResult.stdout.trim()
+      // -l 会执行用户 profile，可能先输出问候等噪声行——取最后一行（echo 的输出）
+      const out = cygwinResult.stdout.trim().split('\n').filter(Boolean).pop() ?? ''
+      // 防呆：cmd 回显的 "$PATH" 字面量 / 空串都不可用
+      if (out && out !== '$PATH' && out.includes('/')) {
+        pathValue = out
+      } else {
+        logForDebugging(
+          `Cygwin PATH probe returned unusable output (${out.slice(0, 40)}); falling back to process.env.PATH`,
+        )
+      }
     }
     // Fall back to process.env.PATH if we can't get Cygwin PATH
   }
@@ -330,11 +347,15 @@ FIND_GREP_FUNC_END
   }
 
   // Add PATH to the file
-  content += `
+  // 防呆：pathValue 是字面量 "$PATH"（cmd 回显事故）或空串时不写 export——
+  // 写了会自引用成 export PATH=$PATH，把 Git 目录从后续命令里抹掉。
+  if (pathValue && pathValue !== '$PATH') {
+    content += `
 
       # Add PATH to the file
-      echo "export PATH=${quote([pathValue || ''])}" >> "$SNAPSHOT_FILE"
+      echo "export PATH=${quote([pathValue])}" >> "$SNAPSHOT_FILE"
   `
+  }
 
   return content
 }
