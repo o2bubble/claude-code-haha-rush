@@ -21,7 +21,7 @@ describe("applyStoreEffects — terminal", () => {
     applyStoreEffects([
       { type: "terminal.start", toolUseId: "t1", command: "Bash" },
       { type: "terminal.update", toolUseId: "t1", command: "ls -la" },
-      { type: "terminal.append", text: "file.txt" },
+      { type: "terminal.append", toolUseId: "t1", text: "file.txt" },
       { type: "terminal.finish", toolUseId: "t1", exitCode: 0 },
     ]);
     const entries = getEntries();

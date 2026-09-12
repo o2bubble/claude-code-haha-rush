@@ -162,10 +162,14 @@ describe("chatReduce — tool progress + terminal", () => {
     return s;
   }
 
-  it("tool_progress updates last tool output + emits terminal.append delta", () => {
-    const r = reduce({ type: "tool_progress", data: { type: "bash_progress", output: "delta", fullOutput: "full" } }, baseWithTool());
+  it("tool_progress updates last tool output + emits addressed terminal.append", () => {
+    // 真实 id 在 parent_tool_use_id（tool_use_id 是每包自增的 bash-progress-N）
+    const r = reduce(
+      { type: "tool_progress", tool_use_id: "bash-progress-0", parent_tool_use_id: "t1", data: { type: "bash_progress", output: "delta", fullOutput: "full" } },
+      baseWithTool(),
+    );
     expect(r.nextState.messages[0].toolUses![0].output).toBe("full");
-    expect(r.effects).toEqual([{ type: "terminal.append", text: "delta" }]);
+    expect(r.effects).toEqual([{ type: "terminal.append", toolUseId: "t1", text: "delta" }]);
   });
 
   it("non-bash tool_progress is ignored", () => {

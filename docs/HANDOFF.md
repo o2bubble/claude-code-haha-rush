@@ -159,6 +159,29 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
   —— 已上传云 `123.56.66.84:8765`；**96 未上传**（内网不通）
 - **2026.09.13.1**（切会话打断确认 + 子代理工具标记 + 时间线遮挡修复；仅 gui，其余复用 .12.6）
   —— 已上传云；gui sha `d36b7903…`
+- **2026.09.13.2**（终端输出重复 + 并发串台修复；仅 gui，其余复用 .12.6）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `b43b6005…`
+
+### 2026-09-13 终端重复根因（本批最有价值发现）
+- **后端进度回调送的是"滚动尾部窗口"，不是增量** —— `exec` 的 onProgress 传
+  `lastLines`(=最近 5 行) / `allLines`(=最近 100 行)，取自 `CircularBuffer.getRecent`
+  （`src/utils/task/TaskOutput.ts`；pipe 模式走 `#recentLines.getRecent(5)`）。每次 poll
+  窗口滑动且与上次重叠 → 前端按注释 "append only the delta" 直接 `output += text`
+  就会把重叠累积，短输出（≤5 行）整段重复。**前端那句注释与后端实现不符**，
+  是这次 bug 的根。
+- **修复**：`terminalStore.mergeTailWindow` —— 按**行**找 incoming 与已累积文本尾部的
+  最长重叠，只追加新行。整行比较而非字符比较（否则 "…abc" 尾部的 c 会被当成
+  "cde" 的重叠而丢字符）。真实重复（连续 `echo same`）无法与窗口滑动区分 → 保守保留。
+- **同时修掉的寻址 bug**：`terminal.append` 原不带工具 id，永远写"最后一个条目"，
+  并发工具时输出会落到别的卡片上。寻址必须用 **`parent_tool_use_id`** 而非
+  `tool_use_id` —— 后者是 `bash-progress-N` 计数器（`toolExecution.ts:566` /
+  `BashTool.tsx:666` 每包自增），用它寻址会永远找不到条目、终端进度整个失效。
+
+### 发布 notes 格式（易错，已踩）
+`build.ts` 的 `--notes` **不会自动加版本头** —— `vYYYY.MM.DD.N` 那行必须自己写，
+否则更新面板里该版本段没有标题、累积说明断代。累积由脚本自动拼接（本版 + 上一版
+manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已补回并
+修正 13.1 段。
 
 ### 2026-09-13 三处 GUI 改动（本批）
 - **切会话打断确认** —— 后端 `handleResumeSession`/`handleNewSession` 首行就是
