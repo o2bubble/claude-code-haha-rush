@@ -333,3 +333,43 @@ body {
   white-space: pre-wrap;
 }
 .md-body a { overflow-wrap: anywhere; word-break: break-all; }
+
+/* ── 发布说明（更新面板）：紧凑 markdown ──
+   同 md-body 防溢出，但收掉浏览器默认的大边距/大标题 —— 更新面板是窄栏
+   紧凑布局，默认 h1(32px 边距)/ul(40px 缩进)/p(16px 边距) 会把累积多版的
+   说明撑得极长。字号由容器 inline style 给（跟随 --font-scale）。 */
+.md-notes { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.md-notes > *:first-child { margin-top: 0; }
+.md-notes > *:last-child { margin-bottom: 0; }
+.md-notes h1, .md-notes h2, .md-notes h3, .md-notes h4 {
+  margin: 8px 0 3px;
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--fg-primary);
+  line-height: 1.4;
+}
+.md-notes h1 { font-size: 1.08em; }
+.md-notes p { margin: 3px 0; line-height: 1.5; }
+.md-notes ul, .md-notes ol { margin: 3px 0; padding-left: 16px; }
+.md-notes li { margin: 1px 0; line-height: 1.5; }
+.md-notes hr {
+  margin: 8px 0;
+  border: none;
+  border-top: 1px solid var(--border-light);
+}
+.md-notes strong { color: var(--fg-primary); font-weight: 600; }
+.md-notes code {
+  font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+  background: var(--bg-code);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.md-notes pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 4px 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-code);
+}
+.md-notes pre code { background: none; padding: 0; }

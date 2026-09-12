@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useRef } from "react";
+import React, { useCallback, useMemo, useState, useRef } from "react";
 import type { DesktopItem } from "../../types/desktop";
 import type { FileGroupContent } from "../../types/desktop";
 import { windowBus } from "../../services/windowBus";
@@ -73,11 +73,23 @@ function collectFiles(
 
 export function FileGroupItem({ item }: Props) {
   const content = item.content as FileGroupContent;
-  const rootEntries: TreeEntry[] = content.files.map((f) => ({
-    type: f.type === "dir" ? "dir" as const : "file" as const,
-    path: f.path,
-    label: f.label || f.path.split(/[/\\]/).pop() || f.path,
-  }));
+  // 数据契约防御（同 RefItem）：块内容可能不完整（AI 经 MCP 创建时漏 path），
+  // 渲染期抛错会被 ErrorBoundary 捕获 → 整个超级桌面消失。故过滤无效条目并告知。
+  const { rootEntries, dropped } = useMemo(() => {
+    const list = Array.isArray(content.files) ? content.files : [];
+    const valid = list.filter(
+      (f): f is (typeof list)[number] =>
+        !!f && typeof f === "object" && typeof f.path === "string" && f.path.length > 0,
+    );
+    return {
+      rootEntries: valid.map((f) => ({
+        type: f.type === "dir" ? ("dir" as const) : ("file" as const),
+        path: f.path,
+        label: f.label || f.path.split(/[/\\]/).pop() || f.path,
+      })),
+      dropped: list.length - valid.length,
+    };
+  }, [content.files]);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [childCache, setChildCache] = useState<Map<string, TreeEntry[]>>(new Map());
   const [hoveredPath, setHoveredPath] = useState<string | null>(null);
@@ -133,8 +145,8 @@ export function FileGroupItem({ item }: Props) {
 
   if (rootEntries.length === 0) {
     return (
-      <div style={{ padding: 16, color: "var(--fg-muted)", fontSize: 12, textAlign: "center" }}>
-        {t("desktop.block.noFiles")}
+      <div style={{ padding: 16, color: dropped > 0 ? "var(--semantic-warning)" : "var(--fg-muted)", fontSize: 12, textAlign: "center" }}>
+        {dropped > 0 ? t("desktop.block.droppedRefs", { n: dropped }) : t("desktop.block.noFiles")}
       </div>
     );
   }
@@ -162,6 +174,11 @@ export function FileGroupItem({ item }: Props) {
         e.stopPropagation();
       }}
     >
+      {dropped > 0 && (
+        <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--semantic-warning)", borderBottom: "1px solid var(--border-light)" }}>
+          {t("desktop.block.droppedRefs", { n: dropped })}
+        </div>
+      )}
       {visible.map(({ entry, depth }, i) => {
         const icon = TYPE_ICONS[entry.type] || "📄";
         const isDir = entry.type === "dir";

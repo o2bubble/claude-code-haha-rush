@@ -1807,8 +1807,364 @@ Spec: `.scratch/gui-plugin-system/PRD.md` · 第一版只做安全贡献层 + �
 
 ## T6 — 验收（人工清单，PRD §9）
 
-- [ ] 手动在 `%APPDATA%/claude-code-gui/plugins/demo/` 放插件（面板 in-main/floating + 命令 + 后台进程）→ 面板自动出现、可拖可浮窗可关
-- [ ] 命令进调色板，点按 → 面板收到事件
-- [ ] 后台进程绑定工作区后启动 → 面板订阅到数据 → GUI 退出进程被杀（无孤儿）
-- [ ] 停用/卸载 → 面板从布局移除
-- [ ] `tsc --noEmit` + vitest 全绿 + `cargo tauri build` 通过
+**Status: done (2026-09-07)** — demo-widget 经 96 市场安装走完整验收（发布: demo-widget 传 96 + 云）
+
+- [x] 安装即活: 96 插件市场可见 demo-widget → 一键安装 → 「演示面板」自动出现并渲染（in-main, userManaged）
+- [x] 命令进调色板（demo.print「打印演示」链路无报错; 纯声明式面板无可见反馈属预期——面板响应需带进程插件）
+- [x] 事件订阅: chat.stateChanged 转发链路工作, 宿主功能零回归
+- [x] 重启持久化: 重启 GUI 后演示面板还在（启动自动重扫 plugins/ 目录）
+- [x] `tsc --noEmit` + vitest 437 全绿 + `cargo tauri build --no-bundle` 通过
+- [ ] 后台进程生命周期（绑定工作区/kill/退出无孤儿）— demo-widget 无后台进程, 待首个带进程插件验收
+- [ ] 停用/卸载 → 面板从布局移除 — 未实现（T5-plugin-packages.md §6 已留档）
+
+---
+
+# Tickets: nodejs 运行时环境插件 + 平台运行时注册机制
+
+来源: `.scratch/plugin-nodejs-runtime/PRD.md`（ready-for-agent, grilling 2026-09-08 全决策对齐）。第一个正式上架的市场插件——生态基础设施, 后续插件声明依赖它。核心契约: manifest 新增 `runtimes` 声明, 平台把已启用插件的 runtime 目录注册进**程序内部 PATH**（插件进程 + AI Bash 双消费方, 系统环境变量零污染）。
+
+Work the **frontier**: any ticket whose blockers are all done. T1/T4/T5 互不依赖可并行。
+
+## T1 — runtimes 字段解析 + PATH 聚合纯函数
+
+**What to build:** 插件作者在 plugin.json 里声明 `"runtimes": [{ "id": "node", "path": "runtime" }]` 后, 平台能容错解析该字段, 并且存在一个纯函数: 输入（活动 manifests, disabledPlugins, 目录存在性检查）→ 输出 runtime 目录绝对路径列表。这是 GUI spawn / GUI 推送 / claude 启动扫描三方共享的契约层——本票只交付解析 + 纯函数 + 单测, 不接任何消费方（不 demo 到 UI, 可用测试验证）。
+
+**Blocked by:** None — 可立即开始
+
+**Status:** ready-for-agent
+
+- [ ] manifest 类型加可选 `runtimes` 字段; 解析容错: 缺省兼容（旧 manifest 无字段）、非数组/非法元素忽略、path 必须是插件目录内相对路径（拒绝绝对路径与 `..` 穿越）
+- [ ] 聚合纯函数: 活动 manifests + disabledPlugins + 目录存在性 → 去重后的 runtime 目录列表; 禁用插件的 runtime 被排除; 目录不存在（未真正装 Node）跳过
+- [ ] 单测覆盖: 合法解析/缺失/类型错/穿越拒绝/禁用排除/目录缺失跳过（先例: pluginRegistry.test.ts）
+- [ ] `bunx tsc --noEmit` + vitest 全绿
+
+## T2 — 插件进程 PATH 注入（GUI spawn 通道）
+
+**What to build:** 用户安装一个声明了 `processes` 且 `"command": "node"` 的插件（依赖 nodejs 插件）后, 该后台进程启动时能直接找到 node——GUI 在 spawn 插件进程前把 T1 聚合结果拼进进程 PATH（env 注入, Rust 只接收现成值保持哑）。demo 方式: 手动放一个最小 dependent 插件目录 + 已就绪的 nodejs runtime, Worker 面板看到进程 running。
+
+**Blocked by:** T1
+
+**Status:** ready-for-agent
+
+- [ ] GUI spawn 插件后台进程前调用聚合函数, 把 runtime 目录拼进进程 PATH 环境段（Windows 下注意 PATH 追加语义与分号分隔）
+- [ ] 禁用/卸载 nodejs 后, 重启的 dependent 进程 PATH 不再含其 runtime（聚合实时生效, 不缓存陈旧结果）
+- [ ] 无任何 runtimes 声明时行为与现状完全一致（零回归）
+- [ ] 验证: 最小 dependent 插件（temp, 不上架）进程内能执行 node; tsc + cargo check 通过
+
+## T3 — claude.exe 双通道: A 启动自扫兜底 + B GUI 推送实时
+
+**What to build:** AI 用户当前会话装完 Node 后**立刻**能在 Bash 里跑 `node --version`（B 通道: GUI 重扫后把聚合结果经 ideMode 通道推送）; 新开会话/重启 claude 后 node 依然可用（A 通道: claude 启动时自扫插件目录解析 runtimes, 拼进本会话 Bash 工具 PATH）。两通道对同一 manifest 声明给出一致结果（契约对称性测试）。B 的实际生效时机（下一条 Bash 调用 vs 会话全局）实现时按 ideMode 现有通道能力确定并留痕; 若推送改运行中 env 成本超预期, 降级为"推送后新 Bash 生效"并在票内记录。
+
+**Blocked by:** T1
+
+**Status:** ready-for-agent
+
+- [ ] A 通道: claude 启动扫描为纯函数（插件目录条目 → PATH 段）, 与 T1 聚合函数对同一输入给出一致结果（对称性测试）
+- [ ] B 通道: GUI 重扫（安装/启停触发）后经 ideMode 通道把最新聚合结果推送; claude 侧接收后本会话 Bash PATH 生效
+- [ ] claude 侧扫描容忍: 无插件目录/坏 plugin.json/runtimes 非法值 → 静默跳过不报错
+- [ ] 系统环境变量零改动（测试断言只操作会话内 env 前缀, 不碰系统）
+- [ ] 验证: 当前会话装完即用 + 新会话兜底可用; tsc 通过
+
+## T4 — plugin_set_status MCP 工具 + aiStatus 透出
+
+**What to build:** AI 完成 ai-guided 插件的环境安装验证后, 调 `plugin_set_status(name, status, detail?)` 上报 ready/not_ready/error（内存存储, GUI 重启清空）; 随后 `plugin_list` / `plugin_get` 的输出带 `aiStatus` 字段（未上报时缺省）, AI 排查时先看状态再决定是否重验。工具描述写明: 这是 AI 声明的参考状态, GUI 不据此改变插件行为。
+
+**Blocked by:** None — 可立即开始（与 T1 并行）
+
+**Status:** ready-for-agent
+
+- [ ] mcpBridge tools/list 加 `plugin_set_status`（name 必填; status 枚举 ready|not_ready|error; detail 可选对象）
+- [ ] dispatch case: 写内存状态（含时间戳）; 未知插件名报错（对照 installed map）
+- [ ] `plugin_list` / `plugin_get` 输出加 `aiStatus`（无记录缺省无字段）
+- [ ] 单测: 上报后可读 / GUI 重启模拟（内存清空）/ 未知插件名拒绝（先例: mcpBridge 既有 dispatch 测试方式）
+- [ ] `bunx tsc --noEmit` + vitest 全绿
+
+## T5 — 卸载依赖反查（一层）
+
+**What to build:** 用户在市场/详情面板点卸载一个被其它已安装插件依赖的插件（如 nodejs）时, 卸载被拒绝并明确列出依赖它的插件清单, 提示先卸载它们; 无依赖时卸载行为与现状一致。只做一层反查（不递归传递闭包）。
+
+**Blocked by:** None — 可立即开始（与 T1 并行）
+
+**Status:** ready-for-agent
+
+- [ ] plugin_uninstall（MCP 工具）与 GUI 卸载路径共用同一反查判定: 目标 pluginName 出现在任一**已安装且启用**插件的 dependencies 中 → 拒绝 + 返回清单
+- [ ] 禁用状态的 dependent 不阻止卸载（禁用 = 不参与运行, 与聚合排除规则一致）
+- [ ] 错误信息可操作: 列出 dependent 插件 displayName + pluginName
+- [ ] 单测: 有 dependent 拒绝/仅禁用 dependent 放行/无依赖放行
+- [ ] `bunx tsc --noEmit` + vitest 全绿
+
+## T6 — nodejs 插件包三件套（plugin.json + README + AI_NOTES）
+
+**What to build:** 插件作者视角的完整包: `pluginName: nodejs` / `category: integration` / `installType: ai-guided` / `runtimes: [{id:"node", path:"runtime"}]`, contributes 与 processes 全空。AI_NOTES.md 是 plugin_docs 内置模板的首个实战使用者, 覆盖: 系统/架构检测、下载端点 fallback 链（国内镜像优先 → nodejs.org 官方兜底）、解压拍平（防多套一层版本目录）、`node --version` 验证、失败排查（对照故障模式写）、卸载指导。README 面向人解释定位与使用。
+
+**Blocked by:** T1（manifest 需要 runtimes 字段先落地校验）
+
+**Status:** ready-for-agent
+
+- [ ] plugin.json 符合 PRD manifest 契约; 解析测试通过（T1 的解析器）
+- [ ] AI_NOTES.md 覆盖模板全部章节; 每个安装步骤有可执行命令; fallback 链至少两级且每级写明失败信号与切换动作
+- [ ] 目录布局契约明确写出: `plugins/nodejs/runtime/` 单版本平铺, 官方 zip 解压后拍平
+- [ ] README.md 面向用户: 定位/装后有什么/AI 怎么用/卸载语义
+- [ ] 包可通过 publish-plugin.py 本地校验（zip 根含 plugin.json）
+
+## T7 — 上架 96+云 + 全流程验收
+
+**What to build:** nodejs 插件作为第一个正式市场插件走完整链路: publish-plugin.py 正门发布 96 + 云 → 用户在市场点安装（或 AI 代装）→ AI 按指导真实下载 Node LTS（演练 fallback）→ 验证后 plugin_set_status ready → 当前会话 AI Bash `node --version` 成功 → 新会话可用 → 最小 dependent 插件进程走 PATH → 卸载 nodejs 被反查拦截 → 依次卸载后目录与 PATH 干净。同时验收 AI_NOTES 模板本身的可操作性（AI 照文档能否一次装对）。
+
+**Blocked by:** T2, T3, T4, T5, T6
+
+**Status:** 部分完成（2026-09-08）——基础设施层+AI 代装+PATH 三通道已验收；dependent/卸载反查待 GUI 更新后补验
+
+- [x] 96 与云市场均可搜到 nodejs（integration 分类）且详情页 README/AI_NOTES 渲染正常（96+云双端点, ai_notes 3121 字符透传）
+- [x] AI 代装全流程走通: plugin_docs 拿到 AI_NOTES（本地级回退演练）→ 官网确认 v24.20.0 LTS → npmmirror 命中（fallback 链第 1 级, 10s/37MB）→ 解压拍平（避开多套一层坑）→ `node --version` v24.20.0 ✅ → temp 清理
+- [x] plugin_list 显示已装+enabled; **当前会话 Bash node 可用（A 通道启动扫描，v24.20.0 优先于系统 v24.16.0）**; A=扫描/B=推送双通道实现
+- [x] 已装态视觉强化（验收中发现误判问题, 发 09.08.2: 「已安装/已禁用」徽标）——**期间暴露 PATH 注入重大 bug（bash $PATH 引号 + PowerShell 拼接吞命令, 全 agent 会话中毒）, 修复+回归锁已发 09.08.2**
+- [ ] 最小 dependent 插件（temp）的 processes 用 `"command": "node"` 启动成功（Worker 面板 running）— 待 09.08.2 GUI 更新后补验
+- [ ] 卸载 nodejs 被拦截并列出 dependent 清单; 依次卸载后 plugins/nodejs 目录移除、PATH 聚合不再含 runtime — 待补验
+- [x] AI_NOTES 模板实战验证: 一次性走通（步骤清晰/fallback 链有效/拍平提醒命中要害）; 改进点: 增加「下载后校验 zip 完整性」步骤（首次 37MB 下载曾怀疑截断, 后验证完好）
+
+**验收记录（2026-09-08）:** 端点命中=npmmirror(v24.20.0, 10.35s, 37,539,751B), 架构=x64, 验证命令=`runtime/node.exe --version → v24.20.0`; 事故复盘: PATH 注入 bug 导致本会话+其它 agent 会话 shell 中毒, 根因=powershellProvider 拼接缺分隔符/bashProvider $PATH 被引号吞, 修复 b4d88c6 含 pathPrependRegression.test.ts 结构回归锁。
+
+## T8 — 运行时目录按平台注入 bin 子目录（unix 契约对齐）
+
+**What to build:** 2026-09-09 平台分节重构 AI_NOTES 时发现的真实契约差异——
+Windows 上 Node `runtime/` 根直接是 node.exe，PATH 注入 runtime/ 即 `node` 可用；
+**macOS/Linux 上官方 tar 布局是 `runtime/bin/node`**，PATH 注入的是 runtime/ 根，
+`node` 直接执行不到。当前行为：unix 依赖方须用绝对路径（已在 AI_NOTES 第 6 步
+如实标注）。本票把契约对齐：**扩展 manifest runtimes 声明支持 bin 子目录 ——
+`runtimes: [{id, path, bin?: "bin"}]`**（bin 为目录内可执行文件所在子目录，缺省
+= 目录根，Windows 无需声明）。
+
+**Blocked by:** T1（runtimes 解析扩展）— 独立于 T2-T7
+
+**Status:** 待排期（无验收阻塞, 属兼容性契约演进）
+
+- [ ] manifest runtimes 类型加可选 `bin` 字段; 解析容错（旧 manifest 无字段兼容; 非法值忽略; 仍是插件目录内相对路径）
+- [ ] PATH 聚合纯函数: bin 存在时注入 `<runtime>/<bin>` 而非 runtime/ 根（GUI 聚合 + 插件进程 + claude A/B 通道三方同步）
+- [ ] 目录存在性检查对 bin 路径同样校验（Tauri/claude 侧）
+- [ ] 回归: Windows（无 bin 声明）行为零变化; unix（bin: "bin"）注入正确; 两侧契约对称性测试更新
+- [ ] nodejs 插件 AI_NOTES 第 6 步「已知限制」改为「已按 bin 声明注入, 直接 node 可用」
+- [ ] 补验: macOS/Linux 真机 AI 代装 nodejs → Bash `node --version` 直接可用（若无 mac/linux 真机, 用 CI/容器验证 unix 路径 + AI_NOTES 保持绝对路径说明兜底案）
+
+---
+
+## git-viewer 插件 (2026-09-09, PRD 已定版)
+
+PRD: `.scratch/git-viewer-plugin/PRD.md` — **只读 git 查看工具**（diff/历史/分支, 无任何写操作）。
+形态 standard（自带 UI+进程, 依赖 nodejs, GUI 自带 git）。里程碑 M1-M5 对应下面的 T1-T5。
+
+### GV-T1 — 平台层 iframe 内容源（M1）
+
+**What to build:** 插件面板声明 `content: { type: "html", src: "panel.html" }` 时, GUI 面板 render 改为 iframe 加载插件目录内该文件, 而非现有的声明式占位组件。
+
+**Status:** ✅ 实现完成（2026-09-09）—— 测试全绿待实机验收
+
+**Blocked by:** 无（平台层, 可先动）
+
+**已调查现状（2026-09-09）:**
+- `gui/src/services/pluginRegistry.ts`: `PluginPanel` 无 content 字段; `parsePanels` (249-276) 未解析 content —— 需加 `content?: { type: "html"; src: string }`
+- `gui/src/services/pluginPanelBridge.tsx`: `pluginPanelContent` (14-28) 是占位组件（显示插件信息）—— iframe 分支在此加
+- Rust 无协议注册 —— iframe 加载插件目录文件需要 serve 机制:
+  - 方案 A: Tauri `register_uri_scheme_protocol("plugins", ...)` 从 `app_data_dir()/plugins/<name>/` 读文件返回（推荐——无需额外端口, 同源可控）
+  - 方案 B: 自建 HTTP 静态服务（复用 mcp.rs 端口不可取——混合路由）
+- 插件进程端口: GUI 已知（pluginProcessBridge store 的 port 字段）, iframe URL query `?port=xxxx` 注入
+
+**验收:**
+- [ ] manifest 解析: content.src 解析进 PluginPanel; 旧 manifest（无 content）零影响
+- [ ] 协议注册: `plugins://<pluginName>/<src>` 正确返回插件目录文件（路径穿越防护: 禁 `..` 逃逸插件目录）
+- [ ] iframe 渲染: content 声明存在 → iframe; 不存在 → 占位组件不变
+- [ ] 沙箱: `allow-scripts + allow-same-origin`; 不设 allow-top-navigation / allow-modals
+- [ ] `?port=xxxx` 注入 iframe URL（从进程状态 store 取, 缺失时省略）
+
+### GV-T2 — 插件进程 git 只读 API（M2）
+
+**What to build:** 插件进程 `node git-viewer-server.js`, http server 提供只读 git API, stdout 打 `PLUGIN_PORT=` 供发现。命令全部 `execFile`（无 shell）+ 参数白名单 + 路径穿越防护。
+
+**Status:** ✅ 实现完成（git-viewer-server.cjs 单测 8/8 + curl 实测 status/diff/log/branches/show/安全防护全过）
+
+**Blocked by:** 无（进程机制本身已完备, nodejs 插件已验证 PATH 注入）
+
+**验收:**
+- [ ] `GET /api/status` → `git status --porcelain` 文件列表
+- [ ] `GET /api/diff?file=<path>` → 单文件 diff（file 禁 `..` 穿越; 禁 `-c`/`--bare` 等注入）
+- [ ] `GET /api/log?limit=<n>` → `git log --oneline -n`; `limit` 数值上限（如 ≤200）
+- [ ] `GET /api/branches` → `git branch -a`
+- [ ] `GET /api/show?ref=<ref>` → `git show <ref> --stat`; ref 禁以 `-` 开头
+- [ ] `execFile('git', args, { cwd: workspace })` 无 shell; env `GIT_OPTIONAL_LOCKS=0`
+- [ ] manifest: `command: "node"`, `args: ["git-viewer-server.js"]`, `env.CLAUDE_PLUGIN_WORKSPACE`, startOn workspace_bound
+- [ ] git 未找到: 启动时 `git --version` 失败 → 进程仍启动但所有 API 返回明确错误（面板可显示「请先安装 git」）
+
+### GV-T3 — MCP 工具转接（M3）
+
+**What to build:** MCP 工具 `git_view_diff` / `git_history` / `git_branches`, AI 直接调用读取 git 数据并呈现给用户审阅。**实现根本: 进程 HTTP API 提供数据, MCP 工具转接**（AI 不经过面板）。
+
+**Status:** ✅ 实现完成（mcpBridge 注册三工具 + 截断 helper; tsc/测试过）
+
+**Blocked by:** GV-T2
+
+**验收:**
+- [ ] mcpBridge 注册三工具（参数透传; 从插件进程 port 取 URL —— 经 pluginProcessBridge 状态）
+- [ ] 工具输出上限: 大 diff 截断策略（如 40K 字符截断 + 注记「已截断, 可用 git_view_diff(file, context) 再看」）
+- [ ] 进程未运行（error/stopped）→ 工具返回明确错误「git-viewer 进程未运行」
+- [ ] 非 Tauri / 插件未装 → 工具不存在（不注册）
+
+### GV-T4 — 面板 UI panel.html（M4）
+
+**What to build:** 插件目录内 `panel.html` iframe 自绘 UI: 工作区（文件列表+选中 diff）/ 历史 / 分支三 tab; 选中 diff → 「发送到聊天」postMessage 上行 → GUI 生成 chip。
+
+**Blocked by:** GV-T1, GV-T2（基础渲染）; chip 上行依赖 T1 配套
+
+**验收:**
+- [ ] 三 tab: 工作区文件列表 / 提交历史 / 分支列表
+- [ ] 点文件 → diff 显示; 点提交 → 提交 diff 显示
+- [ ] 暗色适配（CSS 变量 / 简单切换）
+- [ ] 进程 dead / git 缺失 → 面板内错误提示
+- [ ] 刷新: 手动刷新按钮（PRD §9 待细化: 是否 watch —— 先手动, 留后续）
+
+### GV-T5 — chip 上行 + 全链路验收 / 发布（M5）
+
+**What to build:** postMessage 上行（UI→GUI）: 选中 diff → 聊天 chip（复用现有 ref/paste 机制）; 插件打包上架（standard 签名发布）; 全流程验收。
+
+**Status:** ✅ 发布完成（2026-09-09: GUI 09.09.5 96+云 + git-viewer 0.1.0 签名发布 96+云, 96 签名端点验证 200）—— 实机验收待 GUI 更新后
+
+**Blocked by:** GV-T1, GV-T3, GV-T4
+
+**验收:**
+- [ ] iframe postMessage 上行 → GUI 监听（来源校验: 只接受本插件面板 iframe）→ 生成聊天 chip（复用现有机制, 不造新全局 store —— 见记忆 feedback_data_system）
+- [ ] 插件 zip: plugin.json + panel.html + git-viewer-server.js + README + AI_NOTES（平台检测节 — 同 playwright-mcp 模板）
+- [ ] publish-plugin.py 签名发布 96+云; 市场安装 → 面板出现、进程 running、三 tab 工作
+- [ ] 安全: 恶意参数（`-c`、`..`、shell 注入）被拒
+- [ ] AI 经 MCP: `/git_view_diff` 读 diff 呈现
+- [ ] 未装 git 机器 → 面板显示「请先安装 git」（兜底）
+- [ ] GV-T1-T4 全部验收项复跑通过
+
+## memory 检索 + 写入契约升级 (2026-09-11, SPEC 已定版)
+
+**SPEC:** `.scratch/memory-upgrade/SPEC.md`（借鉴研究: `.scratch/memory-borrow/`）
+**一句话：** 修复「假语义检索」根因（FTS5 + jieba 中文分词 + BM25 + RRF 纯本地），并把写入改造为两段式去重契约（预检 → conflict_detected → agent 决策 store/update/merge/skip）。
+**Work the frontier:** 按下方依赖顺序推进。
+
+### MT-T1 — tokenize.py 分词层 + schema v3 迁移（地基）
+
+**Status:** ✅ 完成（tokenizer.py + jieba/bigram 双通道 + schema v3 迁移；模块名用 tokenizer 避免遮蔽 stdlib）
+
+**What to build:** 中文分词能力落地 + 数据库 schema 升级到 v3（version/superseded_by/deleted_at/source 四列 + FTS5 虚拟表），存量 ~301 条记忆在启动时自动迁移并重建 FTS 索引。
+
+**Blocked by:** None — can start immediately
+
+**验收:**
+- [x] `tokenize.py` 新建：jieba 懒加载单例（cut_for_search 子词铺开，如「人工智能」→「人工 智能 人工智能」）
+- [x] bigram 降级路径（jieba 不可用：连续 CJK 段 2-gram，拉丁按 `\w+` 切；两端同源保证自洽）
+- [x] 停用词表（~40 虚词）+ `build_fts_query` 输出 `"tok1" OR "tok2"` 语义
+- [x] `tokenize_for_index` / `build_fts_query` / `get_tokenizer_status` 三接口
+- [x] schema v3：ALTER 加 4 列 + idx_memories_superseded 索引；FTS5 虚拟表 memories_fts(memory_id UNINDEXED, title_tokens, content_tokens) 建表包 try/except
+- [x] v2→v3 自动迁移：ALTER + 全量重建 FTS 索引 + meta 写 schema_version/fts_enabled/tokenizer；幂等（重复启动不重复建）
+- [x] 失败姿态：FTS 重建失败不阻断启动（fts_enabled=false），库数据不受影响
+- [x] 临时库单测：构造 v2 库 → 启动 → 数据完整 + FTS 可检索
+
+### MT-T2 — FTS 检索通道（store 层）
+
+**What to build:** `store.fts_search()` BM25 检索路径 + FTS 索引三处同步钩子（add/update/delete），hybrid_search 的文本路从 LIKE 子串匹配换成 FTS。
+
+**Blocked by:** MT-T1
+
+**验收:**
+- [x] `fts_search(query, scope, type, limit)`：`bm25(memories_fts, 10.0, 1.0)`（title 权重 ×10）→ 负数取反 → 归一化 `rel/(1+rel)`
+- [x] 过取 `limit*3`；scope/type/superseded/deleted 过滤在 JOIN memories 后 WHERE
+- [x] FTS 同步钩子：add_memory INSERT、update_memory（title/content 变化）DELETE+INSERT、delete_memory DELETE
+- [x] 未启用的记录不进检索：`superseded_by IS NOT NULL OR deleted_at IS NOT NULL` 一律过滤
+- [x] fts_available=false 时回退 LIKE 路径（strategy="like"），行为不崩
+- [x] 单测：中文子词命中（"智能"搜到"人工智能"）；title 权重排序；英文大小写；增删改后索引一致；title 改动后旧词不再命中
+
+### MT-T3 — search_engine 重写：RRF 融合 + strategy 显式化
+
+**What to build:** 多路检索 + RRF 融合（FTS 路 + tag 路）+ strategy 枚举 + 阈值/小语料豁免；`mode="semantic"` 从静默空数组改为显式报告未启用（修根因）。
+
+**Blocked by:** MT-T2
+
+**验收:**
+- [x] `rrf_merge(lists, key, k=60)`：`score = Σ 1/(60+rank+1)`，只用 rank；同 id 累加
+- [x] 单路原始分先过 min_similarity(0.3) 再进 RRF；命中数 ≤ limit 时该路豁免阈值（小语料 IDF→0）
+- [x] hybrid 返回 `{results, total, strategy, message?}`；strategy ∈ fts|tag|hybrid|like|none
+- [x] 结果带 `match_type`（fts/tag/both）与归一化 `score`；importance 作 tiebreaker
+- [x] semantic 模式：strategy="none" + 明确 message（中英双语）——**回归测试：不得再静默返回空数组**
+- [x] 一路异常不阻断另一路（失败返回空契约）
+- [x] 单测：RRF 排名奖励、单路退化、阈值与豁免、strategy 各枚举值
+
+### MT-T4 — 删除 embedding 死代码 + capability/stats 显式化
+
+**What to build:** 清掉「假语义」死代码（embeddings.py 及全部引用），capability 信息透出到 stats，让"实际有什么能力"一眼可见。
+
+**Blocked by:** MT-T3
+
+**验收:**
+- [x] 删 `embeddings.py`；server.py / api.py 删 embedder 全局与全部引用（encode、model 状态打印）
+- [x] store.py 删 `_pack_embedding`/`_unpack_embedding`/`get_all_with_embeddings`；**保留 embedding 列**（未来向量路复用，SPEC §10）
+- [x] `MemoryStore.get_capabilities()`：`{fts, jieba, tags, like_fallback, embedding:false}`
+- [x] `memory_stats` 输出 capabilities，去掉误导性 `model: "none"`
+- [x] api.py 适配 `hybrid_search` 新返回结构（Web UI :40021 搜索不崩）
+- [x] Dockerfile 加 `COPY tokenize.py .`；requirements.txt 加 jieba
+- [x] 全库回归：本机起 server，stats/search/get/store 各工具冒烟通过
+
+### MT-T5 — memory_store 两段式去重契约 + 质量闸门
+
+**What to build:** `memory_store` 状态机：无 action 时预检 FTS top-5 候选（有则返回 conflict_detected 且不落库），agent 带 action=store|update|merge|skip 二次调用完成决策；配套写入质量闸门与封闭原因枚举。
+
+**Blocked by:** MT-T3
+
+**验收:**
+- [x] 预检：无候选/全低于阈值 → 直接 stored；有候选 → `{status:"conflict_detected", candidates:[...]}` 且**未落库**
+- [x] 候选字段：`{id, title, type, scope, score, content_hash, snippet(≤120字), exact}`；exact=content_hash 相同
+- [x] 决策模式：store 直接落库；update 原地更新（version+1）；merge 新记录 + 旧 targets 标 superseded_by；skip 不落库
+- [x] 校验：action=update/merge 缺 target_ids 或 id 不存在 → rejected(target_not_found)；非法 action → rejected(invalid_action)
+- [x] 质量闸门：empty_content / too_short(<10 中文字符或<20 拉丁) / too_long(>8000) / noise(纯符号) → rejected + 对应 reason
+- [x] 失败姿态：预检/闸门任何异常 → 降级直接 store（宁多存不误删）
+- [x] `source` 可选参数落到 v3 列
+- [x] 单测：全状态机路径 + 闸门各 reason + 任何拒绝都返回结构化枚举（不抛异常）
+
+### MT-T6 — 软删除 + 版本 + merge 图转移
+
+**What to build:** memory_forget 默认软删除（hard=true 物理删）；merge 时旧记忆的 associations/content_refs 转移到新记录，知识图不断链。
+
+**Blocked by:** MT-T5
+
+**验收:**
+- [x] forget 默认 `deleted_at=now`，返回 `{status:"forgotten", soft:true}`；hard=true 物理删除
+- [x] 软删后：检索/traverse 不可见；memory_get 仍可读（审计）
+- [x] merge 落库：图转移（targets 出边+入边 + content_refs 复制到新记录）；importance 取 max；返回 `{status:"merged", id, superseded:[ids]}`
+- [x] update 落库：version+1、updated_at 刷新、content_hash 重算、FTS 同步
+- [x] 单测：软删可见性矩阵；merge 后关联边完整迁移；version 单调递增
+
+### MT-T7 — 技能文件 + 全局指令文档同步
+
+**What to build:** agent 侧行为文档跟上新协议：/remember 改为两段式流程，/recall 更新搜索说明，全局 memory-mcp.md 同步工具协议。
+
+**Blocked by:** MT-T5, MT-T6
+
+**验收:**
+- [x] `skills/remember.md`：预检 → conflict_detected → 决策调用（含四动作选择指引：状态类倾向 merge、无增量 skip）
+- [x] `skills/recall.md`：strategy 字段用法、关键词检索技巧（同义词并列）、semantic 未启用的说明
+- [x] `skills/memory-status.md`：capabilities 展示
+- [x] `~/.claude/memory-mcp.md` 同步（**先定位源文件**：可能由 GUI 安装器覆盖生成，若如此须改源重建，同 memory 里记的教训）
+- [x] 更新后的技能文件在本机实测：/remember 走一次完整两段式流程
+
+### MT-T8 — 本机全量测试 + 部署 96 + 真机验收
+
+**Status:** ✅ 完成（43 单测全绿；部署 96 端口 14020/40021；真机验收通过：caps/jieba 搜索/两段式未落库/skip/闸门/严格 target 校验/merge importance max/merge 原子性）
+**code-review 修复**（review 后补）：merge 单事务化（原两段事务+兜底可能重复落库）、merge importance 强制取 max、target_ids 部分无效改为拒绝（原静默丢弃）、hybrid_search 失败返回空契约、FTS 重建失败不阻断启动、并发迁移 BEGIN IMMEDIATE 串行化（真实部署竞态）、REST 列表软删过滤 + 保留 message、删 0 字节垃圾文件
+—— Web UI 待用户浏览器复核；云上跟进未做
+
+**What to build:** 测试全绿、镜像重建、部署 96、存量 301 条迁移验证、全链路真机验收。
+
+**Blocked by:** MT-T4, MT-T6, MT-T7
+
+**验收:**
+- [x] 单测全绿：`python -m unittest`（分词/FTS/RRF/阈值/strategy/状态机/闸门/软删/迁移/同步）
+- [x] 部署前**先备份** 96 `/data/memory/claude-memory.db`
+- [x] `docker compose build`（jieba 走阿里云 PyPI）+ 部署 96（方式对齐上次：镜像传输或 96 直接 build）
+- [x] 真机：stats 显示 `capabilities.fts=true, tokenizer="jieba"`；semantic 返回明确 message
+- [x] 真机：中文子词召回（搜"智能"命中含"人工智能"的历史记忆）
+- [x] 真机：memory_store 相似内容 → conflict_detected + 候选 → action=merge 二次调用 → 检索确认合并生效
+- [x] 存量 301 条抽样验证全部可 FTS 检索 + 总数校验
+- [x] Web UI（:40021）搜索正常
+- [x] 云上环境（123.56.66.84）按惯例跟进

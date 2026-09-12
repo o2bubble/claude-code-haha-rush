@@ -166,6 +166,27 @@ export async function createBashShellProvider(
         commandParts.push(`source ${quote([finalPath])} 2>/dev/null || true`)
       }
 
+      // Plugin runtime PATH prepend (plugin-nodejs-runtime T3): the snapshot's
+      // `export PATH=...` clobbers any PATH env override, so re-prepend AFTER
+      // sourcing it. Reading the session env var here (not caching) makes GUI
+      // pushes effective on the next command. The stored value is a raw dir
+      // list separated by ';'; the join with the EXISTING $PATH uses ':' —
+      // POSIX PATH separator on every bash (Git Bash included).
+      {
+        const prepend = getSessionEnvVars().get('CLAUDE_PLUGIN_PATH_PREPEND')
+        if (prepend) {
+          const dirs = prepend
+            .split(';')
+            .filter(d => d.length > 0)
+            .map(d => windowsPathToPosixPath(d))
+          if (dirs.length > 0) {
+            // $PATH must stay OUTSIDE quote() — quoting makes it a literal
+            // '$PATH' string (no expansion) and destroys the rest of PATH.
+            commandParts.push(`export PATH=${quote([dirs.join(':')])}:$PATH`)
+          }
+        }
+      }
+
       // Source session environment variables captured from session start hooks
       const sessionEnvScript = await getSessionEnvironmentScript()
       if (sessionEnvScript) {

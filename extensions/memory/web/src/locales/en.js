@@ -9,6 +9,7 @@ export const en = {
   'login.subtitle': 'Enter password to continue',
   'login.password': 'Password',
   'login.error': 'Incorrect password',
+  'login.notConfigured': 'Password not configured — set VITE_MEMORY_PASSWORD at build time',
   'login.button': 'Login',
   'login.loading': '...',
 

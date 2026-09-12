@@ -11,7 +11,11 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 /// 运行中的插件事进程描述(状态信息, 无 Child 句柄——Child 由管理线程持有)。
+/// 序列化 camelCase(与前端 PluginProcessInfo 的 processId 字段对齐——list_all invoke
+/// 曾以 snake process_id 返回, 前端读 processId 得 undefined → WorkerPanel 显示
+/// "插件进程 undefined" 空名行, 用户实测)。
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginProcessInfo {
     pub process_id: String,
     pub status: String, // stopped|starting|running|error|killed
@@ -25,8 +29,9 @@ pub struct PluginProcessRegistry {
     pub pids: Mutex<std::collections::HashMap<String, u32>>,
     pub ports: Mutex<std::collections::HashMap<String, u16>>,
     pub statuses: Mutex<std::collections::HashMap<String, String>>,
-    /// spawn 时记录进程声明(command/args/env)——WorkerPanel 重启时从这取, 不需前端传。
-    pub commands: Mutex<std::collections::HashMap<String, (String, Vec<String>, std::collections::HashMap<String, String>)>>,
+    /// spawn 时记录进程声明(command/args/env/cwd)——WorkerPanel 重启时从这取, 不需前端传。
+    /// cwd = 插件目录(相对 args 解析基准; None = 用 GUI cwd)。
+    pub commands: Mutex<std::collections::HashMap<String, (String, Vec<String>, std::collections::HashMap<String, String>, Option<String>)>>,
 }
 
 impl PluginProcessRegistry {
@@ -111,14 +116,46 @@ pub fn spawn_plugin_process(
     command: &str,
     args: Vec<String>,
     env: std::collections::HashMap<String, String>,
+    cwd: Option<String>,
 ) -> Result<(), String> {
     let pid_str = process_id.to_string();
     emit_status(&app, &pid_str, "starting", None, None, None);
 
     let mut cmd = Command::new(command);
     cmd.args(&args);
+    // Windows: hide the console window (CREATE_NO_WINDOW) —— 否则子进程启动时
+    // 闪一个黑框(用户实测插件进程/后台进程启动黑框一闪而过)。同 backend 进程做法。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW, 与 lib.rs backend 同款
+    }
+    // 插件目录 cwd: 相对 args(如 git-viewer-server.cjs)在此解析。
+    // 不设则 node 以 GUI 安装目录为 cwd → MODULE_NOT_FOUND(用户实测)。
+    if let Some(c) = cwd.clone().filter(|c| !c.trim().is_empty()) {
+        cmd.current_dir(&c);
+    }
+    // runtime PATH 注入（plugin-nodejs-runtime T2）: 前端把聚合的 runtime 目录列表
+    // （';' 分隔的存储格式, 见 pluginRegistry.aggregateRuntimePaths）放进
+    // CLAUDE_PLUGIN_PATH_PREPEND。这里拆分后用**本平台 PATH 分隔符**重 join 并
+    // prepend 到继承的 PATH——继承语义留在 Rust（webview 拿不到系统 PATH），
+    // PATH 分隔符约定只存在这一处。进程自身 env 不含该变量（插件无感知）。
+    if let Some(prepend) = env.get("CLAUDE_PLUGIN_PATH_PREPEND") {
+        let dirs: Vec<&str> = prepend.split(';').filter(|d| !d.is_empty()).collect();
+        if !dirs.is_empty() {
+            let path_sep = if cfg!(windows) { ";" } else { ":" };
+            let prepend_joined = dirs.join(path_sep);
+            let new_path = match std::env::var("PATH") {
+                Ok(inherited) => format!("{}{}{}", prepend_joined, path_sep, inherited),
+                Err(_) => prepend_joined,
+            };
+            cmd.env("PATH", new_path);
+        }
+    }
     for (k, v) in &env {
-        cmd.env(k, v);
+        if k != "CLAUDE_PLUGIN_PATH_PREPEND" {
+            cmd.env(k, v);
+        }
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -133,8 +170,8 @@ pub fn spawn_plugin_process(
     };
     let pid = child.id();
     registry().pids.lock().unwrap().insert(pid_str.clone(), pid);
-    // 记录进程声明(重启用)——command/args/env 来自插件 manifest。
-    registry().commands.lock().unwrap().insert(pid_str.clone(), (command.to_string(), args.clone(), env.clone()));
+    // 记录进程声明(重启用)——command/args/env/cwd 来自插件 manifest。
+    registry().commands.lock().unwrap().insert(pid_str.clone(), (command.to_string(), args.clone(), env.clone(), cwd.clone()));
     set_status(&pid_str, "starting"); // still starting until port
 
     // 管理线程: 读 stdout 找 PLUGIN_PORT; stderr 日志; 后台检查 wait/崩溃。
@@ -229,6 +266,34 @@ pub fn kill_plugin_process(app: &AppHandle, process_id: &str) -> bool {
     true
 }
 
+/// 纯逻辑: 从 registry 各表(pids/ports/statuses/commands)彻底移除条目。
+/// 返回曾存在于 statuses 表的 id 数(供调用方判断是否需广播/记日志)。
+pub fn forget_entries(process_ids: &[String]) -> usize {
+    let reg = registry();
+    let mut found = 0usize;
+    for id in process_ids {
+        reg.pids.lock().unwrap().remove(id);
+        reg.ports.lock().unwrap().remove(id);
+        reg.commands.lock().unwrap().remove(id);
+        if reg.statuses.lock().unwrap().remove(id).is_some() {
+            found += 1;
+        }
+    }
+    found
+}
+
+/// 遗忘进程条目 + 广播 `removed` 状态让前端 store 删行。
+///
+/// 卸载/禁用插件时用。kill_plugin_process 只把状态置为 "killed"、条目留在 statuses 表
+/// → list_all() 的"stopped 占位"会一直返回它 → WorkerPanel 残留已卸载插件的行;
+/// 且 commands 表还留着启动声明, 点 ↻ 会从已删除的目录重新拉起 node。forget 两者都清。
+pub fn forget_plugin_processes(app: &AppHandle, process_ids: &[String]) {
+    forget_entries(process_ids);
+    for id in process_ids {
+        emit_status(app, id, "removed", None, None, None);
+    }
+}
+
 /// 杀全部插件事进程(GUI 退出清理——防孤儿, 占端口)。遍历 pid 表 kill tree。
 pub fn kill_all_plugin_processes() {
     let pids: Vec<u32> = registry().pids.lock().unwrap().values().copied().collect();
@@ -245,31 +310,41 @@ pub fn kill_all_plugin_processes() {
     registry().pids.lock().unwrap().clear();
 }
 
-/// 重启: kill 旧(若有) → spawn 新。command/args/env 优先用 registry 里记录的
+/// 重启: kill 旧(若有) → spawn 新。command/args/env/cwd 优先用 registry 里记录的
 /// 进程声明(WorkerPanel 重启只需传 process_id); 若传了非空 command 则用新的。
+/// cwd 语义: 插件目录, 相对 args(如 git-viewer-server.cjs)在此解析——不传则用
+/// GUI 进程 cwd(旧插件零回归; 插件用绝对 args 或依赖 PATH 命令不受影响)。
 pub fn restart_plugin_process(
     app: &AppHandle,
     process_id: &str,
     command: &str,
     args: Vec<String>,
     env: std::collections::HashMap<String, String>,
+    cwd: Option<String>,
 ) -> Result<(), String> {
-    let (cmd, a, e) = if !command.is_empty() {
-        (command.to_string(), args, env)
+    let (cmd, a, e, c) = if !command.is_empty() {
+        (command.to_string(), args, env, cwd)
     } else {
         let guard = registry().commands.lock().unwrap();
-        guard.get(process_id).cloned().unwrap_or_else(|| {
-            let msg = format!("unknown process_id: {process_id} (no saved command)");
-            emit_status(app, process_id, "error", None, None, Some(msg.clone()));
-            (String::new(), Vec::new(), Default::default())
-        })
-        // 解锁后使用(克隆出来)
+        guard
+            .get(process_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                let msg = format!("unknown process_id: {process_id} (no saved command)");
+                emit_status(app, process_id, "error", None, None, Some(msg.clone()));
+                (
+                    String::new(),
+                    Vec::new(),
+                    Default::default(),
+                    None,
+                )
+            })
     };
     if cmd.is_empty() {
         return Err(format!("unknown process_id: {process_id} (no saved command)"));
     }
     let _ = kill_plugin_process(app, process_id);
-    spawn_plugin_process(app.clone(), process_id, &cmd, a, e)
+    spawn_plugin_process(app.clone(), process_id, &cmd, a, e, c)
 }
 
 // ── 单元测试: 纯函数 ──
@@ -282,5 +357,45 @@ mod tests {
         assert_eq!(parse_plugin_port_line("PLUGIN_PORT=8300"), Some(8300));
         assert_eq!(parse_plugin_port_line("some log PLUGIN_PORT= 8301 tail"), Some(8301));
         assert_eq!(parse_plugin_port_line("no port here"), None);
+    }
+
+    /// 序列化契约回归锁: list_plugin_processes invoke 返回必须 camelCase(processId),
+    /// 前端据此读——曾是 snake(process_id) → WorkerPanel 空名行 "插件进程 undefined"。
+    #[test]
+    fn plugin_process_info_serializes_camel_case() {
+        let info = PluginProcessInfo {
+            process_id: "git-viewer-server".into(),
+            status: "running".into(),
+            port: Some(8304),
+            pid: Some(1234),
+            error: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"processId\":\"git-viewer-server\""), "got: {json}");
+        assert!(json.contains("\"status\":\"running\""));
+        assert!(json.contains("\"port\":8304"));
+        assert!(!json.contains("process_id"), "snake leaked: {json}");
+    }
+
+    /// 回归锁: forget 后条目不再出现在 list_all()(WorkerPanel 不残留已卸载插件的行)。
+    /// 曾因 kill 只置 "killed" 状态、条目留在 statuses 表 → list_all 的占位分支一直返回它。
+    #[test]
+    fn forget_removes_entry_from_list_all() {
+        let reg = registry();
+        let id = "test-forget-regression".to_string();
+        reg.pids.lock().unwrap().insert(id.clone(), 999999);
+        reg.ports.lock().unwrap().insert(id.clone(), 8500);
+        reg.statuses.lock().unwrap().insert(id.clone(), "running".to_string());
+        reg.commands.lock().unwrap().insert(
+            id.clone(),
+            ("node".into(), vec!["x.cjs".into()], Default::default(), None),
+        );
+        assert!(list_all().iter().any(|p| p.process_id == id), "precondition");
+        forget_entries(&[id.clone()]);
+        assert!(
+            !list_all().iter().any(|p| p.process_id == id),
+            "forgotten entry must not reappear via list_all placeholder"
+        );
+        assert!(!reg.commands.lock().unwrap().contains_key(&id), "commands must be cleared (↻ must not resurrect)");
     }
 }

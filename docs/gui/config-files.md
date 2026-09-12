@@ -24,6 +24,7 @@
 | `<WORK_DIR>/.claude/data.db` | 工作区 | plans / desktops / desktop_items（SQLite） | GUI |
 | `~/.claude/notes/notes.db` | 用户级 | 笔记（跨工作区共享） | GUI |
 | `~/.claude/.env.profiles/*.env` | 用户级 | Profile 环境（全局共享） | Profile 管理 |
+| `~/.claude/.env.profiles/archive/*.env` | 用户级 | **已归档的旧 Profile**（不被加载，仅留档） | 启动迁移自动移入 |
 | `<WORK_DIR>/.claude/active-profile` → `~/.claude/.env.active` | 双标记 | 激活的 Profile（写读路径必须一致） | `switch_profile` |
 
 ## 我要改 X，去哪个文件？
@@ -61,4 +62,5 @@
 
 - 后端每次 spawn 会把内置文档自动拷到 `~/.claude/`：`gui-agent-guide.md` / `gui-ref-system.md` / `gui-config-files.md`（本文件）。内容与 GUI 版本同步，改错会覆盖。
 - 环境变量 / Profile / 网络排查看 GUI 工具栏「运行环境诊断」面板，一键修复。
-- Profile 只认 `~/.claude/.env.profiles/*.env`，别在项目目录建 `.env.profiles` 碰运气。
+- Profile 只认 `~/.claude/.env.profiles/*.env`（**顶层**，不含 `archive/` 子目录），别在项目目录建 `.env.profiles` 碰运气。
+- **启动迁移**（`gui/src-tauri/src/migrations.rs`）会自动整理旧 Profile：同 api + 同 key 的旧模型 Profile 合并为当前模型名的新 Profile，原文件移入 `archive/`；被合并的若是激活 Profile，激活态一并跟随。看到 `archive/` 里的文件属正常留档，**不要**把它们当成可用 Profile。

@@ -20,6 +20,12 @@ Parse the output. Note especially:
 - **Total memories** — is the knowledge base growing?
 - **By type** — balance of facts vs experiences vs lessons
 - **By scope** — which projects/domains dominate?
+- **capabilities** — `{fts, jieba, tags, like_fallback, embedding}`: which retrieval
+  channels are actually available. If `fts` is false the server fell back to LIKE
+  matching (much weaker Chinese recall); if `jieba` is false, tokenization runs on
+  character bigrams only (still works, slightly lower precision). `embedding: false` is
+  expected — there is no vector channel in this build.
+- **superseded / deleted** — memories retired by merge / soft delete (audit counters, not errors)
 
 ### 2. Get tag overview
 
@@ -44,6 +50,8 @@ Present a summary table:
 | Tags | N |
 | Associations | N (content refs: N) |
 | DB size | X KB |
+| Capabilities | fts: on/off, tokenizer: jieba/bigram |
+| Superseded / Deleted | N / N |
 
 If you notice tags that look like duplicates, suggest:
 

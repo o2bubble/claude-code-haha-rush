@@ -145,53 +145,98 @@ unsafe fn read_ptr(h: HANDLE, addr: usize) -> Option<usize> {
     Some(usize::from_le_bytes(out))
 }
 
+/// Read a UNICODE_STRING (Length u16 | MaxLength u16 | pad u32 | Buffer ptr @0x08)
+/// at `addr` in the target process.
+unsafe fn read_ustring(h: HANDLE, addr: usize) -> Option<String> {
+    let mut head = [0u8; 0x10];
+    if !read_mem(h, addr, &mut head) {
+        return None;
+    }
+    let len = u16::from_le_bytes([head[0], head[1]]) as usize;
+    if len == 0 || len > 0x8000 {
+        return None;
+    }
+    let buffer = read_ptr(h, addr + 0x08)?;
+    if buffer == 0 {
+        return None;
+    }
+    let mut bytes = vec![0u8; len];
+    if !read_mem(h, buffer, &mut bytes) {
+        return None;
+    }
+    let wide: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    Some(String::from_utf16_lossy(&wide))
+}
+
+/// (CommandLine, CurrentDirectory) from the target's PEB, or None if the reads
+/// fail (exited / access denied / bitness mismatch).
+unsafe fn read_process_strings(h: HANDLE) -> Option<(String, String)> {
+    let mut pbi = [0u8; 0x30];
+    let mut ret_len = 0u32;
+    if NtQueryInformationProcess(
+        h,
+        0, // ProcessBasicInformation
+        pbi.as_mut_ptr() as *mut core::ffi::c_void,
+        pbi.len() as u32,
+        &mut ret_len,
+    ) != 0
+    {
+        return None;
+    }
+    let peb = read_ptr(h, pbi.as_ptr() as usize + 0x08)?;
+    let params = read_ptr(h, peb + 0x20)?;
+    // RTL_USER_PROCESS_PARAMETERS (x64): CurrentDirectory @0x38 (CURDIR =
+    // UNICODE_STRING DosPath + HANDLE), CommandLine @0x70.
+    let cmd = read_ustring(h, params + 0x70)?;
+    let cwd = read_ustring(h, params + 0x38).unwrap_or_default();
+    Some((cmd, cwd))
+}
+
 fn read_process_command_line(pid: u32) -> Option<String> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
         if h.is_null() {
             return None;
         }
-        let result = (|| {
-            let mut pbi = [0u8; 0x30];
-            let mut ret_len = 0u32;
-            if NtQueryInformationProcess(
-                h,
-                0, // ProcessBasicInformation
-                pbi.as_mut_ptr() as *mut core::ffi::c_void,
-                pbi.len() as u32,
-                &mut ret_len,
-            ) != 0
-            {
-                return None;
-            }
-            let peb = read_ptr(h, pbi.as_ptr() as usize + 0x08)?;
-            let params = read_ptr(h, peb + 0x20)?;
-            // UNICODE_STRING: Length(u16) | MaximumLength(u16) | Buffer(ptr @0x08)
-            let mut cmd = [0u8; 0x10];
-            if !read_mem(h, params + 0x70, &mut cmd) {
-                return None;
-            }
-            let len = u16::from_le_bytes([cmd[0], cmd[1]]) as usize;
-            if len == 0 || len > 0x8000 {
-                return None;
-            }
-            let buffer = read_ptr(h, params + 0x70 + 0x08)?;
-            if buffer == 0 {
-                return None;
-            }
-            let mut bytes = vec![0u8; len];
-            if !read_mem(h, buffer, &mut bytes) {
-                return None;
-            }
-            let wide: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            Some(String::from_utf16_lossy(&wide))
-        })();
+        let result = read_process_strings(h).map(|(cmd, _)| cmd);
         let _ = CloseHandle(h);
         result
     }
+}
+
+/// (pid, parent_pid, cmd, cwd) for every live process. One snapshot + PEB reads.
+/// Used by the orphan/cwd sweeps below.
+pub fn snapshot_processes() -> Vec<(u32, u32, String, String)> {
+    let mut out = Vec::new();
+    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snap == INVALID_HANDLE_VALUE {
+        return out;
+    }
+    unsafe {
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut entry) != 0 {
+            loop {
+                let pid = entry.th32ProcessID;
+                let ppid = entry.th32ParentProcessID;
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
+                if !h.is_null() {
+                    if let Some((cmd, cwd)) = read_process_strings(h) {
+                        out.push((pid, ppid, cmd, cwd));
+                    }
+                    let _ = CloseHandle(h);
+                }
+                if Process32NextW(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
 }
 
 /// Terminate every process (plus its descendants) whose command line contains
@@ -228,6 +273,66 @@ pub fn kill_by_command_line(needle: &str) {
             terminate(p);
         }
     }
+}
+
+/// Normalize for comparison: lowercase + forward slashes + one trailing slash.
+fn norm_dir(p: &str) -> String {
+    let mut s = p.replace('\\', "/").to_lowercase();
+    if !s.ends_with('/') {
+        s.push('/');
+    }
+    s
+}
+
+/// Kill every process whose **current working directory** is `dir` or below.
+/// This is the handle holder that blocks `remove_dir_all` on Windows: a
+/// process's cwd is an open directory handle and, unlike open *files*, it is
+/// invisible to the user and survives force-kill of its parent. Plugin
+/// background processes are spawned with cwd = the plugin dir, so orphaned
+/// instances pin that directory forever. Returns how many were killed.
+pub fn kill_processes_with_cwd_under(dir: &str) -> usize {
+    let base = norm_dir(dir);
+    let procs = snapshot_processes();
+    let mut killed = 0usize;
+    for (pid, _, _, cwd) in procs {
+        if pid == std::process::id() {
+            continue;
+        }
+        let cwd_n = norm_dir(&cwd);
+        if cwd_n == base || cwd_n.starts_with(&base) {
+            kill_process_tree(pid);
+            killed += 1;
+        }
+    }
+    killed
+}
+
+/// Kill **orphaned** plugin processes: parent PID no longer exists AND cwd is
+/// inside `plugins_root`. Cleanup for processes whose GUI was force-killed /
+/// crashed / updated (bypassing RunEvent::Exit) — they hold their plugin dir
+/// hostage so uninstall fails with os error 32. Returns how many were killed.
+///
+/// The two-way condition matters: a live GUI's own plugin process also has a
+/// cwd under plugins_root, but its parent is alive — never touched.
+pub fn kill_orphan_plugin_processes(plugins_root: &str) -> usize {
+    let base = norm_dir(plugins_root);
+    let procs = snapshot_processes();
+    let live: std::collections::HashSet<u32> = procs.iter().map(|(pid, _, _, _)| *pid).collect();
+    let mut killed = 0usize;
+    for (pid, ppid, _, cwd) in &procs {
+        if *pid == std::process::id() {
+            continue;
+        }
+        if live.contains(ppid) {
+            continue; // parent alive — this is a running GUI's child
+        }
+        let cwd_n = norm_dir(cwd);
+        if cwd_n.starts_with(&base) {
+            kill_process_tree(*pid);
+            killed += 1;
+        }
+    }
+    killed
 }
 
 // ── Session-end cleanup window ──
@@ -320,4 +425,27 @@ pub fn install_session_end_cleanup(callback: impl Fn() + Send + Sync + 'static) 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::norm_dir;
+
+    #[test]
+    fn norm_dir_normalizes_case_separators_and_trailing_slash() {
+        assert_eq!(norm_dir(r"C:\Users\X\AppData\plugins"), "c:/users/x/appdata/plugins/");
+        assert_eq!(norm_dir("C:/Users/X/AppData/plugins/"), "c:/users/x/appdata/plugins/");
+        assert_eq!(norm_dir(r"C:\Users\X\AppData\plugins\\").replace("//", "/"), "c:/users/x/appdata/plugins/");
+    }
+
+    #[test]
+    fn norm_dir_prefix_match_does_not_span_sibling_dirs() {
+        let base = norm_dir(r"C:\p\plugins\git-viewer");
+        let sibling = norm_dir(r"C:\p\plugins\git-viewer-extra");
+        assert!(!sibling.starts_with(&base), "sibling dir must not match as child");
+        let child = norm_dir(r"C:\p\plugins\git-viewer\sub");
+        assert!(child.starts_with(&base), "nested dir must match");
+        let itself = norm_dir(r"C:\p\plugins\git-viewer");
+        assert!(itself.starts_with(&base));
+    }
 }

@@ -24,6 +24,12 @@ function makeManifest(overrides?: Partial<PluginManifest>): PluginManifest {
       events: ["chat.stateChanged"],
     },
     processes: [],
+    category: "tool",
+    dependencies: [],
+    installType: "standard",
+    runtimes: [],
+    platforms: [],
+    settings: {},
     ...overrides,
   };
 }

@@ -1,0 +1,57 @@
+{
+  "pluginName": "git-viewer",
+  "displayName": "Git 查看器",
+  "version": "0.1.5",
+  "apiVersion": "1.0",
+  "description": "只读 git 查看工具：工作区改动 diff / 提交历史 / 分支列表。纯查看，不做任何写操作（无 commit/push/rebase）。依赖 nodejs 运行时；git 由 GUI 安装包自带。",
+  "icon": "gitBranch",
+  "category": "tool",
+  "dependencies": [
+    "nodejs"
+  ],
+  "installType": "standard",
+  "contributes": {
+    "panels": [
+      {
+        "id": "git-viewer-panel",
+        "title": "Git 查看器",
+        "panelKind": "in-main",
+        "userManaged": true,
+        "content": {
+          "type": "html",
+          "src": "panel.html"
+        },
+        "process": "git-viewer-server"
+      },
+      {
+        "id": "diff-view",
+        "title": "Git diff",
+        "panelKind": "floating",
+        "userManaged": false,
+        "content": {
+          "type": "html",
+          "src": "diff-view.html"
+        },
+        "process": "git-viewer-server"
+      }
+    ],
+    "commands": [],
+    "events": []
+  },
+  "processes": [
+    {
+      "id": "git-viewer-server",
+      "command": "node",
+      "args": ["git-viewer-server.cjs"],
+      "env": {
+        "CLAUDE_PLUGIN_WORKSPACE": "${workspace}"
+      },
+      "startOn": "workspace_bound"
+    }
+  ],
+  "platforms": [
+    "windows",
+    "macos",
+    "linux"
+  ]
+}

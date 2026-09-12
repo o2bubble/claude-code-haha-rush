@@ -171,17 +171,9 @@ import { type ChannelEntry, getInitialMainLoopModel, getIsNonInteractiveSession,
 const autoModeStateModule = feature('TRANSCRIPT_CLASSIFIER') ? require('./utils/permissions/autoModeState.js') as typeof import('./utils/permissions/autoModeState.js') : null;
 
 // TeleportRepoMismatchDialog, TeleportResumeWrapper dynamically imported at call sites
-import { migrateAutoUpdatesToSettings } from './migrations/migrateAutoUpdatesToSettings.js';
-import { migrateBypassPermissionsAcceptedToSettings } from './migrations/migrateBypassPermissionsAcceptedToSettings.js';
-import { migrateEnableAllProjectMcpServersToSettings } from './migrations/migrateEnableAllProjectMcpServersToSettings.js';
-import { migrateFennecToOpus } from './migrations/migrateFennecToOpus.js';
-import { migrateLegacyOpusToCurrent } from './migrations/migrateLegacyOpusToCurrent.js';
-import { migrateOpusToOpus1m } from './migrations/migrateOpusToOpus1m.js';
-import { migrateReplBridgeEnabledToRemoteControlAtStartup } from './migrations/migrateReplBridgeEnabledToRemoteControlAtStartup.js';
-import { migrateSonnet1mToSonnet45 } from './migrations/migrateSonnet1mToSonnet45.js';
-import { migrateSonnet45ToSonnet46 } from './migrations/migrateSonnet45ToSonnet46.js';
-import { resetAutoModeOptInForDefaultOffer } from './migrations/resetAutoModeOptInForDefaultOffer.js';
-import { resetProToOpusDefault } from './migrations/resetProToOpusDefault.js';
+// 迁移统一入口：11 个一次性迁移全量登记在 MIGRATION_REGISTRY（src/migrations/index.ts），
+// runMigrations 遍历 sync 项执行。新增迁移只需在登记表加一条。
+import { MIGRATION_REGISTRY } from './migrations/index.js';
 import { createRemoteSessionConfig } from './remote/RemoteSessionManager.js';
 /* eslint-enable @typescript-eslint/no-require-imports */
 // teleportWithProgress dynamically imported at call site
@@ -322,23 +314,15 @@ async function logStartupTelemetry(): Promise<void> {
 
 // @[MODEL LAUNCH]: Consider any migrations you may need for model strings. See migrateSonnet1mToSonnet45.ts for an example.
 // Bump this when adding a new sync migration so existing users re-run the set.
+// 迁移全清单见 src/migrations/index.ts 的 MIGRATION_REGISTRY（登记表）。
 const CURRENT_MIGRATION_VERSION = 11;
 function runMigrations(): void {
   if (getGlobalConfig().migrationVersion !== CURRENT_MIGRATION_VERSION) {
-    migrateAutoUpdatesToSettings();
-    migrateBypassPermissionsAcceptedToSettings();
-    migrateEnableAllProjectMcpServersToSettings();
-    resetProToOpusDefault();
-    migrateSonnet1mToSonnet45();
-    migrateLegacyOpusToCurrent();
-    migrateSonnet45ToSonnet46();
-    migrateOpusToOpus1m();
-    migrateReplBridgeEnabledToRemoteControlAtStartup();
-    if (feature('TRANSCRIPT_CLASSIFIER')) {
-      resetAutoModeOptInForDefaultOffer();
-    }
-    if ("external" === 'ant') {
-      migrateFennecToOpus();
+    // 顺序 = MIGRATION_REGISTRY 中 sync 项的声明顺序 —— 改动顺序等于改变行为。
+    for (const m of MIGRATION_REGISTRY) {
+      if (m.trigger !== 'sync' || !m.fn) continue;
+      if (m.condition === false) continue;
+      m.fn();
     }
     saveGlobalConfig(prev => prev.migrationVersion === CURRENT_MIGRATION_VERSION ? prev : {
       ...prev,

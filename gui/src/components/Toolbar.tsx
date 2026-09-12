@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope, Copy, Brain, Gauge } from "lucide-react";
-import { getTree, findParentSplit, toggleGroupHidden, toggleRightPanel, addFloatingPanel, getFloatingPanels, bringFloatingToFront, findTabByPanelId, applyLayoutPreset, LAYOUT_PRESETS, togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
+import { getTree, findParentSplit, toggleGroupHidden, toggleLeftColumn, toggleRightPanel, addFloatingPanel, getFloatingPanels, bringFloatingToFront, findTabByPanelId, applyLayoutPreset, LAYOUT_PRESETS, togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
 import { iconFor } from "../utils/icons";
 import { getRecent, sortByRecent } from "../utils/recentUsage";
 import { getChatState } from "../stores/chatStore";
@@ -202,7 +202,7 @@ const TOOLBAR_BTN_BASE = {
 const btn = (active: boolean): React.CSSProperties => ({
   ...TOOLBAR_BTN_BASE,
   background: active ? "var(--bg-hover)" : "transparent",
-  color: active ? "var(--fg-primary)" : "var(--fg-muted)",
+  color: active ? "var(--fg-primary)" : "var(--fg-secondary)",
 });
 
 // 布局模式按钮开启态：绿色身份色（与布局模式 chrome 一致）
@@ -210,7 +210,7 @@ const LM_ACCENT = "oklch(0.56 0.15 150)";
 const lmBtn = (active: boolean): React.CSSProperties => ({
   ...TOOLBAR_BTN_BASE,
   background: active ? LM_ACCENT : "transparent",
-  color: active ? "var(--fg-inverse)" : "var(--fg-muted)",
+  color: active ? "var(--fg-inverse)" : "var(--fg-secondary)",
   boxShadow: active ? "0 0 0 2px oklch(0.56 0.15 150 / 0.2)" : undefined,
 });
 
@@ -911,7 +911,6 @@ function LayoutPresetDropdown() {
 
 export default function Toolbar() {
   const [, setTick] = useState(0);
-  const [gitBranch, setGitBranch] = useState<string>("");
   const [isDark, setIsDark] = useState(() => isDarkTheme(document.documentElement.dataset.theme));
 
   // Red-dot badge when an update is available (set by startup/panel update check)
@@ -937,22 +936,12 @@ export default function Toolbar() {
 
   useEventHandler<LayoutTreeChangedPayload>(Events.LAYOUT_TREE_CHANGED, () => setTick((t) => t + 1));
 
-  // Git branch — fetch when workDir changes
+  // Git 分支不在工具栏显示 —— 由 git-viewer 插件面板提供（真 git 命令 + 自动刷新）。
+  // 旧实现读 .git/HEAD 且只在 workDir 变化时拉一次：切分支不更新、worktree 下失效，
+  // 常驻显示错误分支比不显示更危险（2026-09-11 移除）。
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const workDir = settingsPayload?.settings?.workDir ?? "";
   const workspaceName = workspaceBasename(workDir);
-  useEffect(() => {
-    if (!workDir) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const branch: string = await invoke("get_git_branch", { path: workDir });
-        if (!cancelled) setGitBranch(branch);
-      } catch { if (!cancelled) setGitBranch(""); console.warn("Git branch fetch failed"); }
-    })();
-    return () => { cancelled = true; };
-  }, [workDir]);
 
   // Session name
   const chatPayload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
@@ -973,7 +962,7 @@ export default function Toolbar() {
           title={t(key)}
           aria-label={t(key)}
           style={btn(isVisible(id))}
-          onClick={() => id === "chat-split" ? toggleRightPanel() : toggleGroupHidden(id)}
+          onClick={() => id === "chat-split" ? toggleRightPanel() : id === "sidebar-left" ? toggleLeftColumn() : toggleGroupHidden(id)}
         >
           <Icon size={16} style={{ pointerEvents: "none" }} />
         </button>
@@ -997,7 +986,7 @@ export default function Toolbar() {
         {workspaceName && (
           <span style={{
             fontSize: 11,
-            color: "var(--fg-secondary)",
+            color: "var(--fg-primary)",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -1048,20 +1037,11 @@ export default function Toolbar() {
         {isDark ? <Sun size={15} style={{ pointerEvents: "none" }} /> : <Moon size={15} style={{ pointerEvents: "none" }} />}
       </button>
 
-      {/* Middle area: git branch + session name */}
+      {/* Middle area: session name */}
       <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, marginLeft: 8 }}>
-        {gitBranch && (
-          <span title={`Git: ${gitBranch}`} style={{
-            fontSize: 11, color: "var(--fg-muted)", fontFamily: "var(--font-mono)",
-            display: "flex", alignItems: "center", gap: 2,
-            maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-          }}>
-            <span style={{ color: "var(--fg-muted)" }}>⎇</span> {gitBranch}
-          </span>
-        )}
         {sessionTitle && (
           <span title={`Session: ${sessionTitle}`} style={{
-            fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-muted)",
+            fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-secondary)",
             maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           }}>
             {sessionTitle}

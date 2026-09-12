@@ -70,22 +70,25 @@ bash install-tools.sh
 
 | 选项 | 说明 |
 |------|------|
-| **DeepSeek v4 Pro** | 预设模板，只需输入 AUTH_TOKEN |
-| **DeepSeek v4 Flash** | 更快但稍弱的模型预设 |
+| **DeepSeek Flash** | 预设模板，只需输入 AUTH_TOKEN |
+| **DeepSeek v4 Pro** | 更强的模型预设 |
 | **Custom** | 自定义模板，手动填写所有字段 |
 
 **配置存储结构：**
 
 ```
 .env.profiles/
-├── deepseek-v4-pro.env    # 每个 .env 文件是一个模型配置（源）
-├── deepseek-v4-flash.env
+├── deepseek-flash.env     # 每个 .env 文件是一个模型配置（源）
+├── deepseek-v4-pro.env
 └── qwen-3.6-plus.env
 
 .env.active                # 当前激活的 Profile 名称
 
 ~/.claude/settings.json    # 切换时写入 "env" 块，CLI 和 IDE 共用
 ```
+
+> DeepSeek 已下线 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`（官方路由到 V4.1-Flash）；
+> 旧 Profile 在 GUI 启动时自动合并为 `deepseek-flash`，原文件移入 `.env.profiles/archive/`。
 
 > 插件启动后自动读取 `.env.profiles/` 下的所有 Profile，填入状态栏下拉框。切换 Profile 时插件会将配置写入 `~/.claude/settings.json` 的 `env` 块，同时重启后端进程以应用新配置。
 

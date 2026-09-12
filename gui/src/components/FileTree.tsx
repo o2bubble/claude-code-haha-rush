@@ -90,6 +90,8 @@ interface FileTreeProps {
   forceRefresh?: number;
   /** 定位到目录树：展开祖先链并选中该文件（编辑器右键"定位目录树"） */
   revealPath?: string | null;
+  /** 每次 reveal 递增；同一文件再次定位时 path 不变，靠它重新触发滚动 */
+  revealNonce?: number;
 }
 
 const S = {
@@ -131,9 +133,9 @@ function sortFileEntries(entries: FileEntry[]): FileEntry[] {
   return sorted;
 }
 
-function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath, selectedPath, onSelect, treeVersion, revealPath }: {
+function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath, selectedPath, onSelect, treeVersion, revealPath, revealNonce }: {
   entry: FileEntry; depth: number; showHidden: boolean; onOpenFile: (path: string) => void; refreshParent: () => void; rootPath: string;
-  selectedPath?: string | null; onSelect?: (path: string | null) => void; treeVersion?: number; revealPath?: string | null;
+  selectedPath?: string | null; onSelect?: (path: string | null) => void; treeVersion?: number; revealPath?: string | null; revealNonce?: number;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FileEntry[] | null>(null);
@@ -146,7 +148,11 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
   const nodeRef = useRef<HTMLDivElement>(null);
 
   // 定位目录树：若本目录是 revealPath 的祖先 → 自动展开并加载子项
-  const norm = (p: string) => p.replace(/\\/g, "/");
+  // 比较 Windows 语义大小写不敏感(盘符/段大小写来自不同来源: workDir vs agent ref chip)
+  const norm = (p: string) => {
+    const s = p.replace(/\\/g, "/").replace(/\/+$/, "");
+    return s.match(/^[a-z]:/i) ? s.toLowerCase() : s;
+  };
   const revealNorm = revealPath ? norm(revealPath) : null;
   const entryNorm = norm(entry.path);
   const isRevealAncestor = !!entry.isDir && !!revealNorm && revealNorm.startsWith(entryNorm + "/");
@@ -160,11 +166,48 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRevealAncestor]);
 
-  // 定位到目标文件后滚入视野
+  // 定位到目标文件后滚入视野。
+  //
+  // 不能挂载即滚：祖先目录的子项是**异步**加载的(refresh → fileService.readDir)，
+  // 本行挂载时它下方/上方的兄弟行还没渲染完，此刻布局高度不足，scrollIntoView
+  // 会算错滚动量；等剩余行陆续渲染出来，位置就过时了(实测定位到了但停在视口外)。
+  //
+  // 收敛条件用「本行**是否真在视口内**」而不是「布局是否稳定」——后者要靠
+  // requestAnimationFrame 逐帧观察，而 rAF 在**不渲染的页面会停止触发**
+  // （面板在后台布局组/窗口最小化/切到别的标签），实测循环跑到第 2 帧就没了，
+  // 差一帧没滚。setTimeout 在后台同样触发，且"到位即停"天然幂等。
   useEffect(() => {
-    if (isRevealTarget) nodeRef.current?.scrollIntoView({ block: "center" });
+    if (!isRevealTarget) return;
+    let cancelled = false;
+    const deadline = Date.now() + 1500;
+    const ensureVisible = () => {
+      if (cancelled) return;
+      const el = nodeRef.current;
+      if (el) {
+        // 找可滚动祖先：内容高于容器时才有滚动条（面板窄→常为 null，直接跳过）
+        let c: HTMLElement | null = el.parentElement;
+        while (c && c !== document.body) {
+          const oy = getComputedStyle(c).overflowY;
+          if ((oy === "auto" || oy === "scroll") && c.scrollHeight > c.clientHeight) break;
+          c = c.parentElement;
+        }
+        if (c) {
+          const er = el.getBoundingClientRect();
+          const cr = c.getBoundingClientRect();
+          const inView = er.top >= cr.top - 1 && er.bottom <= cr.bottom + 1;
+          if (inView) return;                      // 已到位 → 停，不再打扰
+          el.scrollIntoView({ block: "center" });
+          if (Date.now() >= deadline) return;      // 滚过最后一次仍不达标 → 放弃
+        }
+      }
+      if (Date.now() < deadline) setTimeout(ensureVisible, 60);
+    };
+    ensureVisible();
+    return () => { cancelled = true; };
+    // revealNonce 参与依赖：对同一文件再次「定位目录树」时 path 不变，
+    // 仅靠 isRevealTarget 这个布尔无法重新触发（曾表现为"再点一次没反应"）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isRevealTarget]);
+  }, [isRevealTarget, revealNonce]);
 
   const refresh = useCallback(async () => {
     if (!entry.isDir) return;
@@ -357,7 +400,7 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
         {loading && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--fg-muted)" }}>...</span>}
       </div>
       {isDir && expanded && children && children.map((child) => (
-        <DirNode key={child.path} entry={child} depth={depth + 1} showHidden={showHidden} onOpenFile={onOpenFile} refreshParent={refresh} rootPath={rootPath} selectedPath={selectedPath} onSelect={onSelect} treeVersion={treeVersion} />
+        <DirNode key={child.path} entry={child} depth={depth + 1} showHidden={showHidden} onOpenFile={onOpenFile} refreshParent={refresh} rootPath={rootPath} selectedPath={selectedPath} onSelect={onSelect} treeVersion={treeVersion} revealPath={revealPath} revealNonce={revealNonce} />
       ))}
       {deletePending && (
         <ConfirmOverlay
@@ -374,7 +417,7 @@ function DirNode({ entry, depth, showHidden, onOpenFile, refreshParent, rootPath
 
 // ── Root component ──
 
-function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath }: FileTreeProps) {
+function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath, revealNonce }: FileTreeProps) {
   const [rootEntries, setRootEntries] = useState<FileEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState<"file" | "dir" | null>(null);
@@ -558,7 +601,7 @@ function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath 
         <div style={S.empty}>{t("files.emptyFolder")}</div>
       )}
       {rootEntries && rootEntries.map((entry) => (
-        <DirNode key={entry.path} entry={entry} depth={0} showHidden={showHidden} onOpenFile={onOpenFile} refreshParent={refreshRoot} rootPath={rootPath || ""} selectedPath={selectedPath} onSelect={setSelectedPath} treeVersion={treeVersion} revealPath={revealPath} />
+        <DirNode key={entry.path} entry={entry} depth={0} showHidden={showHidden} onOpenFile={onOpenFile} refreshParent={refreshRoot} rootPath={rootPath || ""} selectedPath={selectedPath} onSelect={setSelectedPath} treeVersion={treeVersion} revealPath={revealPath} revealNonce={revealNonce} />
       ))}
       {deleteTarget && (
         <ConfirmOverlay

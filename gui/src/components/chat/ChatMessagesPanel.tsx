@@ -5,6 +5,7 @@ import { useChatBridge } from "./useChatBridge";
 import { MessageList } from "./MessageList";
 import { MessageSearchDialog } from "./MessageSearchDialog";
 import { TimeLineBar } from "./TimeLineBar";
+import { promptPreview, type UserPrompt } from "./timelineMath";
 import { useBackend } from "../../services/backendService";
 import { useEvent } from "../../services/useService";
 import { Events, type ChatStateChangedPayload, type SettingsChangedPayload } from "../../services/events";
@@ -31,6 +32,16 @@ function ChatMessagesPanelImpl() {
     () => state.messages.map((m) => m.timestamp),
     [state.messages]
   );
+
+  // 用户提示刻度：回溯"我在哪儿说过什么"（悬停显示预览）。preview 已折叠空白/截断。
+  const userPrompts = useMemo(() => {
+    const out: UserPrompt[] = [];
+    state.messages.forEach((m, i) => {
+      if (m.role !== "user") return;
+      out.push({ index: i, time: m.timestamp, preview: promptPreview(m.content) });
+    });
+    return out;
+  }, [state.messages]);
 
   useChatBridge(backend.port);
 
@@ -83,7 +94,7 @@ function ChatMessagesPanelImpl() {
 
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
         {showTimeline && messageTimestamps.length > 0 && (
-          <TimeLineBar timestamps={messageTimestamps} onSeek={jumpTo} />
+          <TimeLineBar timestamps={messageTimestamps} onSeek={jumpTo} userPrompts={userPrompts} />
         )}
 
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>

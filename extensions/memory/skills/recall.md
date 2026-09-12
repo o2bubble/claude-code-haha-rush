@@ -37,9 +37,19 @@ For debugging tasks, also search specifically for lessons:
 memory_search(query="<error keyword>", mode="hybrid", type=["lesson"], limit=5)
 ```
 
+**Search notes:**
+- Search is keyword-based (BM25 + CJK bigrams, RRF-fused with tags). Short, distinctive
+  terms work best; spread synonyms across your 2-3 attempts instead of one long sentence.
+- Check `strategy` in the response: `hybrid`/`fts`/`tag` are the normal paths; `like`
+  means FTS5 is unavailable on this server; `none` + a `message` means nothing ran.
+- `mode="semantic"` is not available (no embedding provider) — it returns an explicit
+  message, so don't rely on it; use `hybrid`.
+- At most ~3 search attempts per turn, then proceed with what you have.
+
 ### 3. Expand the most relevant hits
 
-For each result with similarity ≥ 0.4:
+For the top-ranked hits that look relevant (use ranking order; `score` scales differ
+between strategies):
 
 ```
 memory_get(id=<id>)

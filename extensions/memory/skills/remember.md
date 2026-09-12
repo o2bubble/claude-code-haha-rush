@@ -21,9 +21,8 @@ Scan the last ~20 turns. Identify:
 
 ### 2. Search for related memories (multi-angle)
 
-This is the MOST IMPORTANT step. For each candidate finding, run 2-3 searches with different
-angles — don't just search for near-duplicates, but also for **thematically related** memories
-that would benefit from being linked:
+Run 2-3 searches with different angles — don't just search for near-duplicates, but also for
+**thematically related** memories that would benefit from being linked:
 
 ```
 memory_search(query="<finding summary>", mode="hybrid", limit=5)
@@ -31,24 +30,38 @@ memory_search(query="<related angle 1>", mode="hybrid", limit=5)
 memory_search(query="<related angle 2>", mode="hybrid", limit=5)
 ```
 
-Separate results into three buckets:
+Separate results into buckets:
 
-- **MERGE target** (similarity ≥ 0.7 AND same scope/topic) → merge content instead of duplicating
-- **ASSOCIATION target** (similarity 0.3–0.7 OR different scope but related topic) → link later in step 4
+- **ASSOCIATION target** (related topic) → link later in step 4
+- **Likely duplicate/merge candidate** → note its id; the server re-detects it automatically
+  in step 3 (you don't need to decide merge-vs-create here)
 - **No match** → create fresh
 
-### 3. Merge or create
+Note: `mode="hybrid"` scores are RRF fusion scores (~0.01–0.03 scale) — use them for
+ranking, not as absolute similarity thresholds.
 
-**MERGE** (similarity ≥ 0.7, same scope):
-```
-memory_update(id=<id>, content=<merged content>)
-```
+### 3. Store with conflict resolution
 
-- Append the new insight to existing content, or rewrite to combine both
-- Bump `importance` by 0.1 if this finding reinforces the old memory (cap at 1.0)
-- Update `tags` to include any new relevant tags
+Call `memory_store` with NO `action` — the server pre-checks for similar memories:
 
-**CREATE** (no good merge target):
+- `{status: "stored"}` → done, note the id.
+- `{status: "conflict_detected", candidates: [...]}` → **nothing was persisted yet**.
+  Inspect the candidates and re-call with an action:
+
+| Situation | Action |
+|-----------|--------|
+| Genuinely new information | `action="store"` (create anyway) |
+| Same fact, better/more current wording; old one superseded | `action="update", target_ids=[<id>]` |
+| Complementary details on the same topic → one richer memory | `action="merge", target_ids=[ids], merged_content="<combined>"` |
+| Candidate `exact: true` (identical content_hash) | `action="skip"` (unless rewriting via update) |
+
+Judgment guide:
+- **State-like** (preferences, rules, facts): same thing described again → merge or skip;
+  explicitly outdated → update.
+- **Event-like** (what happened): same event's stages/causes → merge into one narrative.
+- After a merge, raise `importance` if the result is more complete than its parts
+  (e.g. two 0.7 memories can become 0.8).
+
 ```
 memory_store(
   type=<fact|experience|lesson>,
@@ -57,7 +70,8 @@ memory_store(
   scope=<global|domain:<name>|project:<name>>,
   tags=[...],
   importance=<0.5 default, 0.7+ for critical lessons>,
-  associations=[...]   # include association targets from step 2
+  associations=[...],  # include association targets from step 2
+  source=<session id / where learned>   # optional provenance
 )
 ```
 
@@ -76,6 +90,9 @@ memory_store(
 ```
 
 Use `memory://<id>` links to reference related memories within the content body.
+
+**Quality gate:** content must be 10+ CJK chars (or 20+ chars total), max 8000 chars —
+write complete sentences, not fragments.
 
 ### 4. Build associations
 

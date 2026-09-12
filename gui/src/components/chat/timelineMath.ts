@@ -5,6 +5,88 @@
 
 export type Tick = { time: number; kind: "day" | "hour" | "start" | "end"; showLabel?: boolean };
 
+/** 用户提示刻度：时间线上一类独立标记，用于回溯"我在哪儿说过什么"。
+ *  index 指向 messages 下标（点击刻度即定位到该条）。 */
+export interface UserPrompt {
+  index: number;
+  time: number;
+  /** 悬停提示用的单行预览（已折叠空白/截断，见 promptPreview）。 */
+  preview: string;
+}
+
+/** 落在用户提示上的悬停命中：带像素位置便于渲染高亮。 */
+export interface UserPromptHit extends UserPrompt {
+  pixel: number;
+}
+
+/** 提示文本 → 单行预览：把 @ref 语法还原成可读标签、折叠空白、截断。
+ *  @ref{file:/a/b/c.ts} → c.ts；带 label 的取 label；未知形态保留原文。 */
+export function promptPreview(text: string, maxLen = 60): string {
+  const withRefs = (text || "").replace(/@ref\{([^}]*)\}/g, (_m, body: string) => {
+    const [target, label] = body.split("|");
+    if (label && label.trim()) return label.trim();
+    const t = (target || "").trim();
+    if (!t) return "";
+    // target 形如 <type>:<path>[:line]；取路径末段作可读名
+    const path = t.includes(":") ? t.slice(t.indexOf(":") + 1) : t;
+    return path.split(/[/\\]/).pop()?.trim() || t;
+  });
+  const flat = withRefs.replace(/\s+/g, " ").trim();
+  return flat.length > maxLen ? flat.slice(0, maxLen) + "…" : flat;
+}
+
+/** 找离 y（像素）最近且不超过 threshold 的用户提示；无命中 → null。
+ *  两条都在阈值内时取更近的一条（刻度密时不至于乱跳）。 */
+export function findNearestPrompt(
+  y: number,
+  prompts: UserPromptHit[],
+  threshold: number,
+): UserPromptHit | null {
+  let best: UserPromptHit | null = null;
+  let bestDist = Infinity;
+  for (const p of prompts) {
+    const d = Math.abs(p.pixel - y);
+    if (d <= threshold && d < bestDist) {
+      best = p;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+/** 渲染用像素簇：相邻两条像素间距 < minGap 时并作一个标记。
+ *  密度高时刻度中心距会小于点直径（视觉上糊成一片），聚类后每簇只画一个点。
+ *  **吸附不受聚类影响** —— 仍用原始刻度取最近的那条，精度不打折。 */
+export interface PromptCluster {
+  /** 簇标记位置（簇内首尾像素的中点） */
+  pixel: number;
+  /** 簇内刻度，按 pixel 升序 */
+  items: UserPromptHit[];
+}
+
+export function clusterPrompts(ticks: UserPromptHit[], minGap: number): PromptCluster[] {
+  if (ticks.length === 0) return [];
+  const sorted = [...ticks].sort((a, b) => a.pixel - b.pixel);
+  const out: PromptCluster[] = [];
+  let cur: UserPromptHit[] = [sorted[0]];
+  const flush = () => {
+    const first = cur[0].pixel;
+    const last = cur[cur.length - 1].pixel;
+    out.push({ pixel: (first + last) / 2, items: cur });
+  };
+  for (let i = 1; i < sorted.length; i++) {
+    // 与簇内**最后一条**比间距（链式聚合：3px 间隔的一串会连成一个簇）
+    if (sorted[i].pixel - cur[cur.length - 1].pixel < minGap) {
+      cur.push(sorted[i]);
+    } else {
+      flush();
+      cur = [sorted[i]];
+    }
+  }
+  flush();
+  return out;
+}
+
 /** 活跃段：同一天内连续的消息子集 */
 export interface TimeSegment {
   startTime: number;
@@ -127,7 +209,7 @@ function pickHourStep(span: number): number {
 }
 
 /** 均分取样：数组超 n 时均匀取 n 个（保首末）。 */
-function pickEven<T>(arr: T[], n: number): T[] {
+export function pickEven<T>(arr: T[], n: number): T[] {
   if (arr.length <= n) return arr;
   const step = arr.length / n;
   const picked: T[] = [];

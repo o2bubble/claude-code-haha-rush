@@ -911,7 +911,7 @@ fn prepare_gui_update_mac(
 }
 
 #[tauri::command]
-pub fn launch_updater_and_exit(updater_path: String) -> Result<(), String> {
+pub fn launch_updater_and_exit(app: tauri::AppHandle, updater_path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
         // Kill all OTHER GUI instances before the update replaces the exe —
@@ -931,6 +931,16 @@ pub fn launch_updater_and_exit(updater_path: String) -> Result<(), String> {
             .args(["-NoProfile", "-Command",
                 "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object { $_.CommandLine -match '--ide-mode' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"])
             .status();
+        // 插件后台进程: 本进程 exit(0) 绕过 RunEvent::Exit → 若不清理则遗留孤儿
+        // (node 以插件目录为 cwd = 目录句柄 → 卸载报 os error 32)。
+        // ① 自己 registry 里的; ② 历史上被强杀/更新留下的孤儿(父进程已死 + cwd 在插件根内)。
+        crate::plugin_process::kill_all_plugin_processes();
+        if let Ok(plugins_root) = crate::plugins_base_dir(&app) {
+            let n = crate::prockill::kill_orphan_plugin_processes(&plugins_root);
+            if n > 0 {
+                log::info!("launch_updater_and_exit: killed {} orphan plugin processes", n);
+            }
+        }
 
         // Start-Process -Verb RunAs triggers UAC.
         // Use .status() to ensure PowerShell has launched Update.exe before we exit.

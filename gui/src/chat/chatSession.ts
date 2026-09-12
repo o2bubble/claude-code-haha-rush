@@ -30,6 +30,7 @@ import {
   registerGuardChatApi, reportGuardTurnEnded, guardActive, guardStop as guardStopBridge,
   markGuardReported, markUserInterruptedTurn, clearUserInterruptedTurn, suppressWatcherReport,
 } from "../services/guardBridge";
+import { registerPluginInstallChatApi } from "../services/pluginInstallBridge";
 import { wsDiagAdd } from "../services/wsDiag";
 
 // 本实例是否是第一个 GUI 实例（缓存）。第二个实例跳过"自动加载最近会话"，
@@ -512,6 +513,10 @@ export function createChatSession(): ChatSession {
 
   // 守卫执行 API 注入: sendMessage 走 sendForceWhenIdle(空闲直发; 忙则暂存等后端就绪, 防撞 busy)
   registerGuardChatApi({ sendMessage: sendForceWhenIdle, releaseQueue: guardReleaseQueue });
+
+  // 插件市场「AI 帮我安装/卸载」指令通道: 用户主动点击 = 普通消息(忙则入队),
+  // 不走守卫 force 语义。busy 时 sendMessage 自动入队, 指令不会丢。
+  registerPluginInstallChatApi({ sendMessage });
 
   /** 恢复 auto + 空闲时立即消化。 */
   function queueResume() {

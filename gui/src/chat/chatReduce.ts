@@ -4,6 +4,7 @@
 // Faithful port of useChatBridge's ~24 handlers — behaviour is unchanged.
 
 import type { ChatState, ChatMessage, ChatEffect, WireMessage, ReduceCtx } from "./types";
+import type { ToolUse } from "../stores/chatStore";
 import type { EffortLevelUI } from "../stores/chatStore";
 import { extractPlanTasks, isPlanTool } from "./planExtract";
 import { mergeSessionMessages } from "./sessionMerge";
@@ -48,6 +49,9 @@ export function emptyChatState(): ChatState {
     modelCapabilities: null,
     // 最近一次流式活动的时间戳（null=尚无）；无响应提示据此计算卡顿秒数
     lastStreamEventAt: null,
+    // 在途工具数（tool_use 开始 → tool_result 回来）。仅用于展示/诊断；
+    // stall 决策**不再据此豁免**（2026-09-10 一刀切：静默 30s 一律弹条）。
+    activeToolUses: 0,
     // 后端权威忙闲信号（status 广播携带 busy 布尔写入）。undefined = 后端尚无信号
     // （初始化/WS 半开），回落 streaming；true/false 后即用权威值。
     backendBusy: undefined,
@@ -64,9 +68,23 @@ export function isBackendBusy(s: ChatState): boolean {
 }
 
 /**
+ * 在途工具名（tool_use 已开始、tool_result 未回）。
+ * 仅供 stall 决策的**自动中断分级宽限**使用（Bash/Task 给更长宽限, 避免真在
+ * 干活时被过早杀掉）；不参与决策条弹出判定（弹条恒 30s, 见 streamStallDecision）。
+ * 无工具在跑 → 空数组。
+ */
+export function activeToolNames(s: ChatState): string[] {
+  return s.messages.at(-1)?.toolUses?.filter((t) => t.status === "running").map((t) => t.name) ?? [];
+}
+
+/**
  * 无响应提示：给定最近流式活动时间，算出当前已卡顿秒数。
  * 仅在 streaming 且超过阈值后返回 >0（UI 据此显示"已 N 秒无响应"）。
- * @param thresholdMs 阈值（默认 30s，与后端 stall 检测一致）
+ * **不做工具豁免**（2026-09-10 一刀切）——工具在跑时后端可能零广播，但分级
+ * 判断屡屡不准（真卡死也被豁免，用户被迫干等）。现在静默即计数，配合 30s
+ * 决策条把选择权交给用户；确定性非卡死状态（等用户回答/压缩/子代理）由
+ * ChatInputPanel 在调用状态机前拦掉。
+ * @param thresholdMs 阈值（默认 30s，与决策条 ENTER_DECISION_SECS 一致）
  */
 export function computeStreamStall(
   lastStreamEventAt: number | null | undefined,
@@ -132,6 +150,35 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
     }
     set({ messages: msgs });
   };
+
+  /** 按 tool_use_id 全局查找含该工具的 assistant 消息并修复——多轮 assistant
+   *  消息时 updateLast 只改最后一条, tool_result 对应更早消息时卡片停在
+   *  "运行中…"（用户实测: 命令输出都出来了还显示运行中）。找不到才回退 updateLast。 */
+  const updateToolByUseId = (toolUseId: string, fn: (t: ToolUse) => ToolUse) => {
+    const msgs = [...s.messages];
+    let updated = false;
+    for (const m of msgs) {
+      if (m.role !== "assistant" || !m.toolUses) continue;
+      const idx = m.toolUses.findIndex((tool) => tool.id === toolUseId);
+      if (idx >= 0) {
+        const tools = [...m.toolUses];
+        tools[idx] = fn(tools[idx]!);
+        m.toolUses = tools;
+        updated = true;
+        break;
+      }
+    }
+    if (updated) {
+      set({ messages: msgs });
+    } else {
+      updateLast((m) => {
+        const tools = [...(m.toolUses || [])];
+        const idx = tools.findIndex((tool) => tool.id === toolUseId);
+        if (idx >= 0) tools[idx] = fn(tools[idx]!);
+        return { ...m, toolUses: tools };
+      });
+    }
+  };
   const pushMessage = (m: ChatMessage) => {
     if (m.id && s.messages.some((x) => x.id === m.id)) return;
     set({ messages: [...s.messages, m] });
@@ -167,6 +214,9 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       const cb = inner.content_block;
       if (cb?.type === "tool_use") {
         const name = cb.name || "";
+        // 在途工具 +1（tool_result 回来时 -1）——供 activeToolNames 判定自动中断
+        // 分级宽限（Bash/Task 给更长宽限），不再用于决策条豁免。
+        set({ activeToolUses: (s.activeToolUses ?? 0) + 1 });
         updateLast((m) => ({
           ...m,
           toolUses: [
@@ -240,16 +290,26 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       // 'ready' (the authoritative turn-end signals).
       updateLast((m) => ({ ...m, streaming: false }));
       break;
-    case "result":
+    case "result": {
       setStreaming(false);
-      set({ backendBusy: false }); // result 是权威 turn 结束信号 → 后端空闲
+      // 回合结束（含中断）→ 在途工具计数清零：abort 的 tool_result 永远不会来，
+      // 不清会泄漏（此后 stall 永远 0, 真卡死不再提示）。豁免期一并失效。
+      set({ activeToolUses: 0 });
+      // 只认显式 busy===false 的 result 为权威 turn 结束——裸 result（局部 slash
+      // 命令如 /mcp-refresh、/reload-plugins 结束时也发 result，但不占 global busy）
+      // 若无条件清 backendBusy，会在主 turn 仍 busy 时误判空闲 → 用户消息直发撞
+      // "A prompt is already being processed"（不进队列）。裸 result 不动 backendBusy，
+      // 交给后续 status:ready(busy:false) / 带 busy 的 result 收口。
+      const r = inner as { busy?: boolean };
+      if (r.busy === false) set({ backendBusy: false });
       break;
+    }
     case "error":
       // 必须复位全局 streaming：某些路径（上游中断/看门狗降级失败/断连）error 后
       // 没有 result 兜底，不复位会让 GUI 永远停在 streaming=true（状态栏"工作中"，
       // 用户只能手动中断+继续来"激活"——即"输出莫名卡死"）。result 仍会覆盖为 false。
       setStreaming(false);
-      set({ compacting: false, backendBusy: false });
+      set({ compacting: false, backendBusy: false, activeToolUses: 0 });
       pushMessage({ id: uuid(), role: "assistant", content: `Error: ${inner.message || "Unknown error"}`, timestamp: now() });
       break;
     case "task_error":
@@ -477,31 +537,29 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       if (Array.isArray(content)) {
         for (const block of content) {
           if (block.type === "tool_result" && block.tool_use_id) {
-            updateLast((m) => {
-              const tools = [...(m.toolUses || [])];
-              const idx = tools.findIndex((tool) => tool.id === block.tool_use_id);
-              if (idx >= 0) {
-                const resultContent =
-                  typeof block.content === "string"
-                    ? block.content
-                    : Array.isArray(block.content)
-                      ? block.content.map((c: any) => c.text || "").join("")
-                      : "";
-                const exitMatch = (resultContent || "").match(/exit(?:\s*code)?[:\s]*(\d+)/i);
-                const exitCode = exitMatch ? parseInt(exitMatch[1], 10) : 0;
-                tools[idx] = { ...tools[idx], status: "done", output: resultContent };
-                if (isBashLike(tools[idx].name)) {
-                  if (resultContent) effects.push({ type: "terminal.output", toolUseId: block.tool_use_id, text: resultContent });
-                  effects.push({ type: "terminal.finish", toolUseId: block.tool_use_id, exitCode });
-                }
-                if (tools[idx].name.toLowerCase().includes("exitplanmode") && resultContent) {
-                  const planText = (resultContent.match(/##\s*Approved Plan.*?\n([\s\S]*)/i) || [])[1]?.trim() || "";
-                  const sid = s.sessionId || "";
-                  const stitle = s.sessions.find((x) => x.id === sid)?.title || "";
-                  effects.push({ type: "plan.save", sessionId: sid, title: stitle, planText });
-                }
+            // 在途工具 -1（与 content_block_start(tool_use) 的 +1 配对）
+            set({ activeToolUses: Math.max(0, (s.activeToolUses ?? 0) - 1) });
+            updateToolByUseId(block.tool_use_id, (tool) => {
+              const resultContent =
+                typeof block.content === "string"
+                  ? block.content
+                  : Array.isArray(block.content)
+                    ? block.content.map((c: any) => c.text || "").join("")
+                    : "";
+              const exitMatch = (resultContent || "").match(/exit(?:\s*code)?[:\s]*(\d+)/i);
+              const exitCode = exitMatch ? parseInt(exitMatch[1], 10) : 0;
+              const updated = { ...tool, status: "done" as const, output: resultContent };
+              if (isBashLike(tool.name)) {
+                if (resultContent) effects.push({ type: "terminal.output", toolUseId: block.tool_use_id, text: resultContent });
+                effects.push({ type: "terminal.finish", toolUseId: block.tool_use_id, exitCode });
               }
-              return { ...m, toolUses: tools };
+              if (tool.name.toLowerCase().includes("exitplanmode") && resultContent) {
+                const planText = (resultContent.match(/##\s*Approved Plan.*?\n([\s\S]*)/i) || [])[1]?.trim() || "";
+                const sid = s.sessionId || "";
+                const stitle = s.sessions.find((x) => x.id === sid)?.title || "";
+                effects.push({ type: "plan.save", sessionId: sid, title: stitle, planText });
+              }
+              return updated;
             });
           }
         }

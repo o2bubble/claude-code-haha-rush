@@ -64,6 +64,10 @@ export const Events = {
   // Files
   FILE_REVEAL: "file.reveal",
 
+  // Plugins — 重扫完成后广播（安装/卸载/启停任何路径都经 reloadPlugins）。
+  // 市场面板订阅以刷新 installedMap 快照, 否则 MCP 路径的装/卸面板状态不变。
+  PLUGINS_RESCANNED: "plugins.rescanned",
+
   // Desktop
   DESKTOP_CHANGED: "desktop.changed",
   DESKTOP_ITEM_SELECTED: "desktop.itemSelected",
@@ -100,6 +104,9 @@ export interface FileRevealPayload {
   path: string;
   /** 工作区根路径；非空时仅在该工作区内的文件才定位目录树 */
   rootPath?: string;
+  /** 每次请求递增 —— 对同一个文件再点一次「定位目录树」时 path 不变，
+   *  消费方靠它识别"这是新请求"并重新滚动（否则 effect 依赖不变不重跑）。 */
+  nonce?: number;
 }
 
 export interface ToastPayload {

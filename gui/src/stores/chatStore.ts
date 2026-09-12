@@ -103,6 +103,10 @@ export interface ChatState {
   sessionTotal: number | null;
   /** 最近一次流式活动的时间戳（null=尚无）；无响应提示据此计算卡顿秒数。 */
   lastStreamEventAt: number | null;
+  /** 在途工具数（tool_use 已开始、tool_result 未回）。
+   *  仅供自动中断分级宽限判定（Bash/Task 给更长宽限），**不豁免决策条**
+   *  （2026-09-10 一刀切：静默 30s 一律弹条，见 streamStallDecision）。 */
+  activeToolUses?: number;
   /** 后端权威忙闲信号（status 广播携带 busy 布尔写入）。undefined = 后端尚无信号
    *  （初始化/WS 半开），回落 streaming；true/false 后即用权威值。用于消除乐观
    *  streaming 与后端 busy 的失同步（interrupt 乐观清空/等子代理静默/error 卡 true）。 */

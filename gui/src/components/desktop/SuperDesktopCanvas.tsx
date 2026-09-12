@@ -9,7 +9,7 @@ import { ConnectionOverlay } from "./ConnectionOverlay";
 import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 import type { DesktopItemSelectedPayload, SettingsChangedPayload } from "../../services/events";
-import { saveClipboardItem, isRealFilePath, resolvePaste, collectPaste, defaultReadDir } from "../../services/clipboardService";
+import { saveClipboardItem, isRealFilePath, resolvePaste, collectPaste, defaultReadDir, defaultReadClipboardFiles } from "../../services/clipboardService";
 import { useEvent } from "../../services/useService";
 import { isSelected, setSelection, clearSelection, getSelectedIds, useSelection } from "./selectionStore";
 import { setCurrentViewerItemId } from "../../services/desktopItemViewerRegistry";
@@ -414,7 +414,25 @@ function SuperDesktopCanvasImpl({ desktop, searchMatchedIds }: Props) {
     if (!el) return;
     const handler = (e: WheelEvent) => {
       const target = e.target as HTMLElement;
-      if (target.closest("[data-desktop-item]")) return;
+
+      // 让路规则（与 useContentZoom / 各内容块的分工）：
+      //   Ctrl/Cmd+滚轮 → 内容的**内部缩放**（图片/图形标了 data-wheel-zoom）
+      //   裸滚轮        → 目标处在**可滚动的内部容器**里时优先滚动它
+      //                   （文本块/表格 —— 表格是 AG Grid 自己渲染的滚动容器，
+      //                    故用运行时检测而非标记属性）
+      // 其余一律缩放画布 —— 包括"悬停在图片上裸滚轮"这种情况（早先对所有 item
+      // 无条件让路，导致这些位置滚轮完全没反应）。
+      if (e.ctrlKey || e.metaKey) {
+        if (target.closest("[data-wheel-zoom]")) return;
+      } else {
+        let n: HTMLElement | null = target;
+        while (n && n !== el) {
+          const cs = getComputedStyle(n);
+          if ((cs.overflowY === "auto" || cs.overflowY === "scroll")
+              && n.scrollHeight > n.clientHeight + 1) return;
+          n = n.parentElement;
+        }
+      }
       e.preventDefault();
 
       // Push snapshot once at start of zoom sequence
@@ -501,6 +519,8 @@ function SuperDesktopCanvasImpl({ desktop, searchMatchedIds }: Props) {
         text,
         pathExists: isRealFilePath,
         readDir: defaultReadDir,
+        // 粘贴的文件没有 .path（只有拖放有）→ 从系统剪贴板补源路径，走引用而非复制
+        readClipboardFiles: defaultReadClipboardFiles,
       });
 
       if (decision.kind === "refs") {

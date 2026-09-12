@@ -128,7 +128,7 @@ bash install.sh
 claude-profile create
 ```
 
-可选模板：DeepSeek v4 Pro / DeepSeek v4 Flash / Custom。
+可选模板：DeepSeek Flash / DeepSeek v4 Pro / Custom。
 
 ---
 

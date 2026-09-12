@@ -171,6 +171,42 @@ const ICON_BAR_BASE = {
 
 // (props intentionally empty — the renderer reads layout/panel state from stores)
 
+// ── 分隔条拖动数学（纯函数, 供单测锁定回归）──
+
+/** 拖动中：把 delta 施加到相邻两个可见面板, 返回归一化后的百分比数组。
+ *  px[i] 与 children 索引对齐；px[i] <= 0 表示该子节点隐藏(display:none 无 DOM)。
+ *  返回 null = 本次 delta 不可应用(相邻面板不可见/总量为 0)。 */
+export function applyDividerDelta(
+  px: number[],
+  dividerIndex: number,
+  delta: number,
+  visible: boolean[],
+): number[] | null {
+  // 相邻不可见 → 不拖动(否则空间会"分"给隐藏节点, 松手比例错乱)
+  if (!visible[dividerIndex] || !visible[dividerIndex + 1]) return null;
+  const next = [...px];
+  next[dividerIndex] = Math.max(80, next[dividerIndex] + delta);
+  next[dividerIndex + 1] = Math.max(80, next[dividerIndex + 1] - delta);
+  // 归一化只用可见元素的总和: 隐藏节点保留原值但 display:none,
+  // 若计入 total 会让可见面板永远填不满容器(留白)。
+  const total = next.reduce((a, b, i) => (visible[i] ? a + b : a), 0);
+  if (total <= 0) return null;
+  return next.map((v, i) => (visible[i] ? (v / total) * 100 : 0));
+}
+
+/** 松手时：用 DOM 实测像素反算百分比, 写回完整 sizes(隐藏位归 0)。
+ *  index 与 children 对齐——曾用顺序游标, 隐藏节点不占位时游标错位,
+ *  把可见面板的尺寸写到隐藏节点上。 */
+export function sizesFromDomPx(
+  finalPx: number[],
+  visible: boolean[],
+  originalSizes: number[],
+): number[] | null {
+  const total = finalPx.reduce((a, b) => a + b, 0);
+  if (total <= 0) return null;
+  return originalSizes.map((_, i) => (visible[i] ? (finalPx[i] / total) * 100 : 0));
+}
+
 // ── Resize hook（DOM 直写 + RAF，松手同步，保证 60fps） ──
 
 function useSplitResize(
@@ -211,10 +247,15 @@ function useSplitResize(
     const elB = childRefs.current[dividerIndex + 1];
     if (!elA || !elB) return;
 
-    // 从 DOM 实际尺寸算初始值（比 store 百分比反算更准）
-    const allEls = childRefs.current.filter(Boolean) as HTMLDivElement[];
+    // ⚠️ 不能用 filter(Boolean) —— 有隐藏子节点时它把数组压缩, 索引整体前移,
+    // 而 dividerIndex 是**原始 children 索引** → px[dividerIndex+1] 取到 undefined
+    // → Math.max(80, undefined - delta) = NaN → flex:"0 0 NaN%" 被浏览器忽略
+    // → 隐藏一侧后另一侧分隔条完全拖不动(用户实测)。保留空洞, 索引与 children 对齐。
+    const allEls = childRefs.current;
+    // 可见元素才量尺寸(隐藏的 ref 为 null; 塌缩的 flex:0 0 auto 量出来是真实宽高,
+    // 不参与拖动——见下方 px 计算)
     const initialPx = allEls.map((el) =>
-      direction === "horizontal" ? el.offsetWidth : el.offsetHeight
+      el ? (direction === "horizontal" ? el.offsetWidth : el.offsetHeight) : 0
     );
 
     const st = stateRef.current;
@@ -224,6 +265,12 @@ function useSplitResize(
 
     const prevUserSelect = document.body.style.userSelect;
     document.body.style.userSelect = "none";
+
+    // 拖动期间禁用面板内 iframe 的指针事件: iframe 有自己的事件域(鼠标进入 iframe
+    // 后宿主 document 收不到 mousemove/mouseup → 松手后拖动状态不退出 + 不跟手。
+    // VS Code 同款做法)。松手恢复。
+    const iframes = Array.from(container.querySelectorAll("iframe"));
+    iframes.forEach((f) => { (f as HTMLElement).style.pointerEvents = "none"; });
 
     // 保存原始 sizes（包含隐藏节点），用于松手时恢复完整数组
     const originalSizes = split.sizes;
@@ -235,13 +282,11 @@ function useSplitResize(
         const currentPos = direction === "horizontal" ? ev.clientX : ev.clientY;
         const delta = currentPos - st.startPos;
 
-        const px = [...st.initialPx];
-        px[dividerIndex] = Math.max(80, px[dividerIndex] + delta);
-        px[dividerIndex + 1] = Math.max(80, px[dividerIndex + 1] - delta);
-
-        const newTotal = px.reduce((a, b) => a + b, 0);
+        const pcts = applyDividerDelta(st.initialPx, dividerIndex, delta, allEls.map(Boolean));
+        if (!pcts) return;
         allEls.forEach((el, i) => {
-          el.style.flex = `0 0 ${((px[i] / newTotal) * 100).toFixed(2)}%`;
+          if (!el) return; // 隐藏子节点无 DOM
+          el.style.flex = `0 0 ${pcts[i].toFixed(2)}%`;
         });
       });
     }
@@ -254,20 +299,14 @@ function useSplitResize(
       document.removeEventListener("mousemove", onMove);
       document.removeEventListener("mouseup", onUp);
       document.body.style.userSelect = prevUserSelect;
+      iframes.forEach((f) => { (f as HTMLElement).style.pointerEvents = ""; });
 
-      // 用 DOM 最终尺寸反算百分比，填充回完整的 sizes（含隐藏节点）
+      // 用 DOM 最终尺寸反算百分比, 写回完整的 sizes(含隐藏节点)
       const finalPx = allEls.map((el) =>
-        direction === "horizontal" ? el.offsetWidth : el.offsetHeight
+        el ? (direction === "horizontal" ? el.offsetWidth : el.offsetHeight) : 0
       );
-      const total = finalPx.reduce((a, b) => a + b, 0);
-      if (total > 0) {
-        let vi = 0;
-        const fullSizes = originalSizes.map((orig) => {
-          if (orig <= 0) return 0;
-          return (finalPx[vi++] / total) * 100;
-        });
-        updateSizes(splitId, fullSizes);
-      }
+      const fullSizes = sizesFromDomPx(finalPx, allEls.map(Boolean), originalSizes);
+      if (fullSizes) updateSizes(splitId, fullSizes);
     }
 
     document.addEventListener("mousemove", onMove);
@@ -279,8 +318,61 @@ function useSplitResize(
 
 // ── Split 节点 ──
 
+/** 子树是否完全隐藏（group 全部 hidden；split 递归判所有 child）。
+ *  修复2026-09-09: 嵌套 split 下 group 隐藏后 subtree 全 hidden 仍占父 split
+ *  尺寸 → 空间不回收（用户实测点隐藏左侧边栏后空区不消失）。
+ *  纯函数, 供 getVis / 归一化消费 —— 导出供单测锁定回归。 */
+export function isSubtreeHidden(node: LayoutNode): boolean {
+  if (node.type === "group") return (node.visibility || "expanded") === "hidden";
+  // split: 直接 visibility(hidden) 或 内部全 hidden → hidden
+  if ((node.visibility || "expanded") === "hidden") return true;
+  return node.children.every((c) => isSubtreeHidden(c));
+}
+
+/** 找子树里第一个 activity 组（图标栏宿主）。折叠的包装列渲染它 = 整列收成图标条。 */
+export function findActivityGroup(node: LayoutNode): TabGroupType | null {
+  if (node.type === "group") {
+    return node.tabStyle?.startsWith("activity") ? node : null;
+  }
+  for (const c of node.children) {
+    const g = findActivityGroup(c);
+    if (g) return g;
+  }
+  return null;
+}
+
+/** 折叠的包装列 — 整列收成 activity 图标条。
+ *  内部切割产生的包装 split 自身折叠时, 只渲染内部 activity 组的图标栏
+ *  (48px 宽/35px 高), 内容不渲染 → 上层按 collapsed 回收宽度/高度。 */
+function CollapsedColumnBar({ split }: { split: SplitNode }) {
+  const activity = findActivityGroup(split);
+  if (!activity) {
+    // 包装层内没有 activity 组(非常规布局) → 渲染占位条, 保证仍有可见抓手
+    return <div style={{ width: 48, flexShrink: 0, backgroundColor: "var(--bg-hover)", borderRight: "1px solid var(--border-medium)" }} />;
+  }
+  const bar: React.CSSProperties = {
+    width: 48, flexDirection: "column",
+    borderRight: "1px solid var(--border-medium)",
+  };
+  const indicator: React.CSSProperties = { left: 0, top: 6, bottom: 6, width: 2 };
+  return (
+    <div style={{ display: "flex", flexDirection: "row", flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+      <IconOverflowBar node={activity}
+        barStyle={{ ...ICON_BAR_BASE, backgroundColor: "var(--bg-hover)", ...bar } as React.CSSProperties}
+        indicator={indicator} isActivityBottom={false}
+        dropIsReorder={false} />
+    </div>
+  );
+}
+
 function getVis(child: LayoutNode): Visibility {
-  if (child.type !== "group") return "expanded";
+  if (child.type !== "group") {
+    // split child: 自带 visibility(hidden/collapsed, 2026-09-09 整列隐藏) 优先,
+    // 否则内部全 hidden → hidden(上轮修复: 嵌套子 split 塌缩)
+    const self = child.visibility || "expanded";
+    if (self === "hidden" || self === "collapsed") return self;
+    return isSubtreeHidden(child) ? "hidden" : "expanded";
+  }
   return child.visibility || "expanded";
 }
 
@@ -348,7 +440,13 @@ function SplitView({ node }: { node: SplitNode }) {
                       })
               }
             >
-              <LayoutNodeView node={child} />
+              {/* 折叠的包装列(内部切割产生): 整列收成 activity 图标条 —— 不能
+                  落到 LayoutNodeView(它会按正常 split 铺开, 宽度收不回来)。 */}
+              {collapsed && child.type === "split" ? (
+                <CollapsedColumnBar split={child} />
+              ) : (
+                <LayoutNodeView node={child} />
+              )}
             </div>
             {showDivider && (
               <ResizeDivider

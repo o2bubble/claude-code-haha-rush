@@ -13,6 +13,11 @@ import type {
   ReferralEligibilityResponse,
 } from '../services/oauth/types.js'
 import { getCwd } from '../utils/cwd.js'
+// 迁移函数集中到 src/migrations/（登记表见 src/migrations/index.ts）。
+// 从具体文件导入 —— 不能从 migrations/index.ts 导入，否则形成
+// config.ts → index.ts → 其他迁移文件 → config.ts 的运行时循环。
+import { migrateConfigFields } from '../migrations/migrateConfigFields.js'
+import { removeProjectHistory } from '../migrations/removeProjectHistory.js'
 import { registerCleanup } from './cleanupRegistry.js'
 import { logForDebugging } from './debug.js'
 import { logForDiagnosticsNoPII } from './diagLogs.js'
@@ -904,89 +909,6 @@ function reportConfigCacheStats(): void {
 registerCleanup(async () => {
   reportConfigCacheStats()
 })
-
-/**
- * Migrates old autoUpdaterStatus to new installMethod and autoUpdates fields
- * @internal
- */
-function migrateConfigFields(config: GlobalConfig): GlobalConfig {
-  // Already migrated
-  if (config.installMethod !== undefined) {
-    return config
-  }
-
-  // autoUpdaterStatus is removed from the type but may exist in old configs
-  const legacy = config as GlobalConfig & {
-    autoUpdaterStatus?:
-      | 'migrated'
-      | 'installed'
-      | 'disabled'
-      | 'enabled'
-      | 'no_permissions'
-      | 'not_configured'
-  }
-
-  // Determine install method and auto-update preference from old field
-  let installMethod: InstallMethod = 'unknown'
-  let autoUpdates = config.autoUpdates ?? true // Default to enabled unless explicitly disabled
-
-  switch (legacy.autoUpdaterStatus) {
-    case 'migrated':
-      installMethod = 'local'
-      break
-    case 'installed':
-      installMethod = 'native'
-      break
-    case 'disabled':
-      // When disabled, we don't know the install method
-      autoUpdates = false
-      break
-    case 'enabled':
-    case 'no_permissions':
-    case 'not_configured':
-      // These imply global installation
-      installMethod = 'global'
-      break
-    case undefined:
-      // No old status, keep defaults
-      break
-  }
-
-  return {
-    ...config,
-    installMethod,
-    autoUpdates,
-  }
-}
-
-/**
- * Removes history field from projects (migrated to history.jsonl)
- * @internal
- */
-function removeProjectHistory(
-  projects: Record<string, ProjectConfig> | undefined,
-): Record<string, ProjectConfig> | undefined {
-  if (!projects) {
-    return projects
-  }
-
-  const cleanedProjects: Record<string, ProjectConfig> = {}
-  let needsCleaning = false
-
-  for (const [path, projectConfig] of Object.entries(projects)) {
-    // history is removed from the type but may exist in old configs
-    const legacy = projectConfig as ProjectConfig & { history?: unknown }
-    if (legacy.history !== undefined) {
-      needsCleaning = true
-      const { history, ...cleanedConfig } = legacy
-      cleanedProjects[path] = cleanedConfig
-    } else {
-      cleanedProjects[path] = projectConfig
-    }
-  }
-
-  return needsCleaning ? cleanedProjects : projects
-}
 
 // fs.watchFile poll interval for detecting writes from other instances (ms)
 const CONFIG_FRESHNESS_POLL_MS = 1000

@@ -1,8 +1,9 @@
-import React, { memo, useState, useCallback, useEffect } from "react";
+import React, { memo, useState, useCallback, useEffect, useMemo } from "react";
 import { t } from "../../i18n";
 import { EmptyState } from "../SharedStates";
 import { updateService, setUpdateAvailability, REQUIRED_COMPONENTS, type ComponentStatus, type UpdateCheckResult } from "../../services/updateService";
 import { addStatusMessage } from "../../stores/statusMsgStore";
+import { renderReleaseNotes } from "../../utils/releaseNotesMarkdown";
 
 // ── Component display names ──
 
@@ -72,7 +73,8 @@ const S = {
   releaseNotes: {
     padding: "8px 10px", backgroundColor: "var(--bg-surface)", borderRadius: 6,
     fontSize: "calc(var(--font-scale, 1) * 11.5px)", color: "var(--fg-secondary)",
-    maxHeight: 100, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",
+    maxHeight: 100, overflow: "auto",
+    // 排版交给 .md-notes（紧凑 markdown 变体，防溢出 + 收掉默认大边距）
     // flex column default-shrinks children — a long component list would squash
     // the notes to a sliver; never shrink it, let the body scroll instead.
     flexShrink: 0,
@@ -134,6 +136,32 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
   /** Staging path + Update.exe path returned by prepareGuiUpdate — reused by the
    *  restart button so it does NOT re-download the GUI zip. */
   const [updaterPath, setUpdaterPath] = useState<string | null>(null);
+
+  // 发布说明 markdown 解析一次即可 —— 下载进度等 state 会高频触发重渲染，
+  // 每次重解析既浪费又无意义（内容在一轮检查内不变）。
+  const notesHtml = useMemo(
+    () => renderReleaseNotes(result?.release_notes ?? ""),
+    [result?.release_notes],
+  );
+
+  // 发布说明块 —— 「有更新」与「已是最新」两态共用。
+  // 已是最新时说明描述的是**本机已装版本**（服务器 latest 即本机版本），
+  // 标签带上版本号，用户仍能看到"我这版包含什么"。
+  // 内容来自服务端（外部输入）—— renderReleaseNotes 内置转义防护，
+  // 只放行 markdown 结构，裸 HTML 一律降级为文本。
+  const renderNotes = (label: string) =>
+    result?.release_notes ? (
+      <>
+        <div style={{ ...S.releaseNotes, fontSize: "calc(var(--font-scale, 1) * 11px)", fontWeight: 500, color: "var(--fg-secondary)" }}>
+          {label}
+        </div>
+        <div
+          className="md-notes"
+          style={{ ...S.releaseNotes, maxHeight: 340 }}
+          dangerouslySetInnerHTML={{ __html: notesHtml }}
+        />
+      </>
+    ) : null;
 
   // 监听 Rust 下载进度事件，按 component 名写进 progress/speed map。
   // 事件是全局广播（app.emit），本面板只关心自身发起的组件下载；多组件并发时靠 component 路由。
@@ -384,6 +412,7 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
                 onClick: handleCheck,
               }}
             />
+            {renderNotes(t("update.currentVersionNotes", { version: result?.version ?? "" }))}
             {optIn.length > 0 && (
               <>
                 <div style={S.optHeader}>{t("update.optionalInstall")}</div>
@@ -414,21 +443,7 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
               <span style={{ color: "var(--fg-muted)" }}>({result.published_at?.slice(0, 10)})</span>
             </div>
 
-            {result.release_notes && (
-              <div style={{ ...S.releaseNotes, fontSize: "calc(var(--font-scale, 1) * 11px)", fontWeight: 500, color: "var(--fg-secondary)" }}>
-                {t("update.releaseNotes")}
-              </div>
-            )}
-            {result.release_notes && (
-              // Normalize literal \n (possible double-escape somewhere in the
-              // wire chain) to real newlines, then render one line per entry so
-              // bullets always break regardless of the source encoding.
-              <div style={{ ...S.releaseNotes, maxHeight: 220, minHeight: 150 }}>
-                {result.release_notes.replace(/\\n/g, "\n").split(/\r?\n/).map((line, i) => (
-                  <div key={i} style={{ minHeight: 16 }}>{line || "\u00A0"}</div>
-                ))}
-              </div>
-            )}
+            {renderNotes(t("update.releaseNotes"))}
 
             <div style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", fontWeight: 600, color: "var(--fg-secondary)", marginTop: 4 }}>
               {t("update.selectComponents")}

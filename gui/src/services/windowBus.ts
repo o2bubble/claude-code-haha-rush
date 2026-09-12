@@ -65,6 +65,13 @@ class EventBus {
   clearSticky(event: EventName): void {
     this.sticky.delete(event);
   }
+
+  /** Whether a sticky value exists — e.g. WORKSPACE_BOUND fired in this window
+   *  (= a workspace is bound). Unlike a module flag this survives any consumer
+   *  ordering, since sticky is set at emit time. */
+  hasSticky(event: EventName): boolean {
+    return this.sticky.has(event);
+  }
 }
 
 // ── CommandRegistry — cross-panel actions ──

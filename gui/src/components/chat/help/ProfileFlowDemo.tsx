@@ -27,9 +27,9 @@ export function ProfileFlowDemo() {
           Profile 管理
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {["deepseek-v4-flash", "deepseek-v4-pro", "qwen-3.6-plus"].map((name, i) => {
+          {["deepseek-flash", "deepseek-v4-pro", "qwen-3.6-plus"].map((name, i) => {
             const isActive = i === step;
-            const label = step === 2 && i === 0 ? "🔑 deepseek-v4-flash" : name;
+            const label = step === 2 && i === 0 ? "🔑 deepseek-flash" : name;
             return (
               <div key={name} style={{
                 padding: "4px 10px", borderRadius: 4,

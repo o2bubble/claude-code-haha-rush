@@ -14,7 +14,7 @@ export type IconKey =
   | "askQuestion" | "desktopItemView" | "profileManager" | "feedback" | "update"
   | "explorer" | "search" | "outline" | "compoundGroup" | "file" | "notes"
   | "quickPrompts" | "help" | "diagnostics" | "default" | "user"
-  | "folderKanban" | "package" | "grid3x3" | "layoutGrid" | "combine";
+  | "folderKanban" | "package" | "grid3x3" | "layoutGrid" | "combine" | "gitBranch";
 
 /** 分割容器 — 水平或垂直排列子节点，带可拖拽分隔线 */
 export interface SplitNode {
@@ -24,6 +24,9 @@ export interface SplitNode {
   children: LayoutNode[];
   /** 每个子节点的尺寸比例（百分比），和 children 一一对应 */
   sizes: number[];
+  /** 可见状态（split 级）— 2026-09-09: 左列/拆分列整体可隐藏（内部切分的面板随列一起）
+   *  expanded=完整, collapsed=仅图标栏, hidden=整列消失 */
+  visibility?: Visibility;
 }
 
 /** TabGroup 显示风格 */

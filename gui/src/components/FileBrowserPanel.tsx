@@ -17,9 +17,10 @@ export function FileBrowserPanel() {
   const refreshTree = () => setTreeKey((k) => k + 1);
 
   // 编辑器"定位目录树" → 文件树展开祖先并选中目标(粘性事件, 面板延迟挂载也能收到)
-  const [revealPath, setRevealPath] = useState<string | null>(null);
-  useEventHandler<FileRevealPayload>(Events.FILE_REVEAL, ({ path }) => {
-    setRevealPath(path);
+  // 带 nonce：对同一文件再次定位时 path 不变，靠它让文件树重新滚动(见 events.ts)
+  const [reveal, setReveal] = useState<{ path: string; nonce: number } | null>(null);
+  useEventHandler<FileRevealPayload>(Events.FILE_REVEAL, ({ path, nonce }) => {
+    setReveal({ path, nonce: nonce ?? 0 });
     windowBus.clearSticky(Events.FILE_REVEAL);
   });
 
@@ -65,7 +66,7 @@ export function FileBrowserPanel() {
         {rootPath}
       </div>
       <div style={{ flex: 1, overflow: "auto" }}>
-        <FileTree forceRefresh={treeKey} rootPath={rootPath} showHidden={showHidden} revealPath={revealPath} onOpenFile={async (p) => {
+        <FileTree forceRefresh={treeKey} rootPath={rootPath} showHidden={showHidden} revealPath={reveal?.path ?? null} revealNonce={reveal?.nonce ?? 0} onOpenFile={async (p) => {
           const name = p.split(/[/\\]/).pop() || p;
           if (isPreviewable(p)) {
             editorStore.openPreview(p, name);

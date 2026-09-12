@@ -2,6 +2,7 @@
 
 import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
+import { migrateWorkspaceSeed } from "../migrations";
 
 export interface QuickPrompt {
   id: string;
@@ -82,6 +83,8 @@ export interface AppSettings {
   compactExtractScript?: string;
   /** 流卡死中断后的唤醒提示词：发给 AI 让它检查会话、继续未完成的内容。空=用默认 */
   streamStallWakePrompt?: string;
+  /** 禁用的插件(pluginName 列表)：扫描时跳过 → 面板/命令/后台进程全不挂。目录不动。 */
+  disabledPlugins?: string[];
 }
 
 let settings: AppSettings = {
@@ -142,9 +145,8 @@ export async function loadSettings(): Promise<AppSettings> {
   }
 
   // Migrate: if workspaces is empty but workDir is set, seed workspaces
-  if (settings.workspaces.length === 0 && settings.workDir) {
-    settings.workspaces = [settings.workDir];
-  }
+  // （迁移集中到 gui/src/migrations/ —— 全清单见其 MIGRATION_REGISTRY）
+  migrateWorkspaceSeed(settings);
 
   loaded = true;
   windowBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });

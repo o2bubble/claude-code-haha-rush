@@ -63,7 +63,20 @@ export function createPowerShellProvider(shellPath: string): ShellProvider {
       // exit code (was 0 — old logic only looked at $? which the trailing
       // cmdlet set true). Both rarer than the git/npm/curl stderr case.
       const cwdTracking = `\n; $_ec = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }\n; (Get-Location).Path | Out-File -FilePath '${escapedCwdFilePath}' -Encoding utf8 -NoNewline\n; exit $_ec`
-      const psCommand = command + cwdTracking
+      // Plugin runtime PATH prepend (plugin-nodejs-runtime T3): mirrors the
+      // bashProvider prepend. Read at build time so GUI pushes take effect on
+      // the next command. Stored value is a ';'-separated dir list — PowerShell
+      // PATH separator is ';' on all platforms, so join as-is.
+      // The prepend MUST end with '; ' — it is string-concatenated with the
+      // user command. Without a separator, `$env:PATH` swallows the command
+      // ('...+ $env:PATHgit branch' — parse error, tool call dies).
+      // Guarded by isPowerShellSafe: parens/quotes inside dirs would break the
+      // single-quoted literal; only plain paths are prepended (runtime dirs).
+      const pluginPrepend = getSessionEnvVars().get('CLAUDE_PLUGIN_PATH_PREPEND')
+      const psPrepend = pluginPrepend
+        ? `\n; $env:PATH = '${pluginPrepend.replace(/'/g, "''")};' + $env:PATH\n; `
+        : ''
+      const psCommand = psPrepend + command + cwdTracking
 
       // Sandbox wraps the returned commandString as `<binShell> -c '<cmd>'` —
       // hardcoded `-c`, no way to inject -NoProfile -NonInteractive. So for

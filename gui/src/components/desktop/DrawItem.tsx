@@ -463,8 +463,11 @@ export function DrawItem({ item }: { item: DesktopItem }) {
 
   // ── Render ──
 
-  // Show static SVG when not selected, OR when selected but not in edit mode
-  if (!sel || (!editing && elements.length === 0)) {
+  // 静态视图：未选中，或选中但不在编辑态。
+  // 选中时始终给「编辑」按钮 —— 曾多一个 `&& elements.length === 0` 条件，
+  // 导致画上第一个图元后按钮永久消失、再也进不去编辑态（退出编辑是单向的，
+  // 「完成」之后无任何入口）。空画布只是不需要按钮的**特例**，不该作为唯一条件。
+  if (!sel || !editing) {
     const svgStr = content.svg || emptySVG(w, h);
     return (
       <div style={{ width: "100%", height: "100%", overflow: "hidden", position: "relative" }}>

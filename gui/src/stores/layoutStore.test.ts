@@ -3,7 +3,7 @@
 // 旧版持久化数据没有 icon 字段 → 回退到 registry 图标。
 
 import { beforeEach, describe, it, expect } from "vitest";
-import { resetLayout, serializeLayout, deserializeLayout, addFloatingPanel, addTab, mergeIntoTab, removeChildFromCompound, dissolveCompoundGroup, getTree, findGroup } from "./layoutStore";
+import { resetLayout, serializeLayout, deserializeLayout, addFloatingPanel, addTab, mergeIntoTab, removeChildFromCompound, dissolveCompoundGroup, getTree, findGroup, setTree, toggleLeftColumn } from "./layoutStore";
 import { registerPanel } from "./panelRegistry";
 import type { TabGroup, TabInstance } from "../types/layout";
 
@@ -163,5 +163,38 @@ describe("compound group dissolve", () => {
     const before = findGroup(getTree(), "bottom-panel")!.tabs.length;
     dissolveCompoundGroup("bottom-panel", "t-x");
     expect(findGroup(getTree(), "bottom-panel")!.tabs.length).toBe(before);
+  });
+});
+
+describe("toggleLeftColumn — 整列隐藏(2026-09-09 修复)", () => {
+  it("根第一个 child 是 split(内部切分后) → split visibility=hidden, 空间回收", () => {
+    // 构造: 根 split children=["sidebar", "center"](sidebar 是含两组的 split)
+    const sidebar: any = {
+      type: "split", id: "sidebar-column", direction: "vertical",
+      children: [
+        { type: "group", id: "sidebar-left", tabs: [], activeTabId: null, visibility: "expanded" },
+        { type: "group", id: "group-plan", tabs: [], activeTabId: null, visibility: "expanded" },
+      ],
+      sizes: [50, 50],
+    };
+    const root: any = {
+      type: "split", id: "root", direction: "horizontal",
+      children: [
+        sidebar,
+        { type: "group", id: "center", tabs: [], activeTabId: null, visibility: "expanded" },
+      ],
+      sizes: [25, 75],
+    };
+    setTree(root);
+    toggleLeftColumn();
+    const after = getTree() as any;
+    // 根第一个 child(sidebar-column) visibility=hidden
+    expect(after.children[0].visibility).toBe("hidden");
+    // 尺寸归 0(redistribute 把空间给兄弟)
+    expect(after.sizes[0]).toBe(0);
+    // toggle 回来 → expanded
+    toggleLeftColumn();
+    const after2 = getTree() as any;
+    expect(after2.children[0].visibility).toBeUndefined();
   });
 });

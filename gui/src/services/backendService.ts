@@ -39,7 +39,9 @@ function notify() {
   windowBus.emit(Events.BACKEND_STATE_CHANGED, { ..._state } satisfies BackendStateChangedPayload);
 }
 
-async function pollForPort(timeoutMs = 30_000): Promise<number> {
+// 60s（原 30s）: 引擎启动实测 31s+（工具/命令/skills/MCP 初始化），
+// 30s 卡在悬崖边偶发"启动超时"。60s 给足余量; 快速路径 quick poll 3s 未变。
+async function pollForPort(timeoutMs = 60_000): Promise<number> {
   const invoke = await tauriInvoke();
   if (!invoke) throw new Error("Tauri IPC not available");
 

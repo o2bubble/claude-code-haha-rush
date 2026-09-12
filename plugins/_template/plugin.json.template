@@ -1,0 +1,89 @@
+// ═══════════════════════════════════════════════════════════════════════
+// plugin.json 模板（JSONC——本文件不参与解析，注释仅供阅读）
+// 用法：复制为 <新插件目录>/plugin.json，删掉全部注释再发布。
+// 字段来源：三个实例插件（git-viewer / nodejs / playwright-mcp）的并集。
+// 全 schema 见 MCP 工具 plugin_docs（不带 name）的「plugin.json 最小骨架」。
+// ═══════════════════════════════════════════════════════════════════════
+{
+  // ── 身份（必填）────────────────────────────────────────────────
+  "pluginName": "my-plugin",        // 目录名 + 唯一 id；只用小写/数字/连字符
+  "displayName": "我的插件",         // 界面显示名（可中文）
+  "version": "0.1.0",               // 语义化版本；**改内容必须升版本**，否则市场不提示更新
+  "apiVersion": "1.0",              // 插件 API 版本（当前 1.0）
+  "description": "一句话说明（市场列表 + 详情页摘要）",
+  // 图标：**必须是合法 IconKey** —— 见 gui/src/types/layout.ts 的 IconKey 联合类型。
+  // ⚠️ 写非法值**不报错**，会静默兜底成 grid3x3（曾见插件写 "compass" 结果显示成九宫格）。
+  // 常用值："package"（通用）/ "gitBranch" / "terminal" / "files" / "default"
+  "icon": "package",
+
+  // ── 分类与平台 ────────────────────────────────────────────────
+  "category": "tool",               // tool | integration | 自定义任意非空字符串（市场筛选 chips 动态并入）
+  "platforms": ["windows", "macos", "linux"], // 支持列表；缺省/空 = 全平台
+
+  // ── 安装形态（决定用户怎么装、AI 怎么对待）────────────────────
+  //   standard  = 包里就是程序本体，即装即活
+  //   ai-guided = 包里是"指导"（无运行时），只能 AI 按 AI_NOTES 执行安装
+  "installType": "standard",
+
+  // ── 依赖其它插件（安装时校验、卸载时反查防呆）──────────────────
+  "dependencies": [],
+
+  // ── 运行时目录（仅"提供运行时的插件"声明，如 nodejs）─────────
+  //   平台会把这些目录注册进**程序内部 PATH**（插件进程 + AI 会话可用，系统环境零污染）。
+  //   ⚠️ path 必须是插件目录内的相对路径（绝对路径/`..` 会被拒）；
+  //   ⚠️ 该目录是"安装产物"，不是包内容 —— 平台在插件更新时会跨覆盖保留它。
+  "runtimes": [
+    // { "id": "node", "path": "runtime" }
+  ],
+
+  // ── 后台进程（平台负责 spawn/重启/注入 runtime PATH）──────────
+  //   id:        进程标识（卸载/重启按它定位）
+  //   command:   可执行名。依赖 nodejs 时写 "node"（平台注入 PATH，无需绝对路径）
+  //   args:      相对路径在 **cwd=本插件目录** 下解析（脚本放插件目录内）
+  //   env:       可用 ${workspace} 占位符（工作区绑定后展开）
+  //   startOn:   "workspace_bound"（绑定工作区时启动）
+  "processes": [
+    // {
+    //   "id": "my-server",
+    //   "command": "node",
+    //   "args": ["server.cjs"],
+    //   "env": { "CLAUDE_PLUGIN_WORKSPACE": "${workspace}" },
+    //   "startOn": "workspace_bound"
+    // }
+  ],
+
+  // ── 贡献物 ────────────────────────────────────────────────────
+  "contributes": {
+    // 面板：平台按 content.src 以 iframe 加载插件目录内文件（沙箱隔离）
+    //   panelKind: "in-main"（主区布局内）| "floating"（独立浮窗，如详情视图）
+    //   userManaged: 是否出现在面板下拉/图标栏（false = 只由系统/其它面板驱动，如详情浮窗）
+    //   process: 关联的后台进程 id（面板数据来自它；无进程则不写）
+    "panels": [
+      // {
+      //   "id": "my-panel",
+      //   "title": "我的面板",
+      //   "panelKind": "in-main",
+      //   "userManaged": true,
+      //   "content": { "type": "html", "src": "panel.html" },
+      //   "process": "my-server"
+      // }
+    ],
+    "commands": [],   // 斜杠命令贡献（如无则空数组）
+    "events": []      // 事件订阅贡献（如无则空数组）
+  },
+
+  // ── 插件设置（设置面板按插件分组渲染；无则删此字段）──────────
+  //   轻量 JSON Schema：type=boolean|string|number|select，含 default。
+  "settings": {
+    // "myOption": {
+    //   "type": "select",
+    //   "title": "选项标题",
+    //   "description": "说明（写给用户；AI 代装时也会读到）",
+    //   "default": "a",
+    //   "options": [
+    //     { "value": "a", "label": "选项 A" },
+    //     { "value": "b", "label": "选项 B" }
+    //   ]
+    // }
+  }
+}

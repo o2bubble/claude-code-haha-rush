@@ -17,42 +17,31 @@ PROFILES_DIR = os.path.join(CLAUDE_DIR, ".env.profiles")
 
 # ── Presets (mirrors scripts/claude-profile.ts templates) ──────────────
 
+# DeepSeek 现只提供两个模型名：deepseek-flash 与 deepseek-v4-pro。
+# 旧的 deepseek-v4-flash / deepseek-v4-flash-vision-exp 已下线（官方路由到 V4.1-Flash）。
 PRESETS = {
+    "deepseek-flash": {
+        "label": "DeepSeek Flash",
+        "description": "DeepSeek Flash (Claude-compatible)",
+        "vars": {
+            "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+            "ANTHROPIC_MODEL": "deepseek-flash",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-flash",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-flash",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-flash",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
+        },
+        "requires_token": True,
+    },
     "deepseek-v4-pro": {
         "label": "DeepSeek v4 Pro",
-        "description": "DeepSeek v4 Pro (Claude-compatible)",
+        "description": "DeepSeek v4 Pro (stronger)",
         "vars": {
             "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
             "ANTHROPIC_MODEL": "deepseek-v4-pro",
             "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-pro",
             "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
-        },
-        "requires_token": True,
-    },
-    "deepseek-v4-flash": {
-        "label": "DeepSeek v4 Flash",
-        "description": "DeepSeek v4 Flash (faster, weaker)",
-        "vars": {
-            "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-            "ANTHROPIC_MODEL": "deepseek-v4-flash",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-flash",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-flash",
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
-        },
-        "requires_token": True,
-    },
-    "deepseek-v4-flash-vision-exp": {
-        "label": "DeepSeek v4 Flash Vision",
-        "description": "DeepSeek v4 Flash Vision (experimental, image input)",
-        "vars": {
-            "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-            "ANTHROPIC_MODEL": "deepseek-v4-flash-vision-exp",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-flash-vision-exp",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash-vision-exp",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-flash-vision-exp",
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
         },
         "requires_token": True,
@@ -169,8 +158,8 @@ def main():
     ).pack(anchor="w")
 
     presets_info = (
-        f"  • DeepSeek v4 Pro   — deepseek-v4-pro  (默认激活)\n"
-        f"  • DeepSeek v4 Flash — deepseek-v4-flash\n\n"
+        f"  • DeepSeek v4 Pro  — deepseek-v4-pro  (默认激活)\n"
+        f"  • DeepSeek Flash   — deepseek-flash\n\n"
         f"Base URL: https://api.deepseek.com/anthropic\n"
         f"Context:  1,000,000 tokens\n"
         f"共用一个 API Key，输入一次即可。"

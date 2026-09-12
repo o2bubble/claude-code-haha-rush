@@ -5,7 +5,8 @@
 ```bash
 # API 地址
 REGISTRY="http://123.56.66.84:8765"
-API_KEY="sk-mattpocock-skills-2026"
+# 上传密钥：真实值见 .private/api-keys.md（该目录已 gitignore）
+API_KEY="<上传密钥>"
 
 # 上传技能包
 curl -X POST "$REGISTRY/api/packages" \

@@ -400,7 +400,7 @@ export function WorkspaceSelector({ workspaces, activeWorkDir, onLaunch }: Works
                 const isSel = p === selected;
                 const isActive = p === activeWorkDir;
                 return (
-                  <div key={p} className={"ws-card" + (isSel ? " sel" : "")} onClick={() => setSelected(p)}>
+                  <div key={p} className={"ws-card" + (isSel ? " sel" : "")} onClick={() => setSelected(p)} onDoubleClick={() => { setSelected(p); void handleLaunch(); }}>
                     <button
                       type="button"
                       className="ws-card-del"

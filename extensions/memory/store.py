@@ -1,11 +1,15 @@
 """SQLite storage layer for the memory MCP server.
 
 Schema:
-  memories      — id, type, scope, title, content, embedding, importance, ...
+  memories      — id, type, scope, title, content, embedding, version, ...
+  memories_fts  — FTS5 index over tokenized title/content (optional)
   tags          — id, name (unique)
   memory_tags   — many-to-many bridge
   associations  — directed weighted edges between memories
-  meta          — key-value metadata (schema_version, model info, etc.)
+  meta          — key-value metadata (schema_version, tokenizer, etc.)
+
+The FTS5 index stores tokenized text only; display text is always read from
+`memories` via JOIN (index and display are separate concerns).
 """
 
 from __future__ import annotations
@@ -23,7 +27,9 @@ from typing import Any, Optional
 
 import re
 
-SCHEMA_VERSION = 2
+import tokenizer
+
+SCHEMA_VERSION = 3
 
 
 def _compute_hash(title: str, content: str) -> str:
@@ -40,13 +46,12 @@ def _uid() -> str:
     return str(uuid.uuid4())
 
 
-def _pack_embedding(vec: list[float]) -> bytes:
-    """Pack a float32 list into a BLOB."""
-    return struct.pack(f"{len(vec)}f", *vec)
-
-
 def _unpack_embedding(blob: bytes) -> list[float]:
-    """Unpack a BLOB back into a float32 list."""
+    """Unpack a BLOB into a float32 list.
+
+    Kept for reading legacy rows written before the embedding channel was
+    removed; the column stays in the schema for a future vector channel.
+    """
     n = len(blob) // 4
     return list(struct.unpack(f"{n}f", blob))
 
@@ -55,7 +60,17 @@ def _open_db(db_path: str) -> sqlite3.Connection:
     """Open (or create) the SQLite database and apply the schema."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # server.py and api.py start concurrently against the same file; wait for
+    # locks instead of failing immediately during migrations / FTS rebuilds.
+    conn.execute("PRAGMA busy_timeout=30000")
+    # PRAGMA journal_mode does NOT honor busy_timeout — it fails instantly
+    # when a peer holds the write lock. WAL is persistent, so check first and
+    # tolerate contention: a concurrent opener sets it for everyone.
+    try:
+        if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+            conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS meta (
@@ -64,17 +79,21 @@ def _open_db(db_path: str) -> sqlite3.Connection:
         );
 
         CREATE TABLE IF NOT EXISTS memories (
-            id           TEXT PRIMARY KEY,
-            type         TEXT NOT NULL CHECK(type IN ('fact','experience','lesson')),
-            scope        TEXT NOT NULL DEFAULT 'global',
-            title        TEXT NOT NULL,
-            content      TEXT NOT NULL,
-            embedding    BLOB,
-            importance   REAL NOT NULL DEFAULT 0.5,
-            access_count INTEGER NOT NULL DEFAULT 0,
-            created_at   TEXT NOT NULL,
-            updated_at   TEXT NOT NULL,
-            content_hash TEXT
+            id            TEXT PRIMARY KEY,
+            type          TEXT NOT NULL CHECK(type IN ('fact','experience','lesson')),
+            scope         TEXT NOT NULL DEFAULT 'global',
+            title         TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            embedding     BLOB,
+            importance    REAL NOT NULL DEFAULT 0.5,
+            access_count  INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            content_hash  TEXT,
+            version       INTEGER NOT NULL DEFAULT 1,
+            superseded_by TEXT,
+            deleted_at    TEXT,
+            source        TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_memories_type       ON memories(type);
         CREATE INDEX IF NOT EXISTS idx_memories_scope      ON memories(scope);
@@ -108,30 +127,76 @@ def _open_db(db_path: str) -> sqlite3.Connection:
         );
     """)
     _ensure_meta(conn)
+    # created after migration: the column only exists once the DB is v3
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by)"
+    )
     return conn
 
 
 def _ensure_meta(conn: sqlite3.Connection) -> None:
-    cur = conn.execute("SELECT value FROM meta WHERE key='schema_version'")
-    row = cur.fetchone()
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     if row is None:
+        # Fresh database — schema is already current.
         conn.execute(
             "INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
         )
-    else:
-        stored = int(row[0])
-        if stored == 1 and SCHEMA_VERSION == 2:
+        return
+
+    if int(row[0]) == SCHEMA_VERSION:
+        return
+
+    # Migration path. server.py and api.py open the same file concurrently and
+    # both may attempt the upgrade: BEGIN IMMEDIATE serializes them, and the
+    # version is re-read under the lock so whichever loses the race sees the
+    # already-migrated state and skips (otherwise: "duplicate column name").
+    conn.commit()  # clear any implicit transaction before taking the write lock
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        stored = int(
+            conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+        )
+        if stored == 1:
             conn.execute("ALTER TABLE memories ADD COLUMN content_hash TEXT")
-            # Backfill existing rows
-            for row in conn.execute("SELECT id, title, content FROM memories WHERE content_hash IS NULL"):
-                h = _compute_hash(row["title"], row["content"])
-                conn.execute("UPDATE memories SET content_hash=? WHERE id=?", (h, row["id"]))
+            for r in conn.execute(
+                "SELECT id, title, content FROM memories WHERE content_hash IS NULL"
+            ):
+                h = _compute_hash(r["title"], r["content"])
+                conn.execute("UPDATE memories SET content_hash=? WHERE id=?", (h, r["id"]))
             conn.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
-        elif stored != SCHEMA_VERSION:
-            raise RuntimeError(
-                f"DB schema version is {stored}, expected {SCHEMA_VERSION}. "
-                f"Run migration or delete the DB file."
-            )
+            stored = 2
+        if stored == 2:
+            conn.execute("ALTER TABLE memories ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+            conn.execute("ALTER TABLE memories ADD COLUMN superseded_by TEXT")
+            conn.execute("ALTER TABLE memories ADD COLUMN deleted_at TEXT")
+            conn.execute("ALTER TABLE memories ADD COLUMN source TEXT")
+            conn.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+            stored = 3
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    if stored != SCHEMA_VERSION:
+        raise RuntimeError(
+            f"DB schema version is {stored}, expected {SCHEMA_VERSION}. "
+            f"Run migration or delete the DB file."
+        )
+
+
+def _ensure_fts(conn: sqlite3.Connection) -> bool:
+    """Create the FTS5 index table. Returns False when FTS5 is unavailable."""
+    try:
+        conn.execute(
+            """CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                   memory_id UNINDEXED,
+                   title_tokens,
+                   content_tokens
+               )"""
+        )
+        return True
+    except sqlite3.OperationalError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +210,74 @@ class MemoryStore:
     def __init__(self, db_path: str = "claude-memory.db") -> None:
         self.db_path = db_path
         self._conn = _open_db(db_path)
+        self._fts = _ensure_fts(self._conn)
+        if not self._fts:
+            # FTS5 unavailable: record why so memory_stats can report it.
+            self.set_meta("fts_enabled", "0")
+            return
+        # (Re)build the index once per migration, or when the tokenizer engine
+        # changed (jieba vs bigram produce different tokens — index side and
+        # query side must always use the same engine). BEGIN IMMEDIATE so
+        # concurrent openers (server.py + api.py) serialize: the loser sees
+        # fts_enabled=1 and skips instead of double-rebuilding. An index
+        # problem must never block startup — degrade to LIKE instead.
+        tok_status = tokenizer.get_tokenizer_status()
+        try:
+            self._conn.commit()
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                if (
+                    self.get_meta("fts_enabled") != "1"
+                    or self.get_meta("tokenizer") != tok_status
+                ):
+                    self._rebuild_fts()
+                    # direct writes: set_meta() opens its own `with conn`
+                    # block, which would commit this explicit transaction early
+                    for key, value in (("fts_enabled", "1"), ("tokenizer", tok_status)):
+                        self._conn.execute(
+                            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                            (key, value),
+                        )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        except Exception:
+            self._fts = False
+            self.set_meta("fts_enabled", "0")
 
     # -- helpers ------------------------------------------------------------
+
+    def _fts_upsert(self, memory_id: str, title: str, content: str) -> None:
+        """Keep the FTS row for one memory in sync (no-op without FTS5)."""
+        if not self._fts:
+            return
+        self._conn.execute("DELETE FROM memories_fts WHERE memory_id=?", (memory_id,))
+        self._conn.execute(
+            "INSERT INTO memories_fts(memory_id, title_tokens, content_tokens) VALUES (?,?,?)",
+            (
+                memory_id,
+                tokenizer.tokenize_for_index(title),
+                tokenizer.tokenize_for_index(content),
+            ),
+        )
+
+    def _fts_delete(self, memory_id: str) -> None:
+        if not self._fts:
+            return
+        self._conn.execute("DELETE FROM memories_fts WHERE memory_id=?", (memory_id,))
+
+    def _rebuild_fts(self) -> None:
+        """Full re-index of every memory (including superseded/deleted rows).
+
+        The caller must hold an open write transaction (see __init__), so
+        concurrent openers serialize instead of rebuilding in parallel.
+        """
+        if not self._fts:
+            return
+        self._conn.execute("DELETE FROM memories_fts")
+        for r in self._conn.execute("SELECT id, title, content FROM memories"):
+            self._fts_upsert(r["id"], r["title"], r["content"])
 
     def _get_tag_id(self, name: str) -> int:
         cur = self._conn.execute(
@@ -171,22 +302,23 @@ class MemoryStore:
         content: str,
         scope: str = "global",
         tags: Optional[list[str]] = None,
-        embedding: Optional[list[float]] = None,
         importance: float = 0.5,
         associations: Optional[list[dict[str, Any]]] = None,
+        source: Optional[str] = None,
     ) -> dict[str, Any]:
         mid = _uid()
         now = _now()
-        emb_blob = _pack_embedding(embedding) if embedding is not None else None
         content_hash = _compute_hash(title, content)
 
         with self._conn:
             self._conn.execute(
-                """INSERT INTO memories (id, type, scope, title, content, embedding,
-                   importance, created_at, updated_at, content_hash)
+                """INSERT INTO memories (id, type, scope, title, content,
+                   importance, created_at, updated_at, content_hash, source)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (mid, type, scope, title, content, emb_blob, importance, now, now, content_hash),
+                (mid, type, scope, title, content, importance, now, now,
+                 content_hash, source),
             )
+            self._fts_upsert(mid, title, content)
             if tags:
                 for t in tags:
                     tid = self._get_tag_id(t)
@@ -229,8 +361,13 @@ class MemoryStore:
         title: Optional[str] = None,
         content: Optional[str] = None,
         importance: Optional[float] = None,
-        embedding: Optional[list[float]] = None,
     ) -> bool:
+        row = self._conn.execute(
+            "SELECT title, content FROM memories WHERE id=?", (memory_id,)
+        ).fetchone()
+        if row is None:
+            return False
+
         sets: list[str] = []
         params: list[Any] = []
         if title is not None:
@@ -242,32 +379,147 @@ class MemoryStore:
         if importance is not None:
             sets.append("importance=?")
             params.append(importance)
-        if embedding is not None:
-            sets.append("embedding=?")
-            params.append(_pack_embedding(embedding))
         if not sets:
             return False
+
+        new_title = title if title is not None else row["title"]
+        new_content = content if content is not None else row["content"]
+        text_changed = title is not None or content is not None
+        if text_changed:
+            sets.append("content_hash=?")
+            params.append(_compute_hash(new_title, new_content))
+
+        sets.append("version = version + 1")
         sets.append("updated_at=?")
         params.append(_now())
-        if "title" in {s.split("=")[0] for s in sets} or "content" in {s.split("=")[0] for s in sets}:
-            # Need current values if only one of title/content is changing
-            cur = self._conn.execute("SELECT title, content FROM memories WHERE id=?", (memory_id,))
-            row = cur.fetchone()
-            if row:
-                new_title = title if title is not None else row["title"]
-                new_content = content if content is not None else row["content"]
-                sets.append("content_hash=?")
-                params.append(_compute_hash(new_title, new_content))
         params.append(memory_id)
-        sql = f"UPDATE memories SET {', '.join(sets)} WHERE id=?"
+
         with self._conn:
-            self._conn.execute(sql, params)
+            self._conn.execute(
+                f"UPDATE memories SET {', '.join(sets)} WHERE id=?", params
+            )
+            if text_changed:
+                self._fts_upsert(memory_id, new_title, new_content)
         return True
 
     def delete_memory(self, memory_id: str) -> bool:
         with self._conn:
             cur = self._conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
+            if cur.rowcount > 0:
+                self._fts_delete(memory_id)
         return cur.rowcount > 0
+
+    def soft_delete_memory(self, memory_id: str) -> bool:
+        """Mark a memory as deleted without removing the row (auditable)."""
+        now = _now()
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE memories SET deleted_at=?, updated_at=? "
+                "WHERE id=? AND deleted_at IS NULL",
+                (now, now, memory_id),
+            )
+        return cur.rowcount > 0
+
+    def merge_supersede(
+        self,
+        target_ids: list[str],
+        type: str,
+        title: str,
+        content: str,
+        *,
+        scope: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        importance: Optional[float] = None,
+        source: Optional[str] = None,
+    ) -> str:
+        """Create a merged record and mark targets as superseded.
+
+        Runs as one transaction: either the new record exists with every
+        target retired, or nothing changes. Associations (both directions)
+        and content refs of the targets are transferred to the new record so
+        the knowledge graph stays connected. Returns the new memory's id.
+        """
+        targets = []
+        for tid in target_ids:
+            mem = self.get_memory(tid)
+            if mem is None:
+                raise ValueError(f"target id not found: {tid}")
+            targets.append(mem)
+        if not targets:
+            raise ValueError("no target ids to merge")
+
+        if scope is None:
+            scope = targets[0].get("scope", "global")
+        if tags is None:
+            seen: dict[str, None] = {}
+            for t in targets:
+                for name in self.get_tags_for_memory(t["id"]):
+                    seen[name] = None
+            tags = sorted(seen)
+        # A merge is at least as important as its most important part.
+        target_max = max(t.get("importance", 0.5) for t in targets)
+        importance = target_max if importance is None else max(importance, target_max)
+
+        new_id = _uid()
+        now = _now()
+        content_hash = _compute_hash(title, content)
+
+        with self._conn:  # single transaction — all or nothing
+            self._conn.execute(
+                """INSERT INTO memories (id, type, scope, title, content,
+                   importance, created_at, updated_at, content_hash, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (new_id, type, scope, title, content, importance, now, now,
+                 content_hash, source),
+            )
+            self._fts_upsert(new_id, title, content)
+            for t in (tags or []):
+                tid = self._get_tag_id(t)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO memory_tags(memory_id, tag_id) VALUES (?, ?)",
+                    (new_id, tid),
+                )
+
+            for t in targets:
+                tid = t["id"]
+                for a in self._conn.execute(
+                    "SELECT target_id, weight, type FROM associations WHERE source_id=?",
+                    (tid,),
+                ).fetchall():
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO associations "
+                        "(source_id,target_id,weight,type,created_at) VALUES (?,?,?,?,?)",
+                        (new_id, a["target_id"], a["weight"], a["type"], now),
+                    )
+                for a in self._conn.execute(
+                    "SELECT source_id, weight, type FROM associations WHERE target_id=?",
+                    (tid,),
+                ).fetchall():
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO associations "
+                        "(source_id,target_id,weight,type,created_at) VALUES (?,?,?,?,?)",
+                        (a["source_id"], new_id, a["weight"], a["type"], now),
+                    )
+                for r in self._conn.execute(
+                    "SELECT target_id FROM content_refs WHERE source_id=?", (tid,)
+                ).fetchall():
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO content_refs(source_id,target_id) VALUES (?,?)",
+                        (new_id, r["target_id"]),
+                    )
+                for r in self._conn.execute(
+                    "SELECT source_id FROM content_refs WHERE target_id=?", (tid,)
+                ).fetchall():
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO content_refs(source_id,target_id) VALUES (?,?)",
+                        (r["source_id"], new_id),
+                    )
+                self._conn.execute(
+                    "UPDATE memories SET superseded_by=?, updated_at=?, "
+                    "version = version + 1 WHERE id=?",
+                    (new_id, now, tid),
+                )
+        return new_id
 
     # -- tags ---------------------------------------------------------------
 
@@ -484,6 +736,68 @@ class MemoryStore:
 
     # -- search -------------------------------------------------------------
 
+    def fts_search(
+        self,
+        query: str,
+        scope: Optional[list[str]] = None,
+        type: Optional[list[str]] = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """BM25 full-text search over the tokenized FTS5 index.
+
+        Returns memory dicts (same shape as other search methods) plus a
+        normalized `score` in (0, 1): FTS5's bm25() is a negative relevance,
+        mapped via relevance / (1 + relevance) so thresholds mean the same
+        thing across retrieval channels.
+        """
+        if not self._fts:
+            return []
+        fts_q = tokenizer.build_fts_query(query)
+        if not fts_q:
+            return []
+
+        conditions = [
+            "memories_fts MATCH ?",
+            "m.superseded_by IS NULL",
+            "m.deleted_at IS NULL",
+        ]
+        params: list[Any] = [fts_q]
+        if scope:
+            conditions.append(f"m.scope IN ({','.join('?' * len(scope))})")
+            params.extend(scope)
+        if type:
+            conditions.append(f"m.type IN ({','.join('?' * len(type))})")
+            params.extend(type)
+
+        retrieve = max(limit * 3, limit)  # over-fetch for post-filtering
+        params.append(retrieve)
+        # bm25() weights follow column order: (memory_id, title_tokens,
+        # content_tokens) — memory_id is UNINDEXED so its weight is inert.
+        sql = f"""
+            SELECT memories_fts.memory_id AS id,
+                   bm25(memories_fts, 0.0, 10.0, 1.0) AS rank
+            FROM memories_fts
+            JOIN memories m ON m.id = memories_fts.memory_id
+            WHERE {' AND '.join(conditions)}
+            ORDER BY rank
+            LIMIT ?
+        """
+        rows = self._conn.execute(sql, params).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for r in rows:
+            mem = self.get_memory(r["id"])
+            if mem is None:
+                continue
+            mem.pop("embedding", None)
+            relevance = -float(r["rank"])  # FTS5 bm25(): negative = more relevant
+            mem["score"] = relevance / (1.0 + relevance) if relevance > 0 else 0.0
+            mem["tags"] = self.get_tags_for_memory(r["id"])
+            results.append(mem)
+            if len(results) >= limit:
+                break  # over-fetch is internal to the SQL; callers get <= limit
+        return results
+
     def search_by_tags(
         self,
         tags: list[str],
@@ -494,7 +808,7 @@ class MemoryStore:
         """Find memories that match ALL given tags, with optional filters."""
         tag_names = [t.lower().strip() for t in tags]
         placeholders = ",".join("?" * len(tag_names))
-        conditions = ["1=1"]
+        conditions = ["m.superseded_by IS NULL", "m.deleted_at IS NULL"]
         params: list[Any] = []
 
         if scope:
@@ -582,7 +896,11 @@ class MemoryStore:
         token_conditions = f"({' OR '.join(or_clauses)})"
         score_expr = " + ".join(score_parts)
 
-        conditions = [token_conditions]
+        conditions = [
+            token_conditions,
+            "m.superseded_by IS NULL",
+            "m.deleted_at IS NULL",
+        ]
 
         if scope:
             scope_ph = ",".join("?" * len(scope))
@@ -619,22 +937,6 @@ class MemoryStore:
             results.append(d)
         return results
 
-    def get_all_with_embeddings(self) -> list[dict[str, Any]]:
-        """Return (id, embedding, importance, updated_at) for all memories that have embeddings."""
-        cur = self._conn.execute(
-            """SELECT id, embedding, importance, updated_at
-               FROM memories WHERE embedding IS NOT NULL"""
-        )
-        results = []
-        for r in cur.fetchall():
-            results.append({
-                "id": r[0],
-                "embedding": _unpack_embedding(r[1]),
-                "importance": r[2],
-                "updated_at": r[3],
-            })
-        return results
-
     def record_access(self, memory_id: str) -> None:
         with self._conn:
             self._conn.execute(
@@ -643,6 +945,16 @@ class MemoryStore:
             )
 
     # -- stats & meta -------------------------------------------------------
+
+    def get_capabilities(self) -> dict[str, Any]:
+        """What this store can actually do — callers read this to pick a path."""
+        return {
+            "fts": bool(self._fts),
+            "jieba": tokenizer.get_tokenizer_status() == "jieba",
+            "tags": True,
+            "like_fallback": not self._fts,
+            "embedding": False,
+        }
 
     def get_stats(self) -> dict[str, Any]:
         stats: dict[str, Any] = {}
@@ -673,9 +985,18 @@ class MemoryStore:
         else:
             stats["db_size_kb"] = 0
 
-        cur = self._conn.execute("SELECT value FROM meta WHERE key='embedding_model'")
-        row = cur.fetchone()
-        stats["model"] = row[0] if row else None
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE superseded_by IS NOT NULL"
+        )
+        stats["superseded"] = cur.fetchone()[0]
+
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL"
+        )
+        stats["deleted"] = cur.fetchone()[0]
+
+        stats["capabilities"] = self.get_capabilities()
+        stats["tokenizer"] = self.get_meta("tokenizer") or tokenizer.get_tokenizer_status()
 
         return stats
 

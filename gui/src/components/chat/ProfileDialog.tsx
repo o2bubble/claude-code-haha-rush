@@ -90,7 +90,23 @@ function parseCapabilities(str?: string): Set<string> {
   return new Set(str.split(",").map((x) => x.trim()).filter(Boolean));
 }
 
+// DeepSeek 现只提供两个模型名：deepseek-flash 与 deepseek-v4-pro。
+// 旧的 deepseek-v4-flash / deepseek-v4-flash-vision-exp 已下线（官方路由到 V4.1-Flash），
+// 已有 profile 由 Rust 侧 migrate_deepseek_profiles 自动合并迁移。
 const DEEPSEEK_TEMPLATES: PresetTemplate[] = [
+  {
+    label: "DeepSeek Flash",
+    profileName: "deepseek-flash",
+    vars: {
+      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic",
+      ANTHROPIC_MODEL: "deepseek-flash",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-flash",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-flash",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-flash",
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1000000",
+    },
+    requiresToken: true,
+  },
   {
     label: "DeepSeek v4 Pro",
     profileName: "deepseek-v4-pro",
@@ -100,32 +116,6 @@ const DEEPSEEK_TEMPLATES: PresetTemplate[] = [
       ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-v4-pro",
       ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-pro",
       ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-pro",
-      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1000000",
-    },
-    requiresToken: true,
-  },
-  {
-    label: "DeepSeek v4 Flash",
-    profileName: "deepseek-v4-flash",
-    vars: {
-      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic",
-      ANTHROPIC_MODEL: "deepseek-v4-flash",
-      ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-v4-flash",
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-flash",
-      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-flash",
-      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1000000",
-    },
-    requiresToken: true,
-  },
-  {
-    label: "DeepSeek v4 Flash Vision",
-    profileName: "deepseek-v4-flash-vision-exp",
-    vars: {
-      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic",
-      ANTHROPIC_MODEL: "deepseek-v4-flash-vision-exp",
-      ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-v4-flash-vision-exp",
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-flash-vision-exp",
-      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-flash-vision-exp",
       CLAUDE_CODE_MAX_CONTEXT_TOKENS: "1000000",
     },
     requiresToken: true,

@@ -4,8 +4,11 @@ import sqlite3
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "registry.db")
+# 包根目录（与 routes.py 的 SKILLS_STORE 同源）——_plugin_meta 读包内 plugin.json 用
+SKILLS_STORE = Path(os.path.dirname(os.path.dirname(__file__))) / "skills-store"
 
 
 def get_conn() -> sqlite3.Connection:
@@ -63,11 +66,19 @@ def init_db() -> None:
 
 # ── Packages ──
 
-def list_packages() -> list[dict]:
+def list_packages(pkg_type: str | None = None) -> list[dict]:
+    """pkg_type=None 返回全部（兼容）；'skill'/'plugin' 按 type 过滤。
+    旧 GUI 的 GET /packages 无 type 概念 → 端点侧默认 skill，防插件串进技能库。"""
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM packages ORDER BY download_count DESC"
-    ).fetchall()
+    if pkg_type:
+        rows = conn.execute(
+            "SELECT * FROM packages WHERE type = ? ORDER BY download_count DESC",
+            (pkg_type,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM packages ORDER BY download_count DESC"
+        ).fetchall()
     conn.close()
     return [_row_to_pkg(r) for r in rows]
 
@@ -90,6 +101,22 @@ def insert_package(slug: str, name: str, description: str, author: str,
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (slug, name, description, author, version, json.dumps(tags),
          skill_count, pkg_type, now, now),
+    )
+    conn.commit()
+    conn.close()
+    return get_package(slug)
+
+
+def update_package(slug: str, name: str, description: str, author: str,
+                   version: str, tags: list[str], skill_count: int) -> dict:
+    """force 覆盖: 更新元数据(版本/作者/描述/技能数), 保留 download_count/created_at。"""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn = get_conn()
+    conn.execute(
+        """UPDATE packages SET name=?, description=?, author=?, version=?,
+           tags=?, skill_count=?, updated_at=? WHERE slug=?""",
+        (name, description, author, version, json.dumps(tags),
+         skill_count, now, slug),
     )
     conn.commit()
     conn.close()
@@ -209,8 +236,25 @@ def _row_to_feedback(row: sqlite3.Row) -> dict:
 
 # ── Helpers ──
 
+def _plugin_meta(slug: str) -> dict:
+    """读包根 plugin.json 的扩展字段（category/dependencies/installType）。
+    无 plugin.json / 字段缺失 → {}（旧包兼容, GUI 侧用默认值）。"""
+    path = SKILLS_STORE / slug / "plugin.json" if SKILLS_STORE else None
+    if not path or not path.exists():
+        return {}
+    try:
+        pm = json.loads(path.read_text(encoding="utf-8"))
+        out = {}
+        for k in ("category", "dependencies", "installType", "platforms"):
+            if k in pm:
+                out[k] = pm[k]
+        return out
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 def _row_to_pkg(row: sqlite3.Row) -> dict:
-    return {
+    pkg = {
         "slug": row["slug"],
         "name": row["name"],
         "description": row["description"],
@@ -223,3 +267,7 @@ def _row_to_pkg(row: sqlite3.Row) -> dict:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+    # 插件包 enrich 扩展字段（读包内 plugin.json, 不入库——schema 零迁移, 旧包自动兼容）
+    if pkg["type"] == "plugin":
+        pkg.update(_plugin_meta(row["slug"]))
+    return pkg

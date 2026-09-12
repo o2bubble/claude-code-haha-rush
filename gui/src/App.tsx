@@ -8,8 +8,8 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { WorkspaceSelector } from "./components/chat/WorkspaceSelector";
 import { WelcomeWizard, type WizardSettings } from "./components/chat/WelcomeWizard";
 import { registerPanel } from "./stores/panelRegistry";
-import { reloadPlugins, getActiveManifests } from "./services/pluginRegistry";
-import { startPluginProcesses, startPluginProcessListener } from "./services/pluginProcessBridge";
+import { reloadPlugins } from "./services/pluginRegistry";
+import { startPluginProcessListener } from "./services/pluginProcessBridge";
 import { ALL_PANEL_DEFS } from "./services/panelDefs";
 import { getSettings, loadSettings, reloadSettings, saveSettings, updateSettings } from "./stores/settingsStore";
 import { workspaceBasename } from "./utils/workspace";
@@ -591,13 +591,13 @@ export default function App() {
           }
         })
         .catch(() => {});
-      // T3: 绑定工作区后启动插件声明的后台进程(决策#6 startOn=workspace_bound)
+      // T3: 绑定工作区后启动插件声明的后台进程(决策#6 startOn=workspace_bound)。
+      // 走 syncPluginProcesses 单一入口——与重扫共用"哪些该跑"的判定(幂等,
+      // 已在跑的不重启; 未绑定时它自己会跳过, 这里是绑定后的实际拉起点)。
       void (async () => {
         try {
-          const decls = getActiveManifests()
-            .flatMap((m) => m.processes.filter((p) => p.startOn === "workspace_bound"))
-            .map((p) => ({ id: p.id, command: p.command, args: p.args, env: p.env as Record<string, string> | undefined, startOn: p.startOn }));
-          if (decls.length > 0) await startPluginProcesses(decls);
+          const { syncPluginProcesses } = await import("./services/pluginProcessBridge");
+          await syncPluginProcesses();
         } catch (e) {
           console.warn("[App] 启动插件后台进程失败:", e);
         }

@@ -7,6 +7,8 @@ import { t } from "../../i18n";
 import {
   buildTicks, timeToIndex, pixelToTime, timeToPixel,
   segmentizeByDay, layoutSegments, MIN_SEGMENT_PX,
+  findNearestPrompt, clusterPrompts, pickEven,
+  type UserPrompt, type UserPromptHit,
 } from "./timelineMath";
 
 interface TimeLineBarProps {
@@ -14,7 +16,18 @@ interface TimeLineBarProps {
   timestamps: number[];
   /** 定位到某条消息（index） */
   onSeek: (index: number) => void;
+  /** 用户提示刻度（回溯"我在哪儿说过什么"）；缺省则只画原有日期/时间刻度 */
+  userPrompts?: UserPrompt[];
 }
+
+/** 用户提示刻度的数量上限：超过则均分取样（保首末）。提示本就比助手消息稀疏，
+ *  正常会话远达不到；设上限只为防极端场景糊成一条线。 */
+const MAX_USER_TICKS = 120;
+/** 吸附半径（px）：指针离刻度多近就"吸"到它。点击与拖动共用（走 seekFromClientY）。 */
+const PROMPT_HIT_RADIUS = 7;
+/** 渲染聚类阈值（px）：中心距小于它就并作一个标记。
+ *  点的视觉直径约 6-7px（5px + 1px 描边），取 8 保证相邻点不接触。 */
+const CLUSTER_MIN_GAP = 8;
 
 // 精简态（未 hover）窄条，只显示刻度小点；hover/拖动时展开为详细宽条。
 // 展开态需容纳「MM-DD HH:MM」日期+时间，故较宽。
@@ -55,7 +68,7 @@ function dayLabel(time: number, now: number): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-export function TimeLineBar({ timestamps, onSeek }: TimeLineBarProps) {
+export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState(0);
   const [hovered, setHovered] = useState(false);
@@ -96,12 +109,33 @@ export function TimeLineBar({ timestamps, onSeek }: TimeLineBarProps) {
     return layoutSegments(segmentizeByDay(timestamps), height, MIN_SEGMENT_PX);
   }, [timestamps, height]);
 
+  // 用户提示刻度 → 像素位置（时间线是分段映射，必须走 timeToPixel 而非线性换算）
+  const userTicks = useMemo<UserPromptHit[]>(() => {
+    if (!userPrompts || userPrompts.length === 0 || layout.length === 0) return [];
+    const capped = userPrompts.length > MAX_USER_TICKS
+      ? pickEven(userPrompts, MAX_USER_TICKS)
+      : userPrompts;
+    return capped.map((p) => ({ ...p, pixel: timeToPixel(p.time, layout) }));
+  }, [userPrompts, layout]);
+
+  // 用户提示刻度的像素位置（seekFromClientY 命中判定用；须与渲染同一套映射）
+  const userTicksRef = useRef<UserPromptHit[]>([]);
+  userTicksRef.current = userTicks;
+
   const seekFromClientY = useCallback(
     (clientY: number) => {
       const el = containerRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
       const y = Math.min(el.clientHeight, Math.max(0, clientY - rect.top));
+      // 落在用户提示刻度上 → 直接跳该条。不做「像素→时间→二分」反算：
+      // 反算有时间取整误差，会落到前一条（实测点第 3 个刻度跳到了 index 3
+      // 而目标是 index 4）。刻度自身的 index 才是准确意图。
+      const hit = findNearestPrompt(y, userTicksRef.current, PROMPT_HIT_RADIUS);
+      if (hit) {
+        onSeekRef.current(hit.index);
+        return;
+      }
       const time = pixelToTime(y, layout);
       const idx = timeToIndex(timestamps, time);
       if (idx >= 0) onSeekRef.current(idx);
@@ -146,10 +180,38 @@ export function TimeLineBar({ timestamps, onSeek }: TimeLineBarProps) {
 
   const pointerY = dragging ? dragY : hoverY;
   let pointerPixel: number | null = null;
-  if (pointerY !== null && containerRef.current) {
-    const rect = containerRef.current.getBoundingClientRect();
-    pointerPixel = Math.min(height, Math.max(0, pointerY - rect.top));
+  // 容器屏幕矩形：pointerPixel 换算要用（提示浮层不依赖它 —— 见下方 CSS left:100%）
+  let barRect: DOMRect | null = null;
+  if (containerRef.current) {
+    barRect = containerRef.current.getBoundingClientRect();
+    if (pointerY !== null) {
+      pointerPixel = Math.min(height, Math.max(0, pointerY - barRect.top));
+    }
   }
+
+  // 当前吸附的用户提示刻度（悬停与**拖动**共用）——拖动时 pointerPixel 取自 dragY，
+  // 所以拖动过程中它就是"吸到了哪条"，浮层实时跟随，松开前就能确认。
+  // 早先 dragging 时返回 null，导致拖动全程看不到吸附结果（密集时无从判断）。
+  const hoveredPrompt = useMemo(
+    () => (pointerPixel === null ? null : findNearestPrompt(pointerPixel, userTicks, PROMPT_HIT_RADIUS)),
+    [pointerPixel, userTicks],
+  );
+
+  // 渲染聚类：密集区只画一个标记，避免点糊成一片（吸附仍用原始刻度）
+  const promptClusters = useMemo(
+    () => clusterPrompts(userTicks, CLUSTER_MIN_GAP),
+    [userTicks],
+  );
+
+  // 吸附目标在其簇内的序号（密集时告诉用户"这里挤了几条、当前是第几条"）
+  const clusterPos = useMemo(() => {
+    if (!hoveredPrompt) return null;
+    for (const c of promptClusters) {
+      const i = c.items.findIndex((it) => it.index === hoveredPrompt.index);
+      if (i >= 0) return { pos: i + 1, total: c.items.length };
+    }
+    return null;
+  }, [hoveredPrompt, promptClusters]);
 
   return (
     <div
@@ -262,6 +324,79 @@ export function TimeLineBar({ timestamps, onSeek }: TimeLineBarProps) {
           );
         })}
 
+      {/* 用户提示刻度：实心点，折叠态也显示（回溯定位的主要抓手）。
+          颜色用 warning 琥珀，与天刻度(accent 蓝)/时间刻度(border 灰)区分。
+          按像素聚类渲染 —— 密集区一个标记（尺寸编码密度），避免糊成一片。 */}
+      {height > 0 &&
+        promptClusters.map((c, i) => {
+          const active = !!hoveredPrompt && c.items.some((it) => it.index === hoveredPrompt.index);
+          const dense = c.items.length > 1;
+          const size = active ? 9 : dense ? 7 : 5;
+          return (
+            <div
+              key={`up-${i}`}
+              style={{
+                position: "absolute",
+                left: "50%",
+                top: Math.min(height - size, Math.max(0, c.pixel - size / 2)),
+                width: size,
+                height: size,
+                marginLeft: -size / 2,
+                borderRadius: "50%",
+                background: active ? "var(--accent)" : "var(--semantic-warning)",
+                // 细描边把点从中心竖线上"抬"起来，密集处也能分辨
+                boxShadow: "0 0 0 1px var(--bg-surface)",
+                pointerEvents: "none",
+                zIndex: active ? 2 : 1,
+              }}
+            />
+          );
+        })}
+
+      {/* 悬停到用户提示刻度 → 浮出预览。
+          定位：`left = 栏左边缘 + 展开宽度`，**不用测出的 barRect.right** ——
+          栏展开有 350ms 过渡，渲染期测到的矩形是展开前的窄态（12px），
+          曾因此把浮层压在栏上。左边缘稳定、展开宽度是常量，二者相加即可。
+          fixed 是必需的：容器 overflow:hidden 会把内部绝对定位的浮层裁掉。 */}
+      {expanded && hoveredPrompt && barRect && (
+        <div
+          style={{
+            position: "fixed",
+            left: barRect.left + EXPANDED_WIDTH + 6,
+            top: Math.min(
+              Math.max(4, barRect.top + hoveredPrompt.pixel - 14),
+              (typeof window !== "undefined" ? window.innerHeight : 800) - 64
+            ),
+            maxWidth: 260,
+            padding: "4px 8px",
+            borderRadius: 4,
+            background: "var(--bg-root)",
+            border: "1px solid var(--border-medium)",
+            boxShadow: "var(--shadow-md)",
+            fontSize: 11,
+            lineHeight: 1.45,
+            color: "var(--fg-primary)",
+            fontFamily: "var(--font-sans)",
+            pointerEvents: "none",
+            zIndex: 1000,
+          }}
+        >
+          <div style={{ fontSize: 10, color: "var(--fg-muted)", marginBottom: 2 }}>
+            {t("timeline.userPrompt")} · {formatAxisTime(hoveredPrompt.time, false, Date.now())}
+            {/* 密集区标记：告诉用户"这里挤了几条、当前第几条"——像素不足以逐条区分时，
+                这是唯一能让人判断自己选到哪条的信息 */}
+            {clusterPos && clusterPos.total > 1 && (
+              <span style={{ marginLeft: 4, color: "var(--semantic-warning)" }}>
+                {clusterPos.pos}/{clusterPos.total}
+              </span>
+            )}
+          </div>
+          <div style={{ wordBreak: "break-word" }}>
+            {hoveredPrompt.preview || t("timeline.emptyPrompt")}
+          </div>
+        </div>
+      )}
+
       {/* 拖动/悬停指针 + 时间提示（仅展开态） */}
       {expanded && pointerPixel !== null && (
         <>
@@ -277,6 +412,8 @@ export function TimeLineBar({ timestamps, onSeek }: TimeLineBarProps) {
               zIndex: 2,
             }}
           />
+          {/* 时间标签：吸附到用户提示时让位 —— 右侧预览浮层已含时间，避免重复 */}
+          {!hoveredPrompt && (
           <div
             style={{
               position: "absolute",
@@ -296,6 +433,7 @@ export function TimeLineBar({ timestamps, onSeek }: TimeLineBarProps) {
             {pointerPixel !== null &&
               formatAxisTime(pixelToTime(pointerPixel, layout), dragging, Date.now())}
           </div>
+          )}
         </>
       )}
     </div>

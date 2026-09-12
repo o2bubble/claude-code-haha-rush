@@ -575,7 +575,6 @@ Collapsible message log at bottom (24px):
 | `create_profile` | lib.rs | Create new API profile (.env file) |
 | `delete_profile` | lib.rs | Delete an API profile |
 | `set_default_profile` | lib.rs | Set default profile + write settings.json env |
-| `get_git_branch` | lib.rs | Read current git branch from .git/HEAD |
 | `run_cli_print` | lib.rs | Spawn CLI headless in background → emit result via `cli-translate-result` Tauri event |
 | `save_skills_i18n` | lib.rs | Save skills i18n translations to workspace |
 | `load_skills_i18n` | lib.rs | Load skills i18n translations from workspace |
@@ -2013,10 +2012,11 @@ Without embeddings, `hybrid` mode degrades to:
 | Container | `claude-memory` | `claude-memory` |
 | Data | `/data/claude-memory/claude-memory.db` | `/data/memory/claude-memory.db` |
 
-- Server: 192.168.186.96 (`root` / `dqhZ#0827!Pla*`), cloud: 123.56.66.84 (`root` / `3kEJVURHJbtNKn4`)
+- Server: 192.168.186.96 (`root` / `<SSH 密码>`), cloud: 123.56.66.84 (`root` / `<SSH 密码>`)
 - Both Docker compose managed, bind mounts for persistence
-- Memory Explorer password: `helloworld!`
+- Memory Explorer password: `<密码>`
 - Release Platform: port 8765 (same on both servers)
+- 凭据（服务器/密钥/账号）汇总见内部凭证记录，不写入仓库文档
 
 ## 26. Help Panel (2026-07-31)
 

@@ -40,6 +40,13 @@ export function rerenderPanel(panel: PanelDefinition) {
   windowBus.emit(Events.PANEL_REGISTRY_CHANGED, { panels: [...panels.values()] }, { sticky: true });
 }
 
+/** 注销面板（插件禁用/卸载——定义摘除, 图标栏/下拉即消失）。
+ *  已打开的实例由调用方负责从布局树移除(unregisterPluginPanels)。 */
+export function unregisterPanel(id: string) {
+  if (!panels.delete(id)) return;
+  windowBus.emit(Events.PANEL_REGISTRY_CHANGED, { panels: [...panels.values()] }, { sticky: true });
+}
+
 export function getPanel(id: string): PanelDefinition | undefined {
   return panels.get(id);
 }

@@ -3,7 +3,7 @@
 // asserts nextState + effects. Deterministic via injected now/uuid.
 
 import { describe, it, expect } from "vitest";
-import { chatReduce, emptyChatState, computeStreamStall, isBackendBusy } from "./chatReduce";
+import { chatReduce, emptyChatState, computeStreamStall, isBackendBusy, activeToolNames } from "./chatReduce";
 import type { ChatState, ReduceCtx } from "./types";
 
 const ctx: ReduceCtx = { now: () => 1234567890, uuid: () => "gen-id" };
@@ -89,10 +89,23 @@ describe("chatReduce — streaming FSM", () => {
 
   it("result resets global + message streaming", () => {
     let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } });
-    r = reduce({ type: "result" }, r.nextState);
+    r = reduce({ type: "result", busy: false }, r.nextState);
     expect(r.nextState.streaming).toBe(false);
     expect(r.nextState.messages[0].streaming).toBe(false);
-    expect(r.nextState.backendBusy).toBe(false); // result=权威 turn 结束 → 后端空闲
+    expect(r.nextState.backendBusy).toBe(false); // 带 busy:false 的 result = 权威 turn 结束
+  });
+
+  it("bare result (no busy field) does NOT clear backendBusy (local slash-command result regression)", () => {
+    // 局部命令(/mcp-refresh 等)结束也发裸 result, 但不占 global busy。若裸 result
+    // 清 backendBusy, 主 turn 仍 busy 时 gate 误判空闲 → 消息直发撞
+    // "A prompt is already being processed"(不进队列)。
+    let r = reduce({ type: "status", status: "thinking", busy: true });
+    expect(r.nextState.backendBusy).toBe(true);
+    r = reduce({ type: "result" }, r.nextState); // 裸 result(局部命令结束)
+    expect(r.nextState.streaming).toBe(false);   // 乐观 UI 复位仍发生
+    expect(r.nextState.backendBusy).toBe(true);  // 权威 busy 不被裸 result 清掉
+    r = reduce({ type: "result", busy: false }, r.nextState); // 真 turn 结束才收口
+    expect(r.nextState.backendBusy).toBe(false);
   });
 
   it("status ready resets, thinking/compacting starts (with busy field)", () => {
@@ -481,6 +494,25 @@ describe("chatReduce — tasks, subagents, permission, misc", () => {
     expect(r.nextState).toBe(base);
     expect(r.effects).toEqual([]);
   });
+
+  it("activeToolUses: +1 on tool_use start, -1 on tool_result, cleared on result/error", () => {
+    // 非 bash 工具执行期后端零广播 → stall 计时靠在途计数豁免(工具在跑≠卡死)
+    let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } });
+    expect(r.nextState.activeToolUses).toBe(0);
+    r = reduce({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "t1", name: "Write" } } }, r.nextState);
+    expect(r.nextState.activeToolUses).toBe(1);
+    r = reduce({ type: "stream_event", event: { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "t2", name: "Read" } } }, r.nextState);
+    expect(r.nextState.activeToolUses).toBe(2);
+    r = reduce({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } }, r.nextState);
+    expect(r.nextState.activeToolUses).toBe(1);
+    r = reduce({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "ok" }] } }, r.nextState);
+    expect(r.nextState.activeToolUses).toBe(0);
+    // 泄漏防护: abort 后 tool_result 永远不来 → 回合结束(result/error)清零
+    r = reduce({ type: "stream_event", event: { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "t3", name: "Task" } } }, r.nextState);
+    expect(r.nextState.activeToolUses).toBe(1);
+    r = reduce({ type: "result", busy: false }, r.nextState);
+    expect(r.nextState.activeToolUses).toBe(0);
+  });
 });
 
 describe("computeStreamStall — 无响应提示", () => {
@@ -499,6 +531,23 @@ describe("computeStreamStall — 无响应提示", () => {
   it("past threshold → elapsed seconds (hint shown)", () => {
     expect(computeStreamStall(now - 45_000, now, true)).toBe(45);
     expect(computeStreamStall(now - 120_000, now, true)).toBe(120);
+  });
+  it("工具在跑也不再豁免 — 静默照常计时 (2026-09-10 一刀切)", () => {
+    // 此前按工具分级豁免（Bash 600s / 快速工具 60s），但分级判断屡屡不准：
+    // 连续工具调用不断续期，真卡死也一直沉默（实测状态栏"已 165s"而决策条不弹）。
+    // 现在不论有无在途工具，静默即计数 —— 选择权交给用户。
+    expect(computeStreamStall(now - 168_000, now, true, 30_000)).toBe(168);
+    expect(computeStreamStall(now - 90_000, now, true, 30_000)).toBe(90);
+  });
+  it("activeToolNames 收集在途工具名（供自动中断分级宽限）", () => {
+    const st = { ...emptyChatState(), messages: [{ id: "m1", role: "assistant" as const, content: "", timestamp: 0, streaming: true,
+      toolUses: [
+        { id: "t1", index: 0, name: "Bash", input: {}, status: "running" as const },
+        { id: "t2", index: 1, name: "Edit", input: {}, status: "done" as const },
+        { id: "t3", index: 2, name: "Task", input: {}, status: "running" as const },
+      ] }] };
+    expect(activeToolNames(st as any)).toEqual(["Bash", "Task"]);
+    expect(activeToolNames(emptyChatState() as any)).toEqual([]);
   });
   it("stream_event updates lastStreamEventAt", () => {
     let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } }, base, { now: () => 111 });

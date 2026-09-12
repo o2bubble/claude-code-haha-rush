@@ -256,6 +256,11 @@ interface ProviderTemplate {
   requiresToken: boolean
 }
 
+// DeepSeek 现只提供两个模型名：deepseek-flash 与 deepseek-v4-pro。
+// 旧的 deepseek-v4-flash / deepseek-v4-flash-vision-exp 已下线（官方路由到 V4.1-Flash），
+// 已有 profile 由 GUI 侧 migrate_deepseek_profiles 自动合并迁移。
+// [1] 与 [2] 的区别是**创建顺序**（先写 pro 还是先写 flash），两者都会创建同两个
+// profile（flash + pro）——顺序只影响首条写入哪个，供不同用户习惯选择。
 const TEMPLATES: Record<string, ProviderTemplate[]> = {
   '1': [
     {
@@ -272,27 +277,14 @@ const TEMPLATES: Record<string, ProviderTemplate[]> = {
       requiresToken: true,
     },
     {
-      label: 'DeepSeek v4 Flash',
-      profileName: 'deepseek-v4-flash',
+      label: 'DeepSeek Flash',
+      profileName: 'deepseek-flash',
       vars: {
         ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
-        ANTHROPIC_MODEL: 'deepseek-v4-flash',
-        ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-flash',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash',
-        ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-flash',
-        CLAUDE_CODE_MAX_CONTEXT_TOKENS: '1000000',
-      },
-      requiresToken: true,
-    },
-    {
-      label: 'DeepSeek v4 Flash Vision',
-      profileName: 'deepseek-v4-flash-vision-exp',
-      vars: {
-        ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
-        ANTHROPIC_MODEL: 'deepseek-v4-flash-vision-exp',
-        ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-flash-vision-exp',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash-vision-exp',
-        ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-flash-vision-exp',
+        ANTHROPIC_MODEL: 'deepseek-flash',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-flash',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-flash',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-flash',
         CLAUDE_CODE_MAX_CONTEXT_TOKENS: '1000000',
       },
       requiresToken: true,
@@ -300,14 +292,14 @@ const TEMPLATES: Record<string, ProviderTemplate[]> = {
   ],
   '2': [
     {
-      label: 'DeepSeek v4 Flash',
-      profileName: 'deepseek-v4-flash',
+      label: 'DeepSeek Flash',
+      profileName: 'deepseek-flash',
       vars: {
         ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
-        ANTHROPIC_MODEL: 'deepseek-v4-flash',
-        ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-flash',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash',
-        ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-flash',
+        ANTHROPIC_MODEL: 'deepseek-flash',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-flash',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-flash',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-flash',
         CLAUDE_CODE_MAX_CONTEXT_TOKENS: '1000000',
       },
       requiresToken: true,
@@ -321,19 +313,6 @@ const TEMPLATES: Record<string, ProviderTemplate[]> = {
         ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-pro',
         ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-pro',
         ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-pro',
-        CLAUDE_CODE_MAX_CONTEXT_TOKENS: '1000000',
-      },
-      requiresToken: true,
-    },
-    {
-      label: 'DeepSeek v4 Flash Vision',
-      profileName: 'deepseek-v4-flash-vision-exp',
-      vars: {
-        ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
-        ANTHROPIC_MODEL: 'deepseek-v4-flash-vision-exp',
-        ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-flash-vision-exp',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash-vision-exp',
-        ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-flash-vision-exp',
         CLAUDE_CODE_MAX_CONTEXT_TOKENS: '1000000',
       },
       requiresToken: true,
@@ -399,8 +378,8 @@ async function cmdCreate(): Promise<void> {
   try {
     console.log('\n=== Create Profile ===\n')
     console.log('Templates:')
-    console.log('  [1] DeepSeek v4 Pro/Flash/Vision (preset: only needs AUTH_TOKEN)')
-    console.log('  [2] DeepSeek v4 Flash/Pro/Vision (preset: only needs AUTH_TOKEN)')
+    console.log('  [1] DeepSeek v4 Pro + Flash (preset: only needs AUTH_TOKEN)')
+    console.log('  [2] DeepSeek Flash + v4 Pro (preset: only needs AUTH_TOKEN)')
     console.log('  [3] Qwen 3.6 Plus     (preset: only needs AUTH_TOKEN)')
     console.log('  [4] Custom            (fill in all fields)')
     console.log()

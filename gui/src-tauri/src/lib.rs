@@ -28,9 +28,13 @@ mod db;
 mod diagnostics;
 mod guard;
 mod mcp;
+mod migrations;
 mod plugin_process;
 mod prockill;
 mod settings;
+#[path = "plugin_pubkey.rs"]
+mod plugin_pubkey;
+mod plugin_signature;
 
 /// Holds the SQLite connection and the workspace it was opened for.
 struct DbState {
@@ -281,6 +285,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        // GV-T1: 插件面板 iframe 内容源 —— plugins://<pluginName>/<src> 从
+        // app_data_dir()/plugins/<pluginName>/ 读静态文件。插件 HTML 与 GUI
+        // 同源（allow-same-origin 沙箱下可 fetch GUI / 本地接口）；路径穿越
+        // 由 URL 前缀（本协议只服务 plugins 根）+ 规范后前缀检查双重防护。
+        .register_uri_scheme_protocol("plugins", |app, request| {
+            serve_plugin_asset(app, request)
+        })
         .manage(Mutex::new(DbState {
             conn: db_conn,
             work_dir: work_dir.clone(),
@@ -308,6 +319,18 @@ pub fn run() {
             // webview is built (the in-use one is the current PID). Prevent the
             // ~200-dir / multi-GB junk pile reported by disk-cleanup scans.
             cleanup_old_webview_dirs(app.handle());
+
+            // 清扫孤儿插件进程: 父进程已死 + cwd 在插件根内 → 杀。GUI 被强杀/崩溃/
+            // 更新(exit 绕过 RunEvent::Exit)都会遗留, 它们的 cwd 是插件目录句柄
+            // → 卸载报「另一个程序正在使用此文件」(os error 32)。只杀孤儿——
+            // 活跃实例的插件进程父进程在, 条件不命中。
+            #[cfg(windows)]
+            if let Ok(root) = plugins_base_dir(app.handle()) {
+                let n = prockill::kill_orphan_plugin_processes(&root);
+                if n > 0 {
+                    log::info!("startup: killed {} orphan plugin processes", n);
+                }
+            }
 
             // Create the main window programmatically with a per-instance WebView2
             // user data folder. WebView2 only allows one browser process per data
@@ -348,11 +371,10 @@ pub fn run() {
             // assigning a slot (or the saved position points at a removed monitor)
             // — bring it back on-screen so the GUI is never invisible.
             ensure_window_on_screen(app.handle(), &main_window);
-            // 迁移旧版散落的项目/工作区级 profile 到用户级（幂等）。
-            migrate_legacy_profiles();
-            // 单文件→双文件回退：把 settings.json 根 mcpServers 迁到 ~/.claude.json，
+            // 启动期迁移（旧 profile 目录 / 单文件 MCP → 双文件）——
+            // 全清单见 src/migrations.rs 的 MIGRATION_REGISTRY。
             // 必须在 spawn 后端之前跑（后端启动时读全局配置）。
-            settings::migrate_single_file_mcp_to_claude_json();
+            migrations::run_startup_migrations();
             // office MCP 自动注册到 ~/.claude.json（stdio MCP，Windows→win32com / mac→osascript），
             // 同样要在 spawn 后端之前，后端启动即能看到 office 工具。
             settings::register_office_mcp();
@@ -454,8 +476,15 @@ pub fn run() {
             read_file,
             read_bytes,
             list_plugin_manifests,
+            get_plugins_base_dir,
+            get_platform,
+            get_plugin_settings,
+            save_plugin_settings,
+            verify_plugin_signature,
+            app_relaunch,
             list_plugin_processes,
             kill_plugin_process_cmd,
+            forget_plugin_processes_cmd,
             restart_plugin_process_cmd,
             save_file,
             save_bytes,
@@ -489,7 +518,7 @@ pub fn run() {
             guard::guard_event,
             copy_file,
             read_clipboard_text,
-            get_git_branch,
+            read_clipboard_files,
             run_cli_print,
             save_skills_i18n,
             load_skills_i18n,
@@ -498,6 +527,7 @@ pub fn run() {
             install_skill,
             install_package,
             install_plugin_package,
+            uninstall_plugin,
             delete_skill,
             // Notes
             note_create,
@@ -570,16 +600,26 @@ fn read_dir(path: String, show_hidden_files: Option<bool>) -> Result<Vec<DirEntr
 
 #[tauri::command]
 fn read_file(path: String) -> Result<String, String> {
-    log::info!("read_file: {}", path);
-    std::fs::read_to_string(&path).map_err(|e| format!("Cannot read file: {}", e))
+    // 相对路径以工作区为基准解析（与 open_in_explorer 同一套 resolve_explorer_path）：
+    // AI 给的 @ref chip 常是相对路径（如 `.scratch/x/SPEC.md`），直接交给
+    // read_to_string 会按**进程 cwd** 解析 → 必然失败 → 调用方回退到资源管理器，
+    // 表现为"点了 chip 却在资源管理器打开"。
+    let work_dir = crate::settings::load_settings().work_dir;
+    let abs = resolve_explorer_path(&path, &work_dir);
+    log::info!("read_file: {} (resolved: {})", path, abs);
+    std::fs::read_to_string(&abs).map_err(|e| format!("Cannot read file: {}", e))
 }
 
 #[tauri::command]
 fn read_bytes(path: String) -> Result<String, String> {
     use std::io::Read;
     use base64::Engine;
-    log::info!("read_bytes: {}", path);
-    let p = std::path::PathBuf::from(&path);
+    // 相对路径同样以工作区为基准解析（同 read_file）——图片预览/ImageItem 的路径
+    // 可能来自 @ref chip，直接按进程 cwd 解析会 File not found。
+    let work_dir = crate::settings::load_settings().work_dir;
+    let abs = resolve_explorer_path(&path, &work_dir);
+    log::info!("read_bytes: {} (resolved: {})", path, abs);
+    let p = std::path::PathBuf::from(&abs);
     if !p.exists() {
         return Err("File not found".to_string());
     }
@@ -617,9 +657,196 @@ fn list_plugin_manifests(app: tauri::AppHandle) -> Result<serde_json::Value, Str
         let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
             continue; // 缺 plugin.json → 跳过(前端容错同名逻辑)
         };
-        entries.push(serde_json::json!({ "name": name, "manifestJson": contents }));
+        // 可选 README.md —— 插件详情页正文（市场详情/本地详情共用约定）
+        let readme = std::fs::read_to_string(dir.join("README.md")).ok();
+        // 可选 AI_NOTES.md —— 作者写给 AI 的排查文档（MCP plugin_docs 本地优先源）
+        let ai_notes = std::fs::read_to_string(dir.join("AI_NOTES.md")).ok();
+        entries.push(serde_json::json!({ "name": name, "manifestJson": contents, "readme": readme, "aiNotes": ai_notes }));
     }
     Ok(serde_json::to_value(entries).map_err(|e| e.to_string())?)
+}
+
+/// 插件根目录（app_data_dir()/plugins）——前端 runtime 聚合的相对路径基准
+/// （plugin-nodejs-runtime T2）。与 list_plugin_manifests 的目录约定同源。
+pub(crate) fn plugins_base_dir(app: &tauri::AppHandle) -> Result<String, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"));
+    Ok(base.join("plugins").to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn get_plugins_base_dir(app: tauri::AppHandle) -> Result<String, String> {
+    plugins_base_dir(&app)
+}
+
+// ── GV-T1: 插件面板 iframe 静态资源协议 ──
+
+/// plugins://<pluginName>/<src> → app_data_dir()/plugins/<pluginName>/<src>。
+/// 只服务插件目录内文件; URL 段校验（禁 `..`/反斜杠）+ 规范后前缀检查双重防线。
+fn serve_plugin_asset(
+    ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    use tauri::http::Response;
+
+    let app = ctx.app_handle();
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"))
+        .join("plugins");
+    let Ok(base_canon) = base.canonicalize() else {
+        return not_found();
+    };
+
+    // URI 形如 /<pluginName>/<src>?port=xxxx —— 取 path 段（不含 query）
+    let rest = request.uri().path().trim_start_matches('/');
+    let mut parts = rest.splitn(2, '/');
+    let plugin = match parts.next() {
+        Some(p) if !p.is_empty() && !p.contains("..") => p,
+        _ => return not_found(),
+    };
+    let src = match parts.next() {
+        Some(s) if !s.is_empty() && !s.contains("..") && !s.contains('\\') => s,
+        _ => return not_found(),
+    };
+
+    let candidate = base.join(plugin).join(src);
+    let bytes = match std::fs::read(&candidate) {
+        Ok(b) => b,
+        Err(_) => return not_found(),
+    };
+    // 规范后路径仍须在 plugins 根下（symlink/`..` 残余防线）
+    if let Ok(canon) = candidate.canonicalize() {
+        if !canon.starts_with(&base_canon) {
+            return not_found();
+        }
+    }
+
+    Response::builder()
+        .status(200)
+        .header("Content-Type", mime_for(src))
+        .header("Cache-Control", "no-cache")
+        .body(bytes)
+        .unwrap_or_else(|_| not_found())
+}
+
+fn not_found() -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(404)
+        .body(Vec::new())
+        .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
+/// 极简 MIME 映射 —— 插件面板常见文件类型; 未知类型回退 octet-stream。
+fn mime_for(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "map" => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 当前运行平台（GUI 按编译结果判断, 与 cfg! 同源）——插件 platforms 支持列表
+/// 的匹配基准。返回生态三值枚举: "windows" | "macos" | "linux"。
+#[tauri::command]
+fn get_platform() -> String {
+    match std::env::consts::OS {
+        "windows" => "windows".to_string(),
+        "macos" => "macos".to_string(),
+        _ => "linux".to_string(),
+    }
+}
+
+// ── 插件设置持久化（独立于 claude.exe 的 settings.json/gui 键）──
+// 全局: %APPDATA%/com.claudecode.gui/plugins-settings/<plugin>.json
+// 工作区: <workdir>/.claude/plugins-settings/<plugin>.json（覆盖全局, 读时合并）
+
+fn plugin_settings_path(app: &tauri::AppHandle, plugin: &str, scope: &str) -> std::path::PathBuf {
+    if scope == "workspace" {
+        let wd = crate::settings::bound_work_dir();
+        if !wd.is_empty() {
+            return std::path::PathBuf::from(wd)
+                .join(".claude").join("plugins-settings").join(format!("{}.json", plugin));
+        }
+    }
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"))
+        .join("plugins-settings")
+        .join(format!("{}.json", plugin))
+}
+
+fn read_plugin_settings_file(path: &std::path::Path) -> serde_json::Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// 读插件设置: 工作区覆盖全局（逐键合并, 非整体替换）。无记录返回 {}。
+#[tauri::command]
+fn get_plugin_settings(app: tauri::AppHandle, plugin: String) -> Result<serde_json::Value, String> {
+    if plugin.is_empty() || plugin.contains(['/', '\\', '.', ':']) {
+        return Err(format!("invalid plugin name: {plugin}"));
+    }
+    let global = read_plugin_settings_file(&plugin_settings_path(&app, &plugin, "global"));
+    let wd = crate::settings::bound_work_dir();
+    if wd.is_empty() {
+        return Ok(global);
+    }
+    let workspace = read_plugin_settings_file(&plugin_settings_path(&app, &plugin, "workspace"));
+    let mut out = global;
+    if let (Some(o), Some(w)) = (out.as_object_mut(), workspace.as_object()) {
+        for (k, v) in w { o.insert(k.clone(), v.clone()); }
+    }
+    Ok(out)
+}
+
+/// 写插件设置: scope "workspace"(缺省, 绑定后有效) → 工作区文件; "global" → 全局文件。
+/// 整文件 replace（插件设置文件就是 {key: value} 简单对象）。
+#[tauri::command]
+fn save_plugin_settings(
+    app: tauri::AppHandle,
+    plugin: String,
+    patch: serde_json::Value,
+    scope: Option<String>,
+) -> Result<(), String> {
+    if plugin.is_empty() || plugin.contains(['/', '\\', '.', ':']) {
+        return Err(format!("invalid plugin name: {plugin}"));
+    }
+    let scope_str = scope.as_deref().unwrap_or("workspace");
+    if scope_str == "workspace" && crate::settings::bound_work_dir().is_empty() {
+        return Err("workspace scope requires a bound workspace".to_string());
+    }
+    let path = plugin_settings_path(&app, &plugin, scope_str);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create dir: {}", e))?;
+    }
+    // merge patch into existing (preserve untouched keys)
+    let mut current = read_plugin_settings_file(&path);
+    if let (Some(c), Some(p)) = (current.as_object_mut(), patch.as_object()) {
+        for (k, v) in p { c.insert(k.clone(), v.clone()); }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&current).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Cannot write {}: {}", path.display(), e))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -642,6 +869,38 @@ fn save_bytes(path: String, base64_data: String) -> Result<(), String> {
     std::fs::write(&path, &data).map_err(|e| format!("Cannot write file: {}", e))
 }
 
+/// 重启 GUI 应用（AI 经 MCP app_relaunch 调用, AI-guided 插件安装完成后生效用）。
+/// 自我拉起: spawn 当前 exe（分离进程）→ 短暂等待 → exit(0) 退出自身。
+/// 借鉴 update.rs 的退出模式但不带 UAC/Update.exe——纯重启。
+/// ⚠️ 调用即终止本进程（含其托管的 claude.exe 会话）——MCP 侧有 confirm 门,
+/// AI 必须先获得用户同意。
+#[tauri::command]
+fn app_relaunch() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve exe path: {}", e))?;
+    log::info!("app_relaunch: spawning {:?} then exiting", exe);
+    // exit(0) 绕过 RunEvent::Exit 的 kill_all_plugin_processes → 会遗留孤儿插件进程
+    // （cwd 钉在插件目录 → 卸载报 os error 32）。显式补一次清理。
+    crate::plugin_process::kill_all_plugin_processes();
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: 独立于本进程生命周期
+        std::process::Command::new(&exe)
+            .creation_flags(0x00000008 | 0x00000200)
+            .spawn()
+            .map_err(|e| format!("Cannot spawn new instance: {}", e))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new(&exe)
+            .spawn()
+            .map_err(|e| format!("Cannot spawn new instance: {}", e))?;
+    }
+    // 给新实例启动留窗口, 然后释放本进程（文件锁/端口/MCP server 一并释放）
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    std::process::exit(0);
+}
+
 /// 查询插件后台进程状态(WorkerPanel / 插件面板)。
 #[tauri::command]
 fn list_plugin_processes() -> Vec<crate::plugin_process::PluginProcessInfo> {
@@ -654,7 +913,17 @@ fn kill_plugin_process_cmd(app: tauri::AppHandle, process_id: String) -> bool {
     crate::plugin_process::kill_plugin_process(&app, &process_id)
 }
 
+/// 遗忘插件后台进程条目(卸载/禁用插件时用): 杀 + 从 registry 彻底移除 + 通知前端删行。
+/// 与 kill 的区别: kill 保留条目(killed 状态, WorkerPanel 显示"已停止"且可重启);
+/// forget 用于插件本身已不存在的情况——条目留着没意义, 且 commands 表还存着启动声明,
+/// 点 ↻ 会从已删除的目录重新拉起 node。
+#[tauri::command]
+fn forget_plugin_processes_cmd(app: tauri::AppHandle, process_ids: Vec<String>) {
+    crate::plugin_process::forget_plugin_processes(&app, &process_ids);
+}
+
 /// 重启插件后台进程(kill 旧 → spawn 新; 面板/WorkerPanel 重启按钮)。
+/// cwd: 插件目录（args 相对路径在此解析; None = 用 GUI 进程 cwd —— 旧插件零回归）。
 #[tauri::command]
 fn restart_plugin_process_cmd(
     app: tauri::AppHandle,
@@ -662,8 +931,9 @@ fn restart_plugin_process_cmd(
     command: String,
     args: Vec<String>,
     env: std::collections::HashMap<String, String>,
+    cwd: Option<String>,
 ) -> Result<(), String> {
-    crate::plugin_process::restart_plugin_process(&app, &process_id, &command, args, env)
+    crate::plugin_process::restart_plugin_process(&app, &process_id, &command, args, env, cwd)
 }
 
 #[tauri::command]
@@ -686,7 +956,10 @@ fn create_path(path: String, is_dir: bool) -> Result<(), String> {
 
 #[tauri::command]
 fn path_exists(path: String) -> bool {
-    std::path::PathBuf::from(&path).exists()
+    // 相对路径同样以工作区为基准（同 read_file/read_bytes）：粘贴判断"这段文本是不是
+    // 文件路径"时，用户复制的可能是工作区内的相对路径，按 cwd 解析会误判为不存在。
+    let work_dir = crate::settings::load_settings().work_dir;
+    std::path::PathBuf::from(resolve_explorer_path(&path, &work_dir)).exists()
 }
 
 #[tauri::command]
@@ -1491,7 +1764,7 @@ const MANAGED_KEYS: [&str; 17] = [
 ];
 
 /// Replace profile-managed keys in a settings JSON's `env`, preserving other fields.
-fn apply_profile_env_to_settings(
+pub(crate) fn apply_profile_env_to_settings(
     settings: &mut serde_json::Value,
     env_vars: &[(String, String)],
 ) {
@@ -1592,42 +1865,7 @@ fn ensure_profile_capability_env(path: &std::path::Path) -> bool {
     std::fs::write(path, new_content).is_ok()
 }
 
-/// 迁移旧版散落在项目/工作区级的 .env.profiles：复制 *.env 到用户级，
-/// 同名不覆盖（用户级优先）。旧目录保留不删，避免破坏 git 仓库内已提交内容。
-pub(crate) fn migrate_legacy_profiles() {
-    let user_dir = user_claude_dir().join(".env.profiles");
-    std::fs::create_dir_all(&user_dir).ok();
-
-    let mut legacy_dirs = Vec::new();
-    if let Ok(script) = find_ide_script() {
-        legacy_dirs.push(find_project_root(&script).join(".env.profiles"));
-    }
-    let ws = settings::load_settings().work_dir;
-    legacy_dirs.push(std::path::PathBuf::from(&ws).join(".env.profiles"));
-    legacy_dirs.dedup();
-
-    for dir in legacy_dirs {
-        if dir == user_dir || !dir.exists() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.extension().map_or(true, |x| x != "env") {
-                continue;
-            }
-            let Some(name) = p.file_name() else { continue };
-            let dst = user_dir.join(&name);
-            if dst.exists() {
-                continue;
-            }
-            match std::fs::copy(&p, &dst) {
-                Ok(_) => log::info!("[profile] 迁移 {} → {}", p.display(), dst.display()),
-                Err(err) => log::warn!("[profile] 迁移失败 {} → {}: {}", p.display(), dst.display(), err),
-            }
-        }
-    }
-}
+// migrate_legacy_profiles 已移至 src/migrations.rs（全清单见其 MIGRATION_REGISTRY）
 
 #[tauri::command]
 fn create_profile(profile_name: String, env_vars: HashMap<String, String>) -> Result<(), String> {
@@ -2368,10 +2606,27 @@ fn apply_active_profile(cmd: &mut Command) {
     };
 
     let profile_path = profiles_dir.join(format!("{}.env", profile_id));
-    if !profile_path.exists() {
-        log::warn!("[profile] Profile file not found: {}", profile_path.display());
-        return;
-    }
+    // marker 指向的 profile 文件被删/改名(如归档)时回退到目录里第一个可用 .env——
+    // 静默 return 会让后端用默认配置启动(连错端点/模型, 且难排查)。
+    let profile_path = if profile_path.exists() {
+        profile_path
+    } else {
+        log::warn!(
+            "[profile] Profile file not found: {} — falling back to first available",
+            profile_path.display()
+        );
+        match std::fs::read_dir(&profiles_dir).ok().and_then(|rd| {
+            rd.flatten()
+                .find(|e| e.path().extension().map_or(false, |ext| ext == "env"))
+                .map(|e| e.path())
+        }) {
+            Some(p) => p,
+            None => {
+                log::warn!("[profile] No .env profile available — backend runs with defaults");
+                return;
+            }
+        }
+    };
 
     let content = match std::fs::read_to_string(&profile_path) {
         Ok(c) => c,
@@ -2437,7 +2692,7 @@ pub(crate) fn read_marker(path: &std::path::Path) -> Option<String> {
 }
 
 /// Write the user-level active marker (~/.claude/.env.active), best-effort.
-fn write_user_marker(profile_id: &str) {
+pub(crate) fn write_user_marker(profile_id: &str) {
     let path = user_claude_dir().join(".env.active");
     if let Err(e) = std::fs::write(&path, profile_id) {
         log::warn!("[profile] Cannot write user active marker: {}", e);
@@ -2503,6 +2758,27 @@ fn find_git_bash() -> Option<String> {
 fn read_clipboard_text() -> Result<String, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("{}", e))?;
     clipboard.get_text().map_err(|e| format!("{}", e))
+}
+
+/// 读系统剪贴板的**文件列表**（Windows CF_HDROP / macOS NSPasteboard filenames）。
+///
+/// 为什么需要：浏览器剪贴板事件里的 File **不带真实路径**——`File.path` 是
+/// Electron 的非标准扩展，Tauri 只对**拖放**注入 .path（见 SuperDesktopCanvas
+/// handleDrop 的注释）。于是粘贴文件时前端拿不到源路径，只能把内容复制到
+/// `.claude/pasted/`；而拖放同一个文件却走引用，同一操作两种行为。
+///
+/// 剪贴板里不是文件（截图 / 纯文本）或平台不支持该能力 → 空数组，
+/// 调用方据此回退到"复制内容"的旧行为。
+#[tauri::command]
+fn read_clipboard_files() -> Result<Vec<String>, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("{}", e))?;
+    Ok(clipboard
+        .get()
+        .file_list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect())
 }
 
 // ── File tree context menu helpers ──
@@ -2771,17 +3047,9 @@ fn spawn_gui_instance() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn get_git_branch(path: String) -> Result<String, String> {
-    let head = std::path::PathBuf::from(&path).join(".git").join("HEAD");
-    let content = std::fs::read_to_string(&head).map_err(|_| "".to_string())?;
-    if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
-        Ok(branch.trim().to_string())
-    } else {
-        // Detached HEAD — show short hash
-        Ok(content.trim().chars().take(7).collect())
-    }
-}
+// get_git_branch 已移除（2026-09-11）—— 由 git-viewer 插件面板提供分支信息
+// （真 git 命令 + 自动刷新 + worktree 支持）。旧实现读 .git/HEAD 且只在
+// workDir 变化时拉一次：切分支不更新、worktree 下失效（.git 是文件读不到）。
 
 // ── Skills i18n ──
 
@@ -3046,6 +3314,86 @@ async fn install_package(zip_url: String, package_name: String) -> Result<(), St
     rx.recv().map_err(|e| format!("Install panicked: {}", e))?
 }
 
+/// 读插件目录 plugin.json 的 `runtimes[].path`——更新安装时用于保护这些目录
+/// （它们是**安装产物**而非包内容，如 nodejs 插件的 Node 运行时）。
+///
+/// 校验同前端 `parseRuntimes`：拒绝绝对路径 / 盘符 / UNC / `..` 穿越。
+/// 该值来自磁盘上的旧 manifest，不能无条件信任——`target_dir.join(rel)` 在
+/// rel 含 `..` 时会逃出插件目录（进而被 rename 到别处）。
+/// 读不到 / JSON 非法 / 无有效条目 → None（调用方按"无可保护目录"处理）。
+fn read_runtime_rel_paths(plugin_dir: &std::path::Path) -> Option<Vec<String>> {
+    let raw = std::fs::read_to_string(plugin_dir.join("plugin.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let arr = v.get("runtimes")?.as_array()?;
+    let out: Vec<String> = arr
+        .iter()
+        .filter_map(|r| r.get("path").and_then(|p| p.as_str()))
+        .filter(|p| {
+            !p.is_empty()
+                && !p.starts_with('/')
+                && !p.starts_with('\\')
+                && !(p.len() >= 2 && p.as_bytes()[1] == b':')
+                && !p.split(['/', '\\']).any(|seg| seg == "..")
+        })
+        .map(|p| p.to_string())
+        .collect();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// 把 `plugin_dir` 下 runtimes 声明的目录（**安装产物**：Node 运行时等，非包内容）
+/// rename 到 `stash_prefix` 下暂存，供覆盖安装时跨删除保护。
+/// 返回 (暂存绝对路径, 原相对路径) 列表，交给 [`restore_runtimes`] 移回。
+///
+/// 用 rename 而非复制：同盘瞬时（运行时可达 90MB）；且实测 Windows 上
+/// **rename 含正在运行 exe 的目录可行、删除会被拒**（ACCESS_DENIED）——
+/// 这正是"移出可靠、删除失败"的差异来源。
+fn stash_runtimes(
+    plugin_dir: &std::path::Path,
+    stash_prefix: &std::path::Path,
+    tag: &str,
+) -> Vec<(std::path::PathBuf, String)> {
+    let Some(rels) = read_runtime_rel_paths(plugin_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (i, rel) in rels.iter().enumerate() {
+        let src = plugin_dir.join(rel);
+        if !src.exists() {
+            continue;
+        }
+        let stash = stash_prefix.join(format!(".tmp_rt_{}_{}", tag, i));
+        let _ = std::fs::remove_dir_all(&stash); // 清上次异常残留
+        match std::fs::rename(&src, &stash) {
+            Ok(_) => out.push((stash, rel.clone())),
+            Err(e) => log::warn!("preserve runtime '{}' failed: {}", rel, e),
+        }
+    }
+    out
+}
+
+/// 把 [`stash_runtimes`] 暂存的目录移回 `plugin_dir/<rel>`。
+/// 新包自带同名目录 → 以新包为准（丢弃暂存）；单个失败不拖垮其余。
+fn restore_runtimes(plugin_dir: &std::path::Path, preserved: Vec<(std::path::PathBuf, String)>) {
+    for (stash, rel) in preserved {
+        let dst = plugin_dir.join(&rel);
+        if dst.exists() {
+            let _ = std::fs::remove_dir_all(&stash);
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::rename(&stash, &dst) {
+            log::warn!("restore runtime '{}' failed: {}", rel, e);
+            let _ = std::fs::remove_dir_all(&stash);
+        }
+    }
+}
+
 /// 安装插件包(T5): 下载 zip → 解压 temp → 找 plugin.json 根 → 校验 → 落到
 /// app_data_dir()/plugins/<pluginName>/（旧同名先删）。返回 pluginName 供前端重扫。
 /// 插件包顶层结构: 根含 plugin.json(或单一子目录含 plugin.json)。
@@ -3088,11 +3436,28 @@ async fn install_plugin_package(
 
             // 落到 plugins/<pluginName>/
             let target_dir = plugins_dir.join(&plugin_name);
+            let mut preserved: Vec<(std::path::PathBuf, String)> = Vec::new();
             if target_dir.exists() {
+                // 更新场景：先移出 runtimes 声明的**安装产物**（Node 运行时等），
+                // 否则下面的 remove_dir_all 会一并删除它们 —— 用户每更新一次插件
+                // 就得重新下载安装（nodejs 的运行时可达 90MB）。详见 stash_runtimes。
+                preserved = stash_runtimes(&target_dir, &plugins_dir, &package_name);
+                // 覆盖安装同一目录: 先杀掉 cwd 钉在该目录的进程(孤儿 node 持目录句柄
+                // → remove_dir_all 失败 → 旧文件残留混入新版本), 同 uninstall_plugin。
+                #[cfg(windows)]
+                {
+                    let n = crate::prockill::kill_processes_with_cwd_under(&target_dir.to_string_lossy());
+                    if n > 0 {
+                        log::info!("install_plugin_package: killed {} cwd holders of {}", n, plugin_name);
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                    }
+                }
                 std::fs::remove_dir_all(&target_dir).ok();
             }
-            copy_dir_recursive(&plugin_root, &target_dir)
-                .map_err(|e| format!("Cannot install plugin: {}", e))?;
+            let copy_result = copy_dir_recursive(&plugin_root, &target_dir);
+            // 无论复制成败都还原（失败时运行时也留在正确位置，便于用户重试）
+            restore_runtimes(&target_dir, preserved);
+            copy_result.map_err(|e| format!("Cannot install plugin: {}", e))?;
 
             std::fs::remove_dir_all(&temp_dir).ok();
             log::info!("Plugin installed: {} (from {})", plugin_name, package_name);
@@ -3101,6 +3466,111 @@ async fn install_plugin_package(
         let _ = tx.send(result);
     });
     rx.recv().map_err(|e| format!("Install panicked: {}", e))?
+}
+
+/// 卸载插件: 杀该插件声明的后台进程 → 删除 plugins/<name>/ 目录。
+/// 前端卸载后调 reloadPlugins 重扫, 面板/命令即消失。
+/// process_ids: 前端从 manifest.processes[].id 取（**裸名**, 如 "git-viewer-server"——
+/// 与 registry 实际注册 id 一致; 曾按 `plugin:<name>:` 前缀过滤, 与裸名不匹配 → 进程
+/// 没被杀 → Windows 文件占用删目录失败「另一个程序正在使用此文件」, 用户实测）。
+#[tauri::command]
+async fn uninstall_plugin(
+    app: tauri::AppHandle,
+    plugin_name: String,
+    process_ids: Vec<String>,
+) -> Result<bool, String> {
+    if plugin_name.trim().is_empty() || plugin_name.contains(['/', '\\', '.', ':']) {
+        return Err(format!("invalid plugin name: {plugin_name}"));
+    }
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"));
+    let target = base.join("plugins").join(&plugin_name);
+    if !target.exists() {
+        return Ok(false); // 未安装, 幂等
+    }
+    // 杀该插件的后台进程: 裸名 id（前端传） + 前缀约定兜底（兼容未来带命名空间的注册）。
+    let prefix = format!("plugin:{plugin_name}:");
+    let mut ids: Vec<String> = process_ids;
+    for id in plugin_process::registry().pids.lock().unwrap().keys() {
+        if id.starts_with(&prefix) && !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    for id in &ids {
+        plugin_process::kill_plugin_process(&app, id);
+    }
+    // 决定性一步: 杀所有 **cwd 在该插件目录** 的进程。registry 只覆盖当前 GUI 自己
+    // spawn 的进程——更新/强杀留下的孤儿 node（cwd 钉在插件目录, Windows 目录句柄）
+    // 不在表里, 上面杀不到, 不杀干净这里就会报「另一个程序正在使用此文件」(os error 32)。
+    #[cfg(windows)]
+    {
+        let n = crate::prockill::kill_processes_with_cwd_under(&target.to_string_lossy());
+        if n > 0 {
+            log::info!("uninstall_plugin: killed {} processes holding cwd in {}", n, plugin_name);
+        }
+    }
+    // Windows: 进程退出后文件句柄释放有延迟——重试删除（最多 ~2s）。
+    let mut last_err = String::new();
+    for attempt in 0..10 {
+        match std::fs::remove_dir_all(&target) {
+            Ok(()) => { last_err.clear(); break; }
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt < 9 {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+    }
+    if !last_err.is_empty() {
+        return Err(format!("Cannot remove plugin dir: {last_err}"));
+    }
+    log::info!("Plugin uninstalled: {}", plugin_name);
+    Ok(true)
+}
+
+/// 验证市场插件包签名(Ed25519)。下载 zip 原始字节 + 拉 `<slug>/signature` 端点,
+/// 用嵌入式官方公钥验证 (zip, sig)。
+/// 返回 { trusted: bool, status: "verified" | "unsigned" | "invalid" | "fetch_failed", detail? }
+/// 前端: trusted(true)=可「安装」; 否则只「AI 安装」+ AI 安全审查。
+#[tauri::command]
+async fn verify_plugin_signature(zip_url: String) -> Result<serde_json::Value, String> {
+    // 从 zip_url 推 signature_url: /packages/<slug>/download → /packages/<slug>/signature
+    let sig_url = if zip_url.ends_with("/download") {
+        let base = zip_url.trim_end_matches("/download");
+        format!("{}/signature", base)
+    } else {
+        format!("{}/signature", zip_url.trim_end_matches("/"))
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<serde_json::Value, String> {
+            let client = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .map_err(|e| format!("HTTP client: {}", e))?;
+            let zip_bytes = download_zip_retry(&client, &zip_url, None)?;
+            // 拉签名
+            let sig_resp = client.get(&sig_url).send();
+            match sig_resp {
+                Ok(resp) if resp.status().is_success() => {
+                    let sig = resp.text().unwrap_or_default();
+                    match crate::plugin_signature::verify_zip_signature(&zip_bytes, &sig) {
+                        Ok(true) => Ok(serde_json::json!({ "trusted": true, "status": "verified" })),
+                        Ok(false) => Ok(serde_json::json!({ "trusted": false, "status": "invalid" })),
+                        Err(e) => Ok(serde_json::json!({ "trusted": false, "status": "invalid", "detail": e })),
+                    }
+                }
+                _ => Ok(serde_json::json!({ "trusted": false, "status": "unsigned" })),
+            }
+        })();
+        let _ = tx.send(result);
+    });
+    rx.recv().map_err(|e| format!("verify channel: {}", e))?
 }
 
 // ── Helpers ──
@@ -3456,6 +3926,123 @@ async fn note_get_all_tag_names(
 mod tests {
     use super::*;
 
+    // ── 更新安装时保护 runtimes 目录（安装产物跨覆盖保留）──
+
+    fn rt_fixture(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rt_protect_{}_{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_manifest(dir: &std::path::Path, runtimes_json: &str) {
+        std::fs::write(
+            dir.join("plugin.json"),
+            format!(r#"{{"pluginName":"p","runtimes":{}}}"#, runtimes_json),
+        )
+        .unwrap();
+    }
+
+    /// 正常声明：读出相对路径。
+    #[test]
+    fn runtime_paths_reads_valid() {
+        let d = rt_fixture("valid");
+        write_manifest(&d, r#"[{"id":"node","path":"runtime"}]"#);
+        assert_eq!(read_runtime_rel_paths(&d), Some(vec!["runtime".to_string()]));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `..` 穿越必须被拒 —— 否则 target_dir.join(rel) 会逃出插件目录（可被 rename 到别处）。
+    #[test]
+    fn runtime_paths_rejects_traversal() {
+        let d = rt_fixture("traversal");
+        write_manifest(&d, r#"[{"id":"n","path":"../evil"},{"id":"m","path":"a/../../b"}]"#);
+        assert_eq!(read_runtime_rel_paths(&d), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 绝对路径 / 盘符 / UNC 一律拒绝。
+    #[test]
+    fn runtime_paths_rejects_absolute() {
+        let d = rt_fixture("abs");
+        for bad in [
+            r#"[{"id":"n","path":"/etc"}]"#,
+            r#"[{"id":"n","path":"C:/Windows"}]"#,
+            r#"[{"id":"n","path":"\\\\server\\share"}]"#,
+        ] {
+            write_manifest(&d, bad);
+            assert_eq!(read_runtime_rel_paths(&d), None, "should reject: {}", bad);
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// manifest 缺失 / JSON 非法 / 无有效条目 → None（调用方按"无可保护"处理）。
+    #[test]
+    fn runtime_paths_none_when_unusable() {
+        let d = rt_fixture("none");
+        assert_eq!(read_runtime_rel_paths(&d), None); // 无 plugin.json
+        std::fs::write(d.join("plugin.json"), "{ not json").unwrap();
+        assert_eq!(read_runtime_rel_paths(&d), None); // JSON 非法
+        write_manifest(&d, "[]");
+        assert_eq!(read_runtime_rel_paths(&d), None); // 空数组
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 核心：stash → 删除原目录 → 复制新包 → restore，runtime 内容完好保留。
+    #[test]
+    fn runtimes_survive_overwrite_install() {
+        let base = rt_fixture("roundtrip");
+        let plugin_dir = base.join("p");
+        std::fs::create_dir_all(plugin_dir.join("runtime/sub")).unwrap();
+        std::fs::write(plugin_dir.join("runtime/node.exe"), b"BINARY").unwrap();
+        std::fs::write(plugin_dir.join("runtime/sub/x"), b"data").unwrap();
+        write_manifest(&plugin_dir, r#"[{"id":"node","path":"runtime"}]"#);
+        std::fs::write(plugin_dir.join("old.txt"), b"old").unwrap();
+
+        // 更新流程：移出 → 删除 → 复制"新包" → 移回
+        let saved = stash_runtimes(&plugin_dir, &base, "p");
+        assert_eq!(saved.len(), 1, "runtime 应被移出");
+        std::fs::remove_dir_all(&plugin_dir).ok();
+        assert!(!plugin_dir.join("runtime").exists(), "删除后 runtime 不在原位");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.json"), br#"{"pluginName":"p"}"#).unwrap();
+        restore_runtimes(&plugin_dir, saved);
+
+        // 运行时内容完好
+        assert_eq!(std::fs::read(plugin_dir.join("runtime/node.exe")).unwrap(), b"BINARY");
+        assert_eq!(std::fs::read(plugin_dir.join("runtime/sub/x")).unwrap(), b"data");
+        // 旧包内容被正确清除（remove_dir_all 生效了，不是整体跳过）
+        assert!(!plugin_dir.join("old.txt").exists());
+        // 暂存区已清空
+        let leftovers: Vec<_> = std::fs::read_dir(&base)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp_rt_"))
+            .collect();
+        assert!(leftovers.is_empty(), "暂存目录不应残留");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 新包自带同名目录 → 以新包为准（丢弃暂存，不覆盖回去）。
+    #[test]
+    fn runtimes_restore_prefers_new_package() {
+        let base = rt_fixture("prefer");
+        let plugin_dir = base.join("p");
+        std::fs::create_dir_all(plugin_dir.join("runtime")).unwrap();
+        std::fs::write(plugin_dir.join("runtime/node.exe"), b"OLD").unwrap();
+        write_manifest(&plugin_dir, r#"[{"id":"node","path":"runtime"}]"#);
+
+        let saved = stash_runtimes(&plugin_dir, &base, "p");
+        std::fs::remove_dir_all(&plugin_dir).ok();
+        // 新包自带 runtime/（内容不同）
+        std::fs::create_dir_all(plugin_dir.join("runtime")).unwrap();
+        std::fs::write(plugin_dir.join("runtime/node.exe"), b"NEW").unwrap();
+        restore_runtimes(&plugin_dir, saved);
+
+        assert_eq!(std::fs::read(plugin_dir.join("runtime/node.exe")).unwrap(), b"NEW");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn explorer_path_absolute_stays() {
         assert_eq!(
@@ -3472,6 +4059,32 @@ mod tests {
             resolve_explorer_path("src/utils/pathDetector.ts", r"C:\Storage\proj"),
             r"C:\Storage\proj\src\utils\pathDetector.ts"
         );
+    }
+
+    /// AI 的 @ref chip 常给工作区相对路径（无盘符、无前导分隔符）。read_file /
+    /// read_bytes / path_exists 都复用本函数解析——若不解析就直接读，会按进程 cwd
+    /// 找文件而失败，表现为"点 chip 却在资源管理器打开"。此处锁定该场景的解析结果。
+    #[test]
+    fn explorer_path_handles_ai_ref_chip_paths() {
+        // 用户实际遇到的形态
+        assert_eq!(
+            resolve_explorer_path(".scratch/memory-upgrade/SPEC.md", r"C:\Storage\claude-code-haha-dev"),
+            r"C:\Storage\claude-code-haha-dev\.scratch\memory-upgrade\SPEC.md"
+        );
+        // 正斜杠 / 无前导 ./ 的形态
+        assert_eq!(
+            resolve_explorer_path("docs/adr/0001.md", r"C:\Storage\proj"),
+            r"C:\Storage\proj\docs\adr\0001.md"
+        );
+        // Windows 绝对路径（盘符 / UNC）→ 原样返回，不被工作区前缀污染。
+        // 注意 `/unix/abs/x.md` **不在**此列：`Path::is_absolute()` 在 Windows 上
+        // 不认前导 `/`，会被当相对路径拼到工作区（与既有 explorer 行为一致）。
+        for abs in [r"C:\abs\x.md", r"\\server\share\x.md"] {
+            assert_eq!(resolve_explorer_path(abs, r"C:\ws"), abs, "应原样返回: {}", abs);
+        }
+        // 未绑定工作区（空 work_dir）→ 仍是相对路径（保持相对语义，读不到而已）。
+        // 分隔符会被 PathBuf 归一成 `\`——Windows 上两者等价，不影响可用性。
+        assert_eq!(resolve_explorer_path("a/b.md", ""), r"a\b.md");
     }
 
     #[test]
@@ -3492,7 +4105,7 @@ mod tests {
     #[test]
     #[ignore]
     fn legacy_profiles_migrate_and_ws_marker_resolves() {
-        migrate_legacy_profiles();
+        migrations::migrate_legacy_profiles();
         let user_dir = user_claude_dir().join(".env.profiles");
         assert!(user_dir.join("plan-ds-v4-flash.env").exists(),
             "旧项目级 plan-ds-v4-flash 未迁移到用户级");

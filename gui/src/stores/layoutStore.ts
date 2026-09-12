@@ -629,6 +629,7 @@ const DEFAULT_PANEL_GROUPS: Record<string, string> = {
   "chat-input": "chat-input-group",
   settings: "sidebar-left",
   "quick-prompts": "sidebar-left",
+  "plugin-market-detail": "editor-area",
 };
 
 /** 面板是否已打开：tree/floating/tauri 中存在 tab 且所在组未隐藏 */
@@ -655,9 +656,22 @@ export function togglePanelInTree(panelId: string): boolean {
     }
     return true;
   }
+  return openPanelInTree(panelId);
+}
+
+/** 打开或激活面板（非 toggle）：已打开且可见 → 仅激活该 tab（内容随数据源切换）；
+ *  已存在但隐藏 → 显示并激活；不存在 → addTab 到默认组。
+ *  用于"点卡片看详情"类场景——连续点不同卡片应切换内容, 而不是开/关抖动。 */
+export function openPanelInTree(panelId: string): boolean {
+  const panel = getPanel(panelId as string);
+  if (!panel) return false;
+  const existing = findTabByPanelId(getTree(), panelId);
+  if (existing) {
+    ensureGroupVisible(existing.groupId);
+    setActiveTab(existing.groupId, existing.tabId);
+    return true;
+  }
   const targetGroupId = DEFAULT_PANEL_GROUPS[panelId] || "sidebar-left";
-  // 目标组可能不在当前预设树中（如聊天预设缺 editor-area/bottom-panel）——
-  // addTab 对不存在的组静默失败，面板会"点不开"。退化到第一个存在的组。
   const target = findGroup(getTree(), targetGroupId) ?? findFirstGroup(getTree());
   if (!target) return false;
   addTab(target.id, {
@@ -731,6 +745,13 @@ function setVisibility(groupId: string, v: Visibility) {
   tree = mapGroup(tree, groupId, (g) => ({ ...g, visibility: v === "expanded" ? undefined : v }));
 }
 
+/** 通用节点可见性（group 或 split 都支持）— split 级隐藏用于"整列"开关 */
+function setNodeVisibility(nodeId: string, v: Visibility) {
+  tree = mapTree(tree, (n) =>
+    n.id === nodeId ? { ...n, visibility: v === "expanded" ? undefined : v } : n
+  );
+}
+
 function redistributeSizes(groupId: string, toZero: boolean) {
   const parent = findParentSplit(tree, groupId);
   if (!parent || parent.split.children.length <= 1) return;
@@ -764,6 +785,10 @@ function redistributeSizes(groupId: string, toZero: boolean) {
 
 export function ensureGroupVisible(groupId: string, defaultSize: number = 25) {
   setVisibility(groupId, "expanded");
+  // 包装列(内部切割产生)若折叠着, 面板"打开了"仍看不见(整列是图标条)——
+  // 一并展开, 与 toggleGroupCollapse 的连带收起对称。
+  const wrapper = findCollapsibleWrapper(tree, groupId);
+  if (wrapper) setNodeVisibility(wrapper, "expanded");
   redistributeSizes(groupId, false);
   windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
 }
@@ -1138,13 +1163,46 @@ export function updateSizes(splitId: string, sizes: number[]) {
 
 // ── 面板显隐（三态统一） ──
 
-/** Activity Bar 图标点击: expanded ↔ collapsed，hidden → collapsed */
+/** 收缩时该连带收起的"列"节点。
+ *
+ *  「内部切割」把 activity 组包进包装 split（如 sidebar-left → sidebar-column），
+ *  包出来的内容与 activity 组同属一列。只收缩 activity 组自身时，这一列在上层
+ *  （根 split）仍占原宽度 → 空间收不回来（用户实测）。
+ *
+ *  规则: 一路向上走到**最顶层那个直接挂在水平 split 下的节点**——它的宽度由该
+ *  水平父级分配, 收缩它才能让上层真正回收空间。沿途的中间层(垂直/水平嵌套)
+ *  随之一并收起, 切割出的内容自然跟随。
+ *
+ *  返回该列节点 id；activity 组本身就是那一列（无包装层）时返回 null（行为不变）。
+ *
+ *  例: root(h) > sidebar-column(v) > sidebar-left(activity)
+ *      → 返回 "sidebar-column"（整列收起, root 回收那 25% 宽度, 切割内容一并收起）。 */
+export function findCollapsibleWrapper(root: LayoutNode, groupId: string): string | null {
+  let cursor: string = groupId;
+  let topColumn: string = groupId;
+  while (true) {
+    const p = findParentSplit(root, cursor);
+    if (!p) break; // 到顶
+    if (p.split.direction === "horizontal") {
+      // cursor 直接挂在水平父级下 = 一个"列", 它的宽度由该父级分配
+      topColumn = cursor;
+    }
+    cursor = p.split.id;
+  }
+  return topColumn === groupId ? null : topColumn;
+}
+
+/** Activity Bar 图标点击: expanded ↔ collapsed，hidden → collapsed。
+ *  内部切割的包装层存在时连带收缩整列(见 findCollapsibleWrapper)——否则
+ *  「收缩」只压窄 activity 自己, 包装列在上层仍占宽度, 空间收不回来(用户实测)。 */
 export function toggleGroupCollapse(groupId: string) {
   const group = findGroup(tree, groupId);
   if (!group) return;
   const cur: Visibility = group.visibility || "expanded";
   const next = cur === "collapsed" ? "expanded" : "collapsed";
   setVisibility(groupId, next);
+  const wrapper = findCollapsibleWrapper(tree, groupId);
+  if (wrapper) setNodeVisibility(wrapper, next);
   if (cur === "hidden") redistributeSizes(groupId, false);
   windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
 }
@@ -1164,11 +1222,17 @@ export function toggleGroupHidden(nodeId: string) {
       redistributeSizes(nodeId, true);
     }
   } else {
-    // Split node: just toggle sizes
-    if (parent.split.sizes[parent.index] > 0) {
-      redistributeSizes(nodeId, true);
-    } else {
+    // Split node: 组语义同构（split 级 visibility）— 整个列隐藏/恢复
+    const cur: Visibility = (parent.split.children[parent.index].visibility) || "expanded";
+    if (cur === "hidden") {
+      setNodeVisibility(nodeId, "expanded");
       redistributeSizes(nodeId, false);
+    } else if (cur === "collapsed") {
+      setNodeVisibility(nodeId, "expanded");
+      redistributeSizes(nodeId, false);
+    } else {
+      setNodeVisibility(nodeId, "hidden");
+      redistributeSizes(nodeId, true);
     }
   }
   windowBus.emit(Events.LAYOUT_TREE_CHANGED, { tree }, { sticky: true });
@@ -1176,6 +1240,18 @@ export function toggleGroupHidden(nodeId: string) {
 
 // Shortcuts
 export function toggleLeftPanel() { toggleGroupHidden("sidebar-left"); }
+// toggleLeftPanel 语义应为"隐藏整个左侧列"——但默认布局 sidebar 是 group,
+// 用户内部切分后它被包进 sidebar-column(split)。两者都隐藏 → 根第一个 child
+// 的组/列。这里保持 toggleGroupHidden 对 group 的兼容, 另加整列开关:
+export function toggleLeftColumn() {
+  // 根第一个 child = 左侧区域（可能是 group 或 split 列）
+  const root = tree;
+  if (root.type !== "split") return toggleGroupHidden("sidebar-left");
+  const leftChild = root.children[0];
+  if (!leftChild) return;
+  // child 可能被嵌套再一层(用户切分), 但最外层一定是根第一个 child
+  toggleGroupHidden(leftChild.id);
+}
 export function toggleRightPanel() {
   // 右侧聊天列：默认布局为 chat-split(split，含消息+输入)；用户自定义布局可能把右
   // 侧改成单独的 chat-messages-group(group，直接挂根，如根 split sizes=[..,30] 末位)。

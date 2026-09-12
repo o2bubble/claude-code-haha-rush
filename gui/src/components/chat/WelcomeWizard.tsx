@@ -335,7 +335,7 @@ function StepProfile({ value, onChange }: { value: string | null; onChange: (id:
   const [model, setModel] = useState("");
   const [authToken, setAuthToken] = useState("");
   // DeepSeek/Qwen presets
-  const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set(["deepseek-v4-flash"]));
+  const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set(["deepseek-flash"]));
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
 
@@ -362,10 +362,10 @@ function StepProfile({ value, onChange }: { value: string | null; onChange: (id:
       const { invoke } = await import("@tauri-apps/api/core");
       const extraVars: Record<string, string> = {};
       // 预设模板（与 ProfileDialog 对齐）
+      // DeepSeek 现只提供两个模型名（旧的 v4-flash / vision-exp 已下线）
       const TEMPLATES: Record<string, { baseUrl: string; model: string; label: string }> = {
+        "deepseek-flash": { baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-flash", label: "DeepSeek Flash" },
         "deepseek-v4-pro": { baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-v4-pro", label: "DeepSeek v4 Pro" },
-        "deepseek-v4-flash": { baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-v4-flash", label: "DeepSeek v4 Flash" },
-        "deepseek-v4-flash-vision-exp": { baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-v4-flash-vision-exp", label: "DeepSeek v4 Flash Vision" },
         "qwen-3.6-plus": { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen3.6-plus", label: "Qwen 3.6 Plus" },
       };
 
@@ -425,15 +425,14 @@ function StepProfile({ value, onChange }: { value: string | null; onChange: (id:
 
   // Preset model options per provider
   const getPresetModels = () => {
-    if (provider === "deepseek") return ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"];
+    if (provider === "deepseek") return ["deepseek-flash", "deepseek-v4-pro"];
     if (provider === "qwen") return ["qwen-3.6-plus"];
     return [];
   };
   const getPresetLabels = (id: string) => {
     const labels: Record<string, string> = {
+      "deepseek-flash": "DeepSeek Flash",
       "deepseek-v4-pro": "DeepSeek v4 Pro",
-      "deepseek-v4-flash": "DeepSeek v4 Flash",
-      "deepseek-v4-flash-vision-exp": "DeepSeek v4 Flash Vision",
       "qwen-3.6-plus": "Qwen 3.6 Plus",
     };
     return labels[id] || id;

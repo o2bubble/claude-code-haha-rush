@@ -123,6 +123,13 @@ export interface IDESetPermissionMode extends IDEBaseMessage {
   mode: string
 }
 
+/** GUI 推送插件 runtime 目录（plugin-nodejs-runtime T3 通道 B）——重扫后调用,
+ *  当前会话下一条 Bash 即生效。dirs = 绝对路径列表（GUI 已聚合/验序/存在性过滤）。 */
+export interface IDESetPluginRuntimePaths extends IDEBaseMessage {
+  type: 'set_plugin_runtime_paths'
+  dirs: string[]
+}
+
 export interface IDECompactRequest extends IDEBaseMessage {
   type: 'compact'
 }
@@ -158,6 +165,7 @@ export type StdinMessage =
   | IDEKillTaskRequest
   | IDELoadAgentTranscriptRequest
   | IDESetPermissionMode
+  | IDESetPluginRuntimePaths
   | IDECompactRequest
   | StdinSideQuestion
   | IRewindPointsListRequest

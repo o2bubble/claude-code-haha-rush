@@ -6,13 +6,13 @@ WORKDIR /app
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip config set install.trusted-host mirrors.aliyun.com
 
-# Install dependencies (no PyTorch — lightweight, keyword+tag search only)
+# Install dependencies (no PyTorch — FTS5 BM25 + jieba tokenization)
 COPY requirements.txt .
 RUN pip install --no-cache-dir --default-timeout=300 -r requirements.txt
 
 # Copy application code
 COPY store.py .
-COPY embeddings.py .
+COPY tokenizer.py .
 COPY normalize.py .
 COPY search_engine.py .
 COPY server.py .

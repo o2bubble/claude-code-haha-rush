@@ -248,76 +248,8 @@ pub fn workspace_settings_path(work_dir: &str) -> std::path::PathBuf {
 }
 
 // ── 单文件→双文件回退迁移 ──
-
-/// 把 user-scope MCP（`~/.claude/settings.json` 根 `mcpServers`，单文件模式时代引擎把全局
-/// 配置写进了 settings.json）迁移到 `~/.claude.json` 根 `mcpServers`。
-/// 回退 `getGlobalClaudeFile` 到双文件后，引擎只从 `~/.claude.json` 读 user-scope MCP；
-/// 不迁移则 codebase-memory/playwright 等全部失效。幂等：迁移完成后 settings.json 不再有
-/// 根 mcpServers，下次启动直接 no-op。同名服务器不覆盖（已有的优先）。
-pub fn migrate_single_file_mcp_to_claude_json() {
-    let settings_path = global_settings_path();
-    let claude_json_path = user_home().join(".claude.json");
-    migrate_single_file_mcp_between(&settings_path, &claude_json_path);
-}
-
-/// 路径可注入的迁移核心（单测用临时文件，绝不碰真实 ~/.claude）。
-fn migrate_single_file_mcp_between(
-    settings_path: &std::path::Path,
-    claude_json_path: &std::path::Path,
-) {
-    let mut settings: serde_json::Value = match std::fs::read_to_string(settings_path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-    {
-        Some(v) => v,
-        None => return, // 没有 settings.json → 双文件已就绪
-    };
-
-    let mcp = settings
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .cloned();
-    let Some(mcp) = mcp else {
-        return; // settings.json 没有根 mcpServers → 无需迁移
-    };
-
-    if !mcp.is_empty() {
-        // 合并进 ~/.claude.json 根 mcpServers（同名不覆盖，已有优先）。
-        // mcpServers 缺失 → 创建对象；非对象残留（如数组）→ 重建对象，防迁移丢失。
-        let mut global: serde_json::Value = std::fs::read_to_string(claude_json_path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-        let Some(global_obj) = global.as_object_mut() else {
-            return;
-        };
-        let gm = match global_obj.get_mut("mcpServers") {
-            Some(v) if v.is_object() => v.as_object_mut().unwrap(),
-            _ => {
-                global_obj.insert("mcpServers".into(), serde_json::json!({}));
-                global_obj.get_mut("mcpServers").unwrap().as_object_mut().unwrap()
-            }
-        };
-        let mut moved = 0usize;
-        for (name, cfg) in &mcp {
-            if !gm.contains_key(name) {
-                gm.insert(name.clone(), cfg.clone());
-                moved += 1;
-            }
-        }
-        if moved > 0 {
-            if std::fs::write(claude_json_path, serde_json::to_string_pretty(&global).unwrap_or_default()).is_ok() {
-                log::info!("Migrated {} user-scope MCP server(s): settings.json → ~/.claude.json", moved);
-            }
-        }
-    }
-
-    // 从 settings.json 移除根 mcpServers（保留 gui 键与其余引擎键）
-    if let Some(obj) = settings.as_object_mut() {
-        obj.remove("mcpServers");
-    }
-    let _ = std::fs::write(settings_path, serde_json::to_string_pretty(&settings).unwrap_or_default());
-}
+// 迁移本体已集中到 src/migrations.rs（全清单见其 MIGRATION_REGISTRY），
+// 由 migrations::run_startup_migrations() 在启动序列中调用。
 
 // ── office MCP 自动注册 ──
 
@@ -719,44 +651,10 @@ pub fn load_global_settings() -> AppSettings {
     s
 }
 
-/// Fold each known workspace's `quickPrompts` into the global baseline (dedup by
-/// id), then strip `quickPrompts` from the workspace settings file. Pure helper
-/// extracted for testability — only touches `s` and the filesystem, no logic
-/// gate on version (idempotent: already-merged ids are skipped).
-pub fn migrate_quick_prompts_to_global(s: &mut AppSettings) {
-    let workspaces = s.workspaces.clone();
-    if workspaces.is_empty() {
-        return;
-    }
-    let mut merged: Vec<QuickPrompt> = s.quick_prompts.clone();
-    let mut changed = false;
-
-    for ws in &workspaces {
-        let ws_path = workspace_settings_path(ws);
-        let Some(gui) = read_gui_section(&ws_path) else { continue };
-        let Some(mut gui_obj) = gui.as_object().cloned() else { continue };
-        let Some(qp) = gui_obj.remove("quickPrompts") else { continue };
-        let Some(arr) = qp.as_array() else { continue };
-
-        let extras: Vec<QuickPrompt> = arr
-            .iter()
-            .filter_map(|item| serde_json::from_value::<QuickPrompt>(item.clone()).ok())
-            .collect();
-        let before = merged.len();
-        merged = merge_quick_prompts(merged, extras);
-        if merged.len() != before {
-            changed = true;
-        }
-        // Persist the workspace file with quickPrompts removed (keep other gui keys).
-        let _ = write_gui_section(&ws_path, &serde_json::Value::Object(gui_obj));
-    }
-
-    if changed {
-        s.quick_prompts = merged;
-        let _ = save_global_settings(s);
-        log::info!("Migrated workspace quickPrompts into global baseline");
-    }
-}
+// ── 全局配置字段迁移 ──
+// 本体已集中到 src/migrations.rs（全清单见其 MIGRATION_REGISTRY）。
+// re-export 保持原有 `settings::xxx` 调用路径与测试不变。
+pub use crate::migrations::{migrate_quick_prompts_to_global, should_migrate_server_url};
 
 /// Merge `extra` prompts into `base`, dedup by id (first occurrence wins).
 /// Pure — extracted for testability; the idempotency guarantee of the migration
@@ -770,13 +668,6 @@ pub fn merge_quick_prompts(base: Vec<QuickPrompt>, extra: Vec<QuickPrompt>) -> V
         }
     }
     merged
-}
-
-/// Decide whether a legacy default server URL needs migrating. Pure — only
-/// `localhost` counts (the pre-1.0 default); the cloud/intranet addresses are
-/// valid user choices and are never rewritten.
-pub fn should_migrate_server_url(skill_registry_url: &str) -> bool {
-    skill_registry_url.contains("localhost")
 }
 
 pub fn load_workspace_settings(work_dir: &str) -> AppSettings {
@@ -980,16 +871,7 @@ mod tests {
         assert_eq!(back.recent_workspaces, vec!["C:/ws-a".to_string(), "C:/ws-b".to_string()]);
     }
 
-    /// Regression: the cloud/intranet server URLs are valid user choices and must
-    /// never be migrated back to the intranet 96 default (saving them used to get
-    /// reverted on every load). Only `localhost` is the legacy default.
-    #[test]
-    fn server_url_migration_only_for_localhost() {
-        assert!(should_migrate_server_url("http://localhost:8765"));
-        assert!(!should_migrate_server_url("http://123.56.66.84:8765"));
-        assert!(!should_migrate_server_url("http://192.168.186.96:8765"));
-        assert!(!should_migrate_server_url("http://example.com:8765"));
-    }
+    // server_url 迁移判定测试已随函数移至 src/migrations.rs
 
     /// Regression: binding the DEFAULT workspace (user_home/claude-code-workspace)
     /// must still report it as work_dir — the old guard skipped setting it, so the
@@ -1126,52 +1008,14 @@ mod tests {
         assert_eq!(tree.assignments.get("s1").map(String::as_str), Some("f1"));
     }
 
-    /// quickPrompts 从工作区迁移到全局：按 id 去重合并，先到先得（幂等）。
-    #[test]
-    fn merge_quick_prompts_dedups_by_id_and_keeps_first() {
-        let base = vec![
-            QuickPrompt { id: "q1".into(), title: "A".into(), prompt: "a".into() },
-            QuickPrompt { id: "q2".into(), title: "B".into(), prompt: "b".into() },
-        ];
-        let extra = vec![
-            QuickPrompt { id: "q1".into(), title: "A2".into(), prompt: "a2".into() }, // dup → skip
-            QuickPrompt { id: "q3".into(), title: "C".into(), prompt: "c".into() },  // new → add
-        ];
-        let merged = merge_quick_prompts(base, extra);
-        assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0].id, "q1");
-        assert_eq!(merged[0].prompt, "a", "first occurrence wins");
-        assert_eq!(merged[2].id, "q3");
-    }
+    // quickPrompts 迁移测试 / MCP 迁移测试已随函数移至 src/migrations.rs
 
-    /// 空 extra / 全重复 extra：保持 base 不变（迁移幂等）。
-    #[test]
-    fn merge_quick_prompts_idempotent() {
-        let base = vec![QuickPrompt { id: "q1".into(), title: "A".into(), prompt: "a".into() }];
-        assert_eq!(merge_quick_prompts(base.clone(), vec![]).len(), 1);
-        let again = vec![QuickPrompt { id: "q1".into(), title: "A".into(), prompt: "a".into() }];
-        assert_eq!(merge_quick_prompts(base, again).len(), 1, "rerun with same ids stays stable");
-    }
-
-    // ── 单文件→双文件 MCP 迁移（临时文件，绝不碰真实 ~/.claude）──
-
-    fn mcp_mig_fixture(tag: &str, settings_json: &str, global_json: Option<&str>) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("mcp_mig_{}_{}", std::process::id(), tag));
-        let _ = std::fs::create_dir_all(&dir);
-        let settings = dir.join("settings.json");
-        let claude_json = dir.join(".claude.json");
-        let _ = std::fs::write(&settings, settings_json);
-        if let Some(g) = global_json {
-            let _ = std::fs::write(&claude_json, g);
-        }
-        (settings, claude_json)
-    }
+    // ── office MCP 自动注册（临时文件，绝不碰真实 ~/.claude）──
 
     fn read_json(p: &std::path::Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
     }
 
-    // ── office MCP 自动注册（临时文件，绝不碰真实 ~/.claude）──
 
     fn office_fixture(tag: &str, global_json: Option<&str>) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("office_mcp_{}_{}", std::process::id(), tag));
@@ -1419,77 +1263,5 @@ mod tests {
         assert!(md.contains("@other.md"), "其余行保留");
     }
 
-    /// 迁移把 settings.json 根 mcpServers 搬进 ~/.claude.json；
-    /// 同名服务器不覆盖（已有的优先），其余键（gui 等）保留。
-    #[test]
-    fn mcp_migrate_moves_and_merges_preserving_existing() {
-        let (s, g) = mcp_mig_fixture(
-            "merge",
-            r#"{"gui":{"language":"zh"},"mcpServers":{"codebase-memory-mcp":{"command":"x"},"playwright":{"command":"pw"}}}"#,
-            Some(r#"{"numStartups":5,"mcpServers":{"playwright":{"command":"pw_old"},"memory":{"command":"mem"}}}"#),
-        );
-        migrate_single_file_mcp_between(&s, &g);
-
-        let settings = read_json(&s);
-        assert!(settings.get("mcpServers").is_none(), "settings.json 根 mcpServers 应被移除");
-        assert_eq!(settings["gui"]["language"], "zh", "gui 键必须保留");
-
-        let global = read_json(&g);
-        assert_eq!(global["numStartups"], 5, "~/.claude.json 其余字段保留");
-        let servers = global["mcpServers"].as_object().unwrap();
-        assert!(servers.contains_key("codebase-memory-mcp"), "新服务器应搬入");
-        assert_eq!(servers["playwright"]["command"], "pw_old", "同名不覆盖——已有的优先");
-        assert!(servers.contains_key("memory"), "已有服务器保留");
-    }
-
-    /// 幂等：第二次运行 settings.json 已无 mcpServers → no-op。
-    #[test]
-    fn mcp_migrate_is_idempotent() {
-        let (s, g) = mcp_mig_fixture(
-            "idem",
-            r#"{"gui":{},"mcpServers":{"a":{"command":"1"}}}"#,
-            Some(r#"{}"#),
-        );
-        migrate_single_file_mcp_between(&s, &g);
-        let after_first = std::fs::read_to_string(&g).unwrap();
-        migrate_single_file_mcp_between(&s, &g);
-        assert_eq!(std::fs::read_to_string(&g).unwrap(), after_first, "第二次运行不应改动 ~/.claude.json");
-        assert!(read_json(&s).get("mcpServers").is_none());
-    }
-
-    /// settings.json 没有根 mcpServers → 直接返回，不动任何文件。
-    #[test]
-    fn mcp_migrate_noop_without_settings_mcp() {
-        let (s, g) = mcp_mig_fixture("noop", r#"{"gui":{}}"#, Some(r#"{"mcpServers":{"z":{}}}"#));
-        let before = std::fs::read_to_string(&g).unwrap();
-        migrate_single_file_mcp_between(&s, &g);
-        assert_eq!(std::fs::read_to_string(&g).unwrap(), before, "不应改动");
-        assert!(read_json(&s).get("mcpServers").is_none());
-    }
-
-    /// ~/.claude.json 不存在 → 迁移创建它并写入 mcpServers。
-    #[test]
-    fn mcp_migrate_creates_claude_json_when_missing() {
-        let (s, g) = mcp_mig_fixture("create", r#"{"mcpServers":{"a":{"command":"1"}}}"#, None);
-        assert!(!g.exists());
-        migrate_single_file_mcp_between(&s, &g);
-        assert!(g.exists(), "迁移应创建 ~/.claude.json");
-        assert!(read_json(&g)["mcpServers"].as_object().unwrap().contains_key("a"));
-        assert!(read_json(&s).get("mcpServers").is_none());
-    }
-
-    /// 回归：~/.claude.json 的 mcpServers 是数组残留（非对象）→ 重建为对象再合并，防迁移丢失。
-    #[test]
-    fn mcp_migrate_rebuilds_array_residue() {
-        let (s, g) = mcp_mig_fixture(
-            "array",
-            r#"{"mcpServers":{"a":{"command":"1"}}}"#,
-            Some(r#"{"mcpServers":[]}"#),
-        );
-        migrate_single_file_mcp_between(&s, &g);
-        let global = read_json(&g);
-        assert!(global["mcpServers"].is_object(), "数组残留应被重建为对象");
-        assert!(global["mcpServers"].as_object().unwrap().contains_key("a"), "服务器应合并进去");
-        assert!(read_json(&s).get("mcpServers").is_none());
-    }
+    // MCP 迁移测试已随函数移至 src/migrations.rs
 }

@@ -13,8 +13,8 @@ You are running inside the Claude Code GUI desktop client. This document covers 
 
 | Panel | ID | Purpose |
 |-------|-----|---------|
-| Chat Messages | `messages` | Conversation display |
-| Chat Input | `input` | Message input area |
+| Chat Messages | `chat-messages` | Conversation display |
+| Chat Input | `chat-input` | Message input area |
 | File Browser | `files` | File tree with create/rename/delete/context menu |
 | Editor | `editor` | Monaco code editor + image/PDF/SVG preview |
 | Terminal | `terminal` | xterm.js multi-tab terminal for agent commands |
@@ -27,6 +27,12 @@ You are running inside the Claude Code GUI desktop client. This document covers 
 | Settings | `settings` | App configuration (language, font, editor, etc.) |
 | Quick Prompts | `quick-prompts` | Saved prompt templates |
 | Notes | `notes` | Personal notes with tags, scope, and associations |
+| Diagnostics | `diagnostics` | Runtime/environment health checks + one-click fix |
+| Profiles | `profile-manager` | API profile (model config) manager |
+| Plugin Market | `plugin-market` | Browse/install GUI plugins |
+| Updates | `update` | Version check + component update |
+
+Use `@ref{panel:<id>}` to point the user at a panel — the ID must match this table exactly.
 
 ## Super Desktop (9 block types)
 
@@ -44,9 +50,12 @@ The Super Desktop is an infinite canvas where content blocks can be created, edi
 | Form | `form` | User fill values, AI configure fields (10 control types) |
 | Drawing | `drawing` | User draw (freehand/shapes/text/eraser) + AI view |
 
-## Super Desktop MCP Tools (16 available)
+## GUI MCP Tools
 
-Access these via the MCP server running on the Tauri backend:
+These run on the Tauri backend. Registration lives in `gui/src/services/mcpBridge.ts`.
+Tool descriptions are auto-exposed to you, so this section focuses on **when to use them**.
+
+### Super Desktop (15)
 
 | Tool | Description |
 |------|-------------|
@@ -65,8 +74,38 @@ Access these via the MCP server running on the Tauri backend:
 | `desktop_list` | List all desktops |
 | `desktop_create` | Create a new desktop tab |
 | `desktop_delete` | Delete a desktop tab |
-| `initialize` | MCP handshake |
-| `tools/list` | List available tools |
+
+### GUI Plugins (6)
+
+| Tool | When to use |
+|------|-------------|
+| `plugin_list` | Before debugging anything plugin-related — see what's installed, enabled, and its manifest summary |
+| `plugin_get` | Read one plugin's full `plugin.json` (panels/commands/events/processes it contributes) |
+| `plugin_docs` | **Call before writing or debugging a plugin.** Without `name`: the plugin-system guide (layout, schema, lifecycle, troubleshooting). With `name`: that plugin's own `AI_NOTES.md` — author-written failure modes, log locations, diagnostics |
+| `plugin_install` | Install a **standard** plugin from the marketplace by slug (panels/commands go live immediately). ai-guided plugins have no runtime — read their docs and perform the guided steps yourself instead |
+| `plugin_uninstall` | DANGEROUS — requires `confirm: true` **after the user explicitly agreed in conversation**. Refused while other plugins depend on it |
+| `plugin_set_status` | Report AI-verified environment status (`ready`/`not_ready`/`error`) for an ai-guided plugin, e.g. after manually installing a runtime per its AI_NOTES |
+
+Install flow: `plugin_list` (is it already installed?) → `plugin_docs(name=...)` (read its notes first) → `plugin_install(slug=...)` → verify with `plugin_list`. Dependency errors name the missing plugins — install those first.
+
+### Git Viewer (3)
+
+Read-only git inspection for the bound workspace (the git-viewer plugin's backend):
+
+| Tool | Description |
+|------|-------------|
+| `git_view_diff` | Working-tree diff of one file (uncommitted changes). `file` is repo-relative, e.g. `gui/src/App.tsx` |
+| `git_history` | Recent commits (read-only `git log`) |
+| `git_branches` | Branch list (read-only `git branch`) |
+
+Prefer these over shelling out to `git` when you just need to look — they're read-only by construction (no commit/push/rebase).
+
+### App (2)
+
+| Tool | When to use |
+|------|-------------|
+| `chat_send_command` | Pre-fill text into the chat input (e.g. a slash command like `/mcp-refresh`) for the user to review and send with one keystroke. Nothing is sent automatically — use when a GUI-side action needs a slash command the user must trigger |
+| `app_relaunch` | Restart the GUI app. DANGEROUS — only with `confirm: true` **after the user agreed**; ends the current AI session. Use as the last step of an install flow (e.g. after an ai-guided plugin registered an MCP server that needs a reload) |
 
 ### Content type reference
 

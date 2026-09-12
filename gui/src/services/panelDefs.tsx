@@ -26,6 +26,7 @@ import HelpPanel from "../components/chat/HelpPanel";
 import { UpdatePanel } from "../components/chat/UpdatePanel";
 import { DiagnosticPanel } from "../components/chat/DiagnosticPanel";
 import PluginMarketPanel from "../components/chat/PluginMarketPanel";
+import PluginMarketDetailPanel from "../components/chat/PluginMarketDetailPanel";
 
 /* ── Helper: wrap component in ErrorBoundary ── */
 function withError(name: string, el: JSX.Element) {
@@ -88,6 +89,12 @@ export const ALL_PANEL_DEFS: PanelDefinition[] = [
   {
     id: "skill-dialog", title: t("panel.skill"), icon: "default", userManaged: false, defaultView: "main",
     views: [{ id: "main", title: t("panel.skill"), render: () => withError("SkillDialog", <SkillDialogFloating />) }],
+  },
+  {
+    // 插件详情页: 市场面板卡片点击时在 editor-area 中央区打开(宽幅展示 README)。
+    // userManaged:false —— 不进图标栏/下拉, 只由市场面板驱动。
+    id: "plugin-market-detail", title: t("panel.pluginDetail"), icon: "package", userManaged: false, defaultView: "main",
+    views: [{ id: "main", title: t("panel.pluginDetail"), render: () => withError("PluginDetail", <PluginMarketDetailPanel />) }],
   },
   {
     id: "super-desktop", title: t("panel.superDesktop"), icon: "superDesktop", defaultView: "main",

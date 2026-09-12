@@ -24,8 +24,10 @@ import { openSettingsFloat } from "../Toolbar";
 import { crossWindowBus } from "../../services/crossWindowBus";
 import { StreamStallDecisionBar } from "./StreamStallDecisionBar";
 import {
-  computeStreamStallDecision, enterWaiting, resetToIdle, shouldAutoWake, type StreamStallDecisionState,
+  computeStreamStallDecision, enterWaiting, resetToIdle, shouldAutoWake, ENTER_DECISION_SECS,
+  type StreamStallDecisionState,
 } from "../../utils/streamStallDecision";
+import { activeToolNames } from "../../chat/chatReduce";
 
 function PermissionPrompt({ onAllow, onAllowAlways, onDeny }: {
   onAllow: () => void; onAllowAlways: () => void; onDeny: () => void;
@@ -151,20 +153,24 @@ function ChatStatusBar({ onCompact }: { onCompact?: () => void }) {
 
   // 无响应提示：streaming 期间每 3s 检查一次距上次流式活动的时间，超过阈值显示"已 N 秒无响应"。
   // 上游静默停流/中转断连时不再干等，用户立刻知道卡在哪。
+  // 阈值 = ENTER_DECISION_SECS(与决策条同一常量)——两处必须一致, 否则出现
+  // "提示已 30s 无响应, 但决策条 60s 才弹"的错位(曾如此, 用户实测反馈)。
   const [stallSeconds, setStallSeconds] = useState(0);
   useEffect(() => {
     if (!state.streaming) {
       setStallSeconds(0);
       return;
     }
-    const tick = () => setStallSeconds(computeStreamStall(state.lastStreamEventAt, Date.now(), true));
+    const tick = () => setStallSeconds(computeStreamStall(state.lastStreamEventAt, Date.now(), true, ENTER_DECISION_SECS * 1000));
     tick();
     const iv = setInterval(tick, 3000);
     return () => clearInterval(iv);
   }, [state.streaming, state.lastStreamEventAt]);
 
-  const ctxPct = 100 - (state.contextPercent || 0);
-  const ctxColor = getContextColor(ctxPct);
+  // 后端 contextPercent = remaining_percentage。进度条与数字统一表示「已用」，
+  // 否则条越长、数字越小，两者反向（曾是 bug：条空、旁边写 100%）。
+  const ctxUsedPct = 100 - (state.contextPercent || 0);
+  const ctxColor = getContextColor(ctxUsedPct);
   const ctxActive = state.contextPercent > 0;
 
   // 上下文告警：已用百分比跨过阈值时弹浮动层（idle/showing/dismissed 状态机）
@@ -180,14 +186,14 @@ function ChatStatusBar({ onCompact }: { onCompact?: () => void }) {
     }
     const s = getSettings();
     const res = computeContextWarning({
-      usedPct: ctxPct,
+      usedPct: ctxUsedPct,
       threshold: s.contextWarningPercent ?? DEFAULT_CONTEXT_WARNING_PERCENT,
       enabled: s.contextWarningEnabled ?? DEFAULT_CONTEXT_WARNING_ENABLED,
       state: warnStateRef.current,
     });
     warnStateRef.current = res.nextState;
     setWarnVisible(res.show);
-  }, [ctxPct, ctxActive, settingsPayload]);
+  }, [ctxUsedPct, ctxActive, settingsPayload]);
 
   const handleDismissWarn = () => {
     warnStateRef.current = dismiss(warnStateRef.current);
@@ -263,7 +269,7 @@ function ChatStatusBar({ onCompact }: { onCompact?: () => void }) {
 
           <span style={{ color: "var(--border-medium)", fontSize: 10 }}>|</span>
 
-          <div title={t("chat.contextRemaining", { pct: state.contextPercent })} style={{
+          <div title={t("chat.contextUsed", { pct: Math.round(ctxUsedPct) })} style={{
             display: "flex", alignItems: "center", gap: 4,
           }}>
             <div style={{
@@ -271,7 +277,7 @@ function ChatStatusBar({ onCompact }: { onCompact?: () => void }) {
               backgroundColor: "var(--border-light)", overflow: "hidden", flexShrink: 0,
             }}>
               <div ref={barRef} style={{
-                width: `${ctxPct}%`, height: "100%",
+                width: `${ctxUsedPct}%`, height: "100%",
                 backgroundColor: ctxColor, borderRadius: 2,
                 transition: "width 0.3s ease",
               }} />
@@ -282,7 +288,7 @@ function ChatStatusBar({ onCompact }: { onCompact?: () => void }) {
               fontWeight: warnVisible ? 700 : 400,
               transition: "color 0.3s, font-weight 0.3s",
             }}>
-              {state.contextPercent}%
+              {Math.round(ctxUsedPct)}%
             </span>
           </div>
 
@@ -308,7 +314,7 @@ function ChatStatusBar({ onCompact }: { onCompact?: () => void }) {
           )}
         </>
       )}
-      {warnVisible && <ContextWarningPopover usedPct={ctxPct} onDismiss={handleDismissWarn} />}
+      {warnVisible && <ContextWarningPopover usedPct={ctxUsedPct} onDismiss={handleDismissWarn} />}
     </div>
   );
 }
@@ -351,6 +357,9 @@ export function ChatInputPanel() {
         lastStreamEventAt: st.lastStreamEventAt,
         now: Date.now(),
         state: stallDecisionRef.current,
+        // 在跑工具名 —— 仅用于自动中断的分级宽限（Bash/Task 给更长宽限）。
+        // 弹条不豁免：静默 30s 一律弹（2026-09-10 一刀切）。
+        activeToolNames: activeToolNames(st),
       });
       stallDecisionRef.current = res.nextState;
       setShowStallDecision(res.show);

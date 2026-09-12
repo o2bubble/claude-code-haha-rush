@@ -2,242 +2,245 @@
 
 <p align="right"><a href="./README.md">中文</a> | <strong>English</strong></p>
 
-A **locally runnable version** repaired from the leaked Claude Code source, with support for any Anthropic-compatible API endpoint such as MiniMax and OpenRouter.
+A **locally-runnable version** of Claude Code, repaired from the leaked source — with a **full desktop GUI client** (Tauri 2 + React) built on top.
 
-> The original leaked source does not run as-is. This repository fixes multiple blocking issues in the startup path so the full Ink TUI can work locally.
+Works with any Anthropic-compatible API (DeepSeek, Qwen, MiniMax, OpenRouter, …).
+
+> The leaked source does not run as-is. This repo fixes several startup blockers and adds a graphical interface plus a plugin ecosystem that the original never had.
 
 <p align="center">
-  <img src="docs/00runtime.png" alt="Runtime screenshot" width="800">
+  <img src="docs/diagrams/00gui-main.png" alt="GUI main view" width="900">
+  <br><sub>Multi-panel workbench: sub-agents / Super Desktop / skills / quick prompts / plan / chat / input / terminal</sub>
 </p>
 
-## Features
-
-- Full Ink TUI experience (matching the official Claude Code interface)
-- `--print` headless mode for scripts and CI
-- MCP server, plugin, and Skills support
-- Custom API endpoint and model support
-- Fallback Recovery CLI mode
+<p align="center">
+  <img src="docs/diagrams/00runtime.png" alt="Launcher — pick a workspace" width="700">
+  <br><sub>Launcher: pick or create a workspace</sub>
+</p>
 
 ---
 
-## Architecture Overview
+## Desktop GUI (primary form)
 
-<table>
-  <tr>
-    <td align="center" width="25%"><img src="docs/01-overall-architecture.png" alt="Overall architecture"><br><b>Overall architecture</b></td>
-    <td align="center" width="25%"><img src="docs/02-request-lifecycle.png" alt="Request lifecycle"><br><b>Request lifecycle</b></td>
-    <td align="center" width="25%"><img src="docs/03-tool-system.png" alt="Tool system"><br><b>Tool system</b></td>
-    <td align="center" width="25%"><img src="docs/04-multi-agent.png" alt="Multi-agent architecture"><br><b>Multi-agent architecture</b></td>
-  </tr>
-  <tr>
-    <td align="center" width="25%"><img src="docs/05-terminal-ui.png" alt="Terminal UI"><br><b>Terminal UI</b></td>
-    <td align="center" width="25%"><img src="docs/06-permission-security.png" alt="Permissions and security"><br><b>Permissions and security</b></td>
-    <td align="center" width="25%"><img src="docs/07-services-layer.png" alt="Services layer"><br><b>Services layer</b></td>
-    <td align="center" width="25%"><img src="docs/08-state-data-flow.png" alt="State and data flow"><br><b>State and data flow</b></td>
-  </tr>
-</table>
+The original Claude Code is a terminal program. This project keeps the TUI **and** provides a desktop client — a **multi-panel workbench** that lays out what the terminal renders linearly, into panels you can freely arrange: chat, editor, terminal, and file tree side by side, splittable and floatable.
+
+### Panels
+
+| Panel | Description |
+|-------|-------------|
+| **Editor** | Monaco editor; image/PDF/SVG preview (wheel zoom, drag pan, color picker) |
+| **Chat** | Message stream + history; message timeline (jump by your own prompts), search, reference links |
+| **Terminal** | Multi-tab xterm.js terminal — the agent's Bash output renders here |
+| **Files** | File tree (create/rename/delete, context menu, reveal in editor) |
+| **Super Desktop** | Infinite canvas: 9 block types (text/table/chart/graphic/drawing/form/image/ref/file-group), connectable, zoomable, AI-collaborative |
+| **Skills / Plugin Market** | Install skills and plugins online; plugins can contribute panels, commands, background processes |
+| **Notes** | Personal notes with tags, scopes, and associations (shared across workspaces) |
+| **Plan / Sub-agents / Workers** | TodoWrite task view, background agent list with transcripts, plugin process status |
+| **Diagnostics** | One-click check & repair for backend service/port/connection/env |
+| **Settings / Updates** | Model & API profiles, theme, language, component updates |
+
+### Features
+
+- **Free layout** — drag to rearrange, split into groups, float into separate windows; layout persists per workspace
+- **Multi-instance** — several windows bound to different workspaces; session list / notes / settings sync across windows
+- **Multi-model profiles** — built-in DeepSeek / Qwen presets; config shared with the CLI
+- **Plugin ecosystem** — zip-distributed, one-click install; panels (sandboxed iframe), slash commands, background processes, runtime deps
+- **Deep AI integration** — the AI drives the GUI over MCP (canvas blocks, notes, git inspection, plugin installs)
+- **Theming** — dark/light, UI font scaling
+
+### Stack
+
+| Layer | Tech |
+|-------|------|
+| Shell | [Tauri 2](https://tauri.app) (Rust + WebView2) |
+| Frontend | React 18 + TypeScript + Vite |
+| Editor | Monaco |
+| Terminal | xterm.js |
+| Table / Chart | AG Grid / ECharts |
+| Runtime | Bun (engine side) |
 
 ---
 
 ## Quick Start
 
-### 1. Install Bun
+### Option A: Installer (recommended)
 
-This project requires [Bun](https://bun.sh). If Bun is not installed on the target machine yet, use one of the following methods first:
+Run `ClaudeCodeHaha_Setup_*.exe` and follow the wizard. You can configure an API profile during setup.
 
-```bash
-# macOS / Linux (official install script)
-curl -fsSL https://bun.sh/install | bash
-```
+See [SETUP.md](./SETUP.md) (Chinese).
 
-If a minimal Linux image reports `unzip is required to install bun`, install `unzip` first:
+### Option B: From source
 
 ```bash
-# Ubuntu / Debian
-apt update && apt install -y unzip
-```
+# 1. Install Bun
+curl -fsSL https://bun.sh/install | bash          # macOS / Linux
+powershell -c "irm bun.sh/install.ps1 | iex"      # Windows
 
-```bash
-# macOS (Homebrew)
-brew install bun
-```
-
-```powershell
-# Windows (PowerShell)
-powershell -c "irm bun.sh/install.ps1 | iex"
-```
-
-After installation, reopen the terminal and verify:
-
-```bash
-bun --version
-```
-
-### 2. Install project dependencies
-
-```bash
+# 2. Install dependencies
 bun install
+cd gui && bun install && cd ..
+
+# 3. Configure API
+cp .env.example .env    # fill in ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
+
+# 4. Launch the GUI (dev mode)
+cd gui && cargo tauri dev
 ```
 
-### 3. Configure environment variables
+> **Windows prerequisite**: [Git for Windows](https://git-scm.com/download/win) (provides Git Bash; shell execution depends on it).
 
-Copy the example file and fill in your API key:
+> The **skill / plugin marketplace** needs a reachable registry (the address is configurable in Settings). It defaults to the developer's LAN address — on the public internet, point it at your own deployment. An unreachable marketplace does not affect any other feature.
+
+---
+
+## Terminal TUI Mode
+
+The original form remains fully functional — the same Ink interface as official Claude Code:
 
 ```bash
-cp .env.example .env
-```
+# macOS / Linux
+./bin/claude-haha                    # interactive TUI
+./bin/claude-haha -p "your prompt"   # headless (scripts/CI)
 
-Edit `.env`:
-
-```env
-# API authentication (choose one)
-ANTHROPIC_API_KEY=sk-xxx          # Standard API key via x-api-key header
-ANTHROPIC_AUTH_TOKEN=sk-xxx       # Bearer token via Authorization header
-
-# API endpoint (optional, defaults to Anthropic)
-ANTHROPIC_BASE_URL=https://api.minimaxi.com/anthropic
-
-# Model configuration
-ANTHROPIC_MODEL=MiniMax-M2.7-highspeed
-ANTHROPIC_DEFAULT_SONNET_MODEL=MiniMax-M2.7-highspeed
-ANTHROPIC_DEFAULT_HAIKU_MODEL=MiniMax-M2.7-highspeed
-ANTHROPIC_DEFAULT_OPUS_MODEL=MiniMax-M2.7-highspeed
-
-# Timeout in milliseconds
-API_TIMEOUT_MS=3000000
-
-# Disable telemetry and non-essential network traffic
-DISABLE_TELEMETRY=1
-CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-```
-
-### 4. Start
-
-#### macOS / Linux
-
-```bash
-# Interactive TUI mode (full interface)
-./bin/claude-haha
-
-# Headless mode (single prompt)
-./bin/claude-haha -p "your prompt here"
-
-# Pipe input
-echo "explain this code" | ./bin/claude-haha -p
-
-# Show all options
-./bin/claude-haha --help
-```
-
-#### Windows
-
-> **Prerequisite**: [Git for Windows](https://git-scm.com/download/win) must be installed (provides Git Bash, which the project's internal shell execution depends on).
-
-The startup script `bin/claude-haha` is a bash script and cannot run directly in cmd or PowerShell. Use one of the following methods:
-
-**Option 1: PowerShell / cmd — call Bun directly (recommended)**
-
-```powershell
-# Interactive TUI mode
+# Windows (PowerShell / cmd)
 bun --env-file=.env ./src/entrypoints/cli.tsx
-
-# Headless mode
-bun --env-file=.env ./src/entrypoints/cli.tsx -p "your prompt here"
-
-# Fallback Recovery CLI
-bun --env-file=.env ./src/localRecoveryCli.ts
+bun --env-file=.env ./src/entrypoints/cli.tsx -p "your prompt"
 ```
-
-**Option 2: Run inside Git Bash**
-
-```bash
-# Same usage as macOS / Linux
-./bin/claude-haha
-```
-
-> **Note**: Some features (voice input, Computer Use, sandbox isolation, etc.) are not available on Windows. This does not affect the core TUI interaction.
 
 ---
 
 ## Environment Variables
 
 | Variable | Required | Description |
-|------|------|------|
-| `ANTHROPIC_API_KEY` | One of two | API key sent via the `x-api-key` header |
-| `ANTHROPIC_AUTH_TOKEN` | One of two | Auth token sent via the `Authorization: Bearer` header |
-| `ANTHROPIC_BASE_URL` | No | Custom API endpoint, defaults to Anthropic |
-| `ANTHROPIC_MODEL` | No | Default model |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | No | Sonnet-tier model mapping |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | Haiku-tier model mapping |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | No | Opus-tier model mapping |
-| `API_TIMEOUT_MS` | No | API request timeout, default `600000` (10min) |
-| `DISABLE_TELEMETRY` | No | Set to `1` to disable telemetry |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | No | Set to `1` to disable non-essential network traffic |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | one of two | API key sent via `x-api-key` |
+| `ANTHROPIC_AUTH_TOKEN` | one of two | Auth token sent via `Authorization: Bearer` |
+| `ANTHROPIC_BASE_URL` | no | Custom endpoint (default: Anthropic) |
+| `ANTHROPIC_MODEL` | no | Default model |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | no | Sonnet-tier mapping |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | no | Haiku-tier mapping |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | no | Opus-tier mapping |
+| `API_TIMEOUT_MS` | no | Request timeout, default 600000 (10 min) |
+| `DISABLE_TELEMETRY` | no | Set `1` to disable telemetry |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | no | Set `1` to disable non-essential requests |
 
----
-
-## Fallback Mode
-
-If the full TUI has issues, use the simplified readline-based interaction mode:
-
-```bash
-CLAUDE_CODE_FORCE_RECOVERY_CLI=1 ./bin/claude-haha
-```
-
----
-
-## Fixes Compared with the Original Leaked Source
-
-The leaked source could not run directly. This repository mainly fixes the following issues:
-
-| Issue | Root cause | Fix |
-|------|------|------|
-| TUI does not start | The entry script routed no-argument startup to the recovery CLI | Restored the full `cli.tsx` entry |
-| Startup hangs | The `verify` skill imports a missing `.md` file, causing Bun's text loader to hang indefinitely | Added stub `.md` files |
-| `--print` hangs | `filePersistence/types.ts` was missing | Added type stub files |
-| `--print` hangs | `ultraplan/prompt.txt` was missing | Added resource stub files |
-| **Enter key does nothing** | The `modifiers-napi` native package was missing, `isModifierPressed()` threw, `handleEnter` was interrupted, and `onSubmit` never ran | Added try/catch fault tolerance |
-| Setup was skipped | `preload.ts` automatically set `LOCAL_RECOVERY=1`, skipping all initialization | Removed the default setting |
+In the GUI these are managed via the settings panel / profiles — no need to edit `.env` by hand.
 
 ---
 
 ## Project Structure
 
-```text
+```
+gui/                     # Desktop client (the main addition in this repo)
+├── src/                 #   React frontend
+│   ├── components/      #     panels & UI components
+│   ├── stores/          #     state (layout/sessions/desktop/notes…)
+│   ├── services/        #     bridges (Tauri commands, MCP, cross-window)
+│   └── i18n/            #     zh/en strings
+└── src-tauri/           #   Rust backend (windows, files, processes, plugins, DB)
+
+src/                     # Engine (repaired from the leaked source)
+├── entrypoints/         #   CLI entrypoints (cli.tsx / ideMode.ts)
+├── main.tsx             #   TUI core (Commander.js + React/Ink)
+├── tools/               #   Agent tools (Bash/Edit/Grep…)
+├── commands/            #   Slash commands
+├── skills/              #   Skill system
+├── services/            #   Service layer (API/MCP/OAuth…)
+└── utils/               #   Utilities
+
+plugins/                 # Official plugins (+ _template/ scaffolding & doc conventions)
+extensions/              # IDE plugins (VS Code / VS / IntelliJ) + memory service
+installer/               # Installer (Inno Setup)
+docs/                    # Diagrams & developer docs
 bin/claude-haha          # Entry script
 preload.ts               # Bun preload (sets MACRO globals)
-.env.example             # Environment variable template
-src/
-├── entrypoints/cli.tsx  # Main CLI entry
-├── main.tsx             # Main TUI logic (Commander.js + React/Ink)
-├── localRecoveryCli.ts  # Fallback Recovery CLI
-├── setup.ts             # Startup initialization
-├── screens/REPL.tsx     # Interactive REPL screen
-├── ink/                 # Ink terminal rendering engine
-├── components/          # UI components
-├── tools/               # Agent tools (Bash, Edit, Grep, etc.)
-├── commands/            # Slash commands (/commit, /review, etc.)
-├── skills/              # Skill system
-├── services/            # Service layer (API, MCP, OAuth, etc.)
-├── hooks/               # React hooks
-└── utils/               # Utility functions
 ```
 
 ---
 
-## Tech Stack
+## Development
 
-| Category | Technology |
-|------|------|
-| Runtime | [Bun](https://bun.sh) |
-| Language | TypeScript |
-| Terminal UI | React + [Ink](https://github.com/vadimdemedes/ink) |
-| CLI parsing | Commander.js |
-| API | Anthropic SDK |
-| Protocols | MCP, LSP |
+```bash
+# GUI dev (hot reload)
+cd gui && cargo tauri dev
+
+# GUI tests / typecheck
+cd gui && npm test && npx tsc --noEmit
+
+# Engine (TUI)
+bun --env-file=.env ./src/entrypoints/cli.tsx
+
+# Fallback recovery CLI (when the TUI misbehaves)
+bun --env-file=.env ./src/localRecoveryCli.ts
+```
+
+Architecture docs live in [docs/](./docs/) (`ARCHITECTURE.md` and the `gui/` topic docs).
+
+---
+
+## Building
+
+All artifacts land in `dist/`, driven by `scripts/build.ts` (compile components → assemble dist → optionally generate update packages).
+
+```bash
+# Full build (engine + GUI + CLI tools + embedded runtimes → dist/)
+bun run scripts/build.ts
+
+# Rebuild only selected components (reuse other zips from the previous release — much faster)
+bun run scripts/build.ts --components gui,claude
+#   available: gui, server, claude, bun, updater, tools, python, git, extensions
+
+# Skip steps whose output already exists (for repeated local iteration)
+bun run scripts/build.ts --quick
+
+# Generate an update package: manifest + per-component zips → dist/release/<version>/
+bun run scripts/build.ts --release 2026.09.10.14 --notes "v2026.09.10.14
+
+### Fixes
+- One line on what changed — and why"
+```
+
+Output layout:
+
+```
+dist/
+├── claude.exe / claude-code-gui.exe / claude-gui-server.exe / …   # components
+├── bin/                          # CLI tools (rg / fd / jq / yq / shellcheck)
+└── release/<version>/
+    ├── manifest.json             # update manifest (version + per-component sha256)
+    └── <component>.zip           # per-component update packages (GUI updates by sha)
+```
+
+### Building the installer
+
+```powershell
+# Requires Inno Setup 6+ (https://jrsoftware.org/isdl.php)
+cd installer
+./build.ps1            # derives a "YYYYWww" build tag automatically; -Quick skips the version prompt
+```
+
+Produces `dist/ClaudeCodeHaha_Setup_<version>_<buildTag>.exe` (wizard with component selection, PATH, API profile setup).
+
+> **Distribution**: update packages and the skill/plugin marketplace both need a compatible registry / update service (`GET /api/updates/latest`, `POST /api/updates/<version>/upload`). No server implementation ships with this repo — self-host one, or substitute your own publishing flow. The full packaging + upload walkthrough (including Windows/macOS differences) lives in `docs/windows-build-playbook.md` / `docs/macos-build-playbook.md`.
+
+---
+
+## Fixes Over the Leaked Source
+
+The leaked source does not run directly. Main repairs:
+
+| Problem | Root cause | Fix |
+|---------|-----------|-----|
+| TUI won't start | Entry routed no-arg launch to the recovery CLI | Restored the full `cli.tsx` entrypoint |
+| Startup hang | `verify` skill imported a missing `.md`; Bun's text loader hung | Added stub `.md` files |
+| `--print` hang | `filePersistence/types.ts` missing | Added type stub |
+| `--print` hang | `ultraplan/prompt.txt` missing | Added resource stub |
+| **Enter key unresponsive** | `modifiers-napi` native package missing; `isModifierPressed()` threw, breaking `handleEnter` | Wrapped in try-catch |
+| Setup skipped | `preload.ts` unconditionally set `LOCAL_RECOVERY=1` | Removed the default |
+| Compiled binary can't find ripgrep | `bun build --compile` doesn't embed `vendor/ripgrep/` | Multi-path runtime lookup |
 
 ---
 
 ## Disclaimer
 
-This repository is based on the Claude Code source leaked from the Anthropic npm registry on 2026-03-31. All original source code copyrights belong to [Anthropic](https://www.anthropic.com). It is provided for learning and research purposes only.
+This repository is based on Claude Code source code leaked from the Anthropic npm registry on 2026-03-31. All original source code copyright belongs to [Anthropic](https://www.anthropic.com). For learning and research purposes only.

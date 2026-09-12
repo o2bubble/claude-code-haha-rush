@@ -1,6 +1,6 @@
 # Memory MCP — Agent Instruction
 
-You have access to a **Memory MCP Server** that provides persistent, cross-session memory for your work. Unlike auto-memory (flat markdown files) or session memory (in-session compaction), this system offers semantic search, weighted associations between memories, and experience accumulation across sessions and machines.
+You have access to a **Memory MCP Server** that provides persistent, cross-session memory for your work. Unlike auto-memory (flat markdown files) or session memory (in-session compaction), this system offers BM25 full-text search (Chinese word segmentation + character bigrams), tag filtering, RRF-fused ranking, weighted associations between memories, and experience accumulation across sessions and machines.
 
 ## Core concepts
 
@@ -56,10 +56,11 @@ When you `memory_get()` a memory, the content's Markdown links to other memories
 
 ## Tool reference
 
-### memory_store — Save a memory
+### memory_store — Save a memory (two-phase contract)
 
 ```
-memory_store(type, title, content, scope?, tags?, importance?, associations?)
+memory_store(type, title, content, scope?, tags?, importance?, associations?, source?,
+             action?, target_ids?, merged_content?)
 ```
 
 - `type`: `"fact"` | `"experience"` | `"lesson"`
@@ -69,6 +70,28 @@ memory_store(type, title, content, scope?, tags?, importance?, associations?)
 - `tags`: List of tag strings (free-form, will be normalized later)
 - `importance`: 0.0–1.0, defaults to 0.5. Set higher for critical lessons
 - `associations`: `[{target_id, weight, type}]` — link to existing memories
+- `source`: Optional provenance (session id / where this was learned)
+- `action` / `target_ids` / `merged_content`: used to resolve a conflict (below)
+
+**Two-phase flow (IMPORTANT):**
+
+1. Call WITHOUT `action`. The server pre-checks for similar memories:
+   - No similar memory → `{status: "stored", id}` — done.
+   - Similar found → `{status: "conflict_detected", candidates: [...]}` and **nothing is
+     persisted**. Each candidate has `id/title/type/scope/score/content_hash/exact/snippet`.
+2. Decide and re-call with an `action`:
+   - `action="store"` — create anyway (new information)
+   - `action="update"` + `target_ids=[id]` — overwrite that memory (corrections, same fact)
+   - `action="merge"` + `target_ids=[ids]` + `merged_content` — combine complementary
+     memories into one; targets are marked superseded (hidden from search, still auditable)
+   - `action="skip"` — nothing was worth persisting
+
+**Judgment guide:** state-like info (preferences, rules, facts) describing the same thing →
+usually merge; no new information → skip; explicitly outdated → update. An `exact: true`
+candidate (identical content_hash) is almost always skip or merge.
+
+**Quality gate:** content needs 10+ CJK chars (or 20+ chars total), max 8000 chars; junk is
+rejected with a closed reason enum (`empty_content` / `too_short` / `too_long` / `noise`).
 
 **When to call:**
 - After solving a problem → `type="experience"`, with tags for the domain
@@ -98,13 +121,25 @@ memory_search(query, mode?, scope?, type?, tags?, limit?, min_similarity?)
 ```
 
 - `query`: Natural language, describe what you're looking for
-- `mode`: `"hybrid"` (default, combines semantic + tag) | `"semantic"` | `"tag"`
+- `mode`: `"hybrid"` (default, BM25 + tags fused via RRF) | `"keyword"` (BM25 only) |
+  `"tag"` (tag filter only) | `"semantic"` (**not available** — no embedding provider;
+  returns an explicit message instead of results)
 - `scope`: Filter by scopes (list), e.g. `["project:claude-code-haha", "domain:devops"]`
 - `type`: Filter by memory type, e.g. `["lesson"]` to find only pitfalls
 - `tags`: In tag/hybrid mode, require ALL these tags
 - `limit`: Default 10, max 50
+- `min_similarity`: Default 0.3; applies to single-channel scores only (RRF-fused scores
+  are on a different scale)
 
-Results include a `content_hash` field (SHA256 of title+content). Use this for efficient change detection: if you already have the memory's content in your context from a previous session, compare hashes — skip `memory_get()` if they match to save tokens.
+**Return shape:** `{results: [...], total, strategy, message}`. `strategy` reports which
+retrieval path actually ran (`hybrid` / `fts` / `tag` / `like` / `none`) — check it when
+results look off. Each result has `match_type` (`fts`/`tag`/`both`), a `score` (ranking
+hint), and `content_hash` (SHA256 of title+content) — compare hashes to skip re-reading
+unchanged memories and save tokens.
+
+**Retrieval advice:** start with `hybrid`. If empty, rephrase with synonyms / distinctive
+terms (search is keyword-based — Chinese queries match sub-words and character bigrams, so
+shorter distinctive terms work well). At most ~3 search attempts per turn, then proceed.
 
 **When to call:**
 - BEFORE starting any non-trivial task → search for related experiences and lessons
@@ -162,8 +197,12 @@ memory_tags(scope?)
 ### memory_forget — Remove a memory
 
 ```
-memory_forget(id, confirm=True)
+memory_forget(id, confirm=True, hard?)
 ```
+
+Default is a **soft delete** (`deleted_at` set): hidden from search/traverse but still
+readable via `memory_get` for auditing. Pass `hard=true` to physically delete (also
+cascades associations). Prefer a soft delete unless the content is actively harmful.
 
 **When to call:**
 - Memory is objectively wrong or dangerously misleading
@@ -175,7 +214,9 @@ memory_forget(id, confirm=True)
 memory_stats()
 ```
 
-Returns counts by type/scope, total tags, associations, DB size.
+Returns counts by type/scope, tags, associations, DB size, and `capabilities`
+(`{fts, jieba, tags, like_fallback, embedding}`) — capabilities tells you which retrieval
+channels are actually available (e.g. if `fts` is false, search degraded to LIKE).
 
 ### memory_normalize_tags — Clean up tags
 
@@ -203,6 +244,12 @@ Applies a tag normalization mapping provided by the caller (LLM-driven). **No** 
 ```
 # Mid-task fact
 memory_store(type="fact", title="...", content="...", scope="project:<name>", tags=[...])
+
+# If you get {status: "conflict_detected", candidates}, decide and re-call:
+#   same fact, better wording → action="update", target_ids=[<id>]
+#   complementary details      → action="merge", target_ids=[...], merged_content="..."
+#   genuinely new              → action="store"
+#   nothing new                → action="skip"
 
 # Note: don't wait until the end — store facts as you discover them
 ```
@@ -255,8 +302,11 @@ When the user invokes `/remember` (or asks you to remember something), follow th
    - Detailed content (Markdown: what, why, how)
    - Appropriate type and scope
    - Relevant tags
-4. **Associate** new memories with existing ones where there's a clear relationship.
-5. **Summarize** what was stored, so the user can verify.
+4. **Resolve conflicts** — if `memory_store` returns `conflict_detected`, apply the
+   appropriate action (store/update/merge/skip) as described above. This is the
+   primary deduplication mechanism — use it, don't blindly re-store.
+5. **Associate** new memories with existing ones where there's a clear relationship.
+6. **Summarize** what was stored, so the user can verify.
 
 ## Example transcript
 

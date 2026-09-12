@@ -89,7 +89,15 @@ def _zip_dir(dir_path: Path) -> io.BytesIO:
 
 @router.get("/packages")
 async def list_packages():
-    packages = models.list_packages()
+    # 只返回技能包——旧 GUI 无 type 过滤概念，插件混进来会被当技能展示/安装。
+    # 插件走独立端点 GET /plugins。
+    packages = models.list_packages(pkg_type="skill")
+    return {"ok": True, "data": packages}
+
+
+@router.get("/plugins")
+async def list_plugins():
+    packages = models.list_packages(pkg_type="plugin")
     return {"ok": True, "data": packages}
 
 
@@ -110,6 +118,20 @@ async def get_package(slug: str):
     pkg["skills"] = skills
     trans_dir = pkg_dir / "translations"
     pkg["translations"] = [p.stem for p in trans_dir.glob("*.json")] if trans_dir.exists() else []
+    # 插件详情页: 包根 README.md 透传（skill 包无此约定, 缺省 None）
+    readme_path = pkg_dir / "README.md"
+    if pkg.get("type") == "plugin" and readme_path.exists():
+        try:
+            pkg["readme"] = readme_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    # AI 排查文档透传（作者写给 AI 的故障排查说明, MCP plugin_docs 远端回退源）
+    ai_notes_path = pkg_dir / "AI_NOTES.md"
+    if pkg.get("type") == "plugin" and ai_notes_path.exists():
+        try:
+            pkg["ai_notes"] = ai_notes_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
     return {"ok": True, "data": pkg}
 
 
@@ -146,15 +168,39 @@ async def download_package(slug: str):
     if not pkg or not pkg_dir.exists():
         raise HTTPException(status_code=404, detail="Package not found")
     models.increment_download(slug)
-    buf = _zip_dir(pkg_dir)
-    # zip 已在内存里，带 Content-Length 走固定长度传输（避免 chunked 被代理/防火墙掐断）
+    # 优先返回原始上传 zip(签名绑定原始字节, 不能重打包); 无则重打包兜底
+    raw_zip = SKILLS_STORE / f"{slug}.zip"
+    if raw_zip.exists():
+        content = raw_zip.read_bytes()
+        media = "application/zip"
+    else:
+        buf = _zip_dir(pkg_dir)
+        content = buf.getvalue()
+        media = "application/zip"
+    # 带 Content-Length 走固定长度传输（避免 chunked 被代理/防火墙掐断）
     return Response(
-        content=buf.getvalue(),
-        media_type="application/zip",
+        content=content,
+        media_type=media,
         headers={
             "Content-Disposition": f"attachment; filename={slug}.zip",
-            "Content-Length": str(buf.getbuffer().nbytes),
+            "Content-Length": str(len(content)),
         },
+    )
+
+@router.get("/packages/{slug}/signature")
+async def download_package_signature(slug: str):
+    """官方签名(Ed25519, base64). GUI 安装时与 zip 一起验证:
+    验证通过=受信任(可安装), 缺失/不通过=未受信任(仅 AI 安装+安全审查)."""
+    pkg = models.get_package(slug)
+    if not pkg:
+        raise HTTPException(status_code=404, detail="Package not found")
+    sig_path = SKILLS_STORE / f"{slug}.sig"
+    if not sig_path.exists():
+        raise HTTPException(status_code=404, detail="No signature (untrusted)")
+    return Response(
+        content=sig_path.read_text(encoding="utf-8").strip(),
+        media_type="text/plain",
+        headers={"Content-Type": "text/plain; charset=utf-8"},
     )
 
 
@@ -183,6 +229,8 @@ async def upload_package(
     manifest: str = Form(...),
     skills: UploadFile = File(...),
     type: str = Form("skill"),
+    signature: str = Form(None),
+    force: bool = Form(False),
     _auth=Depends(require_auth),
 ):
     # Parse manifest
@@ -205,7 +253,7 @@ async def upload_package(
 
     # Check if slug already exists
     existing = models.get_package(slug)
-    if existing:
+    if existing and not force:
         raise HTTPException(status_code=409, detail=f"Package '{slug}' already exists")
 
     # Extract zip to skills-store
@@ -219,6 +267,17 @@ async def upload_package(
             zf.extractall(pkg_dir)
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="Invalid zip file")
+
+    # 保留原始上传 zip 字节(下载端点返回它——签名绑定原始字节, 不能重打包)
+    raw_zip_path = SKILLS_STORE / f"{slug}.zip"
+    raw_zip_path.write_bytes(zip_bytes)
+
+    # 官方签名: 随发布提交, 存为 <slug>.sig(与 zip 一起由下载端点提供, GUI 验证)
+    sig_path = SKILLS_STORE / f"{slug}.sig"
+    if signature:
+        sig_path.write_text(signature.strip(), encoding="utf-8")
+    elif sig_path.exists():
+        sig_path.unlink()  # 未签名覆盖 → 移除旧签名(强制未受信任)
 
     # 按 type 分叉校验:
     if type == "plugin":
@@ -251,17 +310,28 @@ async def upload_package(
     manifest_path = pkg_dir / "manifest.yaml"
     manifest_path.write_text(manifest, encoding="utf-8")
 
-    # Insert into DB
-    pkg = models.insert_package(
-        slug=slug,
-        name=meta["name"],
-        description=meta.get("description", ""),
-        author=meta["author"],
-        version=meta["version"],
-        tags=meta.get("tags", []),
-        skill_count=skill_count,
-        pkg_type=type,
-    )
+    # Insert or update DB (force 覆盖重签场景)
+    if existing:
+        pkg = models.update_package(
+            slug=slug,
+            name=meta["name"],
+            description=meta.get("description", ""),
+            author=meta["author"],
+            version=meta["version"],
+            tags=meta.get("tags", []),
+            skill_count=skill_count,
+        )
+    else:
+        pkg = models.insert_package(
+            slug=slug,
+            name=meta["name"],
+            description=meta.get("description", ""),
+            author=meta["author"],
+            version=meta["version"],
+            tags=meta.get("tags", []),
+            skill_count=skill_count,
+            pkg_type=type,
+        )
 
     return {"ok": True, "data": pkg}
 

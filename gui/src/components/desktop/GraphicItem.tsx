@@ -6,6 +6,7 @@ import { isMermaidContent } from "./graphicContent";
 import { MermaidDialog } from "./MermaidDialog";
 import { isDarkTheme } from "../../utils/themeUtils";
 import { t } from "../../i18n";
+import { useContentZoom } from "./useContentZoom";
 
 interface Props {
   item: DesktopItem;
@@ -17,7 +18,7 @@ const COLORS = ["#4e79a7", "#f28e2b", "#59a14f", "#e15759", "#76b7b2", "#b07aa1"
 
 function GraphicItemImpl({ item }: Props) {
   const content = item.content as GraphicContent;
-  const svgRef = useRef<SVGSVGElement>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
 
   const isMermaid = isMermaidContent(content);
@@ -31,9 +32,11 @@ function GraphicItemImpl({ item }: Props) {
 
   const nodes = content.nodes || [];
   const edges = content.edges || [];
-  const [svgPan, setSvgPan] = useState({ x: 0, y: 0 });
-  const [svgZoom, setSvgZoom] = useState(1);
-  const panStart = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+  // 内容内部缩放（Ctrl/Cmd+滚轮）—— 两种模式共用同一 hook，分工见 useContentZoom
+  // 结构化模式：内容可能超出固定视口，1x 时也允许平移（panAlways）
+  // 两模式互斥渲染，同一 hook 各绑一次；svgRef 另有节点拖拽用途，故组合绑定。
+  const czSvg = useContentZoom({ panAlways: true });
+  const czMermaid = useContentZoom();
 
   // ── Mermaid 渲染（懒加载 mermaid.js；fit 适配 item；主题跟随；错误保留文本）──
 
@@ -214,41 +217,14 @@ function GraphicItemImpl({ item }: Props) {
   };
 
   // ── SVG pan/zoom ──
-
-  const handleSvgWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
-    const svg = svgRef.current;
-    if (!svg) return;
-    const rect = svg.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const factor = e.deltaY < 0 ? 1.15 : 0.87;
-    setSvgZoom((z) => {
-      const nz = Math.max(0.2, Math.min(5, z * factor));
-      setSvgPan((p) => ({
-        x: mx - (mx - p.x) * (nz / z),
-        y: my - (my - p.y) * (nz / z),
-      }));
-      return nz;
-    });
-  }, []);
+  // 缩放/平移/复位统一由 useContentZoom 提供；节点（rect/text）上的按下不平移，
+  // 让给节点拖拽（handleNodeMouseDown）。
 
   const handleSvgMouseDown = useCallback((e: React.MouseEvent) => {
-    if (e.button !== 0) return;
     const target = e.target as Element;
     if (target.closest("rect") || target.closest("text") || target.closest("button")) return;
-    panStart.current = { x: e.clientX, y: e.clientY, px: svgPan.x, py: svgPan.y };
-  }, [svgPan]);
-
-  const handleSvgMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!panStart.current) return;
-    setSvgPan({
-      x: panStart.current.px + (e.clientX - panStart.current.x),
-      y: panStart.current.py + (e.clientY - panStart.current.y),
-    });
-  }, []);
-
-  const handleSvgMouseUp = useCallback(() => { panStart.current = null; }, []);
+    czSvg.onMouseDown(e);
+  }, [czSvg]);
 
   // ── Render ──
 
@@ -258,10 +234,19 @@ function GraphicItemImpl({ item }: Props) {
   const isFlowchart = content.subType !== "mindmap";
 
   // ── Mermaid 模式：mermaid.js 渲染的 SVG，等比 fit 适配 item（viewBox + max 约束）──
+  // 内部缩放走 czMermaid（Ctrl/Cmd+滚轮）。注意**双击已被"编辑源码"占用**，
+  // 故复位只能靠角标按钮（结构化模式无此冲突，双击即复位）。
   if (isMermaid) {
     return (
-      <div style={{ padding: 4, height: "100%", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+      <div
+        ref={czMermaid.ref}
+        data-wheel-zoom
+        onMouseDown={czMermaid.onMouseDown}
+        title={t("desktop.block.zoomHint")}
+        style={{ padding: 4, height: "100%", overflow: "hidden", position: "relative", cursor: czMermaid.cursor }}
+      >
         <style>{`.mermaid-graphic-svg svg{width:auto !important;max-width:100%;max-height:100%;height:auto !important;display:block;}`}</style>
+        <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", ...czMermaid.style }}>
         {mermaidErr ? (
           <div style={{ color: "var(--semantic-error)", fontSize: 12, maxWidth: "100%", overflow: "auto", textAlign: "center" }}>
             {t("desktop.mermaidError")}
@@ -276,6 +261,20 @@ function GraphicItemImpl({ item }: Props) {
           />
         ) : (
           <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>{t("common.loading")}</div>
+        )}
+        </div>
+
+        {czMermaid.isZoomed && (
+          <button
+            onClick={(e) => { e.stopPropagation(); czMermaid.reset(); }}
+            title={t("desktop.block.zoomReset")}
+            style={{
+              position: "absolute", bottom: 6, right: 6,
+              padding: "2px 8px", borderRadius: 4, cursor: "pointer",
+              border: "1px solid var(--border-medium)", background: "var(--bg-root)",
+              color: "var(--fg-primary)", fontFamily: "var(--font-sans)", fontSize: 11,
+            }}
+          >{Math.round(czMermaid.zoom * 100)}% ↺</button>
         )}
 
         {showMermaidEdit && (
@@ -294,17 +293,18 @@ function GraphicItemImpl({ item }: Props) {
   }
 
   return (
-    <div style={{ padding: 4, height: "100%", display: "flex", flexDirection: "column" }}>
+    <div
+      title={t("desktop.block.zoomHint")}
+      style={{ padding: 4, height: "100%", display: "flex", flexDirection: "column" }}
+    >
       <svg
-        ref={svgRef}
+        ref={(node) => { svgRef.current = node; czSvg.ref(node); }}
+        data-wheel-zoom
         width={svgW}
         height={svgH}
-        onWheel={handleSvgWheel}
         onMouseDown={handleSvgMouseDown}
-        onMouseMove={handleSvgMouseMove}
-        onMouseUp={handleSvgMouseUp}
-        onMouseLeave={handleSvgMouseUp}
-        style={{ flex: 1, backgroundColor: "var(--bg-surface)", border: "1px solid var(--border-light)", borderRadius: 4, overflow: "hidden", minHeight: 0, cursor: panStart.current ? "grabbing" : "default" }}
+        onDoubleClick={czSvg.onDoubleClick}
+        style={{ flex: 1, backgroundColor: "var(--bg-surface)", border: "1px solid var(--border-light)", borderRadius: 4, overflow: "hidden", minHeight: 0, cursor: czSvg.cursor }}
       >
         <defs>
           <marker id={markerId} markerWidth="10" markerHeight="7" refX="8" refY="3.5" orient="auto">
@@ -313,7 +313,7 @@ function GraphicItemImpl({ item }: Props) {
         </defs>
 
         {/* Transformed content group */}
-        <g transform={`translate(${svgPan.x},${svgPan.y}) scale(${svgZoom})`}>
+        <g transform={czSvg.svgTransform}>
           {/* Edges */}
           {edges.map((edge: GraphicEdge) => {
           const fromNode = nodes.find((n: GraphicNode) => n.id === edge.from);
@@ -379,7 +379,11 @@ function GraphicItemImpl({ item }: Props) {
       </svg>
       <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
         <button onClick={autoLayout} style={{ fontSize: 12, padding: "3px 8px", border: "1px solid var(--border-medium)", borderRadius: 3, background: "var(--bg-root)", color: "var(--fg-primary)", cursor: "pointer" }}>Auto Layout</button>
-        <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{Math.round(svgZoom * 100)}%</span>
+        <button
+          onClick={czSvg.reset}
+          title={t("desktop.block.zoomReset")}
+          style={{ fontSize: 11, padding: "3px 8px", border: 0, borderRadius: 3, background: "transparent", color: "var(--fg-muted)", cursor: "pointer", fontFamily: "var(--font-sans)" }}
+        >{Math.round(czSvg.zoom * 100)}% ↺</button>
       </div>
     </div>
   );

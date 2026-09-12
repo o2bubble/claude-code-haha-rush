@@ -165,11 +165,15 @@ function TextItemImpl({ item }: Props) {
       contentType: "text",
       dataKeys: ["text", "wordCount", "lines"],
       queryHandler: (key: string) => {
-        const current = content.text;
+        // text 缺失时（块数据不完整，如 AI 经 MCP 创建时漏 text 字段）按空串处理。
+        // 不能直接 split —— 这条链路是 AI 查询桌面数据时**同步**走到的
+        // （chatSession → queryData → 本 handler），抛错会穿透到调用方，
+        // 表现为一堆 "Cannot read properties of undefined (reading 'split')"。
+        const current = typeof content.text === "string" ? content.text : "";
         switch (key) {
           case "text": return { keys: ["text"], value: current };
           case "wordCount": return { keys: ["wordCount"], value: current.split(/\s+/).filter(Boolean).length };
-          case "lines": return { keys: ["lines"], value: current.split("\n").length };
+          case "lines": return { keys: ["lines"], value: content.text == null ? 0 : current.split("\n").length };
           default: return undefined;
         }
       },

@@ -4,7 +4,7 @@
 
 ## 0. 架构速查
 
-- **平台化更新服务**：`updates.py` 按平台分 manifest + `?platform=windows|macos`。Windows 组件集 `{gui,claude,bun,updater,tools,python,git,extensions}`。
+- **平台化更新服务**：`updates.py` 按平台分 manifest + `?platform=windows|macos`。Windows 组件集 `{gui,server,claude,bun,updater,tools,python,git,extensions}`（`server` = `claude-gui-server.exe`，JSON-RPC 后端服务，源码在 `gui/src-tauri/server/`）。
 - **目录**：`updates-store/{version}/`（windows，base）+ `updates-store/{version}/macos/`（macos）。`_platform_dir` 里 `platform=="windows"` → base，否则 `base/platform`。
 - **96**（内网 `192.168.186.96:8765`）与**云**（`123.56.66.84:8765`）跑同一套 `claude-code-gui-release-platform`（云端目录名 `claude-code-gui-release-platform`；96 是 `claude-release-platform`，updates-store 挂 `/root/claude-release-data/updates-store/`）。
 
@@ -12,8 +12,8 @@
 
 ```bash
 cd C:\Storage\claude-code-haha-dev
-bun run scripts/build.ts --release 2026.XX.XX.N --note "..." --components gui,claude
-# --note: 累积中文描述（见 §2），新版本写全，历史往下堆
+bun run scripts/build.ts --release 2026.XX.XX.N --notes "..." --components gui,claude
+# --notes（复数！写成 --note 会被静默忽略、notes 不累积）: markdown 格式见 §2
 # --components: 本次只重建/重打这些组件，其余复用上一版本 zip（server 端也按 sha 复制）
 ```
 
@@ -25,18 +25,27 @@ bun run scripts/build.ts --release 2026.XX.XX.N --note "..." --components gui,cl
 
 ```
 v2026.XX.XX.N
-· 新增:xxx — 一句解释(为什么/解决什么)
-· 修复:xxx — ...
+### 新增
+- xxx — 一句解释(为什么/解决什么)
+- ...
+
+### 修复
+- xxx — ...
+
+---
 
 v2026.XX.XX.N-1
-· 修复:xxx — ...
 ...（.N-2 及以下，接上一版完整 notes）
 ```
 
-- 前缀：`· 新增: / 修复: / 优化: / 通用:`
+- **Markdown 渲染**（更新面板按此渲染；实现见 `gui/src/utils/releaseNotesMarkdown.ts`）：
+  首行版本号；分节用 `###`；条目用 `-`；版本之间用 `---`；`**粗体**` 会真加粗。
+- **每条一句话**讲清「改了什么 + 为什么」；细节留给 commit，别堆长段
+  （面板高度有限，单条一屏会挤掉其余版本）。
 - **中文**、` — ` 后跟原因/效果。
 - **不要**写英文 commit 风格（`feat(...):`）——用户会立刻看出来。
-- 拼接：新版本段 + `\n\n` + `上一版 manifest 的 release_notes`（上一版已含全部历史）。
+- 拼接：新版本段 + `\n\n---\n\n` + `上一版 manifest 的 release_notes`（上一版已含全部历史）。
+- 脚本拼接上限 `MAX_RELEASE_NOTES = 5`（`scripts/build.ts`），更老的自动滚出。
 
 ## 3. 上传到 96（requests POST）
 
@@ -48,7 +57,8 @@ requests.post(f"{SERVER_96}/api/updates/{VERSION}/upload",
 ```
 
 - 端点 `POST /api/updates/{version}/upload`；Form：`manifest`(JSON 字符串)、`platform`、`components`(list[File])。
-- header `X-API-Key: sk-mattpocock-skills-2026`。
+- header `X-API-Key: <上传密钥>` —— 真实值见 `.private/api-keys.md`（该目录已 gitignore）。
+  **不要把真实 key 写进本文件**：上传密钥能伪造更新包，泄露 = 拿到代码执行入口。
 - server 端 `shutil.rmtree(version_dir)` 重建 → **重传即覆盖**（改 notes 后重传即可）。
 - 只传本次改的组件 zip；其他组件 server 从同平台上一版本按 sha 复制（`updates.py` 末尾逻辑）。
 

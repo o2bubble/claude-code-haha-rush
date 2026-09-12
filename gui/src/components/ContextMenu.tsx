@@ -1,5 +1,12 @@
 import React, { memo, useState, useEffect, useRef } from "react";
 
+/** 菜单项文字颜色：禁用态 muted，破坏性操作 error，其余默认 */
+function itemColor(item: ContextMenuItem): string {
+  if (item.disabled) return "var(--fg-muted)";
+  if (item.danger) return "var(--semantic-error, #e5484d)";
+  return "var(--fg-primary)";
+}
+
 export interface ContextMenuItem {
   label?: string;           // omit for separator
   action?: () => void;
@@ -7,6 +14,7 @@ export interface ContextMenuItem {
   icon?: React.ReactNode;
   children?: ContextMenuItem[];
   separator?: boolean;      // renders as a divider line
+  danger?: boolean;         // 破坏性操作（卸载等）→ 红色文字
 }
 
 // ── 模块级状态（pub/sub 模式）──
@@ -129,7 +137,7 @@ function _ContextMenu() {
           tabIndex={item.disabled ? undefined : 0}
           style={{
             ...menuItemStyle,
-            color: item.disabled ? "var(--fg-muted)" : "var(--fg-primary)",
+            color: itemColor(item),
             display: "flex",
             alignItems: "center",
             gap: 6,
@@ -179,7 +187,7 @@ function _ContextMenu() {
               key={j}
               style={{
                 ...menuItemStyle,
-                color: item.disabled ? "var(--fg-muted)" : "var(--fg-primary)",
+                color: itemColor(item),
                 display: "flex",
                 alignItems: "center",
                 gap: 6,

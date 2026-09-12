@@ -4,7 +4,7 @@ import { useEvent, useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
 import type { ChatInsertTextPayload, ChatAddReferencePayload, SettingsChangedPayload, ChatStateChangedPayload } from "../../services/events";
 import { formatReference } from "../../utils/referenceParser";
-import { saveClipboardItem, resolvePaste, collectPaste, isRealFilePath, defaultReadDir } from "../../services/clipboardService";
+import { saveClipboardItem, resolvePaste, collectPaste, isRealFilePath, defaultReadDir, defaultReadClipboardFiles } from "../../services/clipboardService";
 import { getChatState, isChatReady } from "../../stores/chatStore";
 import { getSettings } from "../../stores/settingsStore";
 import type { SlashCommand } from "../../stores/chatStore";
@@ -438,6 +438,8 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
       el.focus();
 
       // 提取结构化剪贴板输入，交给 resolvePaste 做粘贴决策。
+      // readClipboardFiles：粘贴的文件没有 .path（Tauri 只对拖放注入），
+      // 靠它拿源路径让文件走引用而非复制内容（见 clipboardService 注释）。
       const { files, images, text } = collectPaste(e);
       const decision = await resolvePaste({
         files,
@@ -445,6 +447,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
         text,
         pathExists: isRealFilePath,
         readDir: defaultReadDir,
+        readClipboardFiles: defaultReadClipboardFiles,
       });
 
       if (decision.kind === "refs") {

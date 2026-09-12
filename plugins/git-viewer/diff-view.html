@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Git diff</title>
+<style>
+  :root {
+    --bg: #20242f; --bg2: #161a23; --fg: #e6e9f0; --fg-muted: #8b93a7;
+    --border: #2c3547; --accent: #5aa8ff;
+    --success: #4ecb71; --danger: #f0666e; --info: #4fd0e0;
+    --add-bg: rgba(78,203,113,.10); --del-bg: rgba(240,102,110,.10); --hunk-bg: rgba(90,168,255,.10);
+    --hover: #232a3a;
+  }
+  html.theme-light {
+    --bg: #f3f5f9; --bg2: #ffffff; --fg: #1f2430; --fg-muted: #5b6474;
+    --border: #d8dee8; --accent: #2563eb;
+    --success: #15803d; --danger: #dc2626; --info: #0e7490;
+    --add-bg: rgba(21,128,61,.10); --del-bg: rgba(220,38,38,.10); --hunk-bg: rgba(37,99,235,.10);
+    --hover: #eef1f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg); color: var(--fg); font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px;
+  }
+  .head { padding: 6px 10px; font-size: 11px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+  .head .title { color: var(--fg-muted); font-family: ui-monospace, Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .body { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 10px; }
+  .empty { color: var(--fg-muted); padding: 16px; text-align: center; }
+  /* 文件卡片。
+     flex-shrink: 0 必须保留：.body 是 flex column，卡片默认 flex-shrink: 1；
+     而卡片自身的 overflow: hidden 会让 flex 的 min-height: auto 失效（规范：
+     overflow 非 visible 时自动最小尺寸退化为 0）。两者叠加 → 内容超出视口时
+     卡片被压到内容高度以下，diff 行挤成一条缝（实测 76 行卡片只剩 176px，
+     且 .body 因总高被压缩而根本不出现滚动条）。 */
+  .file { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; flex-shrink: 0; }
+  .fhead { padding: 5px 10px; font-size: 11px; font-family: ui-monospace, Consolas, monospace; display: flex; gap: 8px; align-items: center; background: var(--bg2); border-bottom: 1px solid var(--border); }
+  .fpath { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat { font-size: 10px; flex-shrink: 0; }
+  .stat .add { color: var(--success); }
+  .stat .del { color: var(--danger); }
+  .binary { color: var(--fg-muted); font-size: 10px; }
+  /* hunk */
+  .hunk { padding: 2px 10px; font-size: 10.5px; font-family: ui-monospace, Consolas, monospace; color: var(--info); background: var(--hunk-bg); }
+  /* 行 */
+  .line { display: flex; font-size: 11px; font-family: ui-monospace, Consolas, monospace; line-height: 1.5; }
+  .line.add { background: var(--add-bg); }
+  .line.del { background: var(--del-bg); }
+  .ln { width: 42px; flex-shrink: 0; text-align: right; padding-right: 6px; color: var(--fg-muted); font-size: 10px; user-select: none; }
+  .ln2 { width: 42px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--fg-muted); font-size: 10px; user-select: none; }
+  .pre { width: 12px; flex-shrink: 0; user-select: none; }
+  .line.add .pre { color: var(--success); }
+  .line.del .pre { color: var(--danger); }
+  .text { flex: 1; white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+  <div class="head"><span>Git diff</span><span class="title" id="title"></span></div>
+  <div class="body" id="body"><div class="empty">加载中…</div></div>
+
+<script>
+(function () {
+  "use strict";
+  var params = new URLSearchParams(location.search);
+  var port = params.get("port");
+  var API = port ? "http://127.0.0.1:" + port : null;
+
+  // ── 主题跟随（URL theme 首帧 + 宿主 postMessage 推送）──
+  function applyTheme(theme) {
+    if (theme === "light") document.documentElement.classList.add("theme-light");
+    else document.documentElement.classList.remove("theme-light");
+  }
+  applyTheme(params.get("theme"));
+
+  // ── 参数: URL query params(base64url JSON) + 后续 postMessage kind:"params" ──
+  var current = null;
+  function readUrlParams() {
+    var b64 = params.get("params");
+    if (!b64) return null;
+    try {
+      // 还原 base64url → base64(+补 padding): 宿主用 base64url 编码(防 query 中 + 变空格)
+      var std = b64.replace(/-/g, "+").replace(/_/g, "/");
+      while (std.length % 4) std += "=";
+      return JSON.parse(decodeURIComponent(escape(atob(std))));
+    } catch (e) { return null; }
+  }
+  window.addEventListener("message", function (e) {
+    var d = e.data;
+    if (!d || typeof d !== "object" || d.source !== "plugin:host") return;
+    if (d.kind === "theme") { applyTheme(d.payload && d.payload.theme); return; }
+    if (d.kind === "params" && d.payload) { render(d.payload); }
+  });
+
+  // ── unified diff 解析（自包含; 与 GUI 版同逻辑, 但归插件侧——改样式/布局只需发插件版本）──
+  var HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
+  var FILE_RE = /^diff --git a\/(.+) b\/(.+)$/;
+  function parseUnifiedDiff(text) {
+    // split 后剥行尾 \r: Windows 上 diff 可能是 CRLF（正则 $ 不匹配 \r 会整段失配）
+    var lines = text.split("\n").map(function (l) { return l.charAt(l.length - 1) === "\r" ? l.slice(0, -1) : l; });
+    var files = [], cur = null, hunk = null, oldNo = 0, newNo = 0;
+    function flushFile() { if (cur) files.push(cur); cur = null; hunk = null; }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var fm = line.match(FILE_RE);
+      if (fm) { flushFile(); cur = { path: fm[2], hunks: [], adds: 0, dels: 0 }; continue; }
+      if (!cur) { if (HUNK_RE.test(line)) cur = { path: "", hunks: [], adds: 0, dels: 0 }; else continue; }
+      if (!hunk) {
+        if (line.indexOf("rename from ") === 0) { cur.oldPath = line.slice(12); continue; }
+        if (line.indexOf("rename to ") === 0) { cur.path = line.slice(10); continue; }
+        if (line.indexOf("Binary files ") === 0 && line.slice(-7) === " differ") { cur.binary = true; continue; }
+        if (line.indexOf("index ") === 0 || line.indexOf("--- ") === 0 || line.indexOf("+++ ") === 0 ||
+            line.indexOf("old mode ") === 0 || line.indexOf("new mode ") === 0 ||
+            line.indexOf("similarity index ") === 0 || line.indexOf("new file mode ") === 0 ||
+            line.indexOf("deleted file mode ") === 0 || line.indexOf("copy from ") === 0 || line.indexOf("copy to ") === 0) continue;
+      }
+      var hm = line.match(HUNK_RE);
+      if (hm) {
+        oldNo = parseInt(hm[1], 10); newNo = parseInt(hm[3], 10);
+        hunk = { header: line, lines: [] }; cur.hunks.push(hunk); continue;
+      }
+      if (hunk) {
+        if (line.charAt(0) === "\\") { hunk.lines.push({ kind: "nonewline", text: line }); continue; }
+        if (line.charAt(0) === "+") { hunk.lines.push({ kind: "add", text: line.slice(1), newNo: newNo++ }); cur.adds++; }
+        else if (line.charAt(0) === "-") { hunk.lines.push({ kind: "del", text: line.slice(1), oldNo: oldNo++ }); cur.dels++; }
+        else if (line.charAt(0) === " " || line === "") {
+          if (line === "" && i === lines.length - 1) continue;
+          hunk.lines.push({ kind: "ctx", text: line.slice(1), oldNo: oldNo++, newNo: newNo++ });
+        }
+      }
+    }
+    flushFile();
+    return files;
+  }
+
+  // ── 渲染 ──
+  function el(tag, cls, text) {
+    var d = document.createElement(tag);
+    if (cls) d.className = cls;
+    if (text != null) d.textContent = text;
+    return d;
+  }
+
+  function render(payload) {
+    current = payload || {};
+    var titleEl = document.getElementById("title");
+    if (titleEl) titleEl.textContent = current.title || current.file || current.ref || "";
+    var body = document.getElementById("body");
+    body.innerHTML = "";
+    if (!current.file && !current.ref) { body.appendChild(el("div", "empty", "无目标")); return; }
+    if (!API) { body.appendChild(el("div", "empty", "插件进程未运行（无端口）")); return; }
+    var path = current.ref
+      ? "/api/show?ref=" + encodeURIComponent(current.ref)
+      : "/api/diff?file=" + encodeURIComponent(current.file);
+    fetch(API + path).then(function (r) {
+      return r.json().then(function (b) { return { ok: r.ok, b: b }; });
+    }).then(function (res) {
+      if (!res.ok) { body.innerHTML = ""; body.appendChild(el("div", "empty", res.b && res.b.error ? res.b.error : "git API 失败")); return; }
+      renderDiff(body, res.b.diff || "");
+    }).catch(function (e) {
+      body.innerHTML = "";
+      body.appendChild(el("div", "empty", String(e && e.message || e)));
+    });
+  }
+
+  function renderDiff(body, text) {
+    body.innerHTML = "";
+    var files = parseUnifiedDiff(text);
+    if (files.length === 0) { body.appendChild(el("div", "empty", "无 diff（该文件无改动或无内容）")); return; }
+    files.forEach(function (f) {
+      var card = el("div", "file");
+      var head = el("div", "fhead");
+      head.appendChild(el("span", "fpath", f.oldPath ? (f.oldPath + " → " + f.path) : (f.path || "(未命名)")));
+      if (f.binary) {
+        head.appendChild(el("span", "binary", "Binary"));
+      } else {
+        var stat = el("span", "stat");
+        stat.appendChild(el("span", "add", "+" + f.adds));
+        stat.appendChild(document.createTextNode(" "));
+        stat.appendChild(el("span", "del", "-" + f.dels));
+        head.appendChild(stat);
+      }
+      card.appendChild(head);
+      f.hunks.forEach(function (h) {
+        card.appendChild(el("div", "hunk", h.header));
+        h.lines.forEach(function (l) {
+          var row = el("div", "line" + (l.kind === "add" ? " add" : l.kind === "del" ? " del" : ""));
+          row.appendChild(el("span", "ln", l.oldNo != null ? String(l.oldNo) : ""));
+          row.appendChild(el("span", "ln2", l.newNo != null ? String(l.newNo) : ""));
+          row.appendChild(el("span", "pre", l.kind === "add" ? "+" : l.kind === "del" ? "-" : " "));
+          var txt = el("span", "text", l.text);
+          if (l.kind === "nonewline") txt.style.color = "var(--fg-muted)";
+          row.appendChild(txt);
+          card.appendChild(row);
+        });
+      });
+      body.appendChild(card);
+    });
+  }
+
+  // ── 初始: URL 参数 ──
+  var urlParams = readUrlParams();
+  if (urlParams) render(urlParams);
+  else document.getElementById("body").innerHTML = '<div class="empty">从列表选择文件/提交以查看 diff</div>';
+})();
+</script>
+</body>
+</html>

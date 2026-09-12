@@ -67,8 +67,8 @@ Three templates are available during creation:
 
 | Template | Description |
 |----------|-------------|
-| **DeepSeek v4 Pro** | Pre-configured for DeepSeek, just enter your auth token |
-| **DeepSeek v4 Flash** | Same but with the faster Flash model |
+| **DeepSeek Flash** | Pre-configured for DeepSeek, just enter your auth token |
+| **DeepSeek v4 Pro** | Same but with the stronger Pro model |
 | **Custom** | Full manual configuration |
 
 Profiles are stored in `.env.profiles/` directory. Switching a profile writes the env vars to `~/.claude/settings.json`'s `env` block, shared between CLI and IDE.

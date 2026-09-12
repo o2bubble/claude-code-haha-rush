@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Memory REST API — FastAPI server sharing store.py + embeddings.py with MCP.
+"""Memory REST API — FastAPI server sharing store.py with the MCP server.
 
 Usage:
   python api.py --port 40021
@@ -19,7 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from embeddings import EmbeddingModel
 from normalize import apply_tag_mapping
 from search_engine import hybrid_search
 from store import MemoryStore
@@ -28,7 +27,6 @@ from store import MemoryStore
 # Globals
 # ---------------------------------------------------------------------------
 store: Optional[MemoryStore] = None
-embedder: Optional[EmbeddingModel] = None
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +114,10 @@ def _register_routes(app: FastAPI) -> None:
         scope_list = [s.strip() for s in scope.split(",") if s.strip()] if scope else None
         tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
 
+        message = None
         if q:
-            results = hybrid_search(
+            envelope = hybrid_search(
                 store=store,
-                embedder=embedder,
                 query=q,
                 mode=mode,
                 tags=tags_list,
@@ -128,6 +126,8 @@ def _register_routes(app: FastAPI) -> None:
                 limit=limit + offset,
                 min_similarity=0.1,
             )
+            results = envelope["results"]
+            message = envelope.get("message")  # e.g. semantic mode unavailable
         else:
             results = _list_memories(type_list, scope_list, tags_list, sort, limit + offset)
 
@@ -137,7 +137,7 @@ def _register_routes(app: FastAPI) -> None:
             if "embedding" in r:
                 del r["embedding"]
 
-        return {"total": total, "items": results}
+        return {"total": total, "items": results, "message": message}
 
     @app.get("/api/memories/{memory_id}")
     async def get_memory(memory_id: str):
@@ -241,20 +241,12 @@ def _register_routes(app: FastAPI) -> None:
         body = await request.json()
         content = body["content"]
         title = body.get("title", "")
-        embedding = None
-        if embedder is not None and embedder.loaded:
-            try:
-                emb_text = f"{title}\n{content}"
-                embedding = embedder.encode(emb_text)
-            except NotImplementedError:
-                pass
         result = store.add_memory(
             type=body["type"],
             title=title,
             content=content,
             scope=body.get("scope", "global"),
             tags=body.get("tags"),
-            embedding=embedding,
             importance=body.get("importance", 0.5),
             associations=body.get("associations"),
         )
@@ -272,15 +264,6 @@ def _register_routes(app: FastAPI) -> None:
             kwargs["content"] = body["content"]
         if "importance" in body:
             kwargs["importance"] = body["importance"]
-        if "title" in kwargs or "content" in kwargs:
-            mem = store.get_memory(memory_id)
-            new_title = kwargs.get("title", mem["title"])
-            new_content = kwargs.get("content", mem["content"])
-            if embedder is not None and embedder.loaded:
-                try:
-                    kwargs["embedding"] = embedder.encode(f"{new_title}\n{new_content}")
-                except NotImplementedError:
-                    pass
         updated = store.update_memory(memory_id, **kwargs)
         return {"id": memory_id, "updated": updated}
 
@@ -335,7 +318,8 @@ def _list_memories(
     limit: int,
 ) -> list[dict]:
     conn = store._conn
-    conditions: list[str] = []
+    # the browse list shows only active memories, same as search
+    conditions: list[str] = ["m.superseded_by IS NULL", "m.deleted_at IS NULL"]
     params: list = []
 
     if type_list:
@@ -387,19 +371,17 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=40021)
     args = parser.parse_args()
 
-    global store, embedder
+    global store
     import uvicorn
-
-    embedder = EmbeddingModel()
-    if embedder.loaded:
-        print(f"[memory-api] Embedding model loaded: {embedder.MODEL_NAME}", file=sys.stderr)
-    else:
-        print("[memory-api] No local embedding model — keyword+tag search only.", file=sys.stderr)
 
     print(f"[memory-api] Opening database: {args.db_path}", file=sys.stderr)
     store = MemoryStore(args.db_path)
-    store.set_meta("embedding_model", embedder.MODEL_NAME)
-    print(f"[memory-api] Database ready ({store.get_stats()['total_memories']} memories).", file=sys.stderr)
+    caps = store.get_capabilities()
+    print(
+        f"[memory-api] Database ready ({store.get_stats()['total_memories']} memories, "
+        f"fts={'on' if caps['fts'] else 'off'}).",
+        file=sys.stderr,
+    )
 
     app = create_app()
     print(f"[memory-api] REST API listening on {args.host}:{args.port}", file=sys.stderr)

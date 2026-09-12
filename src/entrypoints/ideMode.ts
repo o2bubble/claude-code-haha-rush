@@ -96,6 +96,7 @@ import { readdir, readFile, unlink, writeFile } from 'fs/promises'
 import { existsSync, readFileSync, readdirSync, appendFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
+import { setSessionEnvVar, deleteSessionEnvVar } from 'src/utils/sessionEnvVars.js'
 import {
   sanitizePath,
   getProjectsDir,
@@ -262,6 +263,48 @@ let ideContext: {
   selection: IDESelection | null
   diagnostics: IDEDiagnostic[]
 } = { files: [], selection: null, diagnostics: [] }
+
+// ============================================================================
+// Plugin runtime PATH registration (plugin-nodejs-runtime PRD)
+// ============================================================================
+
+/**
+ * 会话级 plugin runtime PATH 前置段（CLAUDE_PLUGIN_PATH_PREPEND 的值）。
+ * A 通道: 启动时自扫插件目录; B 通道: GUI 重扫后经 stdin 推送覆盖。
+ * 消费点: bashProvider/powershellProvider buildExecCommand 在 source shell
+ * snapshot 之后 export 前置（snapshot 的 export PATH 会覆盖 spawn env 的 PATH,
+ * 所以必须在 command 串里补前置）。空 = 未注册（provider 不加任何东西）。
+ */
+let pluginPathPrepend: string | undefined
+
+function applyPluginPathPrepend(dirs: string[]): void {
+  const { buildPathPrepend } = require('../utils/pluginRuntimePaths.js') as {
+    buildPathPrepend: (dirs: string[]) => string | undefined
+  }
+  pluginPathPrepend = buildPathPrepend(dirs)
+  if (pluginPathPrepend) {
+    setSessionEnvVar('CLAUDE_PLUGIN_PATH_PREPEND', pluginPathPrepend)
+  } else {
+    deleteSessionEnvVar('CLAUDE_PLUGIN_PATH_PREPEND')
+  }
+}
+
+/** A 通道入口: 启动/重扫时扫描 GUI 插件目录, 注册声明了 runtimes 的目录。
+ *  禁用列表读 settings.json 的 gui.disabledPlugins（GUI 写入的真相源）。 */
+function scanAndApplyPluginRuntimePaths(): void {
+  try {
+    const { scanPluginRuntimePaths } = require('../utils/pluginRuntimePaths.js') as {
+      scanPluginRuntimePaths: (base?: string, disabled?: ReadonlySet<string>) => string[]
+    }
+    const { getInitialSettings } = require('../utils/settings/settings.js') as {
+      getInitialSettings: () => { gui?: { disabledPlugins?: string[] } }
+    }
+    const disabled = new Set(getInitialSettings().gui?.disabledPlugins ?? [])
+    applyPluginPathPrepend(scanPluginRuntimePaths(undefined, disabled))
+  } catch {
+    // 扫描失败静默——无注入即现状行为, 不拖垮会话启动
+  }
+}
 
 // ============================================================================
 // claude-mem direct bridge (bypasses hook registration issue in IDE mode)
@@ -686,6 +729,7 @@ async function forwardSDKEvent(event: SDKMessage): Promise<void> {
           subtype: (event as { subtype?: string }).subtype ?? 'success',
           result: (event as { result?: string }).result,
           error: (event as { error?: string }).error,
+          busy: false,
         })
         break
 
@@ -1425,7 +1469,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
       type: 'assistant',
       message: { role: 'assistant', content: [{ type: 'text', text: '✅ MCP tools refreshed from settings' }] },
     })
-    broadcastToAll({ type: 'result', subtype: 'success' })
+    broadcastToAll({ type: 'result', subtype: 'success', busy: false })
     return true
   }
 
@@ -1544,7 +1588,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
             parent_tool_use_id: null,
           })
         }
-        broadcastToAll({ type: 'result', subtype: 'success' })
+        broadcastToAll({ type: 'result', subtype: 'success', busy: false })
         return true
       }
 
@@ -1855,6 +1899,7 @@ async function runPromptCommand(promptContent: ContentBlockParam[]): Promise<voi
       type: 'result',
       subtype: abortController.signal.aborted ? 'error' : 'success',
       result: abortController.signal.aborted ? 'interrupted' : 'turn_complete',
+      busy: false,
     })
     currentEngine = null
     currentAbortController = null
@@ -1945,6 +1990,7 @@ async function handleUserPrompt(userContent: string | ContentBlockParam[], ws?: 
       type: 'result',
       subtype: abortController.signal.aborted ? 'error' : 'success',
       result: abortController.signal.aborted ? 'interrupted' : 'turn_complete',
+      busy: false,
     })
     broadcastToAll({ type: 'status', status: 'ready', busy: false })
 
@@ -2088,6 +2134,12 @@ async function handleLoadSession(
     return
   }
 
+  // 会话加载时自动刷新 MCP — 用户在会话 A 期间往配置加了新 MCP server（或某 server
+  // 刚恢复），不 refresh 的话旧会话里工具列表缺失，只能手动 /mcp-refresh（用户实测
+  // 高频痛点）。已连接 server 被 memoize 跳过，只有失败/新增的才会重连，开销可控。
+  await refreshMcpTools()
+  broadcastSlashCommands()
+
   try {
     const projectsDir = getProjectsDir()
     const cwd = process.cwd()
@@ -2193,6 +2245,11 @@ async function handleResumeSession(
   interruptCurrentTurn()
   // Clear session-scoped tool approvals so they don't leak across sessions
   sessionAllowedTools.clear()
+
+  // 会话加载自动刷新 MCP（理由同 handleLoadSession）——恢复旧会话同样要拿到
+  // 最新工具列表。放在 try 外: refresh 自带容错, 失败不应阻断会话恢复。
+  await refreshMcpTools()
+  broadcastSlashCommands()
 
   try {
     const projectsDir = getProjectsDir()
@@ -2953,6 +3010,16 @@ async function handleClientMessage(
       break
     }
 
+    case 'set_plugin_runtime_paths': {
+      // 通道 B（plugin-nodejs-runtime T3）: GUI 重扫后推送聚合结果, 覆盖 A 通道
+      // 的启动扫描值。下一条 Bash 即生效（provider 在 source snapshot 后前置）。
+      const dirs = Array.isArray(message.dirs)
+        ? message.dirs.filter((d: unknown): d is string => typeof d === 'string' && !!d)
+        : []
+      applyPluginPathPrepend(dirs)
+      break
+    }
+
     case 'compact': {
       void handleCompact(ws)
       break
@@ -3074,6 +3141,10 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
   })
 
   await initialize()
+
+  // A 通道: 启动时自扫 GUI 插件目录, 注册 runtime PATH 前置（plugin-nodejs-runtime）。
+  // 失败静默——无注入即现状。B 通道(set_plugin_runtime_paths)重扫后覆盖此值。
+  scanAndApplyPluginRuntimePaths()
 
   // Execute SessionStart hooks for plugin context injection (e.g. claude-mem)
   // Also directly notify claude-mem worker to ensure session context is retrieved

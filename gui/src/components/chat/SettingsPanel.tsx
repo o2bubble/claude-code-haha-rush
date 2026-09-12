@@ -13,6 +13,8 @@ import { EmptyState } from "../SharedStates";
 import { useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
 import { crossWindowBus } from "../../services/crossWindowBus";
+import { usePluginSettings, updatePluginSetting } from "../../services/pluginSettingsStore";
+import type { PluginManifest } from "../../services/pluginRegistry";
 
 // ── 压缩配置：handoff 预设（完整复刻技能总结要求）+ 默认脚本路径（随程序打包在 extensions/） ──
 
@@ -77,6 +79,7 @@ export const CATEGORIES: SettingCategory[] = [
   { id: "chat", i18nKey: "settings.catChat" },
   { id: "sessions", i18nKey: "settings.catSessions" },
   { id: "desktop", i18nKey: "settings.catDesktop" },
+  { id: "plugins", i18nKey: "settings.catPlugins" },
   { id: "skills", i18nKey: "settings.catSkills" },
   { id: "about", i18nKey: "settings.catAbout" },
 ];
@@ -139,6 +142,101 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) =>
     <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
       <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} />
     </label>
+  );
+}
+
+// ── 插件设置区（按插件分组渲染, VS Code 扩展设置页同款）──
+
+function PluginSettingsPanel() {
+  const [manifests, setManifests] = useState<PluginManifest[]>([]);
+  const [scope, setScope] = useState<"global" | "workspace">("global");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const { getInstalledPluginEntries, scanPlugins } = await import("../../services/pluginRegistry");
+      const entries = await getInstalledPluginEntries();
+      if (cancelled) return;
+      // 只显示声明了 settings 的已装插件
+      const withSettings = scanPlugins([...entries.values()].map((e) => ({ name: e.name, manifestJson: e.manifestJson! })))
+        .filter((m) => Object.keys(m.settings ?? {}).length > 0);
+      setManifests(withSettings);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (manifests.length === 0) {
+    return <EmptyState text={t("settings.pluginsNone")} />;
+  }
+
+  return (
+    <div style={{ ...S.form, gap: 0 }}>
+      <div style={{ ...S.row, justifyContent: "space-between", marginBottom: 12 }}>
+        <span style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-secondary)" }}>
+          {t("settings.pluginsSaveScope")}
+        </span>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => setScope("global")} style={scopeBtnStyle(scope === "global")}>{t("settings.globalScope")}</button>
+          <button onClick={() => setScope("workspace")} style={scopeBtnStyle(scope === "workspace")}>{t("settings.workspaceScope")}</button>
+        </div>
+      </div>
+      {manifests.map((m) => (
+        <PluginSettingsSection key={m.pluginName} manifest={m} scope={scope} />
+      ))}
+    </div>
+  );
+}
+
+function PluginSettingsSection({ manifest, scope }: { manifest: PluginManifest; scope: "global" | "workspace" }) {
+  const values = usePluginSettings(manifest.pluginName);
+
+  const setValue = (key: string, v: string | number | boolean) => {
+    void updatePluginSetting(manifest.pluginName, key, v, scope);
+  };
+
+  return (
+    <div style={{ borderBottom: "1px solid var(--border-light)", padding: "14px 0" }}>
+      <div style={{ fontSize: "calc(var(--font-scale, 1) * 13px)", fontWeight: 600, color: "var(--fg-primary)" }}>
+        {manifest.displayName || manifest.pluginName}
+        <span style={{ marginLeft: 8, fontSize: "calc(var(--font-scale, 1) * 10px)", color: "var(--fg-muted)", fontWeight: 400 }}>v{manifest.version}</span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+        {Object.entries(manifest.settings ?? {}).map(([id, def]) => (
+          <div key={id}>
+            <Label text={def.title} />
+            {def.type === "boolean" && (
+              <div style={{ marginTop: 2 }}>
+                <Toggle value={Boolean(values[id] ?? def.default ?? false)} onChange={(v) => setValue(id, v)} />
+              </div>
+            )}
+            {def.type === "string" && (
+              <input type="text"
+                value={String(values[id] ?? def.default ?? "")}
+                onChange={(e) => setValue(id, e.target.value)}
+                style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 2 }} />
+            )}
+            {def.type === "number" && (
+              <input type="number"
+                value={Number(values[id] ?? def.default ?? 0)}
+                min={def.min} max={def.max}
+                onChange={(e) => setValue(id, parseFloat(e.target.value) || 0)}
+                style={{ ...S.input, width: 96, marginTop: 2 }} />
+            )}
+            {def.type === "select" && (
+              <select
+                value={String(values[id] ?? def.default ?? def.options?.[0]?.value ?? "")}
+                onChange={(e) => setValue(id, e.target.value)}
+                style={{ ...S.select, marginTop: 2 }}>
+                {(def.options ?? []).map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            )}
+            {def.description && <FieldHint text={def.description} />}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -487,6 +585,9 @@ function CategoryContent({ cat, settings, update, flashField }: {
 
     case "desktop":
       return <EmptyState text={t("settings.empty")} />;
+
+    case "plugins":
+      return <PluginSettingsPanel />;
 
     default:
       return null;

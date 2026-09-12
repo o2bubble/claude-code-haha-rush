@@ -1,0 +1,5 @@
+name: "playwright-mcp"
+author: "官方"
+version: "0.1.5"
+description: "Playwright MCP 浏览器自动化 — AI 按文档完成依赖检测/浏览器选择/MCP 注册/重启引导"
+tags: ["mcp", "playwright", "browser", "automation"]

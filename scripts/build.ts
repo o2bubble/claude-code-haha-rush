@@ -9,7 +9,17 @@
  *   bun run scripts/build.ts --release 2026.07.31 --notes "fix: ..."  # + release notes shown in the GUI update panel
  *   bun run scripts/build.ts --release 2026.07.31 --gui-only  # only re-zip gui; reuse other component zips from previous release
  *   bun run scripts/build.ts --release 2026.08.21.10 --components claude,gui  # 只重建/重打列出的组件，其余复用上一版本 zip + 现有 dist
- *     known components: gui, claude, bun, updater, tools, python, git, extensions
+ *     known components: gui, server, claude, bun, updater, tools, python, git, extensions
+ *
+ * --notes 写法（更新面板按 markdown 渲染，实现见 gui/src/utils/releaseNotesMarkdown.ts）：
+ *   · 首行版本号；分节用 ###；条目用 -；版本之间用 --- 分隔
+ *   · 每条一句话讲清「改了什么 + 为什么」；细节留给 commit，别堆长段
+ *   · 只写本版内容 —— 历史由脚本自动拼接（见下方 MAX_RELEASE_NOTES）
+ *   示例：
+ *     v2026.09.10.2
+ *
+ *     ### 修复
+ *     - 更新说明支持 markdown — 层级可读，**粗体** 不再是字面星号
  */
 
 import { spawnSync } from 'bun'

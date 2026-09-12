@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   timeToIndex, segmentizeByDay, layoutSegments, pixelToTime, timeToPixel, buildTicks,
+  promptPreview, findNearestPrompt, clusterPrompts,
 } from "./timelineMath";
 
 const H = 3600_000;
@@ -144,5 +145,101 @@ describe("buildTicks（按天分段 + 天刻度）", () => {
   });
   it("空 layout → []", () => {
     expect(buildTicks([], { maxCount: 8 })).toEqual([]);
+  });
+});
+
+describe("promptPreview — 提示文本 → 单行预览", () => {
+  it("折叠空白与换行", () => {
+    expect(promptPreview("hello\n\n  world\t!")).toBe("hello world !");
+  });
+
+  it("超长截断并加省略号", () => {
+    const out = promptPreview("x".repeat(200), 60);
+    expect(out).toHaveLength(61); // 60 + '…'
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  it("@ref{file:...} 还原成可读文件名（取路径末段；带行号则保留）", () => {
+    expect(promptPreview("看看 @ref{file:C:\\a\\b\\Editor.tsx} 这段")).toBe("看看 Editor.tsx 这段");
+    // 行号保留 —— 引用到具体行是有用信息，别丢
+    expect(promptPreview("看看 @ref{file:/a/b/FileTree.tsx:42}")).toBe("看看 FileTree.tsx:42");
+  });
+
+  it("@ref 带 label 时取 label", () => {
+    expect(promptPreview("@ref{session:xyz789|上一个会话}")).toBe("上一个会话");
+  });
+
+  it("多个 @ref 都还原", () => {
+    expect(promptPreview("@ref{file:/a/x.ts} 和 @ref{panel:plan}")).toBe("x.ts 和 plan");
+  });
+
+  it("空/纯空白 → 空串", () => {
+    expect(promptPreview("")).toBe("");
+    expect(promptPreview("   \n  ")).toBe("");
+  });
+});
+
+describe("findNearestPrompt — 悬停命中查找", () => {
+  const mk = (index: number, pixel: number) => ({ index, time: pixel * 1000, preview: `p${index}`, pixel });
+
+  it("命中阈值内最近的一条", () => {
+    const list = [mk(0, 10), mk(1, 50), mk(2, 100)];
+    expect(findNearestPrompt(52, list, 7)?.index).toBe(1);
+    expect(findNearestPrompt(100, list, 7)?.index).toBe(2);
+  });
+
+  it("两条都在阈值内 → 取更近的（刻度密时不乱跳）", () => {
+    const list = [mk(0, 48), mk(1, 54)];
+    expect(findNearestPrompt(50, list, 7)?.index).toBe(0); // 距 2 vs 4
+    expect(findNearestPrompt(53, list, 7)?.index).toBe(1); // 距 5 vs 1
+  });
+
+  it("超出阈值 → null", () => {
+    expect(findNearestPrompt(200, [mk(0, 10)], 7)).toBeNull();
+  });
+
+  it("空列表 → null", () => {
+    expect(findNearestPrompt(50, [], 7)).toBeNull();
+  });
+});
+
+describe("clusterPrompts — 渲染聚类（防密集糊成一片）", () => {
+  const mk = (index: number, pixel: number) => ({ index, time: pixel * 1000, preview: `p${index}`, pixel });
+
+  it("稀疏时各自成簇（不改变渲染数量）", () => {
+    const out = clusterPrompts([mk(0, 10), mk(1, 50), mk(2, 120)], 8);
+    expect(out).toHaveLength(3);
+    expect(out.map((c) => c.items.length)).toEqual([1, 1, 1]);
+  });
+
+  it("间距小于阈值 → 并作一簇，标记取簇内中点", () => {
+    const out = clusterPrompts([mk(0, 100), mk(1, 104)], 8);
+    expect(out).toHaveLength(1);
+    expect(out[0].items).toHaveLength(2);
+    expect(out[0].pixel).toBe(102); // (100+104)/2
+  });
+
+  it("链式聚合：3px 间隔的一串连成一个簇", () => {
+    const out = clusterPrompts([mk(0, 100), mk(1, 103), mk(2, 106), mk(3, 109)], 8);
+    expect(out).toHaveLength(1);
+    expect(out[0].items).toHaveLength(4);
+  });
+
+  it("阈值按簇内最后一条算 —— 相邻就聚，不看首尾跨度", () => {
+    // 100/104/108：相邻都 <8，故全聚（而不是按首尾跨度 20 拆开）
+    const out = clusterPrompts([mk(0, 100), mk(1, 104), mk(2, 108)], 8);
+    expect(out).toHaveLength(1);
+    expect(out[0].pixel).toBe(104); // (100+108)/2
+  });
+
+  it("乱序输入按像素排序后再聚", () => {
+    const out = clusterPrompts([mk(0, 50), mk(1, 10), mk(2, 12)], 8);
+    expect(out).toHaveLength(2);
+    expect(out[0].items.map((i) => i.pixel)).toEqual([10, 12]);
+    expect(out[1].items.map((i) => i.pixel)).toEqual([50]);
+  });
+
+  it("空输入 → []", () => {
+    expect(clusterPrompts([], 8)).toEqual([]);
   });
 });

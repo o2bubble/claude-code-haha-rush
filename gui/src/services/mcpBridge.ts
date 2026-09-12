@@ -31,6 +31,9 @@ import {
   forceSaveDesktop,
 } from "../stores/desktopStore";
 import { computeDesktopSummary } from "./desktopSummary";
+import { PLUGIN_DOCS } from "./pluginDocs";
+import { getPluginAiStatus } from "./pluginStatusStore";
+import { addStatusMessage } from "../stores/statusMsgStore";
 import { windowBus } from "./windowBus";
 import { Events } from "./events";
 
@@ -97,6 +100,34 @@ function extractToolName(method: string, params?: Record<string, unknown>): stri
   return "";
 }
 
+// ── git-viewer 工具 helpers ──
+
+/** git-viewer 插件进程端口 —— 从插件进程 store 找正在运行的 port（进程 id 裸名）。
+ *  无 port = 进程未运行/未启动 → 返回 undefined, 调用方报明确错误。 */
+async function getGitViewerPort(): Promise<number | undefined> {
+  try {
+    const { getPluginProcesses } = await import("./pluginProcessBridge");
+    const p = getPluginProcesses().find((x) => x.processId === "git-viewer-server");
+    return typeof p?.port === "number" ? p.port : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** MCP 数值参数 clamp（可选 number, 非数字/超界落到默认） */
+function clampMcpInt(v: unknown, def: number, min: number, max: number): number {
+  const n = typeof v === "number" ? v : NaN;
+  if (Number.isNaN(n)) return def;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+/** diff 截断: AI 上下文预算保护 —— 超 40K 字符截断并注记（可调 context 再看） */
+const DIFF_LIMIT = 40_000;
+function truncateDiff(diff: string): string {
+  if (diff.length <= DIFF_LIMIT) return diff;
+  return diff.slice(0, DIFF_LIMIT) + `\n… [diff 已截断: ${diff.length} 字符, 超出 ${DIFF_LIMIT} 上限]\n(可用 git_view_diff(file, context=较小编号) 看更小片段)`;
+}
+
 async function dispatchTool(name: string, params: Record<string, unknown>): Promise<unknown> {
   switch (name) {
     case "initialize":
@@ -134,6 +165,19 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
           { name: "note_associate", description: "Link two notes", inputSchema: { type: "object", properties: { source_id: { type: "string" }, target_id: { type: "string" }, weight: { type: "number" }, type: { type: "string", enum: ["related_to","derived_from","contradicts","supports"] }, bidirectional: { type: "boolean" } }, required: ["source_id", "target_id"] } },
           { name: "note_tags", description: "List all tags with usage counts", inputSchema: { type: "object", properties: { scope: { type: "string" } } } },
           { name: "note_normalize_tags", description: "Normalize tags by grouping similar ones via LLM. Returns mapping of old→canonical tags.", inputSchema: { type: "object", properties: { dry_run: { type: "boolean" } } } },
+          // ── Plugin tools ──
+          { name: "plugin_list", description: "List installed GUI plugins: name + enabled/disabled + manifest summary (panels/commands/events/processes counts + category/dependencies/installType). Use to check what is installed before debugging.", inputSchema: { type: "object", properties: {} } },
+          { name: "plugin_get", description: "Get one plugin's full plugin.json manifest (parsed JSON) by pluginName.", inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+          { name: "plugin_docs", description: "Plugin documentation for AI. Without 'name': plugin system guide (directory layout, plugin.json schema, lifecycle, troubleshooting checklist) — call before writing or debugging plugins. With 'name': that plugin's AI_NOTES.md (author-written, plugin-specific failure modes / log locations / diagnostics), falling back to the general guide when unavailable.", inputSchema: { type: "object", properties: { name: { type: "string", description: "Optional pluginName — return that plugin's AI_NOTES.md troubleshooting doc" } } } },
+          { name: "plugin_install", description: "Install a GUI plugin from the marketplace by slug (downloads zip, extracts, rescans — panels/commands become live). Only for standard plugins; ai-guided plugins have no runtime — read their docs and perform the guided steps yourself instead. Returns {installed, pluginName} or dependency error.", inputSchema: { type: "object", properties: { slug: { type: "string" } }, required: ["slug"] } },
+          { name: "plugin_uninstall", description: "Uninstall a GUI plugin by pluginName. DANGEROUS — only call with confirm:true AFTER the user explicitly agreed in conversation. Refused when other installed plugins depend on it (uninstall them first). Kills the plugin's processes and deletes its directory (for ai-guided runtime plugins this also removes the downloaded runtime). ai-guided plugins: follow their uninstall guidance instead when applicable.", inputSchema: { type: "object", properties: { name: { type: "string" }, confirm: { type: "boolean" } }, required: ["name", "confirm"] } },
+          { name: "plugin_set_status", description: "Report an AI-verified environment status for an ai-guided plugin (e.g. after manually installing a runtime per its AI_NOTES guidance). status: ready | not_ready | error. In-memory only (cleared on GUI restart — re-verify then). Reference info for later debugging: plugin_list/plugin_get expose it as aiStatus; the GUI does not act on it.", inputSchema: { type: "object", properties: { name: { type: "string" }, status: { type: "string", enum: ["ready", "not_ready", "error"] }, detail: { type: "object", description: "Optional free-form details: version, verify command output, error reason, etc." } }, required: ["name", "status"] } },
+          // ── git-viewer 只读工具（经插件进程 HTTP API 转接; AI 不经过面板直读）──
+          { name: "git_view_diff", description: "Read the diff of a working-tree file (uncommitted changes) for the bound workspace repo. Read-only; the git-viewer plugin process must be running (auto-starts on workspace bind). Pass file as repo-relative path (e.g. 'gui/src/App.tsx'). Optional context: lines of context around changes (default 3, max 60).", inputSchema: { type: "object", properties: { file: { type: "string" }, context: { type: "number" } }, required: ["file"] } },
+          { name: "git_history", description: "Read the recent commit history (git log, read-only) for the bound workspace repo. Optional limit: max commits to return (default 20, max 200).", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
+          { name: "git_branches", description: "Read the branch list (git branch, read-only) for the bound workspace repo.", inputSchema: { type: "object", properties: {} } },
+          { name: "app_relaunch", description: "Restart the GUI application (spawns a fresh instance, then exits — the current AI session ends with it). DANGEROUS: only call with confirm:true AFTER the user explicitly agreed in conversation. Use as the LAST step of an installation flow (e.g. after an ai-guided plugin registered an MCP server that needs a session reload). All unsaved session state is preserved on disk by the backend; the new instance starts fresh.", inputSchema: { type: "object", properties: { confirm: { type: "boolean" } }, required: ["confirm"] } },
+          { name: "chat_send_command", description: "Pre-fill a command or prompt (e.g. a slash command like '/mcp-refresh') into the chat input box for the user to review and send with one keystroke — the user stays in control (this is the confirmation itself: nothing is sent automatically). Use when a GUI-side action needs the user to trigger a slash command but you want to spare them typing it. The text is placed at the start of the input box and highlighted by focus; tell the user to press Enter to send.", inputSchema: { type: "object", properties: { text: { type: "string", description: "Command/prompt text to pre-fill (e.g. '/mcp-refresh')" } }, required: ["text"] } },
         ],
       };
 
@@ -341,6 +385,222 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
       } catch (e: any) {
         throw new Error(`Tag normalization failed: ${e?.message || e}`);
       }
+    }
+
+    // ── Plugin tools ──
+
+    case "plugin_list": {
+      const { getInstalledPluginEntries: getInstalledPlugins } = await import("./pluginRegistry");
+      const { getSettings } = await import("../stores/settingsStore");
+      const disabled = new Set(getSettings().disabledPlugins ?? []);
+      const installed = await getInstalledPlugins();
+      const out: Array<Record<string, unknown>> = [];
+      for (const [name, entry] of installed) {
+        let summary: Record<string, unknown> = { name };
+        if (entry.manifestJson) {
+          try {
+            const m = JSON.parse(entry.manifestJson);
+            summary = {
+              name,
+              displayName: m.displayName ?? name,
+              version: m.version,
+              enabled: !disabled.has(name),
+              panels: (m.contributes?.panels ?? []).map((p: any) => p.id),
+              commands: (m.contributes?.commands ?? []).map((c: any) => c.id),
+              events: m.contributes?.events ?? [],
+              processes: (m.processes ?? []).map((p: any) => p.id),
+              category: m.category ?? "tool",
+              dependencies: m.dependencies ?? [],
+              installType: m.installType ?? "standard",
+              hasReadme: !!entry.readme,
+              aiStatus: getPluginAiStatus(name)?.status,
+            };
+          } catch {
+            summary = { name, enabled: !disabled.has(name), error: "plugin.json parse failed" };
+          }
+        }
+        out.push(summary);
+      }
+      return { plugins: out };
+    }
+
+    case "plugin_get": {
+      const { getInstalledPluginEntries: getInstalledPlugins } = await import("./pluginRegistry");
+      const { getSettings } = await import("../stores/settingsStore");
+      const { getPluginProcesses } = await import("./pluginProcessBridge");
+      const name = params.name as string;
+      const installed = await getInstalledPlugins();
+      const entry = installed.get(name);
+      if (!entry?.manifestJson) throw new Error(`Plugin not found: ${name}`);
+      const manifest = JSON.parse(entry.manifestJson);
+      // 该插件声明的进程的实时状态（process id 全局形式 plugin:<name>:<declId>）
+      const prefix = `plugin:${name}:`;
+      const processes = getPluginProcesses().filter((p) => p.processId.startsWith(prefix));
+      return {
+        name,
+        enabled: !(getSettings().disabledPlugins ?? []).includes(name),
+        manifest,
+        readme: entry.readme ?? null,
+        aiStatus: getPluginAiStatus(name) ?? null,
+        processes,
+      };
+    }
+
+    case "plugin_docs": {
+      // 无 name → 内置通用指南。有 name → 插件专属 AI_NOTES.md 三级回退：
+      // 本地已装目录 → 市场 server（ai_notes 透传字段）→ 提示无专属文档 + 通用指南兜底。
+      const name = params.name as string | undefined;
+      if (!name) return { docs: PLUGIN_DOCS };
+      const { getInstalledPluginEntries } = await import("./pluginRegistry");
+      const installed = await getInstalledPluginEntries();
+      const local = installed.get(name)?.aiNotes;
+      if (local) return { plugin: name, source: "local", docs: local };
+      try {
+        const { skillMarketplace } = await import("./skillMarketplace");
+        const settings = (await import("../stores/settingsStore")).getSettings();
+        const base = settings.skillRegistryUrl;
+        const resp = await fetch(`${base}/api/packages/${encodeURIComponent(name)}`);
+        if (resp.ok) {
+          const body = await resp.json();
+          const notes = body?.data?.ai_notes;
+          if (notes) return { plugin: name, source: "marketplace", docs: notes };
+        }
+      } catch { /* server 不可达 → 走兜底 */ }
+      return {
+        plugin: name,
+        source: "fallback",
+        note: `Plugin "${name}" has no AI_NOTES.md (author hasn't provided one — locally or on the marketplace). Below is the general plugin troubleshooting guide.`,
+        docs: PLUGIN_DOCS,
+      };
+    }
+
+    // ── git-viewer 只读工具（经插件进程 HTTP API 转接; MCP 响应 = AI 呈现给用户）──
+
+    case "git_view_diff": {
+      const file = params.file as string | undefined;
+      if (!file) throw new Error("file is required");
+      const port = await getGitViewerPort();
+      if (!port) throw new Error("git-viewer 进程未运行（没有端口）。插件进程在工作区绑定时自动启动——等待或检查 Worker 面板状态。");
+      const url = `http://127.0.0.1:${port}/api/diff?file=${encodeURIComponent(file)}${params.context ? `&context=${params.context}` : ""}`;
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        const err = await resp.text().catch(() => "");
+        throw new Error(`git_view_diff 失败 (HTTP ${resp.status}): ${err.slice(0, 300)}`);
+      }
+      const body = await resp.json();
+      return { file, diff: truncateDiff(body.diff ?? "") };
+    }
+
+    case "git_history": {
+      const port = await getGitViewerPort();
+      if (!port) throw new Error("git-viewer 进程未运行（没有端口）。插件进程在工作区绑定时自动启动——等待或检查 Worker 面板状态。");
+      const limit = clampMcpInt(params.limit, 20, 1, 200);
+      const resp = await fetch(`http://127.0.0.1:${port}/api/log?limit=${limit}`);
+      if (!resp.ok) {
+        const err = await resp.text().catch(() => "");
+        throw new Error(`git_history 失败 (HTTP ${resp.status}): ${err.slice(0, 300)}`);
+      }
+      const body = await resp.json();
+      return { commits: body.commits ?? [] };
+    }
+
+    case "git_branches": {
+      const port = await getGitViewerPort();
+      if (!port) throw new Error("git-viewer 进程未运行（没有端口）。插件进程在工作区绑定时自动启动——等待或检查 Worker 面板状态。");
+      const resp = await fetch(`http://127.0.0.1:${port}/api/branches`);
+      if (!resp.ok) {
+        const err = await resp.text().catch(() => "");
+        throw new Error(`git_branches 失败 (HTTP ${resp.status}): ${err.slice(0, 300)}`);
+      }
+      const body = await resp.json();
+      return { branches: body.branches ?? [] };
+    }
+
+    case "plugin_install": {
+      const slug = params.slug as string;
+      if (!slug) throw new Error("slug is required");
+      const { skillMarketplace } = await import("./skillMarketplace");
+      const { reloadPlugins } = await import("./pluginRegistry");
+      // 依赖校验: 市场详情里 dependencies 未装 → 拒绝并列出（AI 据此先装依赖）
+      const detail = await skillMarketplace.getPackage(slug);
+      const deps: string[] = (detail as any).dependencies ?? [];
+      if (deps.length > 0) {
+        const { getInstalledPluginEntries } = await import("./pluginRegistry");
+        const installed = await getInstalledPluginEntries();
+        const missing = deps.filter((d) => !installed.has(d));
+        if (missing.length > 0) {
+          throw new Error(`Missing dependencies: ${missing.join(", ")}. Install them first (plugin_install slug=<each>).`);
+        }
+      }
+      // ai-guided 插件没有运行时, GUI 装了也只是文件——拒绝并引导 AI 走指导
+      if ((detail as any).installType === "ai-guided") {
+        throw new Error(`'${slug}' is an ai-guided plugin (no runtime). Read its readme/docs and perform the guided installation steps yourself.`);
+      }
+      const { invoke } = await import("@tauri-apps/api/core");
+      const pluginName = await invoke<string>("install_plugin_package", {
+        zipUrl: skillMarketplace.getPackageDownloadUrl(slug),
+        packageName: slug,
+      });
+      await reloadPlugins();
+      addStatusMessage(`Plugin installed: ${pluginName}`, "success");
+      return { installed: true, pluginName };
+    }
+
+    case "plugin_uninstall": {
+      const pluginName = params.name as string;
+      const confirm = params.confirm === true;
+      if (!pluginName) throw new Error("name is required");
+      // 危险操作门: AI 必须在对话里得到用户明确同意后才能传 confirm:true
+      if (!confirm) {
+        throw new Error("Uninstall requires user consent. Ask the user first, then re-call with confirm:true.");
+      }
+      // 依赖反查 + 删除 + 重扫全部在 uninstallPlugin 单一入口（GUI 面板共用同一门）
+      const { uninstallPlugin } = await import("./pluginRegistry");
+      await uninstallPlugin(pluginName);
+      addStatusMessage(`Plugin uninstalled: ${pluginName}`, "success");
+      return { uninstalled: true, pluginName };
+    }
+
+    case "plugin_set_status": {
+      const pluginName = params.name as string;
+      const status = params.status as "ready" | "not_ready" | "error";
+      const detail = params.detail as Record<string, unknown> | undefined;
+      if (!pluginName) throw new Error("name is required");
+      // 对照已装列表拒未知插件（AI 打错名字即时报错, 而不是存一个没人读的状态）
+      const { getInstalledPluginEntries } = await import("./pluginRegistry");
+      const installed = await getInstalledPluginEntries();
+      if (!installed.has(pluginName)) {
+        throw new Error(`Plugin not found: ${pluginName}. Check plugin_list for installed names.`);
+      }
+      const { setPluginAiStatus } = await import("./pluginStatusStore");
+      setPluginAiStatus(pluginName, status, detail);
+      return { reported: true, pluginName, status };
+    }
+
+    case "app_relaunch": {
+      // 危险操作门: AI 必须在对话里得到用户明确同意后才能传 confirm:true。
+      // 调用即终止本进程（含本 AI 会话）——响应必须先于 relaunch 发出。
+      // Rust 侧 spawn 新实例 → 800ms → exit(0); 本函数 return 后由
+      // handleMcpRequest 把 JSON-RPC 响应写回, 然后进程才退出。
+      const confirm = params.confirm === true;
+      if (!confirm) {
+        throw new Error("Relaunch requires user consent. Ask the user first, then re-call with confirm:true.");
+      }
+      const result = { relaunching: true, note: "GUI is restarting now. The current session ends here — the new instance will pick up fresh MCP config from ~/.claude.json." };
+      // 延迟执行: 让 respond() 先把工具结果送达 AI（写回 HTTP 响应）, 再退进程。
+      setTimeout(() => {
+        invoke("app_relaunch").catch((e) => console.error("[mcpBridge] relaunch failed:", e));
+      }, 500);
+      return result;
+    }
+
+    case "chat_send_command": {
+      // 把命令/提示词预填进聊天输入框, 用户审阅后一键发送——确认门就是发送本身,
+      // 不自动发。复用 CHAT_INSERT_TEXT 通路（命令面板/划词发送同源）。
+      const text = params.text as string;
+      if (!text || !text.trim()) throw new Error("text is required");
+      windowBus.emit(Events.CHAT_INSERT_TEXT, { text, atStart: true });
+      return { prefilled: true, text, note: "Placed into the chat input box. Ask the user to review and press Enter to send." };
     }
 
     default:

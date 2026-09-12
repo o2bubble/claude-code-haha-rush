@@ -116,6 +116,97 @@ describe("resolvePaste — 粘贴内容 → 引用/保存/文本 决策", () => 
     if (d.kind === "refs") expect(d.refs).toEqual([]);
   });
 
+  // ── 粘贴文件的源路径补全（readClipboardFiles）──
+  // 背景：File.path 是 Electron 扩展，Tauri 只对拖放注入 —— 粘贴的文件一律无 path。
+  // 若不管，粘贴文件会走"复制内容到 .claude/pasted"，而拖放同一文件走引用（行为不一致）。
+
+  it("无 .path 文件 + 剪贴板路径数量匹配 → 引用原路径（不复制）", async () => {
+    const readClipboardFiles = vi.fn().mockResolvedValue(["/w/a.md", "/w/b.json"]);
+    const d = await resolvePaste({
+      files: [
+        { name: "a.md", blob: mkBlob("a"), type: "text/markdown" },
+        { name: "b.json", blob: mkBlob("b"), type: "application/json" },
+      ],
+      images: [],
+      text: "",
+      pathExists: mkPathExists(true),
+      readClipboardFiles,
+    });
+    expect(d).toEqual({
+      kind: "refs",
+      refs: [
+        { type: "file", path: "/w/a.md", label: "a.md" },
+        { type: "file", path: "/w/b.json", label: "b.json" },
+      ],
+    });
+  });
+
+  it("无 .path 文件是目录 → 引用目录本身", async () => {
+    const readDir = vi.fn().mockResolvedValue([{ path: "/w/d/x", name: "x", is_dir: false }]);
+    const d = await resolvePaste({
+      files: [{ name: "d", blob: mkBlob("d") }],
+      images: [],
+      text: "",
+      pathExists: mkPathExists(true),
+      readDir,
+      readClipboardFiles: vi.fn().mockResolvedValue(["/w/d"]),
+    });
+    expect(d).toEqual({ kind: "refs", refs: [{ type: "dir", path: "/w/d", label: "d" }] });
+  });
+
+  it("剪贴板路径数量不匹配（混合粘贴）→ 保守回退复制，不错配引用", async () => {
+    const d = await resolvePaste({
+      files: [
+        { name: "a.md", blob: mkBlob("a"), type: "text/markdown" },
+        { name: "shot.png", blob: mkBlob("i", "image/png"), type: "image/png" },
+      ],
+      images: [{ blob: mkBlob("i", "image/png"), mime: "image/png" }],
+      text: "",
+      pathExists: mkPathExists(true),
+      // 剪贴板只有 1 个路径，files 有 2 个 → 不配对
+      readClipboardFiles: vi.fn().mockResolvedValue(["/w/a.md"]),
+    });
+    // a.md 回退复制；png 交给 images（既有行为）
+    expect(d.kind).toBe("saveImages");
+    if (d.kind === "saveImages") expect(d.items.map((i) => i.name)).toEqual(["a.md", undefined]);
+  });
+
+  it("图片不参与补全 —— 即使剪贴板能给出路径（粘贴图片应保持二进制语义）", async () => {
+    const readClipboardFiles = vi.fn().mockResolvedValue(["/w/pic.png"]);
+    const b = mkBlob("i", "image/png");
+    const d = await resolvePaste({
+      files: [{ name: "pic.png", blob: b, type: "image/png" }],
+      images: [{ blob: b, mime: "image/png" }],
+      text: "",
+      pathExists: mkPathExists(true),
+      readClipboardFiles,
+    });
+    expect(d.kind).toBe("saveImages");
+    // 图片不算"需要补路径"，故不该白调一次剪贴板
+    expect(readClipboardFiles).not.toHaveBeenCalled();
+  });
+
+  it("剪贴板读取失败 → 回退复制（不抛错）", async () => {
+    const d = await resolvePaste({
+      files: [{ name: "a.md", blob: mkBlob("a"), type: "text/markdown" }],
+      images: [],
+      text: "",
+      pathExists: mkPathExists(true),
+      readClipboardFiles: vi.fn().mockRejectedValue(new Error("no clipboard")),
+    });
+    expect(d.kind).toBe("saveImages");
+  });
+
+  it("未注入 readClipboardFiles（非 Tauri / 旧调用方）→ 保持旧行为复制", async () => {
+    const d = await resolvePaste({
+      files: [{ name: "a.md", blob: mkBlob("a"), type: "text/markdown" }],
+      images: [],
+      text: "",
+      pathExists: mkPathExists(true),
+    });
+    expect(d.kind).toBe("saveImages");
+  });
+
   it("无 .path 的图片不会因 files+images 重复计数（粘贴图片只出一个 clip）", async () => {
     const b = mkBlob("img", "image/png");
     const d = await resolvePaste({

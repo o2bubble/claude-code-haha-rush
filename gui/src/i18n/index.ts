@@ -33,7 +33,9 @@ export function t(key: string, params?: Record<string, string | number>): string
   let result = typeof val === "string" ? val : key;
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      result = result.replace(`{${k}}`, String(v));
+      // replaceAll: 同一占位符可能出现多次(如更新提示词的 {to} 在「市场 v{to}」和
+      // detail={"version":"{to}"} 里各一次)——replace 只换首处会漏出原文占位符。
+      result = result.replaceAll(`{${k}}`, String(v));
     }
   }
   return result;
