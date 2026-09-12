@@ -996,8 +996,26 @@ async function main() {
     const zipPath = join(RELEASE_DIR, `${name}.zip`)
     if (!want(name)) {
       if (existsSync(zipPath)) {
+        // 本版目录里已存在该组件的 zip（重复构建同一版本时会走到这里）。它的 sha
+        // 同样必须沿用来源 manifest —— 不能留给后面的 fallback 去算 dist/ 源文件，
+        // 那可能是本地遗留的其它版本（→ sha 错误 → 用户端全量误提示更新，
+        // 2026.09.12.1 与 09.12.5 事故同因）。
+        // 先看本版 manifest（上次构建写的），再回退到来源版本 —— 本版 manifest
+        // 可能缺失（首次跑到这里）或本身已被写坏。
+        const recorded =
+          readJsonSafe(join(RELEASE_DIR, 'manifest.json'))?.components?.[name]?.sha256 ??
+          (prevRelDir ? readJsonSafe(join(prevRelDir, 'manifest.json'))?.components?.[name]?.sha256 : undefined)
+        if (recorded) {
+          reusedSha[name] = recorded
+          console.log(`  ${name}.zip (kept existing, sha from manifest)`)
+        } else {
+          // 无来源可依 —— 宁可报错也不要写出可能错误的 sha。
+          console.error(`  [Error] ${name}.zip exists in ${version} but no manifest records its sha.`)
+          console.error(`          Delete dist/release/${version}/ and rebuild so the source is unambiguous.`)
+          process.exit(1)
+        }
         zipSizes[name] = statSync(zipPath).size
-        console.log(`  ${name}.zip (kept existing)`); return
+        return
       }
       if (prevRelDir) {
         // 复用来源校验：声明了 --expect-prev 时，来源版本必须一致——否则本地缺该版本
