@@ -161,8 +161,26 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
   —— 已上传云；gui sha `d36b7903…`
 - **2026.09.13.2**（终端输出重复 + 并发串台修复；仅 gui，其余复用 .12.6）
   —— 已上传云，9 组件 sha 全部核对一致；gui sha `b43b6005…`
+- **2026.09.13.3**（终端重复第二因：xterm 异步队列堆积 → 合并重绘；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `edd9fdbf…`
 
-### 2026-09-13 终端重复根因（本批最有价值发现）
+### 2026-09-13 终端重复是**两个独立 bug**（重要区分）
+用户第一次报"命令和结果重复"→ 修了 store 层（.13.2）。用户复测后报"当前标签仍
+重复，**切一下标签重复又消失**"→ 这条线索直接排除 store 层（切标签就是从 store
+全量重绘，数据若有问题切了也还在），锁定 xterm 渲染层（.13.3）。
+
+**第二个 bug**：`TerminalPanel.renderActive` 直接 `term.reset()` + 一串 `writeln()`。
+但 xterm 的 `write()/writeln()` 是**异步**的（官方 typings：*data is processed
+asynchronously*），而 `reset()` 是同步清屏 —— reset 不会取消队列里未处理的写入。
+流式输出时每个进度事件都触发一轮「reset + 全量重写」，队列里堆了多份 → 处理完
+就是两整份。切标签时输出已停、队列排空 → 重绘正常。
+**修复**：`createRenderScheduler`（`gui/src/components/chat/terminalRender.ts`），
+同一帧内多次 request 合并为一次渲染（微任务调度）。
+
+> 教训：**"切一下就恢复正常" 是极强的定位线索** —— 它说明持久层（store/DB）
+> 是对的、问题在渲染/缓存层。遇到类似症状先按这条切分。
+
+### 2026-09-13 终端重复根因（store 层）
 - **后端进度回调送的是"滚动尾部窗口"，不是增量** —— `exec` 的 onProgress 传
   `lastLines`(=最近 5 行) / `allLines`(=最近 100 行)，取自 `CircularBuffer.getRecent`
   （`src/utils/task/TaskOutput.ts`；pipe 模式走 `#recentLines.getRecent(5)`）。每次 poll
