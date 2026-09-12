@@ -50,6 +50,8 @@ export const zhCN = {
   'detail.close': '关闭',
   'detail.noContent': '(无内容)',
   'detail.associations': '关联 ({count})',
+  'detail.edge.out': '本记忆是起点（派生自/支持对方）',
+  'detail.edge.in': '对方是起点（本记忆派生自它）',
   'detail.importance': '重要性',
   'detail.accessed': '访问',
   'detail.times': '次',

@@ -50,6 +50,8 @@ export const en = {
   'detail.close': 'Close',
   'detail.noContent': '(no content)',
   'detail.associations': 'Associations ({count})',
+  'detail.edge.out': 'this memory is the source (derived from / supports the other)',
+  'detail.edge.in': 'the other memory is the source (this one was derived from it)',
   'detail.importance': 'Importance',
   'detail.accessed': 'Accessed',
   'detail.times': 'times',

@@ -504,6 +504,53 @@ class TestStoreContract(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestAssociations(unittest.TestCase):
+    """Symmetric edges are stored once and must not render twice."""
+
+    def setUp(self):
+        self.store, self.path = _new_store()
+        self.a = self.store.add_memory("fact", "记忆 A", "关于苹果的内容。")
+        self.b = self.store.add_memory("fact", "记忆 B", "关于香蕉的内容。")
+
+    def tearDown(self):
+        self.store.close()
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def test_single_edge_visible_from_both_endpoints(self):
+        self.store.add_association(self.a["id"], self.b["id"], weight=0.8)
+        from_a = self.store.get_associations(self.a["id"], direction="both")
+        from_b = self.store.get_associations(self.b["id"], direction="both")
+        self.assertEqual(len(from_a), 1)
+        self.assertEqual(len(from_b), 1)
+        self.assertEqual(from_a[0]["direction"], "outgoing")
+        self.assertEqual(from_b[0]["direction"], "incoming")
+
+    def test_reverse_call_does_not_duplicate_symmetric_edge(self):
+        # Regression: agents sometimes call associate(A,B) and associate(B,A).
+        # Both rows matched at either endpoint, so the UI listed the relation
+        # twice.
+        self.store.add_association(self.a["id"], self.b["id"], weight=0.8)
+        self.store.add_association(self.b["id"], self.a["id"], weight=0.8)
+        self.assertEqual(len(self.store.get_associations(self.a["id"], "both")), 1)
+        self.assertEqual(len(self.store.get_associations(self.b["id"], "both")), 1)
+
+    def test_derived_from_keeps_direction(self):
+        # derived_from is directional, so the mirror is a different statement
+        # and must survive.
+        self.store.add_association(self.a["id"], self.b["id"], type="derived_from")
+        self.store.add_association(self.b["id"], self.a["id"], type="derived_from")
+        self.assertEqual(len(self.store.get_associations(self.a["id"], "both")), 2)
+
+    def test_mirror_cleanup_only_touches_same_type(self):
+        self.store.add_association(self.a["id"], self.b["id"], type="derived_from")
+        self.store.add_association(self.a["id"], self.b["id"], type="related_to")
+        types = sorted(e["type"] for e in self.store.get_associations(self.a["id"], "outgoing"))
+        self.assertEqual(types, ["derived_from", "related_to"])
+
+
 class TestLifecycle(unittest.TestCase):
     def setUp(self):
         self.store, self.path = _new_store()

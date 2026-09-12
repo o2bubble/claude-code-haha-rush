@@ -7,6 +7,9 @@ import { renderMarkdown } from '../lib/markdown';
 import { renderSubGraph } from '../lib/d3-graph';
 import ConfirmDialog from './ConfirmDialog';
 
+// Mirrors SYMMETRIC_TYPES in store.py — keep the two in sync.
+const SYMMETRIC_EDGE_TYPES = new Set(['related_to', 'contradicts', 'supports']);
+
 const INITIAL = { type: 'fact', title: '', content: '', scope: 'global', tags: '', importance: 0.5 };
 const TYPES = [
   ['fact', 'dialog.type.fact'],
@@ -174,7 +177,14 @@ export default function MemoryDetail() {
                 <div className="sbLabel" style={{ marginBottom: 8 }}>
                   {t('detail.associations', { count: m.associations.length })}
                 </div>
-                {m.associations.map((a, i) => (
+                {m.associations.map((a, i) => {
+                  // Symmetric types mean the same thing either way, so show a
+                  // dot. direction carries meaning only for directed types —
+                  // show ≤ / ⇒ so "what this memory was derived from" is
+                  // distinguishable from "what was derived from this memory".
+                  const directed = !SYMMETRIC_EDGE_TYPES.has(a.type);
+                  const outgoing = a.direction === 'outgoing';
+                  return (
                   <div key={i} style={{
                     fontSize: 13, padding: '7px 0',
                     borderBottom: '1px solid var(--border-soft)',
@@ -189,12 +199,19 @@ export default function MemoryDetail() {
                       flexShrink: 0,
                     }} />
                     <span style={{ color: 'var(--muted)', fontSize: 10 }}>{a.type}</span>
+                    {directed && (
+                      <span title={outgoing ? t('detail.edge.out') : t('detail.edge.in')}
+                            style={{ color: 'var(--muted)', fontSize: 11, fontFamily: 'monospace' }}>
+                        {outgoing ? '→' : '←'}
+                      </span>
+                    )}
                     <span>{a.title || (a.target_id || a.source_id || '').slice(0, 8)}</span>
                     <span style={{ marginLeft: 'auto', color: 'var(--meta)', fontSize: 10 }}>
                       {(a.weight * 100).toFixed(0)}%
                     </span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 

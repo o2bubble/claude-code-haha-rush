@@ -294,7 +294,6 @@ def _register_routes(app: FastAPI) -> None:
             target_id=body["target_id"],
             weight=body.get("weight", 0.5),
             type=body.get("type", "related_to"),
-            bidirectional=body.get("bidirectional", False),
         )
         return result
 

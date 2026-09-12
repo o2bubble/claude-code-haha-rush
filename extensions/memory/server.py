@@ -241,9 +241,12 @@ TOOL_DEFS = [
     },
     {
         "name": "memory_associate",
-        "description": "Create or update a weighted relationship edge between two memories."
-        " Supports 4 edge types: related_to, derived_from, contradicts, supports."
-        " Optionally create the reverse edge too (bidirectional).",
+        "description": "Create a weighted relationship edge between two memories."
+        " Supports 4 edge types: related_to (symmetric), contradicts (symmetric),"
+        " supports (symmetric), derived_from (directed: source was learned from target)."
+        " Edges are stored once and are already visible from both endpoints —"
+        " do NOT create the mirror edge by swapping source/target, that renders"
+        " the relation twice.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -255,7 +258,6 @@ TOOL_DEFS = [
                     "enum": ["related_to", "derived_from", "contradicts", "supports"],
                     "default": "related_to",
                 },
-                "bidirectional": {"type": "boolean", "default": False},
             },
             "required": ["source_id", "target_id"],
         },
@@ -580,7 +582,6 @@ async def _handle_memory_associate(arguments: dict) -> list[TextContent]:
         target_id=arguments["target_id"],
         weight=arguments.get("weight", 0.5),
         type=arguments.get("type", "related_to"),
-        bidirectional=arguments.get("bidirectional", False),
     )
     return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
 
