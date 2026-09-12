@@ -344,6 +344,7 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       }
       updateLast((m) => {
         const existingTools = m.toolUses || [];
+        const isSub = !!inner.parent_tool_use_id;
         const newTools = content
           .filter((b: any) => b.type === "tool_use")
           .filter((b: any) => !existingTools.some((tool) => tool.id === b.id))
@@ -353,6 +354,7 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
             name: b.name || "",
             input: b.input || {},
             status: "running" as const,
+            ...(isSub ? { subagent: true } : {}),
           }));
         for (const b of content) {
           if (b.type !== "tool_use") continue;

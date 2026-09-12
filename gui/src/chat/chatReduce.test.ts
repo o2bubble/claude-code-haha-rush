@@ -228,6 +228,36 @@ describe("chatReduce — assistant messages", () => {
       { type: "plan.update", tasks: [{ content: "a", activeForm: "b", status: "pending" }] },
     ]);
   });
+
+  it("tags tool_uses from a subagent (parent_tool_use_id set)", () => {
+    let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } });
+    r = reduce(
+      {
+        type: "assistant",
+        parent_tool_use_id: "task-tool-1",
+        message: { content: [{ type: "tool_use", id: "s1", name: "Bash", input: {} }] },
+      },
+      r.nextState,
+    );
+    expect(r.nextState.messages[0].toolUses).toEqual([
+      { id: "s1", index: 0, name: "Bash", input: {}, status: "running", subagent: true },
+    ]);
+  });
+
+  it("does not tag main-agent tool_uses (parent_tool_use_id null)", () => {
+    let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } });
+    r = reduce(
+      {
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
+      },
+      r.nextState,
+    );
+    expect(r.nextState.messages[0].toolUses).toEqual([
+      { id: "t1", index: 0, name: "Bash", input: {}, status: "running" },
+    ]);
+  });
 });
 
 describe("chatReduce — sessions", () => {

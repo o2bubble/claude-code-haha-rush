@@ -458,6 +458,19 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
               }}
             >
               <span style={{ fontWeight: 600 }}>{displayName}</span>
+              {tool.subagent && (
+                <span
+                  title={t("message.subagentTooltip")}
+                  style={{
+                    flexShrink: 0, fontSize: 9, lineHeight: "14px", padding: "0 5px",
+                    borderRadius: 3, border: "1px solid var(--border-medium)",
+                    color: "var(--fg-secondary)", backgroundColor: "var(--bg-root)",
+                    cursor: "help",
+                  }}
+                >
+                  {t("message.subagentBadge")}
+                </span>
+              )}
               {isBash && cmdSummary && (
                 <span style={{ color: dimText, fontSize: 11, fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                   {cmdSummary}

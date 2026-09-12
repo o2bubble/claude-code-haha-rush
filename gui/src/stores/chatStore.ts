@@ -22,6 +22,8 @@ export interface ToolUse {
   inputRaw?: string;
   output?: string;
   status: "pending" | "running" | "done" | "error";
+  /** 由子代理（Task/Agent）产生 — 后端 parent_tool_use_id 非空。仅用于 UI 区分。 */
+  subagent?: boolean;
 }
 
 export interface ControlRequest {

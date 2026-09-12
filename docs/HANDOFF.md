@@ -150,13 +150,35 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
 
 ### 测试基线
 - Memory MCP：`cd extensions/memory && python -m unittest discover -s tests` → **43 passed**
-- GUI 前端：`node node_modules/vitest/vitest.mjs run` → 437 通过（前批基线）· `tsc --noEmit` 干净
+- GUI 前端：`node node_modules/vitest/vitest.mjs run` → **586 通过**（50 文件）· `tsc --noEmit` 干净
 - Rust：`cargo check`（gui/src-tauri）通过
 
 ### 发布版本 (dist/release)
 - 2026.09.10.5 ~ 2026.09.10.9（含 bun/claude/extensions/git/gui/python/server/tools/updater zip + manifest）
 - **2026.09.12.5**（笔记面板 FTS5 + jieba + 两段式查重；仅 gui/server 重建，其余复用 .4）
   —— 已上传云 `123.56.66.84:8765`；**96 未上传**（内网不通）
+- **2026.09.13.1**（切会话打断确认 + 子代理工具标记 + 时间线遮挡修复；仅 gui，其余复用 .12.6）
+  —— 已上传云；gui sha `d36b7903…`
+
+### 2026-09-13 三处 GUI 改动（本批）
+- **切会话打断确认** —— 后端 `handleResumeSession`/`handleNewSession` 首行就是
+  `interruptCurrentTurn()`（`ideMode.ts:2245`/`2486`），点会话行即静默中止在跑的回合、
+  token 白烧。新增 `sessionSwitchGuard.ts`（纯函数）+ 弹窗，判定用 `isBackendBusy()`
+  （**不用 `streaming`** —— 它被 `interrupt()` 乐观清空会漏判；见 `chatReduce.ts:66`）。
+  重击当前会话不弹；`backendBusy === undefined`（后端未报过状态）视为不忙。
+  **未覆盖**命令面板（`useCommandPalette.ts:104`）与 `@ref` 会话链接（`referenceActions.ts:37`）
+  —— 那两处没有弹窗宿主，要加需先提供全局 confirm 容器
+- **子代理工具卡片标记** —— 根因：后端一直给子代理消息带 `parent_tool_use_id`（=主 agent 的
+  Task tool_use id，见 `queryHelpers.ts:120-156` 生成、`ideMode.ts:688-781` 广播），但 GUI
+  **从未读过**（全仓仅 `chatSession.ts:177` 写入 `null`）→ 子代理 tool_use 被 `chatReduce.ts:345`
+  直接 merge 进主 agent 最后一条 assistant 的 `toolUses`，视觉无区别。
+  **关键约束：只能标注、不能过滤** —— 卡片按 id 去重、tool_result 靠 `updateToolByUseId` 回填、
+  `tool_progress` 写最后一张卡，过滤会导致结果无处接收。故给 `ToolUse` 加 `subagent?: boolean`
+  仅在 UI 显示徽章
+- **时间线遮挡** —— 两个源：① 黑框是**原生 `title` tooltip**（`TimeLineBar.tsx:219`），OS 级定位
+  CSS 控制不了 → 删除，改 `role="slider"` + `aria-label`；② 提问预览浮层拖动时贴右侧消息区
+  随指针一路遮 → 拖动时翻到左侧（`barRect.left - PREVIEW_MAX_WIDTH - 6`，用常量偏移避免
+  测量自身宽度形成循环依赖）
 - ⚠️ 发布时 `dist/release/` 若为空（换机器），需先从 `GET /api/updates/latest` 拉回上一版
   manifest 落盘，否则 build.ts 的 `prevNotes` 取不到基底、更新面板的累积说明会断代。
   本次即如此处理（拉回 .4 的 manifest 作为基底，见脚本 `prevNotes` 逻辑）
