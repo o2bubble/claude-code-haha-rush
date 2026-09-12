@@ -1,13 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { useT } from '../lib/i18n';
+import { clearToken, getToken, setToken, verifyToken } from '../lib/auth';
 
-// 密码在构建时由部署流程注入（VITE_MEMORY_PASSWORD）——仓库源码不含明文，
-// 值见内部凭据记录。未配置时为空串并拒绝一切登录（fail-closed，防"空密码放行"）。
-const PASSWORD = import.meta.env.VITE_MEMORY_PASSWORD || '';
-const STORAGE_KEY = 'memory_web_auth';
-
+// 登录输入的就是服务端 bearertoken（MEMORY_AUTH_TOKEN）。校验方式 = 拿它调一次
+// /api/stats 看服务端认不认 —— 早期版本在前端比对一个硬编码常量，那只是装饰：
+// 改 localStorage 或直接 curl API 都能绕过。真正拦人的只有服务端中间件。
 export function isAuthenticated() {
-  return !!PASSWORD && localStorage.getItem(STORAGE_KEY) === PASSWORD;
+  return !!getToken();
 }
 
 export default function Login({ onLogin }) {
@@ -81,12 +80,10 @@ export default function Login({ onLogin }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
-    await new Promise((r) => setTimeout(r, 300));
-    if (!PASSWORD) {
-      // 构建时未注入 —— 明确提示，避免被误判为"输错密码"
-      setError(t('login.notConfigured'));
-    } else if (value === PASSWORD) {
-      localStorage.setItem(STORAGE_KEY, PASSWORD);
+    clearToken();
+    const ok = await verifyToken(value.trim());
+    if (ok) {
+      setToken(value.trim());
       onLogin();
     } else {
       setError(t('login.error'));

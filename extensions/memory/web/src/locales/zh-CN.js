@@ -6,10 +6,9 @@ export const zhCN = {
 
   // Login
   'login.title': 'Memory Explorer',
-  'login.subtitle': '请输入密码以继续',
-  'login.password': '密码',
-  'login.error': '密码错误',
-  'login.notConfigured': '未配置密码——构建时需设置 VITE_MEMORY_PASSWORD',
+  'login.subtitle': '请输入访问令牌以继续',
+  'login.password': '访问令牌',
+  'login.error': '令牌无效 —— 服务端已拒绝',
   'login.button': '登录',
   'login.loading': '...',
 

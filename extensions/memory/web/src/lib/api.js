@@ -1,10 +1,19 @@
+import { authHeaders, clearToken } from './auth';
+
 const BASE = '/api';
 
 async function request(path, options = {}) {
   const res = await fetch(BASE + path, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers: authHeaders({ 'Content-Type': 'application/json', ...(options.headers || {}) }),
   });
+  if (res.status === 401) {
+    // The stored token was rejected (rotated server-side, say). Drop it and
+    // reload so the login gate re-renders instead of leaving a dead session.
+    clearToken();
+    window.location.reload();
+    throw new Error('Unauthorized');
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);

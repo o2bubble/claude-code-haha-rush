@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from auth import BearerAuthMiddleware, resolve_token
 from normalize import apply_tag_mapping
 from search_engine import hybrid_search
 from store import MemoryStore, _scope_condition
@@ -32,7 +33,7 @@ store: Optional[MemoryStore] = None
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
-def create_app() -> FastAPI:
+def create_app(auth_token: Optional[str] = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
@@ -53,6 +54,16 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Protect /api/*; leave the SPA bundle public so the browser can render the
+    # login page (it cannot present a token before it has loaded). Any non-/api
+    # path is static assets or the landing page — none of it is user data.
+    if auth_token is not None:
+        app.add_middleware(
+            BearerAuthMiddleware,
+            token=auth_token,
+            protect_prefixes=("/api/",),
+        )
 
     _register_routes(app)
 
@@ -374,6 +385,8 @@ def main() -> None:
     global store
     import uvicorn
 
+    auth_token = resolve_token()
+
     print(f"[memory-api] Opening database: {args.db_path}", file=sys.stderr)
     store = MemoryStore(args.db_path)
     caps = store.get_capabilities()
@@ -383,7 +396,9 @@ def main() -> None:
         file=sys.stderr,
     )
 
-    app = create_app()
+    app = create_app(auth_token)
+    if auth_token is not None:
+        print("[memory-api] Authentication enabled (/api/* requires a bearer token).", file=sys.stderr)
     print(f"[memory-api] REST API listening on {args.host}:{args.port}", file=sys.stderr)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

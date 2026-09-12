@@ -149,15 +149,41 @@ curl -s http://123.56.66.84:8080/health                                   # {"st
 - `memory_stats` → `capabilities.fts == true`、`tokenizer == "jieba"`、`total_memories` 与升级前一致
 - `memory_search(scope=["project:*"])` → 有结果；`scope=["domain:*"]` → **空数组**（不是全集）
 
-## 6. Web UI 密码构建注入（重建前端时必读）
+## 6. 访问控制（2026-09-12 起）
 
-`Login.jsx` 的密码来自 `import.meta.env.VITE_MEMORY_PASSWORD`，**fail-closed**（未注入 → 空字符串 → 拒绝一切登录）。
+**背景**：早期版本 MCP（8080）与 REST（40021）**零鉴权**且公网可达 —— 任何人都能读写
+记忆、投毒，或用 `memory_forget(hard=true)` 删库。Web 登录也只是前端装饰（硬编码密码
++ localStorage 判断，直接 curl API 即可绕过）。
 
-```bash
-cd extensions/memory/web && VITE_MEMORY_PASSWORD=<值> bun run build
+**现在的模型：共享 bearer token（纵深防御）**
+
+| 组件 | 保护范围 | 说明 |
+|------|---------|------|
+| `server.py`（MCP 8080） | 除 `/health` 外全部 | 中间件包住整个 Router（MCP 端点是裸 ASGI，不能用 FastAPI 中间件） |
+| `api.py`（REST 40021） | 仅 `/api/*` | 静态资源保持公开，否则浏览器加载不了登录页 |
+| `/health` | 豁免 | Docker HEALTHCHECK 从容器内调用 |
+
+**配置**：
+- 服务端读环境变量 `MEMORY_AUTH_TOKEN`（compose 已改为 `${MEMORY_AUTH_TOKEN:?...}` 必填）。
+- **未设置则服务拒绝启动**（fail-closed）。本地开发可显式 `MEMORY_AUTH_DISABLED=1` 跳过。
+- 客户端两种 header 都认：`Authorization: Bearer <token>` 或 `X-API-Key: <token>`。
+- 真实值见 `.private/api-keys.md`。
+
+**本地 Claude Code 配置**（`~/.claude.json` 的 `mcpServers.memory`）：
+```json
+{ "type": "http", "url": "http://123.56.66.84:8080/mcp",
+  "headers": { "Authorization": "Bearer <token>" } }
 ```
 
-值见内部凭据笔记。忘记注入 → 构建产物 `PASSWORD=''` → 登录全被拒。**当前 `web/dist/` 是 8-23 的旧构建，未含此改动**——只要不重建前端，行为保持不变。
+**Web UI**：登录框输入的就是这个 token，前端拿它调一次 `/api/stats` 验证（不再有构建期
+注入 —— 也就没有"忘记注入导致登录全被拒"那个失败模式了）。
+
+**前端重建**（无秘密注入，直接构建）：
+```bash
+cd extensions/memory/web && bun run build
+```
+
+**⚠️ 仍建议叠加安全组**：token 是纵深防御，不是唯一防线。端口暴露面越窄越好。
 
 ## 7. 常用运维
 

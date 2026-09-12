@@ -393,7 +393,7 @@ async function main() {
   // Memory MCP Server — Python source + frontend + skills
   // Skip wheels/ (183MB), model/ (88MB), docker images, temp files
   for (const f of [
-    'server.py', 'store.py', 'search_engine.py', 'api.py', 'tokenizer.py', 'normalize.py',
+    'server.py', 'store.py', 'search_engine.py', 'api.py', 'auth.py', 'tokenizer.py', 'normalize.py',
     'requirements.txt', 'Dockerfile', 'docker-compose.yml', 'config.example.json', '.dockerignore',
   ]) {
     copy(`extensions/memory/${f}`, `memory/${f}`)

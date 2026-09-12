@@ -20,6 +20,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from auth import BearerAuthMiddleware, resolve_token
 from normalize import apply_tag_mapping
 from search_engine import hybrid_search
 from store import MemoryStore, _compute_hash
@@ -741,6 +742,9 @@ def main() -> None:
 
     global store
 
+    # stdio transport has no network surface, so auth applies only to HTTP.
+    auth_token = resolve_token() if args.transport != "stdio" else None
+
     print(f"[memory-mcp] Opening database: {args.db_path}", file=sys.stderr)
     store = MemoryStore(args.db_path)
     caps = store.get_capabilities()
@@ -803,6 +807,12 @@ def main() -> None:
                 Route("/health", endpoint=health),
             ],
         )
+
+        # Wrap the whole router: the MCP endpoint is raw ASGI (not a FastAPI
+        # route), so middleware added inside the app would not see it.
+        if auth_token is not None:
+            app = BearerAuthMiddleware(app, auth_token)
+            print("[memory-mcp] Authentication enabled (bearer token required).", file=sys.stderr)
 
         print(f"[memory-mcp] Streamable HTTP server listening on {args.host}:{args.port}", file=sys.stderr)
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
