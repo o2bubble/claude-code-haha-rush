@@ -1,4 +1,4 @@
-import { authHeaders, clearToken } from './auth';
+import { authHeaders, notifyUnauthorized } from './auth';
 
 const BASE = '/api';
 
@@ -8,10 +8,11 @@ async function request(path, options = {}) {
     headers: authHeaders({ 'Content-Type': 'application/json', ...(options.headers || {}) }),
   });
   if (res.status === 401) {
-    // The stored token was rejected (rotated server-side, say). Drop it and
-    // reload so the login gate re-renders instead of leaving a dead session.
-    clearToken();
-    window.location.reload();
+    // Drop the rejected token and let the auth layer re-render the login gate.
+    // Do NOT reload here: the data-loading effects run regardless of auth, so
+    // a reload would re-issue the same 401 forever (observed as an endless
+    // refresh loop). Clearing the token flips the auth state instead.
+    notifyUnauthorized();
     throw new Error('Unauthorized');
   }
   if (!res.ok) {

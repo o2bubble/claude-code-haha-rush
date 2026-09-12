@@ -33,6 +33,25 @@ export function clearToken() {
   }
 }
 
+// A rejected request (401) surfaces in the API layer, but the auth *state* lives
+// in App. Reloading the page there is wrong — the data effects run regardless of
+// auth, so the reload re-issues the same 401 and loops forever (this shipped once
+// and produced an endless refresh). Instead the API layer notifies a subscriber
+// that owns the state, and that subscriber renders the login gate.
+let unauthorizedHandler = null;
+
+export function onUnauthorized(handler) {
+  unauthorizedHandler = handler;
+  return () => {
+    if (unauthorizedHandler === handler) unauthorizedHandler = null;
+  };
+}
+
+export function notifyUnauthorized() {
+  clearToken();
+  if (unauthorizedHandler) unauthorizedHandler();
+}
+
 /** Headers for every API call — carries the bearer token when we have one. */
 export function authHeaders(extra = {}) {
   const token = getToken();
