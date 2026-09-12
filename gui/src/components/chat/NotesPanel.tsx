@@ -19,6 +19,10 @@ interface NoteSummary {
   tags: string[];
   snippet?: string;
   updated_at: string;
+  /** Search-only: relevance hint (undefined for note_list results). */
+  score?: number;
+  /** Search-only: which retrieval path ran — "fts" or "like". */
+  strategy?: string;
 }
 
 interface ScopeNode { path: string; label: string; count: number; children: ScopeNode[]; }

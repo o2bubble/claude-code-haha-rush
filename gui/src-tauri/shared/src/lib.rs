@@ -7,6 +7,7 @@
 pub mod db;
 pub mod note;
 pub mod presence;
+pub mod tokenizer;
 
 pub use db::*;
 pub use note::*;

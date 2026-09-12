@@ -10,7 +10,7 @@
 use rusqlite::Connection;
 
 pub use claude_gui_shared::note::{
-    Note, NoteAssocInput, NoteInput, NoteSummary, NoteUpdate, TagCount,
+    Note, NoteAssocInput, NoteCreateResult, NoteInput, NoteSummary, NoteUpdate, TagCount,
 };
 
 /// Open the user-level notes DB (path overridable via `CLAUDE_GUI_NOTES_DB`).
@@ -20,7 +20,7 @@ pub fn open_notes_db() -> Result<Connection, String> {
 
 // ─── Commands (thin wrappers: open local conn → shared store) ───
 
-pub fn note_create(input: NoteInput) -> Result<Note, String> {
+pub fn note_create(input: NoteInput) -> Result<NoteCreateResult, String> {
     let conn = open_notes_db()?;
     claude_gui_shared::note::note_create(&conn, &input)
 }

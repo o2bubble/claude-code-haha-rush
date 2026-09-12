@@ -3817,7 +3817,7 @@ fn find_plugin_root(temp_dir: &std::path::Path) -> Result<std::path::PathBuf, St
 async fn note_create(
     server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
     input: notes::NoteInput,
-) -> Result<notes::Note, String> {
+) -> Result<notes::NoteCreateResult, String> {
     if let Some(client) = server_client_or(&server_state, "").await {
         match client.note_create(input.clone()).await {
             Ok(v) => return Ok(v),

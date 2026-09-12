@@ -79,9 +79,14 @@ async function handleMcpRequest(req: McpRequest): Promise<void> {
     // 所以无条件 await 即可 —— durability 语义归属 store，调用点零判断。
     await forceSaveDesktop();
 
-    // Notify NotesPanel if a note was mutated
+    // Notify NotesPanel if a note was mutated. note_create is two-phase: the
+    // pre-check returns conflict_detected having written nothing, so emitting
+    // there would make the panel reload its list for no reason.
     const NOTE_MUTATIONS = new Set(["note_create","note_update","note_delete","note_associate","note_disassociate","note_normalize_tags","note_apply_tag_mapping"]);
-    if (NOTE_MUTATIONS.has(toolName)) windowBus.emit(Events.NOTES_CHANGED, {});
+    const notePhaseWroteNothing = toolName === "note_create" &&
+      typeof result === "object" && result !== null &&
+      ["conflict_detected", "skipped", "rejected"].includes((result as { status?: string }).status ?? "");
+    if (NOTE_MUTATIONS.has(toolName) && !notePhaseWroteNothing) windowBus.emit(Events.NOTES_CHANGED, {});
 
     // MCP protocol: tools/call responses must be wrapped in { content: [...] }
     const responsePayload = method === "tools/call"
@@ -156,13 +161,13 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
           { name: "desktop_undo", description: "Undo the last operation on a desktop", inputSchema: { type: "object", properties: { desktopId: { type: "string" } }, required: ["desktopId"] } },
           { name: "desktop_redo", description: "Redo the last undone operation", inputSchema: { type: "object", properties: { desktopId: { type: "string" } }, required: ["desktopId"] } },
           // ── Notes tools ──
-          { name: "note_create", description: "Create a note. Scope: global (default), domain:<name>, or project:<name>.", inputSchema: { type: "object", properties: { title: { type: "string" }, content: { type: "string" }, scope: { type: "string" }, tags: { type: "array", items: { type: "string" } } }, required: ["title", "content"] } },
+          { name: "note_create", description: "Create a note (two-phase). WITHOUT `action`: the server checks for similar notes and either stores directly ({status:'stored'}) or returns {status:'conflict_detected', candidates:[...]} WITHOUT persisting — then re-call with action=store|update|merge|skip plus target_ids/merged_content. Ignoring a conflict_detected response leaves the note unstored. Scope: global (default), domain:<name>, or project:<name>.", inputSchema: { type: "object", properties: { title: { type: "string" }, content: { type: "string" }, scope: { type: "string" }, tags: { type: "array", items: { type: "string" } }, action: { type: "string", enum: ["store", "update", "merge", "skip"], description: "Decision action, used to resolve a conflict_detected response. store=create anyway; update=overwrite target; merge=fold targets into the first and delete the rest; skip=nothing persisted" }, target_ids: { type: "array", items: { type: "string" }, description: "Target note ids for update/merge (required for both)" }, merged_content: { type: "string", description: "Content for update/merge; defaults to `content`" } }, required: ["title", "content"] } },
           { name: "note_update", description: "Update a note. Only provided fields are changed. tags replaces all tags.", inputSchema: { type: "object", properties: { id: { type: "string" }, title: { type: "string" }, content: { type: "string" }, scope: { type: "string" }, tags: { type: "array", items: { type: "string" } } }, required: ["id"] } },
           { name: "note_delete", description: "Delete a note by ID", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
           { name: "note_get", description: "Get full note content + tags + associations", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
           { name: "note_list", description: "List notes, optionally filtered by scope or tag", inputSchema: { type: "object", properties: { scope: { type: "string" }, tag: { type: "string" }, limit: { type: "number" } } } },
-          { name: "note_search", description: "Search notes by text. Searches title, content, and tags; multiple whitespace-separated terms accumulate weight. Results ranked: exact/leading title match > partial title or tag match > content match. scope narrows to a scope (or scope* prefix).", inputSchema: { type: "object", properties: { query: { type: "string" }, scope: { type: "string" }, limit: { type: "number" } }, required: ["query"] } },
-          { name: "note_associate", description: "Link two notes", inputSchema: { type: "object", properties: { source_id: { type: "string" }, target_id: { type: "string" }, weight: { type: "number" }, type: { type: "string", enum: ["related_to","derived_from","contradicts","supports"] }, bidirectional: { type: "boolean" } }, required: ["source_id", "target_id"] } },
+          { name: "note_search", description: "Search notes by text (FTS5 + jieba word segmentation, BM25-ranked). Chinese queries match sub-words, so shorter distinctive terms work well; synonyms spread across separate calls are more effective than one long phrase. Each result carries `strategy` ('fts' or 'like') reporting which retrieval path ran. scope narrows to a scope, or a prefix when it ends with '*'.", inputSchema: { type: "object", properties: { query: { type: "string" }, scope: { type: "string" }, limit: { type: "number" } }, required: ["query"] } },
+          { name: "note_associate", description: "Link two notes. related_to / contradicts / supports are symmetric and derived_from is directed (source was learned from target). A single edge is already visible from both endpoints — do NOT create the mirror edge by swapping source/target, that renders the relation twice.", inputSchema: { type: "object", properties: { source_id: { type: "string" }, target_id: { type: "string" }, weight: { type: "number" }, type: { type: "string", enum: ["related_to","derived_from","contradicts","supports"] } }, required: ["source_id", "target_id"] } },
           { name: "note_tags", description: "List all tags with usage counts", inputSchema: { type: "object", properties: { scope: { type: "string" } } } },
           { name: "note_normalize_tags", description: "Normalize tags by grouping similar ones via LLM. Returns mapping of old→canonical tags.", inputSchema: { type: "object", properties: { dry_run: { type: "boolean" } } } },
           // ── Plugin tools ──
@@ -306,6 +311,9 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
         content: params.content as string,
         scope: (params.scope as string) || "global",
         tags: (params.tags as string[]) || [],
+        action: params.action as string | undefined,
+        target_ids: params.target_ids as string[] | undefined,
+        merged_content: params.merged_content as string | undefined,
       }});
 
     case "note_update":

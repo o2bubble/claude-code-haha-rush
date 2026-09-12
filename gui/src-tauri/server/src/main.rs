@@ -108,6 +108,18 @@ fn note_conn(ctx: &ServerCtx) -> Result<Arc<Mutex<rusqlite::Connection>>, ErrorO
     Ok(c)
 }
 
+/// The id of the note a `note_create` call actually touched, if any.
+/// `None` for the phases that persist nothing (pre-check, skip, reject).
+fn note_create_changed_id(result: &shared::note::NoteCreateResult) -> Option<String> {
+    use shared::note::NoteCreateResult as R;
+    match result {
+        R::Stored { note, .. } | R::Updated { note } | R::Merged { note, .. } => {
+            Some(note.id.clone())
+        }
+        R::ConflictDetected { .. } | R::Skipped { .. } | R::Rejected { .. } => None,
+    }
+}
+
 /// Broadcast a coarse "note changed" signal with the writer's origin so other
 /// GUIs refetch and the writer skips its own echo.
 fn note_changed(ctx: &ServerCtx, id: String, op: String, origin: String) {
@@ -435,9 +447,14 @@ fn build_module(ctx: ServerCtx) -> RpcModule<ServerCtx> {
                 params.parse::<(note::NoteInput, String,)>().map_err(|e| rpc_err(e.to_string()))?;
             let conn = note_conn(ctx)?;
             let db = conn.lock().unwrap();
-            let n = note::note_create(&*db, &input).map_err(|e| rpc_err(e))?;
-            note_changed(ctx, n.id.clone(), "upsert".into(), origin);
-            Ok::<_, ErrorObjectOwned>(n)
+            let result = note::note_create(&*db, &input).map_err(|e| rpc_err(e))?;
+            // Only phases that actually wrote may broadcast: the pre-check phase
+            // persists nothing, so signalling a change would make every GUI
+            // refetch its note list for no reason.
+            if let Some(id) = note_create_changed_id(&result) {
+                note_changed(ctx, id, "upsert".into(), origin);
+            }
+            Ok::<_, ErrorObjectOwned>(result)
         })
         .unwrap();
 

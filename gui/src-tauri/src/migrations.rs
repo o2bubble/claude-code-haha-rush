@@ -502,6 +502,15 @@ pub(crate) const MIGRATION_REGISTRY: &[MigrationEntry] = &[
         idempotent: "ALTER 失败即视为列已存在（SQLite 无版本表，用失败当守卫）",
         run: None,
     },
+    MigrationEntry {
+        name: "note_fts + note_meta（FTS5 索引）",
+        trigger: Trigger::LoadPath,
+        target: "笔记 DB 旧表结构 → 新增 FTS5 虚拟表与状态表，并回填已有笔记",
+        source: "../shared/src/note.rs::ensure_fts",
+        idempotent: "IF NOT EXISTS 建表；回填仅在「索引为空且笔记非空」或「分词引擎变更」时触发，\
+                     且 note_meta.fts_enabled='0' 的手动禁用不会被覆盖",
+        run: None,
+    },
 ];
 
 // ── 启动期汇总 ──
