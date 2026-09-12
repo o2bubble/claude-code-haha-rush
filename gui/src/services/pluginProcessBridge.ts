@@ -29,6 +29,26 @@ function notify() {
  *  本集合让它们互不打架。 */
 const _spawning = new Set<string>();
 
+/** 每个进程「启动时绑定的工作区」。`${workspace}` 在 spawn 那一刻展开后就固定了，
+ *  进程不会自己跟着切——所以切工作区后必须重启，否则插件仍对着旧仓库干活
+ *  （git-viewer 曾在无 git 仓库的工作区启动、切到仓库后依旧报
+ *  "not a git repository"，因为 syncPluginProcesses 只看进程在不在跑）。 */
+const _spawnedWorkspace = new Map<string, string>();
+
+/** 纯函数: 找出「在跑、但绑的是别的工作区」的进程 id——这些需要重启才能跟上。
+ *  工作区为 undefined（非 Tauri / 未绑定）时不做判断，避免误杀。 */
+export function selectProcessesToRebind(
+  current: PluginProcessInfo[],
+  spawnedWorkspace: ReadonlyMap<string, string>,
+  workspace: string | undefined,
+): string[] {
+  if (workspace === undefined) return [];
+  return current
+    .filter((p) => isProcessActive(p) && spawnedWorkspace.has(p.processId))
+    .filter((p) => spawnedWorkspace.get(p.processId) !== workspace)
+    .map((p) => p.processId);
+}
+
 /** 纯函数: 应用一条状态事件到进程列表。
  *  "removed" = 插件已卸载/禁用 → 删行(条目永久消失);
  *  其余状态(含 kill 的 "killed")保留条目——WorkerPanel 显示"已停止"且可 ↻ 重启。 */
@@ -101,9 +121,40 @@ export async function syncPluginProcesses(): Promise<void> {
   const { windowBus } = await import("./windowBus");
   const { Events } = await import("./events");
   if (!windowBus.hasSticky(Events.WORKSPACE_BOUND)) return; // 未绑定 → 等 WORKSPACE_BOUND
+
+  const workspace = await currentWorkspace();
+
+  // 先让「绑在别的工作区」的进程重启。必须在 selectProcessesToStart 之前做：
+  // 否则它们算「已在跑」而被跳过，会一直对着旧仓库服务。
+  const stale = selectProcessesToRebind(getPluginProcesses(), _spawnedWorkspace, workspace);
+  if (stale.length > 0) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    for (const id of stale) {
+      _spawning.add(id);
+      _spawnedWorkspace.delete(id);
+      try {
+        await invoke("kill_plugin_process_cmd", { processId: id });
+      } catch {
+        // 非 Tauri / 命令缺失 —— 忽略；下面的 selectProcessesToStart 仍会尝试拉起
+        _spawning.delete(id);
+      }
+    }
+    await refreshPluginProcesses();
+  }
+
   const { getActiveManifests } = await import("./pluginRegistry");
   const decls = selectProcessesToStart(getActiveManifests(), getPluginProcesses(), _spawning);
   if (decls.length > 0) await startPluginProcesses(decls);
+}
+
+/** 当前绑定的工作区（GUI settings 的 workDir）。非 Tauri 环境返回 undefined。 */
+async function currentWorkspace(): Promise<string | undefined> {
+  try {
+    const { getSettings } = await import("../stores/settingsStore");
+    return getSettings().workDir || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** 纯函数: 从活动 manifest 选出「该跑但没跑」的进程声明。
@@ -132,13 +183,7 @@ export async function startPluginProcesses(decls: PluginProcessDecl[]): Promise<
   const { invoke } = await import("@tauri-apps/api/core");
   const runtimeDirs = await aggregateRuntimeDirs();
   // 绑定工作区: GUIs settingsStore.workDir —— 展开 ${workspace} 用
-  let workspace: string | undefined;
-  try {
-    const { getSettings } = await import("../stores/settingsStore");
-    workspace = getSettings().workDir || undefined;
-  } catch {
-    // 非 Tauri 环境: undefined → 不展开
-  }
+  const workspace = await currentWorkspace();
   // 进程 cwd = 插件目录（args 相对路径如 git-viewer-server.cjs 在此解析——
   // 否则 node 以 GUI 安装目录为 cwd 找不到模块, 用户实测 MODULE_NOT_FOUND）。
   // 目标目录约定: <plugins base>/<pluginName>/。未拿到 base/pluginName → 不设(Rust 用默认 cwd)。
@@ -158,6 +203,8 @@ export async function startPluginProcesses(decls: PluginProcessDecl[]): Promise<
         env: buildPluginProcessEnv(decl.env, runtimeDirs, workspace),
         cwd: pluginProcessCwd(pluginsBase, decl.pluginName),
       });
+      // 记下绑定的工作区：下次 sync 时用它判断进程是否已过期
+      if (workspace !== undefined) _spawnedWorkspace.set(decl.id, workspace);
     } catch (e) {
       // 单个进程失败不拖垮其它
       _spawning.delete(decl.id);

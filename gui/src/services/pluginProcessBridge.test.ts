@@ -3,7 +3,7 @@
 // 测试直接调纯函数 (不 mock Tauri listen)。
 
 import { describe, it, expect } from "vitest";
-import { processStatusMeta, isProcessActive, buildPluginProcessEnv, pluginProcessCwd, selectProcessesToStart, applyProcessStatus } from "./pluginProcessBridge";
+import { processStatusMeta, isProcessActive, buildPluginProcessEnv, pluginProcessCwd, selectProcessesToStart, selectProcessesToRebind, applyProcessStatus } from "./pluginProcessBridge";
 import type { PluginManifest } from "./pluginRegistry";
 import type { PluginProcessInfo } from "./pluginProcessBridge";
 
@@ -67,8 +67,54 @@ describe("selectProcessesToStart — 重扫/绑定后的启动判定", () => {
   });
 
   it("handles manifests with no processes array (容错)", () => {
-    const bare = { pluginName: "empty" } as unknown as PluginManifest;
-    expect(selectProcessesToStart([bare], [], new Set())).toEqual([]);
+    expect(selectProcessesToStart([{ pluginName: "x" } as unknown as PluginManifest], [], new Set())).toEqual([]);
+  });
+});
+
+describe("selectProcessesToRebind — 切换工作区后需重启的进程", () => {
+  const map = (entries: Array<[string, string]>) => new Map(entries);
+
+  it("rebinds a running process spawned under a different workspace", () => {
+    // 场景来源：git-viewer 在无 git 仓库的工作区启动，切到仓库后仍在跑旧路径,
+    // 于是 /api/status 500 (not a git repository)。
+    const out = selectProcessesToRebind(
+      [running("git-viewer-server")],
+      map([["git-viewer-server", "C:/Users/MR/claude-code-workspace"]]),
+      "D:/Development/claude-code-haha-dev",
+    );
+    expect(out).toEqual(["git-viewer-server"]);
+  });
+
+  it("keeps a process already bound to the current workspace", () => {
+    const out = selectProcessesToRebind(
+      [running("git-viewer-server")],
+      map([["git-viewer-server", "D:/Development/claude-code-haha-dev"]]),
+      "D:/Development/claude-code-haha-dev",
+    );
+    expect(out).toEqual([]);
+  });
+
+  it("ignores processes that are not active (stale entries get respawned instead)", () => {
+    const out = selectProcessesToRebind(
+      [{ processId: "a-srv", status: "killed" }],
+      map([["a-srv", "C:/old"]]),
+      "D:/new",
+    );
+    expect(out).toEqual([]);
+  });
+
+  it("does not judge when the workspace is unknown (非 Tauri 保护, 避免误杀)", () => {
+    const out = selectProcessesToRebind(
+      [running("a-srv")],
+      map([["a-srv", "C:/old"]]),
+      undefined,
+    );
+    expect(out).toEqual([]);
+  });
+
+  it("ignores processes with no recorded spawn workspace (启动于本功能之前)", () => {
+    const out = selectProcessesToRebind([running("a-srv")], map([]), "D:/new");
+    expect(out).toEqual([]);
   });
 });
 
