@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { t } from "../../i18n";
+import { WindowControls, isWindowsChrome } from "../TitleBar";
 
 interface WorkspaceSelectorProps {
   workspaces: string[];
@@ -307,6 +308,8 @@ export function WorkspaceSelector({ workspaces, activeWorkDir, onLaunch }: Works
     else if (e.key === "Escape") { setAdding(false); setNewPath(""); }
   };
 
+  const chrome = isWindowsChrome();
+
   return (
     <div className="ws-launcher" data-od-id="workspace-launcher">
       <div className="ws-bg">
@@ -314,6 +317,26 @@ export function WorkspaceSelector({ workspaces, activeWorkDir, onLaunch }: Works
         <div className="ws-glow1" />
         <div className="ws-glow2" />
       </div>
+
+      {/* 自绘窗口按钮 + 拖动条（仅 Windows）。此页是全屏覆盖层，会盖住工具栏 ——
+          没有这组按钮用户就无从关闭/最小化窗口（启动后第一屏即此页）。
+
+          拖动区只覆盖顶部这一条，**不能用 `="deep"`**：卡片是 `div onClick`
+          （见下方 ws-card），不是 BUTTON，deep 会对它 preventDefault 把点击吞掉
+          （Tauri drag.js 只豁免 BUTTON/INPUT 等标签）。顶部这条是空白，
+          不存在可点内容。 */}
+      {chrome && (
+        <div
+          data-tauri-drag-region
+          style={{
+            position: "absolute", top: 0, left: 0, right: 0, height: 36,
+            display: "flex", alignItems: "center", justifyContent: "flex-end",
+            zIndex: 10,
+          }}
+        >
+          <WindowControls />
+        </div>
+      )}
 
       {/* 品牌语境面板 */}
       <div className="ws-rail" data-od-id="launcher-brand-rail">

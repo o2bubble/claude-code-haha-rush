@@ -163,6 +163,34 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
   —— 已上传云，9 组件 sha 全部核对一致；gui sha `b43b6005…`
 - **2026.09.13.3**（终端重复第二因：xterm 异步队列堆积 → 合并重绘；仅 gui）
   —— 已上传云，9 组件 sha 全部核对一致；gui sha `edd9fdbf…`
+- **2026.09.13.4**（Windows 自绘标题栏 + 工具栏收纳 + 布局预设更新；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `0f1c30b1…`
+
+### 2026-09-13 Windows 自绘标题栏（.13.4）
+把系统标题栏与工具栏合并成一条 36px（Windows 专属，mac 保留原生装饰）。
+完整文档见 `docs/gui/window-chrome.md`，四个必踩的坑：
+
+1. **`core:window:allow-start-dragging` 不在 `core:window:default` 里** ——
+   漏加会让所有 `data-tauri-drag-region` 静默失效（窗口拖不动），不报错
+2. **工具栏容器必须 `position: relative` + `z-index`** —— 否则被 `LayoutRenderer`
+   （它是定位元素）盖住；下拉自身的 zIndex 只在**自己堆叠上下文内**有效，救不了父级
+3. **全屏覆盖层必须自带窗口按钮** —— `WorkspaceSelector`(z1000) / `WelcomeWizard`
+   (z2000) 盖住工具栏后就无从关窗（无装饰窗口下工具栏是唯一入口）
+4. **`="deep"` 吞非 BUTTON 元素点击** —— 下拉菜单项是 `div onClick`，被
+   `preventDefault()` 吞掉（表现为"菜单显示正常但点不动"）。弹层一律加
+   `data-tauri-drag-region="false"` 豁免（`Toolbar.tsx` 的 `DROPDOWN_MENU_ATTRS`）
+
+**工具栏收纳架构**（`toolbarItems.ts` 单一数组，顺序即折叠优先级）：
+- **固定降级** `inMenuByDefault` —— 低频功能永远在应用菜单，与宽度无关
+- **响应式折叠** —— 窗口窄了按序折叠（`useToolbarCollapse`：ResizeObserver +
+  实测宽度缓存 + 80ms 防抖，**不持久化**）
+- 两者汇入同一个 `AppMenu`（`AppMark` 图标点开，跨平台）
+
+> ⚠️ **重构工具栏时的教训**：删 JSX 前先确认那个组件能不能用 `ToolbarItem`
+> 表达 —— 自带弹层的（布局预设/终端/模型/面板/权限）**必须固定渲染**。
+> 我把「布局预设」和「系统终端」删了却没换机制，直接丢失功能。
+> 单测覆盖不到"某组件不再渲染"，**改后要做一次渲染清单比对**
+> （`git show HEAD:file | grep` 对比 `<Component` 出现集合）。
 
 ### 2026-09-13 终端重复是**两个独立 bug**（重要区分）
 用户第一次报"命令和结果重复"→ 修了 store 层（.13.2）。用户复测后报"当前标签仍

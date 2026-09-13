@@ -373,7 +373,7 @@ pub fn run() {
             // folder — a shared default folder makes a second GUI instance's webview
             // fail with HRESULT 0x8007139F (process survives, but the webview never
             // loads → no window). Keying by PID isolates every instance.
-            let main_window = tauri::WebviewWindowBuilder::new(
+            let main_builder = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
                 tauri::WebviewUrl::App("index.html".into()),
@@ -385,8 +385,15 @@ pub fn run() {
             .data_directory(webview_data_dir(app.handle()))
             // 纵深防御：主窗口只允许应用自身 origin 导航，外部链接无法替换 GUI。
             // （点击 http(s) 链接由前端委托走 open_url_window 内置窗口打开）
-            .on_navigation(is_allowed_navigation)
-            .build()?;
+            .on_navigation(is_allowed_navigation);
+
+            // Windows: 自绘标题栏（前端 TitleBar 组件），关掉系统标题栏让工具栏
+            // 与标题栏合并成一条。mac 保留原生装饰 —— 红绿灯与系统整合更好，
+            // 且 Tauri 在 mac 上对无装饰窗口的处理方式不同（titleBarStyle 而非
+            // decorations(false)）。见 docs/gui/window-chrome.md。
+            #[cfg(windows)]
+            let main_builder = main_builder.decorations(false);
+            let main_window = main_builder.build()?;
 
             // Restore window position first (only if not maximized).
             // When maximized, the OS manages position — skip to avoid

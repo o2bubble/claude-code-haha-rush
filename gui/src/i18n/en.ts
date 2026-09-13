@@ -2,6 +2,12 @@ import type { Locale } from "./zh";
 
 const en: Locale = {
   toolbar: {
+    appMenu: "Application menu",
+    noMenuItems: "No menu items available",
+    windowMinimize: "Minimize",
+    windowMaximize: "Maximize",
+    windowRestore: "Restore Down",
+    windowClose: "Close Window",
     toggleLeftPanel: "Toggle Left Panel",
     toggleRightPanel: "Toggle Right Panel",
     toggleBottomPanel: "Toggle Bottom Panel",

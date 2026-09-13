@@ -1,5 +1,11 @@
 const zh = {
   toolbar: {
+    appMenu: "应用菜单",
+    noMenuItems: "没有可用的菜单项",
+    windowMinimize: "最小化",
+    windowMaximize: "最大化",
+    windowRestore: "向下还原",
+    windowClose: "关闭窗口",
     toggleLeftPanel: "切换左侧面板",
     toggleRightPanel: "切换右侧面板",
     toggleBottomPanel: "切换底部面板",

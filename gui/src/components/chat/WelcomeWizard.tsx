@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { t, setLanguage, getLanguage, type Language } from "../../i18n";
 import { getSettings } from "../../stores/settingsStore";
 import { withTimeout, DEFAULT_LOAD_TIMEOUT_MS } from "../../services/asyncUtils";
+import { WindowControls, isWindowsChrome } from "../TitleBar";
 import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 
@@ -954,6 +955,20 @@ export function WelcomeWizard({ onComplete }: WelcomeWizardProps) {
 
   return (
     <div style={C.overlay}>
+      {/* 自绘窗口按钮（仅 Windows）——覆盖层盖住工具栏，没有它无法关窗/最小化。
+          拖动区只取顶部一条：向导内多为 div onClick，deep 会吞掉点击。 */}
+      {isWindowsChrome() && (
+        <div
+          data-tauri-drag-region
+          style={{
+            position: "absolute", top: 0, left: 0, right: 0, height: 36,
+            display: "flex", alignItems: "center", justifyContent: "flex-end",
+            zIndex: 1,
+          }}
+        >
+          <WindowControls />
+        </div>
+      )}
       <div style={C.card}>
         {/* Step Indicator */}
         <div style={C.stepBar}>
