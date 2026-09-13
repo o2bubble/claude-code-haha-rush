@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useEvent, useEventHandler } from "../services/useService";
 import { Events, type ChatStateChangedPayload, type LayoutTreeChangedPayload, type LayoutFloatingChangedPayload, type CommandPaletteOpenPayload } from "../services/events";
-import { windowBus } from "../services/windowBus";
+import { windowBus, commandRegistry } from "../services/windowBus";
+import { Commands } from "../services/commands";
 import { togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
 import { getChatState } from "../stores/chatStore";
 import { switchSession } from "./chat/useChatBridge";
 import { ALL_PANEL_DEFS } from "../services/panelDefs";
 import type { PaletteItem } from "../utils/commandPaletteLogic";
-import { shouldOpenPalette } from "../utils/commandPaletteLogic";
 import { buildPanelItems, buildCommandItems, buildSessionItems, type SkillI18n } from "../utils/commandPaletteItems";
 import { buildEditorCommandItems } from "../utils/editorCommands";
 import { recordRecent, getRecent, sortByRecent } from "../utils/recentUsage";
@@ -55,16 +55,15 @@ export function useCommandPalette() {
     openPalette({ context: payload?.context, query: payload?.query });
   });
 
-  // 全局 F1 / Ctrl+Shift+P 快捷键（编辑器外）。焦点在 Monaco 内时跳过，交给 Monaco 处理。
+  // F1 / Ctrl+Shift+P 开面板 —— 键位由快捷键系统统一定义（services/shortcuts.ts），
+  // 这里只注册**动作**。"已打开时不重复触发"这个状态知识必须留在此处 ——
+  // 分发器不持有 `open`，交给它判会重复触发。
+  // Monaco / 输入框的让位逻辑在分发器的 shouldDispatch 里统一处理。
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const inMonaco = !!document.activeElement?.closest(".monaco-editor");
-      if (!shouldOpenPalette(e, open, inMonaco)) return;
-      e.preventDefault();
+    return commandRegistry.register(Commands.PALETTE_OPEN, () => {
+      if (open) return;
       openPalette({ context: "global" });
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    });
   }, [open, openPalette]);
 
   const close = useCallback(() => setOpen(false), []);

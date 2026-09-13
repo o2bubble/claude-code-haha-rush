@@ -31,6 +31,9 @@ export const Commands = {
   // Window
   WINDOW_TOAST: "window.toast",
 
+  // Palette
+  PALETTE_OPEN: "palette.open",
+
   // Desktop
   DESKTOP_CREATE: "desktop.create",
   DESKTOP_SWITCH: "desktop.switch",

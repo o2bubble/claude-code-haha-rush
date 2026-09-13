@@ -6,10 +6,12 @@ import { useEventHandler } from "../services/useService";
 import { Events } from "../services/events";
 import { t } from "../i18n";
 import { windowBus } from "../services/windowBus";
+import { entryKeysOf, matchesEvent } from "../services/shortcuts";
+import { isMacPlatform } from "../services/shortcutDispatcher";
+import { getSettings } from "../stores/settingsStore";
 import { getDesktops, addItem, findSmartPlace, loadDesktops, panToItem } from "../stores/desktopStore";
 import { setSelection } from "./desktop/selectionStore";
 import { activatePanel } from "../stores/layoutStore";
-import { getSettings } from "../stores/settingsStore";
 
 // ── Confirm overlay ──
 
@@ -506,9 +508,15 @@ function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath,
     const name = selectedPath.split(/[/\\]/).pop() || selectedPath;
     const isDir = rootEntries?.some((en) => en.path === selectedPath && en.isDir) ?? false;
 
+    // 键位从快捷键注册表读（不硬编码）—— 保证设置面板显示的键位与实际行为同源。
+    // 这两个是**上下文型**条目：生效条件（需先选中文件）由本组件负责，
+    // 注册表只管键位定义。isMac 决定 mod 映射到 Ctrl 还是 Cmd。
+    const isMac = isMacPlatform();
+    const shortcuts = getSettings().shortcuts;
+
     if (e.key === "Escape") {
       setSelectedPath(null);
-    } else if (e.ctrlKey && e.key === "c") {
+    } else if (matchesEvent(e, entryKeysOf("files.copyPath", shortcuts), isMac)) {
       e.preventDefault();
       navigator.clipboard.writeText(selectedPath).catch(() => {});
     } else if (e.key === "F2" && selectedPath) {
@@ -517,7 +525,7 @@ function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath,
     } else if (e.key === "Delete") {
       e.preventDefault();
       setDeleteTarget({ path: selectedPath, name: selectedPath.split(/[/\\]/).pop() || selectedPath });
-    } else if (e.ctrlKey && e.key === "v") {
+    } else if (matchesEvent(e, entryKeysOf("files.paste", shortcuts), isMac)) {
       e.preventDefault();
       try {
         const text: string = await invokeTauri("read_clipboard_text");

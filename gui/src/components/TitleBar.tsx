@@ -15,14 +15,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Minus, Square, X, Copy } from "lucide-react";
 import { t } from "../i18n";
+import { isWindowsPlatform } from "../utils/platform";
 
 /** 是否使用自绘窗口边框。仅 Windows —— mac 走原生装饰。 */
 export function isWindowsChrome(): boolean {
-  if (typeof navigator === "undefined") return false;
-  // userAgentData 优先（platform 在部分环境已弃用），回落到 platform
-  const uaData = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
-  const plat = (uaData?.platform || navigator.platform || "").toLowerCase();
-  return plat.includes("win");
+  return isWindowsPlatform();
 }
 
 /**

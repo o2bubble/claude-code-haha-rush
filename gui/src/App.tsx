@@ -21,6 +21,7 @@ import { Events, type BackendStateChangedPayload } from "./services/events";
 import { BackendService } from "./services/backendService";
 import { startSessionStatusSync } from "./services/sessionStatusSync";
 import { commandRegistry } from "./services/windowBus";
+import { startShortcutDispatcher } from "./services/shortcutDispatcher";
 import { Commands } from "./services/commands";
 import { toggleGroupHidden, restoreLayout, serializeLayout, getSkipSave, refreshAllTitles, activatePanel } from "./stores/layoutStore";
 import { openSettingsFloat, openHelpFloat, openDiagnosticsFloat } from "./components/Toolbar";
@@ -526,6 +527,14 @@ export default function App() {
     unregs.push(commandRegistry.register(Commands.BACKEND_RESTART, () => BackendService.restart()));
 
     return () => unregs.forEach((fn) => fn());
+  }, []);
+
+  // 快捷键分发器 —— 统一处理应用级快捷键（唯一真相源见 services/shortcuts.ts），
+  // 取代原先散落在 useCommandPalette 等处的 window keydown 监听。
+  // 用户覆盖配置从设置实时读取，改键后无需重启。
+  useEffect(() => {
+    const handle = startShortcutDispatcher(() => getSettings().shortcuts);
+    return () => handle.dispose();
   }, []);
 
   // ── Layout persistence: debounced save on layout changes ──

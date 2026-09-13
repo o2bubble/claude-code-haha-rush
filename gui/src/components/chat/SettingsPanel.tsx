@@ -10,6 +10,8 @@ import { t, setLanguage, getLanguage, type Language } from "../../i18n";
 import { DEFAULT_CONTEXT_WARNING_ENABLED, DEFAULT_CONTEXT_WARNING_PERCENT } from "../../utils/contextWarning";
 import { DEFAULT_STALL_WAKE_PROMPT } from "../../utils/streamStallDecision";
 import { EmptyState } from "../SharedStates";
+import { S } from "./settingsStyles";
+import ShortcutsPanel from "./ShortcutsPanel";
 import { useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
 import { crossWindowBus } from "../../services/crossWindowBus";
@@ -79,6 +81,7 @@ export const CATEGORIES: SettingCategory[] = [
   { id: "chat", i18nKey: "settings.catChat" },
   { id: "sessions", i18nKey: "settings.catSessions" },
   { id: "desktop", i18nKey: "settings.catDesktop" },
+  { id: "shortcuts", i18nKey: "settings.catShortcuts" },
   { id: "plugins", i18nKey: "settings.catPlugins" },
   { id: "skills", i18nKey: "settings.catSkills" },
   { id: "about", i18nKey: "settings.catAbout" },
@@ -86,48 +89,7 @@ export const CATEGORIES: SettingCategory[] = [
 
 // ── Styles ──
 
-const S = {
-  container: { display: "flex", height: "100%", fontFamily: "var(--font-sans)", fontSize: "calc(var(--font-scale, 1) * 12px)" } as React.CSSProperties,
-  sidebar: { width: 110, borderRight: "1px solid var(--border-light)", backgroundColor: "var(--bg-surface)", flexShrink: 0, paddingTop: 4 } as React.CSSProperties,
-  content: { flex: 1, display: "flex", flexDirection: "column", overflow: "auto" } as React.CSSProperties,
-  navBtn: (active: boolean): React.CSSProperties => ({
-    display: "flex", alignItems: "center", padding: "7px 12px", cursor: "pointer",
-    fontSize: "calc(var(--font-scale, 1) * 12px)", color: active ? "var(--accent)" : "var(--fg-primary)",
-    backgroundColor: active ? "var(--bg-active)" : "transparent",
-    borderLeft: active ? "2px solid var(--accent)" : "2px solid transparent",
-    fontWeight: active ? 600 : 400,
-  }),
-  header: { padding: "8px 12px", borderBottom: "1px solid var(--border-light)", fontWeight: 600, color: "var(--fg-primary)", fontSize: "calc(var(--font-scale, 1) * 13px)" } as React.CSSProperties,
-  form: { padding: "12px 16px", display: "flex", flexDirection: "column", gap: 14 } as React.CSSProperties,
-  label: { display: "block", marginBottom: 4, color: "var(--fg-secondary)", fontWeight: 500, fontSize: "calc(var(--font-scale, 1) * 11px)" } as React.CSSProperties,
-  select: { border: "1px solid var(--border-medium)", borderRadius: 4, padding: "4px 8px", fontSize: "calc(var(--font-scale, 1) * 12px)", fontFamily: "inherit", background: "var(--bg-root)" } as React.CSSProperties,
-  input: { border: "1px solid var(--border-medium)", borderRadius: 4, padding: "4px 8px", fontSize: "calc(var(--font-scale, 1) * 12px)", fontFamily: "inherit" } as React.CSSProperties,
-  row: { display: "flex", gap: 6 } as React.CSSProperties,
-  // 分组卡片：把「一组相关设置」圈起来，用于一页里存在多个独立来源/主题时
-  // （典型：插件页 —— 每个插件的设置各成一组）。单主题的扁平页不必用。
-  card: {
-    border: "1px solid var(--border-light)", borderRadius: 8,
-    backgroundColor: "var(--bg-surface)", padding: "12px 14px",
-    display: "flex", flexDirection: "column", gap: 10,
-  } as React.CSSProperties,
-  cardTitle: { display: "flex", alignItems: "baseline", gap: 8 } as React.CSSProperties,
-  cardTitleText: { fontWeight: 600, color: "var(--fg-primary)", fontSize: "calc(var(--font-scale, 1) * 13px)" } as React.CSSProperties,
-  cardTitleMeta: { color: "var(--fg-muted)", fontSize: "calc(var(--font-scale, 1) * 10px)" } as React.CSSProperties,
-  saveBar: { padding: "10px 16px", borderTop: "1px solid var(--border-light)", display: "flex", alignItems: "center", gap: 8 } as React.CSSProperties,
-  saveBtn: (color: string): React.CSSProperties => ({
-    padding: "5px 16px", border: "none", borderRadius: 4,
-    backgroundColor: color, color: "var(--fg-inverse)", cursor: "pointer",
-    fontSize: "calc(var(--font-scale, 1) * 12px)", fontFamily: "inherit", fontWeight: 500,
-  }),
-  // 「去设置」定位高亮：短暂背景闪烁，负 margin 抵消 padding 避免布局跳动
-  fieldFlash: (active: boolean): React.CSSProperties => ({
-    backgroundColor: active ? "var(--accent-subtle)" : "transparent",
-    borderRadius: 4,
-    padding: active ? "4px 6px" : "0",
-    margin: active ? "-4px -6px" : "0",
-    transition: "background-color 0.3s ease",
-  }),
-};
+// 样式见 ./settingsStyles（抽出供 ShortcutsPanel 等同级子页面复用）
 
 // ── Form field helpers ──
 
@@ -144,6 +106,55 @@ function IntField({ value, onChange, min, max }: { value: number; onChange: (v: 
     <input type="number" min={min} max={max} value={value}
       onChange={(e) => onChange(parseInt(e.target.value, 10) || min)}
       style={{ ...S.input, width: 72 }} />
+  );
+}
+
+/**
+ * 外部链接行（关于页的仓库地址）。
+ *
+ * 打开方式沿用项目既有约定（见 FeedbackDialog）：Tauri `plugin-shell.open`，
+ * 失败则回落 `window.open`。**两者都失败时把 URL 复制到剪贴板**并以
+ * `title` 提示 —— 比静默无反应好：用户至少能手动粘贴。
+ */
+function RepoLink({ label, url }: { label: string; url: string }) {
+  const [failed, setFailed] = useState(false);
+
+  const handleOpen = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-shell");
+      await open(url);
+      setFailed(false);
+    } catch {
+      try {
+        window.open(url, "_blank");
+        setFailed(false);
+      } catch {
+        try { await navigator.clipboard.writeText(url); } catch { /* 剪贴板也不可用 */ }
+        setFailed(true);
+      }
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "baseline", gap: 6, padding: "2px 0" }}>
+      <span style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-muted)", flexShrink: 0 }}>
+        {label}
+      </span>
+      <span
+        onClick={handleOpen}
+        title={failed ? t("settings.aboutOpenFailed") : url}
+        style={{
+          flex: 1, minWidth: 0,
+          fontSize: "calc(var(--font-scale, 1) * 11px)",
+          color: failed ? "var(--semantic-warning)" : "var(--accent)",
+          cursor: "pointer",
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          textAlign: "left",
+        }}
+      >
+        {url.replace(/^https?:\/\//, "")}
+      </span>
+    </div>
   );
 }
 
@@ -444,6 +455,21 @@ function CategoryContent({ cat, settings, update, flashField }: {
         <div style={S.form} />
       );
 
+    case "shortcuts":
+      return (
+        <ShortcutsPanel
+          overrides={settings.shortcuts}
+          onChange={(next) => {
+            // 改键**立即持久化**（不像其他字段等"保存"按钮）——
+            //  · 快捷键是明确的单次操作，用户按完就该生效并留存
+            //  · 若只写内存，用户不点保存就重启会丢失
+            //  · 范围固定 global：后端 AppSettings 无工作区级 shortcuts
+            void saveSettings({ shortcuts: next }, "global").catch(() => {});
+            update({ shortcuts: next });
+          }}
+        />
+      );
+
     case "files":
       return (
         <div style={S.form}>
@@ -609,6 +635,17 @@ function CategoryContent({ cat, settings, update, flashField }: {
           <div style={{ fontSize: "calc(var(--font-scale, 1) * 12px)", color: "var(--fg-secondary)", lineHeight: 1.8, maxWidth: 320 }}>
             {t("settings.aboutDescription")}
           </div>
+
+          {/* 源码仓库 —— gitee 是主仓库（日常 push 目标），github 是只读镜像
+              （github-clean 快照分支，见 scripts/sync-github-clean.sh）。 */}
+          <div style={{ marginTop: 20, width: "100%", maxWidth: 320 }}>
+            <div style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-muted)", marginBottom: 6 }}>
+              {t("settings.aboutRepos")}
+            </div>
+            <RepoLink label={t("settings.aboutRepoGitee")} url="https://gitee.com/randomlife/claude-code-haha-dev" />
+            <RepoLink label={t("settings.aboutRepoGithub")} url="https://github.com/o2bubble/claude-code-haha-rush" />
+          </div>
+
           <div style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-muted)", marginTop: 20 }}>
             {t("settings.aboutTechStack")}
           </div>
@@ -767,7 +804,17 @@ function SettingsPanelImpl() {
             <button onClick={() => setScope("global")} style={scopeBtnStyle(scope === "global")}>
               {t("settings.scopeGlobal")}
             </button>
-            <button onClick={() => setScope("workspace")} style={scopeBtnStyle(scope === "workspace")}>
+            {/* 快捷键仅支持全局范围 —— 后端 AppSettings 没有该字段、工作区合并也不含它，
+                选"工作区"会静默丢弃改键。这里直接禁用并用 title 说明原因。 */}
+            <button
+              onClick={() => { if (cat !== "shortcuts") setScope("workspace"); }}
+              disabled={cat === "shortcuts"}
+              title={cat === "shortcuts" ? t("settings.shortcutsGlobalOnly") : undefined}
+              style={{
+                ...scopeBtnStyle(cat === "shortcuts" ? false : scope === "workspace"),
+                ...(cat === "shortcuts" ? { opacity: 0.4, cursor: "not-allowed" } : {}),
+              }}
+            >
               {t("settings.scopeWorkspace")}
             </button>
           </div>

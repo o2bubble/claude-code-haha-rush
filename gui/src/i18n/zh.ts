@@ -121,8 +121,11 @@ const zh = {
     pluginsSaveScope: "保存范围",
     globalScope: "全局",
     workspaceScope: "工作区",
+    shortcutsGlobalOnly: "快捷键为全局设置，不支持按工作区保存",
     catSkills: "技能",
     catAbout: "关于",
+    catShortcuts: "快捷键",
+    // 快捷键面板（嵌套结构 —— t() 用 . 作路径分隔）
     // Editor
     editorFontSize: "字体大小",
     editorFontSizeDesc: "代码编辑器的文字像素大小",
@@ -192,7 +195,39 @@ const zh = {
     uiFontSizeDesc: "全局 UI 文字缩放百分比，松开滑块后生效",
     aboutDescription: "基于 Claude Code 2026-03-31 泄露源码修复的本地可运行版本，使用 Bun + React Ink + Tauri 2 构建的桌面 GUI。",
     aboutTechStack: "Bun · React · Ink · Tauri 2 · Monaco · xterm.js · SQLite",
+    aboutRepos: "源码仓库",
+    aboutRepoGitee: "Gitee（主仓库）",
+    aboutRepoGithub: "GitHub（镜像）",
+    aboutOpenFailed: "无法打开链接，已复制到剪贴板",
   },
+
+  shortcuts: {
+    group: {
+      global: "全局",
+      layout: "布局",
+      notes: "笔记",
+      files: "文件",
+    },
+    item: {
+      paletteOpen: "打开命令面板",
+      paletteOpenAlt: "打开命令面板（备用键）",
+      hardRefresh: "硬刷新",
+      notesCreate: "新建笔记",
+      notesSearch: "搜索笔记",
+      notesToggleRaw: "切换笔记原始模式",
+      filesCopyPath: "复制文件路径",
+      filesPaste: "粘贴文件",
+    },
+    recording: "按下键位…（Esc 取消）",
+    unbound: "未绑定",
+    resetOne: "恢复默认",
+    resetAll: "全部恢复默认",
+    conflictWarning: "有 {count} 组键位冲突（按列表顺序，靠前者优先）",
+    notBindable: "「{keys}」是局部交互键（如回车/取消/方向键），不能设为快捷键",
+    contextualBadge: "（有上下文条件）",
+    hint: "点击键位后按下新组合即可修改；带「有上下文条件」的快捷键只在特定面板生效，故不可修改。",
+  },
+
   workspace: {
     title: "选择工作区",
     subtitle: "选择一个目录，进入 Claude Code Desktop",

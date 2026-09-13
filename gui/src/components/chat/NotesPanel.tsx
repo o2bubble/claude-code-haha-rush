@@ -4,6 +4,9 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Search, Filter, ArrowLeft, X, ChevronRight, ChevronDown } from "lucide-react";
 import { t } from "../../i18n";
 import { addStatusMessage } from "../../stores/statusMsgStore";
+import { entryKeysOf, matchesEvent } from "../../services/shortcuts";
+import { isMacPlatform } from "../../services/shortcutDispatcher";
+import { getSettings } from "../../stores/settingsStore";
 import { useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
 import { windowBus } from "../../services/windowBus";
@@ -506,7 +509,9 @@ export default function NotesPanel() {
     showCtxMenu(e.clientX, e.clientY, items);
   };
 
-  // ── 快捷键（Ctrl+N / Ctrl+K / Esc）——仅在笔记面板内或非编辑态触发，避免劫持其他面板 ──
+  // ── 快捷键（新建 / 搜索 / Esc）——仅在笔记面板内或非编辑态触发，避免劫持其他面板。
+  //    键位从快捷键注册表读（上下文型条目），保证设置面板显示的键位与实际行为同源。
+  //    生效条件（面板内、非编辑态）由本组件负责 —— 注册表只管键位定义。 ──
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -514,8 +519,10 @@ export default function NotesPanel() {
       const editingElsewhere = !!target.closest?.("input, textarea, [contenteditable='true'], .ProseMirror") && !inNotes;
       if (editingElsewhere) return;
       const k = e.key.toLowerCase();
-      if ((e.ctrlKey || e.metaKey) && k === "n") { e.preventDefault(); handleCreate(); }
-      else if ((e.ctrlKey || e.metaKey) && k === "k") { e.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
+      const isMac = isMacPlatform();
+      const ov = getSettings().shortcuts;
+      if (matchesEvent(e, entryKeysOf("notes.create", ov), isMac)) { e.preventDefault(); handleCreate(); }
+      else if (matchesEvent(e, entryKeysOf("notes.search", ov), isMac)) { e.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
       else if (k === "escape") {
         if (filterOpen) setFilterOpen(false);
         else if (selectedIds.size > 0) setSelectedIds(new Set());

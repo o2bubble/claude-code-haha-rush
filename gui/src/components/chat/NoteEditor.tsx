@@ -3,6 +3,9 @@ import { createPortal } from "react-dom";
 import { Bold, Italic, Strikethrough, Code, Heading1, Heading2, Heading3, List, ListOrdered, Quote, Table, MoreHorizontal, Minus, Link, X } from "lucide-react";
 import { t } from "../../i18n";
 import { windowBus } from "../../services/windowBus";
+import { entryKeysOf, matchesEvent } from "../../services/shortcuts";
+import { isMacPlatform } from "../../services/shortcutDispatcher";
+import { getSettings } from "../../stores/settingsStore";
 import { Events } from "../../services/events";
 import { showCtxMenu } from "../ContextMenu";
 
@@ -133,10 +136,12 @@ export function NoteEditor({ note, scopeOptions, saveState, onChange, onDelete, 
     onChange({ ...note, ...patch });
   }, [note, onChange]);
 
-  // ── Ctrl+E: toggle raw / WYSIWYG ──
+  // ── 切换原始 / WYSIWYG 模式。键位从快捷键注册表读（上下文型条目），
+  //    生效条件（编辑器挂载中）由本组件负责。 ──
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "e") {
+      const ov = getSettings().shortcuts;
+      if (matchesEvent(e, entryKeysOf("notes.toggleRaw", ov), isMacPlatform())) {
         e.preventDefault();
         setRawMode((r) => !r);
       }

@@ -9,7 +9,9 @@ import { WindowControls, isWindowsChrome } from "./TitleBar";
 import { AppMenu } from "./AppMenu";
 import { useToolbarCollapse } from "./useToolbarCollapse";
 import { partitionItems, type ToolbarItem } from "./toolbarItems";
-import { updateSettings, saveSettings } from "../stores/settingsStore";
+import { DEFAULT_SHORTCUTS, resolveBindings, displayKeys } from "../services/shortcuts";
+import { isMacPlatform } from "../services/shortcutDispatcher";
+import { updateSettings, saveSettings, getSettings } from "../stores/settingsStore";
 import { workspaceBasename } from "../utils/workspace";
 import { isDarkTheme } from "../utils/themeUtils";
 import { t } from "../i18n";
@@ -30,6 +32,20 @@ function isVisible(groupId: string): boolean {
   const parent = findParentSplit(getTree(), groupId);
   if (!parent) return true;
   return parent.split.sizes[parent.index] > 0;
+}
+
+/**
+ * 查某个功能的当前键位（供菜单提示显示）。
+ *
+ * **从快捷键注册表读，不硬编码** —— 用户在设置里改键后提示自动跟随，
+ * 不会出现"菜单写着 Ctrl+R 但实际绑了别的键"。返回 `undefined` 表示
+ * 该功能无快捷键（下拉菜单项就不显示灰字）。
+ */
+function shortcutFor(id: string): string | undefined {
+  const overrides = getSettings().shortcuts;
+  const e = resolveBindings(DEFAULT_SHORTCUTS, overrides).find((x) => x.id === id);
+  if (!e || !e.keys) return undefined;
+  return displayKeys(e.keys, isMacPlatform());
 }
 
 const PERM_MODES = [
@@ -1011,7 +1027,9 @@ export default function Toolbar() {
     { id: "theme", label: isDark ? t("toolbar.switchToLight") : t("toolbar.switchToDark"),
       icon: isDark ? <Sun size={14} /> : <Moon size={14} />, onClick: toggleTheme,
       inMenuByDefault: true },
-    { id: "hardRefresh", label: t("toolbar.hardRefresh"), shortcut: "Ctrl+R",
+    { id: "hardRefresh", label: t("toolbar.hardRefresh"),
+      // 从快捷键注册表读 —— 唯一真相源。用户在设置里改了键，菜单提示自动跟随。
+      shortcut: shortcutFor("app.hardRefresh"),
       icon: <RefreshCw size={14} />, onClick: () => window.location.reload(),
       inMenuByDefault: true },
     { id: "layoutMode", label: t("toolbar.layoutMode"), icon: <Grid3x3 size={14} />,
@@ -1019,7 +1037,9 @@ export default function Toolbar() {
     // profile 管理不在这里 —— 已归入模型下拉（模型相关的设置聚在一处）
     { id: "update", label: t("update.title"), icon: <Download size={14} />,
       onClick: openUpdateFloat, hasBadge: hasUpdate, inMenuByDefault: true },
-    { id: "help", label: t("help.title"), shortcut: "F1", icon: <HelpCircle size={14} />,
+    // 帮助原先标着 shortcut: "F1" —— 但 F1 是**命令面板**不是帮助，是错误提示。
+    // 快捷键表里也没有"帮助"这个功能，故不显示（显示错的比不显示更糟）。
+    { id: "help", label: t("help.title"), icon: <HelpCircle size={14} />,
       onClick: openHelpFloat, inMenuByDefault: true },
     { id: "diagnostics", label: t("toolbar.diagnostics"), icon: <Stethoscope size={14} />,
       onClick: openDiagnosticsFloat, inMenuByDefault: true },
