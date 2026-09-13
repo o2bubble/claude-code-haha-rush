@@ -3035,21 +3035,28 @@ fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch:
     } else {
         work_dir.clone()
     };
-    // 转义 work_dir 供 bash 引号内使用，再整体作为 AppleScript 字符串字面量转义。
-    // 两层：`"` → `\"`（AppleScript 字面量），`\` → `\\`（保持 bash 路径原样）。
-    let work = target_dir.replace('\\', "\\\\").replace('"', "\\\"");
+    // 转义策略：路径用 **bash 单引号**包裹，而不是双引号。
+    //
+    // 为什么不能用双引号：整段 bash 命令最终要嵌进 AppleScript 字符串字面量
+    //（`do script "..."`）。路径外层若也用 `"`，这对引号会**提前闭合** AppleScript
+    // 的字面量 → osascript 报 `-2741 syntax error: 预期是行的结尾，却找到"`。
+    // 早先的写法正是如此（先转义 `"`→`\"`，再拼上**未转义**的 `"` 包裹），
+    // 所以 mac 上「打开终端」必现失败。
+    //
+    // 单引号不参与 AppleScript 字面量，天然规避；bash 侧单引号内除 `'` 外无特殊
+    // 字符，只需把路径里的 `'` 按 `'\''` 转义（与 update.rs 的 osascript 提权同思路）。
+    let work = target_dir.replace('\'', "'\\''");
     let body = if launch {
-        format!("cd \"{}\" && CLAUDE_CODE_SKIP_PROMPT_HISTORY=true claude", work)
+        format!("cd '{}' && CLAUDE_CODE_SKIP_PROMPT_HISTORY=true claude", work)
     } else {
-        format!("cd \"{}\"", work)
+        format!("cd '{}'", work)
     };
     let script = format!(
         "tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{}\"",
         body
     );
-    // 用 .output() 而非 .spawn()：osascript 可能因 macOS 自动化权限(TCC)被拒而返回
-    // 非零退出码，但 spawn 不检查 → Rust 谎报 Ok、前端也以为成功，实际终端没开。
-    // 检查退出码，权限被拒(-1743)时给用户可读错误。
+    // 用 .output() 而非 .spawn()：osascript 会因权限被拒(TCC)返回非零退出码，
+    // 而 spawn 不检查 → Rust 谎报 Ok、前端也以为成功，实际终端没开。
     let out = Command::new("osascript")
         .arg("-e")
         .arg(&script)
@@ -3057,8 +3064,20 @@ fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch:
         .map_err(|e| format!("Failed to run osascript: {}", e))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
+        // 按错误码区分原因 —— 早先不管什么错都提示"权限未授权"，而 AppleScript
+        // 语法错(-2741)与权限拒绝(-1743)是完全不同的问题，误导排查方向。
+        // 错误码见 AppleScript 错误约定：-2741 = 语法错，-1743 = 用户未授权。
+        let hint = if stderr.contains("-1743") || stderr.contains("-600") {
+            "（macOS「自动化」权限未授权 — 请到 系统设置→隐私与安全性→自动化，允许本 App 控制「终端」）"
+        } else if stderr.contains("-2741") || stderr.contains("syntax error") {
+            // 走到这里说明转义逻辑有 bug，而非用户环境问题
+            "（AppleScript 语法错误 — 这是应用内部 bug，请连同本条报错反馈）"
+        } else {
+            "（请查看上方 osascript 原始报错）"
+        };
+        log::warn!("open_system_terminal: osascript failed, script={script:?}");
         return Err(format!(
-            "osascript failed (exit {:?}): {}. 可能是 macOS「自动化」权限未授权 — 请到 系统设置→隐私与安全性→自动化 允许本 App 控制「终端」(Terminal)",
+            "osascript failed (exit {:?}): {} {hint}",
             out.status.code(),
             stderr.trim()
         ));
