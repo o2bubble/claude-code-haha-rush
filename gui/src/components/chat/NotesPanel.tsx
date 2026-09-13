@@ -422,7 +422,18 @@ export default function NotesPanel() {
   // ── 增删 ──
   const handleCreate = async () => {
     try {
-      const n = await invoke<NoteData>("note_create", { input: { title: t("notes.newTitle"), content: "", scope: "global", tags: [] } });
+      // **必须带 `action: "store"`** —— note_create 是两段式契约：
+      // 不带 action 时服务端先做相似度预检，命中就返回 `conflict_detected` 且
+      // **一个字节都不落库**（返回体里没有 id）。此前这里没检查 status，直接拿
+      // `n.id` → undefined → `setSelectedId(undefined)` → 界面毫无变化，
+      // 用户看到的就是"点新建没反应"。
+      //
+      // 而"点新建要个空白页"本来就不该走查重：空白笔记没有"重复"的语义，
+      // 冲突检测是给"AI 写入知识"用的。且小库（≤20 条）走 exempt 分支时
+      // 分数阈值被跳过，几乎必然误报 —— 库里只有 1 篇时新建必撞。
+      const n = await invoke<NoteData>("note_create", {
+        input: { title: t("notes.newTitle"), content: "", scope: "global", tags: [], action: "store" },
+      });
       addStatusMessage(t("notes.created"), "success");
       await loadList();
       setSelectedId(n.id);

@@ -322,7 +322,7 @@ async function main() {
   mkdirSync(join(DIST, 'scripts'), { recursive: true })
   const keepScripts = [
     'claude-profile.ts', 'install.ts', 'install-tools.ts',
-    'cdp-browser.ts', 'cdp-setup.ts', 'kill-claude.ts',
+    'kill-claude.ts',
     'memory-setup.ts', 'gui-profile.py', 'inject-office-bridge.ts',
   ]
   for (const f of keepScripts) {
@@ -737,14 +737,6 @@ async function main() {
     console.log('  IntelliJ extension')
   } else { console.warn('  [Warn] IntelliJ ZIP not found') }
 
-  // CDP Inspector (MCP server for browser debugging)
-  const cdpDir = join(ROOT, 'extensions', 'cdp-inspector')
-  if (existsSync(cdpDir)) {
-    mkdirSync(join(EXT_PKG, 'cdp-inspector'), { recursive: true })
-    cpSync(cdpDir, join(EXT_PKG, 'cdp-inspector'), { recursive: true })
-    console.log('  CDP Inspector')
-  } else { console.warn('  [Warn] CDP Inspector not found') }
-
   }
 
   // launcher scripts — at dist/ root (Windows .cmd；macOS 用 bin/ shell 脚本 + .app 自带启动)
@@ -761,12 +753,8 @@ async function main() {
       ') else (',
       '  echo [Error] bun.exe not found.',
       ')', ''],
-    'cdp-browser.cmd': ['@echo off', 'chcp 65001 >nul', 'setlocal',
-      '"%~dp0bun.exe" "%~dp0scripts\\cdp-browser.ts" %*', ''],
     'kill-claude.cmd': ['@echo off', 'chcp 65001 >nul', 'setlocal',
       '"%~dp0bun.exe" "%~dp0scripts\\kill-claude.ts" %*', ''],
-    'cdp-setup.cmd': ['@echo off', 'chcp 65001 >nul', 'setlocal',
-      '"%~dp0bun.exe" "%~dp0scripts\\cdp-setup.ts" %*', ''],
 
     'memory-setup.cmd': ['@echo off', 'chcp 65001 >nul', 'setlocal',
       '"%~dp0bun.exe" "%~dp0scripts\\memory-setup.ts" %*', ''],
@@ -796,9 +784,7 @@ async function main() {
       'cla': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" "$@"\n',
       'cla-bypass': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" --permission-mode bypassPermissions "$@"\n',
       'claude-profile': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/claude-profile.ts" "$@"; else echo "[Error] bun not found."; fi\n',
-      'cdp-browser': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/cdp-browser.ts" "$@"; else echo "[Error] bun not found."; fi\n',
       'kill-claude': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/kill-claude.ts" "$@"; else echo "[Error] bun not found."; fi\n',
-      'cdp-setup': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/cdp-setup.ts" "$@"; else echo "[Error] bun not found."; fi\n',
       'memory-setup': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/memory-setup.ts" "$@"; else echo "[Error] bun not found."; fi\n',
     };
     for (const [name, content] of Object.entries(unix)) {
@@ -945,7 +931,7 @@ async function main() {
     // mac launcher 也复制进 .app 根（跟 claude 二进制平级）——IDE 插件按平台找
     // 无扩展名 claude-ide（extension.ts:57 IDE_SCRIPT / intellij ProcessManager），
     // 否则 .app 里只有 claude 没有 claude-ide，mac IDE 找不到启动脚本。
-    for (const name of ['claude-ide', 'cla', 'cla-bypass', 'claude-profile', 'cdp-browser', 'kill-claude', 'cdp-setup', 'memory-setup']) {
+    for (const name of ['claude-ide', 'cla', 'cla-bypass', 'claude-profile', 'kill-claude', 'memory-setup']) {
       const srcP = join(DIST, name)
       if (existsSync(srcP)) {
         copyFileSync(srcP, join(appMacOS, name))
