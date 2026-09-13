@@ -1,7 +1,7 @@
 {
   "pluginName": "nodejs",
   "displayName": "Node.js 运行时环境",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "apiVersion": "1.0",
   "description": "为 GUI 插件进程与 AI Bash 提供共享的 Node.js LTS 运行时。安装后由 AI 按文档引导下载 Node 到本插件 runtime/ 目录，平台自动将其注册进程序内部 PATH（系统环境变量零改动）。后续插件声明 dependencies: [\"nodejs\"] 即可使用 node。",
   "icon": "package",
