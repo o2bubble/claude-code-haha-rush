@@ -901,8 +901,17 @@ async function main() {
   // 否则服务器 manifest 的 gui sha 与完整 .app 不符，客户端永远提示 gui 需更新。
   if (PLATFORM === 'macos') {
     const appMacOS = join(DIST, 'Claude Code.app', 'Contents', 'MacOS')
-    // gui 自身是 .app，不嵌；server 必须随 .app（GUI 从 current_exe 同目录找 claude-gui-server）
-    const embedDirs = ['claude', 'bun', 'bin', 'python', 'extensions', 'server']
+    // gui 自身是 .app，不嵌。
+    //
+    // ⚠️ `server` **不在** embedDirs 里 —— 它在 dist 下是**单文件**
+    // `claude-gui-server`（见上面 serverDistPath），不是同名目录。早先把 'server'
+    // 混在目录列表里 → `existsSync(dist/server)` 恒为假 → 只打一行 [Warn] 静默跳过
+    // → .app 里没有 server 二进制 → GUI 的 find_server_exe()（找 current_exe 同目录）
+    // 失败 → 诊断面板显示「GUI SERVER 已停止」。整个 GUI server 功能在 mac 上缺失。
+    //
+    // 教训：这里的"缺失"分支只 warn 不 fail，而 warn 混在长日志里没人看。
+    // 所以下面给 server 单独做**硬校验**（它是必须存在的，不是可选组件）。
+    const embedDirs = ['claude', 'bun', 'bin', 'python', 'extensions']
     for (const rel of embedDirs) {
       const srcP = join(DIST, rel)
       if (existsSync(srcP)) {
@@ -915,6 +924,23 @@ async function main() {
       } else {
         console.warn(`  [Warn] embed ${rel}: dist/${rel} missing, skipping`)
       }
+    }
+    // server 单文件：必须嵌入（GUI 启动时从 exe 同目录 spawn 它）。
+    {
+      const src = join(DIST, 'claude-gui-server')
+      if (!existsSync(src)) {
+        console.error(`  [Error] 缺少 GUI server 二进制: ${src}`)
+        console.error('          它在 dist 下叫 claude-gui-server（单文件，不是 server/ 目录）。')
+        console.error('          检查 build.ts 第 8.5 步的 GUI Server 构建是否被 --components 跳过。')
+        process.exit(1)
+      }
+      const run = spawnSync(['ditto', src, join(appMacOS, 'claude-gui-server')], { cwd: DIST, timeout: 600000 })
+      if (run.exitCode !== 0) {
+        console.error('  [Error] embed claude-gui-server failed:', run.stderr.toString())
+        process.exit(1)
+      }
+      spawnSync(['chmod', '+x', join(appMacOS, 'claude-gui-server')])
+      console.log('  embed claude-gui-server → .app/Contents/MacOS/')
     }
     // mac launcher 也复制进 .app 根（跟 claude 二进制平级）——IDE 插件按平台找
     // 无扩展名 claude-ide（extension.ts:57 IDE_SCRIPT / intellij ProcessManager），

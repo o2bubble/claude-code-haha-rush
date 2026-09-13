@@ -126,6 +126,98 @@ function clampMcpInt(v: unknown, def: number, min: number, max: number): number 
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+/**
+ * 跑一次 `run_cli_print` 并把 CLI 输出解析成 JSON。
+ *
+ * ⚠️ `run_cli_print` 是**两段式**契约，不是同步返回值：
+ *   ① `invoke("run_cli_print", { prompt, workDir })` 立即返回一个 `request_id`
+ *      （Rust 侧 spawn 后台线程跑 CLI，不阻塞）
+ *   ② CLI 结果经 `cli-translate-result` Tauri 事件回传，用 `request_id` 匹配
+ *
+ * 早先这里写成 `const result = await invoke("run_cli_print", { prompt })` 直接用
+ * 返回值 —— 两个错误叠在一起：缺必填的 `workDir`（invoke 直接报错），且即便补上，
+ * 拿到的也只是 request_id 而非输出。表现即 `note_normalize_tags` 必现失败
+ * （"missing required key workDir"）。
+ *
+ * @param wantKey 期望的顶层键名；缺失即报错（防模型返回别的 JSON 结构时静默拿到空对象）
+ * @param timeoutMs 超时保护 —— CLI 可能因无 profile / 网络问题一直不回事件
+ */
+async function runCliPrintForJson<T extends object>(
+  prompt: string,
+  wantKey: string,
+  timeoutMs = 120000,
+): Promise<T> {
+  const { getSettings } = await import("../stores/settingsStore");
+  const workDir = getSettings().workDir;
+  if (!workDir) throw new Error("工作区未绑定，无法调用 CLI");
+
+  type CliPayload = { request_id: string; ok: boolean; output?: string; error?: string };
+  const payload = await new Promise<CliPayload>((resolve, reject) => {
+    let unlisten: (() => void) | null = null;
+    let settled = false;
+    let wantId: string | null = null;   // invoke resolve 后填入
+    let early: CliPayload | null = null; // invoke 返回前先到的事件（极少见，防御性）
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      unlisten?.();
+      fn();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`CLI 超时（${Math.round(timeoutMs / 1000)}s 无响应）`))),
+      timeoutMs,
+    );
+
+    // 收到事件时的统一处理：id 未知就先存着（**只存第一个**，避免被后续陈旧事件覆盖），
+    // 已知则比对 —— 比对是必需的：上一次调用超时后遗留的迟到事件不能算到这一次头上。
+    const onEvent = (p: CliPayload) => {
+      if (settled) return;
+      if (wantId === null) { if (!early) early = p; return; }
+      if (p.request_id !== wantId) return;
+      finish(() => resolve(p));
+    };
+    const drainEarly = () => {
+      if (early && wantId !== null && early.request_id === wantId) {
+        const p = early;
+        finish(() => resolve(p));
+      }
+    };
+
+    // **先挂监听再 invoke**：CLI 极快完成时事件可能早于 invoke 的 resolve 到达
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<CliPayload>("cli-translate-result", (e) => onEvent(e.payload)))
+      .then((un) => {
+        unlisten = un;
+        if (settled) { un(); return; }  // 监听挂上前已解决 → 立刻注销，防泄漏
+        drainEarly();
+      })
+      .catch((e) => finish(() => reject(e)));
+
+    invoke<string>("run_cli_print", { prompt, workDir }).then(
+      (rid) => {
+        wantId = rid;
+        if (settled) return;
+        drainEarly();
+      },
+      (e) => finish(() => reject(e)),
+    );
+  });
+
+  if (!payload.ok) throw new Error(payload.error || "CLI 调用失败");
+  const text = payload.output || "";
+
+  // 从输出里抓第一个 JSON 对象（模型常带前后说明文字）
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("CLI 输出中未找到 JSON");
+  const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+
+  const value = parsed[wantKey];
+  if (value === undefined) throw new Error(`CLI 输出缺少 "${wantKey}" 字段`);
+  return value as T;
+}
+
 /** diff 截断: AI 上下文预算保护 —— 超 40K 字符截断并注记（可调 context 再看） */
 const DIFF_LIMIT = 40_000;
 function truncateDiff(diff: string): string {
@@ -374,12 +466,7 @@ Return ONLY valid JSON (no markdown, no explanation):
 Only include tags that need to be renamed. Tags that are already canonical should NOT appear in the mappings.`;
 
       try {
-        const result = await invoke<string>("run_cli_print", { prompt });
-        // Parse JSON from the result — extract first { ... } block
-        const jsonMatch = result.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error("No JSON found in response");
-        const parsed = JSON.parse(jsonMatch[0]);
-        const mappings: Record<string, string> = parsed.mappings || {};
+        const mappings = await runCliPrintForJson<Record<string, string>>(prompt, "mappings");
 
         if (!dryRun && Object.keys(mappings).length > 0) {
           await invoke("note_apply_tag_mapping", { mappings });
