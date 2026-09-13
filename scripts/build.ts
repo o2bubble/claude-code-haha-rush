@@ -777,15 +777,20 @@ async function main() {
     // macOS launcher：Unix shebang，跟 claude 二进制平级放 dist/ 根。IDE 插件
     // （vscode/intellij：extension.ts IDE_SCRIPT / intellij ProcessManager）按平台找
     // 无扩展名 claude-ide，此前 mac 分支零 launcher → mac IDE 找不到启动脚本。
-    // CLI 用 shebang 调 claude；bun 脚本用 bun 调 .ts。claude/claude-haha 不生成
-    // （会与 mac 的 claude 二进制同名冲突，命令行直接用二进制）。
+    // CLI 用 shebang 调 claude。claude/claude-haha 不生成（会与 mac 的 claude
+    // 二进制同名冲突，命令行直接用二进制）。
+    //
+    // ⚠️ **不生成依赖 `$DIR/scripts/*.ts` 的那三个**（claude-profile / kill-claude /
+    // memory-setup）：.app 的 Contents/MacOS/ 下**没有 `scripts/` 目录**
+    // （embedDirs 只含 claude/bun/bin/python/extensions，scripts 不打进去），
+    // 这几个 launcher 必然 `exec: .../scripts/xxx.ts: No such file` 跑不起来 ——
+    // 是纯死文件。且这三个功能在 mac 上都由 GUI 界面提供（Profile 管理 / 杀进程 /
+    // 记忆 MCP 配置），命令行入口对 mac 用户没有实际用途。
+    // （真机验证时发现，见 docs/macos-build-playbook.md。）
     const unix: Record<string, string> = {
       'claude-ide': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" --ide-mode "$@"\n',
       'cla': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" "$@"\n',
       'cla-bypass': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" --permission-mode bypassPermissions "$@"\n',
-      'claude-profile': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/claude-profile.ts" "$@"; else echo "[Error] bun not found."; fi\n',
-      'kill-claude': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/kill-claude.ts" "$@"; else echo "[Error] bun not found."; fi\n',
-      'memory-setup': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/memory-setup.ts" "$@"; else echo "[Error] bun not found."; fi\n',
     };
     for (const [name, content] of Object.entries(unix)) {
       const p = join(DIST, name)
@@ -931,7 +936,8 @@ async function main() {
     // mac launcher 也复制进 .app 根（跟 claude 二进制平级）——IDE 插件按平台找
     // 无扩展名 claude-ide（extension.ts:57 IDE_SCRIPT / intellij ProcessManager），
     // 否则 .app 里只有 claude 没有 claude-ide，mac IDE 找不到启动脚本。
-    for (const name of ['claude-ide', 'cla', 'cla-bypass', 'claude-profile', 'kill-claude', 'memory-setup']) {
+    // 列表与上面的 unix 生成清单保持一致（那三个依赖 scripts/*.ts 的已不再生成）。
+    for (const name of ['claude-ide', 'cla', 'cla-bypass']) {
       const srcP = join(DIST, name)
       if (existsSync(srcP)) {
         copyFileSync(srcP, join(appMacOS, name))
