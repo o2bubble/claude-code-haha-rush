@@ -1,1 +1,7 @@
 *.cmd text eol=crlf
+
+# shell 脚本强制 LF —— 本机 core.autocrlf=true 会把它们检出成 CRLF，
+# 而 CRLF 的 .sh 在 mac/Linux 上执行会报 `\r: command not found`（脚本装不上）。
+# `install-mac.sh` 正是要在 mac 上跑的（.25.6 实测踩到）。
+# Git Bash 两种行尾都接受，所以这里统一 LF 无副作用。
+*.sh text eol=lf

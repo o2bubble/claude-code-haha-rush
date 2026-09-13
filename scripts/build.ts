@@ -36,6 +36,32 @@ const SERVERDIR = join(GUILDIR, 'server')   // GUI server daemon (独立二进�
 const UPDDIR = join(ROOT, 'updater')
 const BIN_DIR = join(ROOT, 'bin')
 
+/**
+ * 打印 `cargo tauri build` 的失败详情。
+ *
+ * **必须打 stdout**：cargo-tauri 把 `beforeBuildCommand`（前端 `tsc && vite build`）
+ * 的报错写在 stdout，stderr 只有 "Info Looking up installed tauri packages..."
+ * 这类进度噪声。只打 stderr 会让日志变成
+ * `[Error] GUI build failed: Info Looking up...`，真正的类型错误全丢。
+ *
+ * 代价实例（2026-09-13）：.13.6 的 CI 失败，日志里看不到任何有用信息，
+ * 排查一轮才从"快照分支有改名前的孤儿文件"定位到根因。
+ *
+ * 取 stdout 的**尾部**（前端错误在最后），避免把几千行 vite 输出全刷进日志。
+ */
+function reportGuiBuildFailure(build: { stdout: Buffer | string; stderr: Buffer | string; exitCode: number | null }) {
+  const tail = (s: Buffer | string, n: number) =>
+    s.toString().split('\n').filter((l) => l.trim()).slice(-n).join('\n')
+  console.error(`[Error] GUI build failed (exit ${build.exitCode})`)
+  console.error('--- stdout (tail) ---')
+  console.error(tail(build.stdout, 40))
+  const err = tail(build.stderr, 15)
+  if (err) {
+    console.error('--- stderr (tail) ---')
+    console.error(err)
+  }
+}
+
 // 构建目标平台解析（macOS 移植 seam: planComponents 决定每组件怎么构建/是否打包）。
 // 默认自动检测当前 OS（Windows 构建行为与引入前完全一致；macOS 走平台分支）。
 // 可用 --platform <macos|windows> 显式覆盖——注意执行层命令平台绑定
@@ -224,7 +250,12 @@ async function main() {
       // mac: 出 .app bundle（beforeBuildCommand 编译前端）；dmg 由 CI/分发单独出
       const build = spawnSync(['cargo', 'tauri', 'build', '--bundles', 'app'], { cwd: GUILDIR, timeout: 600000 })
       if (build.exitCode !== 0) {
-        console.error('[Error] GUI build failed:', build.stderr.toString())
+        // ⚠️ 必须打 **stdout**：cargo-tauri 把 beforeBuildCommand 的输出
+        // （前端 `tsc && vite build` 的**类型错误**）写在 stdout，stderr 只有
+        // "Info Looking up installed tauri packages..." 这类进度噪声。
+        // 只打 stderr 会让 CI 日志变成 "GUI build failed: Info Looking up..."，
+        // 真正的报错全丢 —— .13.6 的 CI 失败因此排查了一轮才定位到根因。
+        reportGuiBuildFailure(build)
         process.exit(1)
       }
     } else {
@@ -232,7 +263,7 @@ async function main() {
       // --no-bundle: runs beforeBuildCommand (bun run build = 编译前端), compiles, skips MSI/DMG
       const build = spawnSync(['cargo', 'tauri', 'build', '--no-bundle'], { cwd: GUILDIR, timeout: 600000 })
       if (build.exitCode !== 0) {
-        console.error('[Error] GUI build failed:', build.stderr.toString())
+        reportGuiBuildFailure(build)
         process.exit(1)
       }
     }
