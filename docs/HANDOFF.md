@@ -174,6 +174,25 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
   —— 已上传云，9 组件 sha 全部核对一致；gui sha `f2ecc8d6…`
   —— 本版同时含 mac 侧修复（python 自包含 / server 内嵌 / 打开终端 / 菜单语言），
      但 mac 需 CI 单独构建，见下方「mac 真机验证发现的问题」条
+- **2026.09.13.8**（插件 runtime PATH 少一层 bin/ + 笔记列表宽度自适应；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `fd76b427…`
+
+### 2026-09-14 插件 runtime 的 PATH 注入少一层（mac 实测，影响 Windows 亦然）
+用户装 nodejs 插件后 mac 上 `node`/`npm`/`npx` 全不可用，**连带弄坏 playwright-mcp**
+（`"command": "npx"` 解析不到；即便用绝对路径跑 npx-cli.js，npx 子进程的
+shebang `#!/usr/bin/env node` 仍会失败）。
+
+**根因**：`aggregateRuntimePaths` 把 runtime 声明目录原样当 PATH 条目 ——
+Windows 发行版 `node.exe` 在解压根（命中），mac/Linux 按 Unix 惯例放 `bin/`（差一层）。
+**而 AI_NOTES.md 把缺陷记成了"macOS 已知限制 / 用绝对路径绕行"** —— 那是错的，
+设计意图本就写着「一个 runtime 声明覆盖 node/npm/npx」。
+
+**修法**：注入声明目录**及其 `bin/`**（存在才加；声明已以 `/bin` 结尾则不追加，
+防 `bin/bin`）。一处改动同时修好 A（claude.exe 启动自扫）与 B（GUI 推送）两条通道
+—— 它们共用此函数。Windows 侧 `runtime/bin` 不存在 → 行为不变。
+
+**可复用教训**：**别把实现缺陷当平台限制写进文档** —— 那会固化错误认知，
+后续 AI 会照着文档说"必须用绝对路径"，问题永远不被修。
 
 ### 2026-09-13 mac 真机验证发现的问题（6 个，全部已修）
 用户首次在 mac 真机跑 `.13.6`，点出 6 个问题。**其中 4 个是"必现且功能完全不可用"**

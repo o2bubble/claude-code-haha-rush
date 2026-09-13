@@ -135,7 +135,10 @@ function ensureNotesStyles() {
 .np-pop-sort button.active { border-color: var(--accent); background: var(--accent-subtle); color: var(--accent); font-weight: 600; }
 
 .np-body { flex: 1; min-height: 0; display: flex; }
-.np-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--border-light); display: flex; flex-direction: column; min-height: 0; }
+/* 列表宽度随面板收缩 —— 原固定 300px + flex-shrink:0 会把编辑器挤到 ~400px
+   不可读（面板总宽刚过 narrow 断点 640 时最明显）。面板宽时封顶 280px，
+   窄时按 24% 收缩，下限 180px（再窄由 .narrow 单栏模式接管）。 */
+.np-list { width: clamp(180px, 24%, 280px); flex-shrink: 0; border-right: 1px solid var(--border-light); display: flex; flex-direction: column; min-height: 0; }
 .np-editor { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .np-filter-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 10px; border-bottom: 1px solid var(--border-light); }
 .np-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; color: var(--accent); background: var(--accent-subtle); border: 1px solid var(--accent-glow); border-radius: 12px; padding: 2px 6px 2px 9px; }
