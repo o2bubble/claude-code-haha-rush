@@ -95,7 +95,11 @@ interface FileTreeProps {
 }
 
 const S = {
-  tree: { fontFamily: "var(--font-sans)", fontSize: "calc(var(--font-scale, 1) * 13px)", color: "var(--fg-primary)", padding: "4px 0" } as React.CSSProperties,
+  // 根：占满高度、竖向排列 —— 工具栏固定，内容区自己滚（见 S.scroll）
+  root: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, fontFamily: "var(--font-sans)", fontSize: "calc(var(--font-scale, 1) * 13px)", color: "var(--fg-primary)" } as React.CSSProperties,
+  toolbar: { display: "flex", alignItems: "center", gap: 2, padding: "2px 4px", borderBottom: "1px solid var(--border-light)", flexShrink: 0 } as React.CSSProperties,
+  // 树本体：唯一滚动区。外层 FileBrowserPanel 不再提供滚动。
+  scroll: { flex: 1, minHeight: 0, overflow: "auto", padding: "4px 0" } as React.CSSProperties,
   node: { display: "flex", alignItems: "center", padding: "2px 8px", cursor: "pointer", whiteSpace: "nowrap", userSelect: "none" } as React.CSSProperties,
   arrow: { width: 16, marginRight: 0, flexShrink: 0, fontSize: 10, textAlign: "center", transition: "transform 0.1s" } as React.CSSProperties,
   arrowOpen: { transform: "rotate(90deg)" } as React.CSSProperties,
@@ -558,16 +562,14 @@ function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath,
   return (
     <div
       ref={treeRef}
-      style={S.tree}
+      style={S.root}
       tabIndex={0}
       onKeyDown={onKeyDown}
       onContextMenu={onRootContextMenu}
     >
-      {/* Toolbar */}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 2,
-        padding: "2px 4px", borderBottom: "1px solid var(--border-light)",
-      }}>
+      {/* Toolbar —— 固定不滚动。滚动交给下方内容区（树很长时工具栏必须留在
+          视野内，否则新建/刷新要一路滚回顶部才能点到）。 */}
+      <div style={S.toolbar}>
         <button type="button" onClick={() => startCreate("file")} title={t("files.newFile")} aria-label={t("files.newFile")}
           style={toolBtn}><FilePlus size={14} /></button>
         <button type="button" onClick={() => startCreate("dir")} title={t("files.newFolder")} aria-label={t("files.newFolder")}
@@ -577,6 +579,8 @@ function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath,
           style={toolBtn}><RefreshCw size={14} /></button>
       </div>
 
+      {/* 滚动区：新建输入框与树都在这里 */}
+      <div style={S.scroll}>
       {/* New file/folder input */}
       {creating && (
         <div style={{ display: "flex", padding: "4px 8px", gap: 4, alignItems: "center" }}>
@@ -603,6 +607,8 @@ function _FileTree({ rootPath, showHidden, onOpenFile, forceRefresh, revealPath,
       {rootEntries && rootEntries.map((entry) => (
         <DirNode key={entry.path} entry={entry} depth={0} showHidden={showHidden} onOpenFile={onOpenFile} refreshParent={refreshRoot} rootPath={rootPath || ""} selectedPath={selectedPath} onSelect={setSelectedPath} treeVersion={treeVersion} revealPath={revealPath} revealNonce={revealNonce} />
       ))}
+      </div>
+
       {deleteTarget && (
         <ConfirmOverlay
           title={t("files.delete")}

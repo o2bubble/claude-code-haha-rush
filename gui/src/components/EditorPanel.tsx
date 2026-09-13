@@ -1,5 +1,5 @@
 import MonacoEditor from "./Editor";
-import { editorStore } from "../stores/editorStore";
+import { editorStore, isPreviewable } from "../stores/editorStore";
 import { detectLanguageLabel } from "../utils/detectLanguage";
 import { isMarkdownFile } from "../utils/markdownPreview";
 import { useEventHandler } from "../services/useService";
@@ -20,6 +20,12 @@ export function EditorPanel() {
   useEventHandler<FileChangedPayload>(Events.FILE_CHANGED, async ({ path }) => {
     const needsReload = editorStore.markExternalChanged(path);
     if (needsReload) {
+      // 预览类标签（图片/PDF/SVG）的 content 必须保持空 —— FilePreview 自己用
+      // read_bytes 加载。当文本读进来会得到乱码，还会污染 tabType 的语义。
+      if (isPreviewable(path)) {
+        editorStore.reloadContent(path, "");
+        return;
+      }
       try {
         const content = await fileService.readFile(path);
         editorStore.reloadContent(path, content);

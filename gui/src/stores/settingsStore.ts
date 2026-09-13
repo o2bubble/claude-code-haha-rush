@@ -65,7 +65,9 @@ export interface AppSettings {
     folders: Array<{ id: string; name: string; parentId?: string }>;
     assignments: Record<string, string>;
   };
-  /** 消息时间线导航栏开关(默认关, 需手动开启) */
+  /** 消息时间线导航栏开关(默认**开**)。
+   *  老用户由启动期迁移 `migrate_message_timeline_default_on` 补写实值；
+   *  用户手动关闭后写 false，迁移只补「字段缺失」故不会再翻回。 */
   messageTimeline?: boolean;
   /** 上下文告警开关(默认开): 已用百分比跨过阈值时弹浮动层提示 */
   contextWarningEnabled?: boolean;

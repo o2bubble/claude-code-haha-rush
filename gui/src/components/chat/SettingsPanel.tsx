@@ -103,6 +103,16 @@ const S = {
   select: { border: "1px solid var(--border-medium)", borderRadius: 4, padding: "4px 8px", fontSize: "calc(var(--font-scale, 1) * 12px)", fontFamily: "inherit", background: "var(--bg-root)" } as React.CSSProperties,
   input: { border: "1px solid var(--border-medium)", borderRadius: 4, padding: "4px 8px", fontSize: "calc(var(--font-scale, 1) * 12px)", fontFamily: "inherit" } as React.CSSProperties,
   row: { display: "flex", gap: 6 } as React.CSSProperties,
+  // 分组卡片：把「一组相关设置」圈起来，用于一页里存在多个独立来源/主题时
+  // （典型：插件页 —— 每个插件的设置各成一组）。单主题的扁平页不必用。
+  card: {
+    border: "1px solid var(--border-light)", borderRadius: 8,
+    backgroundColor: "var(--bg-surface)", padding: "12px 14px",
+    display: "flex", flexDirection: "column", gap: 10,
+  } as React.CSSProperties,
+  cardTitle: { display: "flex", alignItems: "baseline", gap: 8 } as React.CSSProperties,
+  cardTitleText: { fontWeight: 600, color: "var(--fg-primary)", fontSize: "calc(var(--font-scale, 1) * 13px)" } as React.CSSProperties,
+  cardTitleMeta: { color: "var(--fg-muted)", fontSize: "calc(var(--font-scale, 1) * 10px)" } as React.CSSProperties,
   saveBar: { padding: "10px 16px", borderTop: "1px solid var(--border-light)", display: "flex", alignItems: "center", gap: 8 } as React.CSSProperties,
   saveBtn: (color: string): React.CSSProperties => ({
     padding: "5px 16px", border: "none", borderRadius: 4,
@@ -134,6 +144,29 @@ function IntField({ value, onChange, min, max }: { value: number; onChange: (v: 
     <input type="number" min={min} max={max} value={value}
       onChange={(e) => onChange(parseInt(e.target.value, 10) || min)}
       style={{ ...S.input, width: 72 }} />
+  );
+}
+
+/**
+ * 设置分组卡片 —— 把「一组相关设置」圈成有边界的块。
+ *
+ * 用途：**一页里有多个独立来源/主题**时（插件页：每个插件各成一组；
+ * 未来若有其他同类页面复用它）。单主题的扁平表单页不需要 —— 那些页的
+ * 字段天然属于同一个上下文，加卡片反而是噪声。
+ */
+function SettingsCard({ title, meta, children }: {
+  title: string;
+  meta?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={S.card}>
+      <div style={S.cardTitle}>
+        <span style={S.cardTitleText}>{title}</span>
+        {meta && <span style={S.cardTitleMeta}>{meta}</span>}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>{children}</div>
+    </div>
   );
 }
 
@@ -170,8 +203,10 @@ function PluginSettingsPanel() {
   }
 
   return (
-    <div style={{ ...S.form, gap: 0 }}>
-      <div style={{ ...S.row, justifyContent: "space-between", marginBottom: 12 }}>
+    // 每个插件是一张卡片，间距交给 S.form 的 gap（原来 gap:0 + borderBottom
+    // 是靠下划线区分，插件多了像一整块表单）
+    <div style={S.form}>
+      <div style={{ ...S.row, justifyContent: "space-between" }}>
         <span style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-secondary)" }}>
           {t("settings.pluginsSaveScope")}
         </span>
@@ -195,48 +230,45 @@ function PluginSettingsSection({ manifest, scope }: { manifest: PluginManifest; 
   };
 
   return (
-    <div style={{ borderBottom: "1px solid var(--border-light)", padding: "14px 0" }}>
-      <div style={{ fontSize: "calc(var(--font-scale, 1) * 13px)", fontWeight: 600, color: "var(--fg-primary)" }}>
-        {manifest.displayName || manifest.pluginName}
-        <span style={{ marginLeft: 8, fontSize: "calc(var(--font-scale, 1) * 10px)", color: "var(--fg-muted)", fontWeight: 400 }}>v{manifest.version}</span>
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
-        {Object.entries(manifest.settings ?? {}).map(([id, def]) => (
-          <div key={id}>
-            <Label text={def.title} />
-            {def.type === "boolean" && (
-              <div style={{ marginTop: 2 }}>
-                <Toggle value={Boolean(values[id] ?? def.default ?? false)} onChange={(v) => setValue(id, v)} />
-              </div>
-            )}
-            {def.type === "string" && (
-              <input type="text"
-                value={String(values[id] ?? def.default ?? "")}
-                onChange={(e) => setValue(id, e.target.value)}
-                style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 2 }} />
-            )}
-            {def.type === "number" && (
-              <input type="number"
-                value={Number(values[id] ?? def.default ?? 0)}
-                min={def.min} max={def.max}
-                onChange={(e) => setValue(id, parseFloat(e.target.value) || 0)}
-                style={{ ...S.input, width: 96, marginTop: 2 }} />
-            )}
-            {def.type === "select" && (
-              <select
-                value={String(values[id] ?? def.default ?? def.options?.[0]?.value ?? "")}
-                onChange={(e) => setValue(id, e.target.value)}
-                style={{ ...S.select, marginTop: 2 }}>
-                {(def.options ?? []).map((o) => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
-            )}
-            {def.description && <FieldHint text={def.description} />}
-          </div>
-        ))}
-      </div>
-    </div>
+    <SettingsCard
+      title={manifest.displayName || manifest.pluginName}
+      meta={`v${manifest.version}`}
+    >
+      {Object.entries(manifest.settings ?? {}).map(([id, def]) => (
+        <div key={id}>
+          <Label text={def.title} />
+          {def.type === "boolean" && (
+            <div style={{ marginTop: 2 }}>
+              <Toggle value={Boolean(values[id] ?? def.default ?? false)} onChange={(v) => setValue(id, v)} />
+            </div>
+          )}
+          {def.type === "string" && (
+            <input type="text"
+              value={String(values[id] ?? def.default ?? "")}
+              onChange={(e) => setValue(id, e.target.value)}
+              style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 2 }} />
+          )}
+          {def.type === "number" && (
+            <input type="number"
+              value={Number(values[id] ?? def.default ?? 0)}
+              min={def.min} max={def.max}
+              onChange={(e) => setValue(id, parseFloat(e.target.value) || 0)}
+              style={{ ...S.input, width: 96, marginTop: 2 }} />
+          )}
+          {def.type === "select" && (
+            <select
+              value={String(values[id] ?? def.default ?? def.options?.[0]?.value ?? "")}
+              onChange={(e) => setValue(id, e.target.value)}
+              style={{ ...S.select, marginTop: 2 }}>
+              {(def.options ?? []).map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          )}
+          {def.description && <FieldHint text={def.description} />}
+        </div>
+      ))}
+    </SettingsCard>
   );
 }
 
@@ -531,7 +563,7 @@ function CategoryContent({ cat, settings, update, flashField }: {
           </div>
           <div>
             <Label text={t("settings.messageTimeline")} />
-            <Toggle value={settings.messageTimeline ?? false}
+            <Toggle value={settings.messageTimeline ?? true}
               onChange={(v) => update({ messageTimeline: v })} />
             <FieldHint text={t("settings.messageTimelineDesc")} />
           </div>

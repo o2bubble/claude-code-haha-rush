@@ -3,7 +3,7 @@ import type { ChatMessage } from "../../stores/chatStore";
 import { dedupTools } from "../../utils/dedupTools";
 import { parseReferences } from "../../utils/referenceParser";
 import { ReferenceLink } from "./ReferenceLink";
-import { editorStore } from "../../stores/editorStore";
+import { editorStore, isPreviewable } from "../../stores/editorStore";
 import { activatePanel } from "../../stores/layoutStore";
 import { fileService } from "../../services/fileService";
 import { getDesktops, addItem, findSmartPlace, panToItem } from "../../stores/desktopStore";
@@ -58,9 +58,17 @@ function ClickableFilePath({ path, style }: { path: string; style?: React.CSSPro
       style={{ ...style, cursor: "pointer", textDecoration: "underline", textDecorationColor: "var(--semantic-info)", textUnderlineOffset: 3 }}
       title={`Click to open: ${path}`}
       onClick={async () => {
+        const name = path.split(/[/\\]/).pop() || path;
+        // 二进制/预览类（图片、PDF、SVG）不能当文本读 —— 原先一律走 readFile
+        // 再 openFile，这类文件读出乱码或抛错，被 catch 静默吞掉，表现为
+        // "点了没反应"。改走 openPreview：EditorPanel 会挂 FilePreview 组件，
+        // 由它用 read_bytes 加载（见 editorStore.openPreview 的注释）。
+        if (isPreviewable(path)) {
+          editorStore.openPreview(path, name);
+          return;
+        }
         try {
           const content = await fileService.readFile(path);
-          const name = path.split(/[/\\]/).pop() || path;
           editorStore.openFile(path, name, content);
           activatePanel("editor");
         } catch { /* file not readable */ }
@@ -244,7 +252,7 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
   const isUser = message.role === "user";
   // 消息时间显示跟随「消息时间线」开关：关闭时连消息块时间也不展示
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
-  const showMsgTime = settingsPayload?.settings?.messageTimeline ?? false;
+  const showMsgTime = settingsPayload?.settings?.messageTimeline ?? true;
   const [html, setHtml] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const outputRefs = useRef<Map<string, HTMLPreElement>>(new Map());

@@ -65,7 +65,9 @@ export function FileBrowserPanel() {
       }}>
         {rootPath}
       </div>
-      <div style={{ flex: 1, overflow: "auto" }}>
+      {/* minHeight:0 + 不设 overflow —— 滚动交给 FileTree 内部的树区
+          （否则工具栏会跟着一起滚） */}
+      <div style={{ flex: 1, minHeight: 0 }}>
         <FileTree forceRefresh={treeKey} rootPath={rootPath} showHidden={showHidden} revealPath={reveal?.path ?? null} revealNonce={reveal?.nonce ?? 0} onOpenFile={async (p) => {
           const name = p.split(/[/\\]/).pop() || p;
           if (isPreviewable(p)) {

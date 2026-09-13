@@ -154,6 +154,58 @@ pub fn should_migrate_server_url(skill_registry_url: &str) -> bool {
     skill_registry_url.contains("localhost")
 }
 
+// ── 消息时间线：默认开启（一次性） ──
+
+/// 消息时间线功能已完善，改为**默认开启**让用户直接体验。
+///
+/// 由于它原先默认关闭，老用户的设置文件里**没有这个字段**（而不是 `false`）——
+/// 这正是本迁移的判定依据：
+///
+/// | 文件里的值 | 含义 | 动作 |
+/// |---|---|---|
+/// | 字段缺失 / `null` | 从未设过 | **写入 `true`**（本次迁移的目标） |
+/// | `true` | 已开启 | 不动 |
+/// | `false` | **用户手动关过** | **不动**（尊重选择，不再翻回） |
+///
+/// 幂等：迁移后字段已是 `true` → 不再匹配「缺失」分支 → no-op。
+///
+/// 直接操作 `gui` 段的 JSON 而不是 `AppSettings` 结构：只有这样才能区分
+/// 「字段缺失」与「显式 false」——`Option<bool>` 读出来都是可分辨的，但走
+/// 结构体写回会把 `None` 序列化成 `null`，白留噪声字段。
+///
+/// 路径可注入（单测用临时目录，绝不碰真实 `~/.claude`）。
+pub(crate) fn migrate_message_timeline_default_on() {
+    migrate_message_timeline_default_on_at(&crate::settings::global_settings_path());
+}
+
+pub(crate) fn migrate_message_timeline_default_on_at(path: &std::path::Path) {
+    let Some(mut gui) = crate::settings::read_gui_section(path) else {
+        // 没有设置文件 = 全新安装，前端默认值 `?? true` 已覆盖，无需写盘
+        return;
+    };
+    let Some(obj) = gui.as_object_mut() else { return };
+
+    // 仅在「键不存在」或「值为 null」时写入 —— 显式 false 绝不覆盖
+    let needs = match obj.get("messageTimeline") {
+        None => true,
+        Some(serde_json::Value::Null) => true,
+        Some(_) => false,
+    };
+    if !needs {
+        return;
+    }
+
+    obj.insert(
+        "messageTimeline".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    if let Err(e) = crate::settings::write_gui_section(path, &gui) {
+        log::warn!("migrate_message_timeline_default_on: write failed: {e}");
+        return;
+    }
+    log::info!("Migrated messageTimeline → true (was unset; explicit false is preserved)");
+}
+
 // ── DeepSeek 模型下线：已有 profile 合并 ──
 
 /// DeepSeek 官方已下线 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`
@@ -437,6 +489,14 @@ pub(crate) const MIGRATION_REGISTRY: &[MigrationEntry] = &[
         source: "migrations.rs",
         idempotent: "目标文件已存在即跳过",
         run: Some(migrate_legacy_profiles),
+    },
+    MigrationEntry {
+        name: "migrate_message_timeline_default_on",
+        trigger: Trigger::Startup,
+        target: "gui.messageTimeline 字段缺失 → 写入 true（该功能改为默认开启）",
+        source: "migrations.rs",
+        idempotent: "字段已是 true / false 即跳过；只补缺失，绝不覆盖用户手动关闭的 false",
+        run: Some(migrate_message_timeline_default_on),
     },
     MigrationEntry {
         name: "migrate_deepseek_profiles",
@@ -836,5 +896,93 @@ mod tests {
             !work.join(".claude").join("active-profile").exists(),
             "激活的是无关 profile → 不应写激活标记"
         );
+    }
+
+    // ── messageTimeline 默认开启迁移（临时目录，绝不碰真实 ~/.claude）──
+
+    fn mt_fixture(tag: &str, gui_json: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mt_mig_{}_{}", std::process::id(), tag));
+        let _ = std::fs::create_dir_all(&dir);
+        let settings = dir.join("settings.json");
+        let content = format!("{{\"gui\":{gui_json},\"env\":{{\"ANTHROPIC_MODEL\":\"keep-me\"}}}}");
+        let _ = std::fs::write(&settings, content);
+        settings
+    }
+
+    fn mt_gui(path: &std::path::Path) -> serde_json::Value {
+        read_gui_section(path).expect("gui section")
+    }
+
+    /// 字段缺失（老用户从未设过）→ 写入 true。
+    #[test]
+    fn mt_unset_becomes_true() {
+        let p = mt_fixture("unset", "{}");
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(mt_gui(&p)["messageTimeline"], serde_json::json!(true));
+    }
+
+    /// 显式 false（用户手动关过）→ 绝不动。
+    #[test]
+    fn mt_explicit_false_preserved() {
+        let p = mt_fixture("false", "{\"messageTimeline\":false}");
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(
+            mt_gui(&p)["messageTimeline"],
+            serde_json::json!(false),
+            "用户手动关闭后，迁移不得翻回 true"
+        );
+    }
+
+    /// 已是 true → 不动（幂等）。
+    #[test]
+    fn mt_already_true_noop() {
+        let p = mt_fixture("true", "{\"messageTimeline\":true}");
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(mt_gui(&p)["messageTimeline"], serde_json::json!(true));
+    }
+
+    /// null 等价于缺失 → 写入 true。
+    #[test]
+    fn mt_null_becomes_true() {
+        let p = mt_fixture("null", "{\"messageTimeline\":null}");
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(mt_gui(&p)["messageTimeline"], serde_json::json!(true));
+    }
+
+    /// 幂等：连跑两次结果一致。
+    #[test]
+    fn mt_idempotent() {
+        let p = mt_fixture("idem", "{}");
+        migrate_message_timeline_default_on_at(&p);
+        let first = mt_gui(&p);
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(first, mt_gui(&p));
+    }
+
+    /// 不碰其它字段（gui 内与 gui 外的都不能丢）。
+    #[test]
+    fn mt_preserves_other_keys() {
+        let p = mt_fixture("preserve", "{\"terminalMaxEntries\":42,\"theme\":\"dark\"}");
+        migrate_message_timeline_default_on_at(&p);
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(raw["gui"]["terminalMaxEntries"], serde_json::json!(42));
+        assert_eq!(raw["gui"]["theme"], serde_json::json!("dark"));
+        assert_eq!(raw["gui"]["messageTimeline"], serde_json::json!(true));
+        assert_eq!(
+            raw["env"]["ANTHROPIC_MODEL"], "keep-me",
+            "顶层非 gui 键必须保留"
+        );
+    }
+
+    /// 设置文件不存在 → 静默 no-op（不 panic、不创建文件）。
+    #[test]
+    fn mt_missing_file_noop() {
+        let p = std::env::temp_dir()
+            .join(format!("mt_mig_missing_{}", std::process::id()))
+            .join("nope.json");
+        migrate_message_timeline_default_on_at(&p);
+        assert!(!p.exists(), "不应凭空创建设置文件");
     }
 }
