@@ -96,6 +96,36 @@ python temp/release_mac_<ver>.py cloud    # workbench upload + exec curl
 
 **Windows 侧同时发过版时（如 .26.4 → Windows 09.04.1 → mac 同步）**：HEAD notes 从对应 Windows 版 `--notes` 抄（内容一致，双平台同变更）；mac ZIPS 全 6 组件都传（claude/bun 单文件也变了）。
 
+### ⚠️ 发布踩坑（2026-09-14 首次正式发 mac 版，四条都真实踩到）
+
+**① 组件文件名必须规范 —— 否则该组件被「静默丢弃」**
+服务端用 `upload.filename.rsplit(".",1)[0]` 判定组件名，不在 valid 集合里就 `continue`，
+**不报错**。浏览器下载的 `gui (3).zip` → 解析出 `"gui (3)"` ≠ `"gui"` → **gui 被丢掉**，
+接口却返回 `ok:true`（列出的 components 少一个，容易漏看）。
+→ 上传前把本地文件映射成 `<component>.zip` 再传。
+
+**② `workbench upload` 不会自动建目标目录**
+缺目录报 `[FileTransfer.PathNoWritePermission] The specified path does not have write permission`
+—— 报错文案指向权限，**真因是目录不存在**。先 `mkdir -p` + `chmod 777`。
+
+**③ `workbench upload` 遇同名文件会交互式问覆盖**
+输出 `Overwrite? [y/N]`，非交互环境直接当"取消"→ 上传失败。
+→ 每次上传前 `rm -rf` 目标目录，从干净状态开始。
+
+**④ `workbench` 输出含 Braille 进度字符（`⠋⠙⠹…`），Windows 控制台 GBK 会崩**
+`UnicodeDecodeError: 'gbk' codec can't decode byte 0x8b` / 打印时 `UnicodeEncodeError`。
+→ subprocess 传 `encoding="utf-8", errors="replace"`；运行脚本用 `PYTHONIOENCODING=utf-8`。
+
+**验证下载端点时注意路径带 `/components/`**：
+`/api/updates/{ver}/components/{comp}/download?platform=macos`（漏掉会 404，且响应体只有 22 字节，
+容易被误读成"下载大小 22"）。
+
+**mac 发布脚本**（本次重写，模板可复用）：`temp/macrel/release_mac.py`
+—— `make` 从 gui.zip 内嵌 manifest 派生 → `cloud` 上传云 → `verify` 校验。
+要点：`version` 从 `ci-build` 改正式号；gui 的 `sha256` 用 `dir_content_hash`
+（逐文件内容 sha 聚合）覆盖内嵌的 `dirMetaHash`，防 size-only 漏检；gui 的 `size`
+改成 **zip 实际大小**（内嵌值是解压后 .app 目录大小 427MB，会让下载进度显示异常）。
+
 **manifest 源**：`gui.zip` 内嵌的 `Contents/MacOS/manifest.json`（CI 算的权威 sha，version=ci-build）。发布脚本读它 → 改 `version` + 注入 `release_notes`。
 
 **⚠️ gui sha 覆盖（dirMetaHash size-only 坑）**：若内嵌 manifest 的 `components.gui.sha256` 与服务器上一版本**相同**，但 §2 的 byte 校验证明 claude-code-gui 变了（内容变 size 恰好不变）→ 客户端 check_for_updates 只对比 sha 值会漏更新。**发布脚本必须用内容 hash 覆盖 gui sha**（`temp/release_mac_*.py` 的 `dir_content_hash`，对 .app 内每文件算内容 sha 聚合），确保新版本 gui sha ≠ 旧版。
@@ -168,12 +198,16 @@ ZIPS = ["gui.zip", ...]              # 只列本次要传的
 | 2026.08.25.1 | mac 首个版本（管线验证，空壳 .app）| 已取代 |
 | 2026.08.25.2 | 完整 .app（组件内置）| zip -r 丢 symlink，已取代 |
 | 2026.08.25.3 | ditto 打包修复版（symlink + 顶层目录正确）| 96+云已验证 |
-| **2026.08.26.4** | **DeepSeek/effort 切换 + profile 能力迁移 + 压缩修复（dir_content_hash 引入）** | **当前 mac 最新** |
-| （待发）| 2026.09.04.x：对齐 Windows 09.04.1（子代理可靠性/唤醒队列/i18n/GLM thinking 链路）| Codemagic 已触发 |
+| **2026.08.26.4** | **DeepSeek/effort 切换 + profile 能力迁移 + 压缩修复（dir_content_hash 引入）** | 已被取代 |
+| **2026.09.14.1** | **对齐 Windows .13.8（插件 PATH 修复 / 笔记宽度）+ mac 专属修复（python 自包含、server 内嵌、打开终端、新建笔记、CDP 移除、菜单中文化）** | **当前 mac 最新（首次正式发布到云）** |
 
 ## 7. 待办 / 未验证
 
-- [ ] 真机 Mac 打开 .app → GUI 启动 → 后端 spawn → 聊天/更新链路
-- [ ] python framework 在 mac 真机 import 正常（symlink 保留但未真机验证）
-- [ ] 后续 python.zip 体积优化（当前 73MB zip / 654MB 解压）
-- [ ] mac 2026.09.04.x 发布（等 Codemagic 构建 → 下载 → 按 §3 走）
+- [x] 真机 Mac 打开 .app → GUI 启动 → 后端 spawn（2026-09-13 用户实测，点出 6 个问题，均已修）
+- [x] ~~python framework 在 mac 真机 import 正常~~ → 已改为 python-build-standalone（真自包含），不再依赖系统框架
+- [x] ~~mac 2026.09.04.x 发布~~ → 2026-09-14 发布 `2026.09.14.1` 到云
+- [ ] **`2026.09.14.1` 真机验证**：装后验 node/npm/npx 可用（PATH 修复）、
+      诊断面板 GUI SERVER 运行中、打开终端、新建笔记、菜单中文
+- [ ] **从 .13.9 之前版本升级到 `2026.09.14.1` 的更新链路**（客户端 check_for_updates
+      → 下载 → osascript 提权替换）尚未真机验证 —— 这是"云端有 mac 版"后的第一要务
+- [ ] python.zip 体积优化（现 41MB zip / 146MB 解压；standalone 已比原 framework 小 4 倍）
