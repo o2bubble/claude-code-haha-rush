@@ -37,11 +37,22 @@ git checkout main -- .
 # （terminalStore.appendToLastEntry）被删除才报错 → **CI 构建失败，而本地怎么
 # 跑都是绿的**（本地在 main 上，根本没有这些文件）。
 #
-# 用 `--others` 一并列出**未跟踪**文件再比差集：孤儿此刻正在这个状态里，
-# 只看索引（旧版 `comm` 的做法）会漏掉它们。`-f` 覆盖「工作树有改动」的拒绝。
-comm -23 <(git ls-files --cached --others --exclude-standard | sort -u) \
-         <(git ls-tree -r --name-only main | sort) \
-  | xargs -r git rm -q -f -- 2>/dev/null || true
+# 用 `--others` 一并列出**未跟踪**文件再比差集 —— 孤儿此刻正处于
+# 「已从索引移除、但仍在工作树」的状态，只看索引（旧版 `comm` 的做法）会漏掉。
+#
+# 删除分两步，且**不能吞错误**（`git rm` 对「不在索引但存在于工作树」的文件会
+# 报 pathspec 错误；早先版本用 `2>/dev/null || true` 把它盖住，于是命令看似成功
+# 实则一个都没删 —— 这正是本次孤儿能存续数周的直接原因）：
+#   ① `git rm --cached` 清索引（忽略错误：本来就不在索引里）
+#   ② `rm -f` 清工作树（这才是关键 —— 文件留在工作树，下一行 `git add -A` 就会把它加回来）
+ORPHANS=$(comm -23 <(git ls-files --cached --others --exclude-standard | sort -u) \
+                   <(git ls-tree -r --name-only main | sort))
+if [ -n "$ORPHANS" ]; then
+    echo "删除 main 已不存在的孤儿文件（$(echo "$ORPHANS" | wc -l | tr -d ' ') 个）："
+    echo "$ORPHANS" | sed 's/^/  - /'
+    echo "$ORPHANS" | xargs -r -d '\n' git rm -q --cached --ignore-unmatch -- 2>/dev/null || true
+    echo "$ORPHANS" | xargs -r -d '\n' rm -f --
+fi
 git add -A
 
 # ── 安全闸：敏感路径一旦入 stage 立即中止 ────────────────────────────────
@@ -70,5 +81,8 @@ fi
 git push github HEAD:main --force
 git push origin github-clean --force
 
-git checkout main
+# `-f`：即便工作树仍有个别未跟踪文件，也强制切回（否则 git 会以
+# "untracked working tree files would be removed by checkout" 拒绝，
+# 配合 `set -e` 让脚本在最后一步失败）。孤儿已在上面显式清理。
+git checkout -f main
 echo "done"
