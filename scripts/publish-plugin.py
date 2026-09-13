@@ -74,6 +74,8 @@ def main() -> int:
     ap.add_argument("--host", default="http://192.168.186.96:8765", help="Registry base URL")
     ap.add_argument("--no-sign", action="store_true", help="Skip signing (unsafe — only for local/untrusted).")
     ap.add_argument("--force", action="store_true", help="Overwrite existing package (re-sign/re-publish).")
+    ap.add_argument("--type", default="plugin", choices=["plugin", "skill"],
+                    help="Package type (default: plugin). Skill packages use the same endpoint.")
     args = ap.parse_args()
 
     with open(args.manifest, encoding="utf-8") as f:
@@ -102,7 +104,7 @@ def main() -> int:
 
     body = b""
     body += field("manifest", manifest_text)
-    body += field("type", "plugin")
+    body += field("type", args.type)
     if sig:
         body += field("signature", sig)  # server stores as <slug>.sig
     if args.force:
