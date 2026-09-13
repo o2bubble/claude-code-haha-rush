@@ -493,7 +493,7 @@ fn sync_cli_tools_at(claude_dir: &std::path::Path, src: &std::path::Path) {
 /// GUI 启动时把 python-env.md 同步到 ~/.claude/ 并确保 `@python-env.md` 注入 CLAUDE.md。
 /// 与 office-bridge 同模式（mac/win 统一、每次启动幂等、更新免重装），但内容按平台
 /// 动态生成 bundled python 路径——逻辑同 register_office_mcp：win=exe_dir/python/python.exe，
-/// mac=exe_dir/python/bin/python3（经 Versions/Current→3.12）。
+/// mac=exe_dir/python/bin/python3（来自 python-build-standalone，包内即此布局）。
 pub fn sync_python_env() {
     let Some(exe_dir) = std::env::current_exe()
         .ok()

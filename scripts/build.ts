@@ -511,65 +511,69 @@ async function main() {
   }
 
   // 8. Setup full Python environment
-  // macOS: 自包含 python — 下载官方 .pkg → pkgutil 解包 → 提取 Python.framework 到 dist/python
+  // macOS: 自包含 python —— 用 **python-build-standalone**（Astral 维护）。
+  //
+  // 为什么不用 python.org 的官方 .pkg（旧方案，2026-09-13 废弃）：
+  //   pkg 装出来的是**框架式**安装，二进制里硬编码
+  //   `/Library/Frameworks/Python.framework/Versions/3.12/Python`。ditto 拷走副本
+  //   只能搬文件、**改不了二进制里的绝对路径** → 用户机器上系统框架一旦升到别的
+  //   版本（如 3.14），那份 3.12 dylib 就没了，内置 python 直接
+  //   `dyld: Library not loaded` 起不来。**"分发副本"从根上不成立**。
+  //   （注意：重建 symlink 救不了 —— 问题不在链接，在 LC_LOAD_DYLIB 的绝对路径。）
+  //
+  // standalone 是**真自包含**：自身引用走 `@rpath` / `@executable_path/../lib`，
+  // libpython3.12.dylib 随包分发；只依赖 /System/Library 下的系统库（永远存在）。
+  // 顺带体积从 ~176MB 降到 ~24MB。
   if (PLATFORM === 'macos') {
     if (!selected('python') && existsSync(join(DIST, 'python'))) {
       console.log('[8/10] python not in components — reusing existing')
     } else {
       console.log('[8/10] Building self-contained Python (macOS)...')
-      const PYTHON_PKG = 'python-3.12.10-macos11.pkg'
-      const PKG_URL = `https://mirrors.huaweicloud.com/python/3.12.10/${PYTHON_PKG}`
+      // 版本固定（可复现构建）。升级时改这两行 + 下面 pip 的版本约束一并复核。
+      const PBS_TAG = '20260901'                     // release tag
+      const PBS_PY = '3.12.14'                       // CPython 版本
+      const PBS_ARCH = 'aarch64-apple-darwin'        // 只出 Apple Silicon（架构决策见 docs/macos-build-playbook.md）
+      const PBS_NAME = `cpython-${PBS_PY}+${PBS_TAG}-${PBS_ARCH}-install_only.tar.gz`
+      const PBS_URL = `https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${PBS_NAME}`
       const PYTHON_DIR = join(DIST, 'python')
-      const LOCAL_PKG = join(ROOT, 'offline-tools', 'macos', PYTHON_PKG)
+      const LOCAL_TGZ = join(ROOT, 'offline-tools', 'macos', PBS_NAME)
 
-      if (!existsSync(LOCAL_PKG)) {
-        mkdirSync(dirname(LOCAL_PKG), { recursive: true })
-        console.log(`  Downloading ${PKG_URL}...`)
-        const dl = spawnSync(['curl', '-L', '-f', '-o', LOCAL_PKG, PKG_URL], { cwd: ROOT, timeout: 600000 })
+      if (!existsSync(LOCAL_TGZ)) {
+        mkdirSync(dirname(LOCAL_TGZ), { recursive: true })
+        console.log(`  Downloading ${PBS_NAME}...`)
+        const dl = spawnSync(['curl', '-L', '-f', '-o', LOCAL_TGZ, PBS_URL], { cwd: ROOT, timeout: 600000 })
         if (dl.exitCode !== 0) {
-          console.error(`[Error] Python pkg download failed: ${dl.stderr.toString()}`)
+          console.error(`[Error] python-build-standalone download failed: ${dl.stderr.toString()}`)
           process.exit(1)
         }
-        console.log(`  Saved ${LOCAL_PKG}`)
+        console.log(`  Saved ${LOCAL_TGZ}`)
       } else {
-        console.log(`  Using offline pkg: ${LOCAL_PKG}`)
+        console.log(`  Using offline archive: ${LOCAL_TGZ}`)
       }
 
-      // 用 macOS 官方 installer 直接安装 pkg，从标准位置提取 Python.framework。
-      // pkgutil --expand-full 对 python.org 嵌套 pkg 不可靠（Python_Framework.pkg
-      // 有 Payload 却找不到 framework）。installer 正确处理所有嵌套子包。
-      // CI runner 是临时环境，装到 /Library/Frameworks 无副作用。
+      // 解压 —— tarball 顶层就是 `python/`（内含 bin/ lib/ include/ share/），
+      // 正好等于 dist/python 想要的结构，解到 DIST 即可，**无需再建 bin 链接**
+      // （旧方案要手建 `python/bin/python3`，那步随 pkg 方案一起消失）。
       rmSync(PYTHON_DIR, { recursive: true, force: true })
-      // installer -target / 需 root（GitHub macOS runner 有免密 sudo）
-      const inst = spawnSync(['sudo', 'installer', '-pkg', LOCAL_PKG, '-target', '/'], { cwd: ROOT, timeout: 600000 })
-      if (inst.exitCode !== 0) {
-        console.error(`[Error] installer failed: ${inst.stderr.toString()}`)
+      const ex = spawnSync(['tar', '-xzf', LOCAL_TGZ, '-C', DIST], { cwd: ROOT, timeout: 600000 })
+      if (ex.exitCode !== 0) {
+        console.error(`[Error] python archive extract failed: ${ex.stderr.toString()}`)
         process.exit(1)
       }
-      const fwSrc = '/Library/Frameworks/Python.framework'
-      if (!existsSync(fwSrc)) {
-        console.error(`[Error] Python.framework not found after install: ${fwSrc}`)
+      const py3 = join(PYTHON_DIR, 'bin', 'python3')
+      if (!existsSync(py3)) {
+        // 下游契约：settings.rs 用 {exe}/python/bin/python3 注册 office MCP。
+        // 布局变了必须在这里失败，而不是等用户装完发现 python 起不来。
+        console.error(`[Error] expected interpreter missing after extract: ${py3}`)
         process.exit(1)
       }
-      const cp = spawnSync(['ditto', fwSrc, PYTHON_DIR], { cwd: ROOT, timeout: 600000 })
-      if (cp.exitCode !== 0) {
-        console.error(`[Error] framework copy failed: ${cp.stderr.toString()}`)
-        process.exit(1)
-      }
-      console.log('  Extracted Python.framework → dist/python/')
-      // 不做瘦身 —— 保持 python.org 完整 framework（universal2 双架构 + 完整标准库）。
-      // 实机测试：lipo -thin arm64 / 删 test/idlelib/lib2to3 会破坏 Framework，
-      // python 解释器报「缺少 Framework」。代价是体积增大，但优先可用性（宁可大也要能跑）。
-      // 建 python3 兼容入口：settings.rs 注册 office MCP 用 {exe}/python/bin/python3，
-      // 而 pkg 提取的 framework 顶层没有 bin/（python 在 Versions/<ver>/bin/ 下）。
-      mkdirSync(join(PYTHON_DIR, 'bin'), { recursive: true })
-      spawnSync(['ln', '-sf', '../Versions/Current/bin/python3', join(PYTHON_DIR, 'bin', 'python3')], { cwd: ROOT })
+      console.log('  Extracted python-build-standalone → dist/python/')
+
       // 安装 mcp SDK（office MCP server 依赖；mac 走 osascript，无 COM，不需要 pywin32）。
-      const fwPy3 = join(PYTHON_DIR, 'Versions', 'Current', 'bin', 'python3')
       console.log('  Installing mcp SDK...')
       // PYTHONNOUSERSITE=1：隔离 user site-packages，强制全部依赖装进 dist 自带
       // site-packages——否则构建机/user 有缓存依赖时 pip 跳过，发版打包丢依赖。
-      const pipInstall = spawnSync([fwPy3, '-m', 'pip', 'install', 'mcp==1.28.1'], { cwd: ROOT, timeout: 180000, env: { ...process.env, PYTHONNOUSERSITE: '1' } })
+      const pipInstall = spawnSync([py3, '-m', 'pip', 'install', 'mcp==1.28.1'], { cwd: ROOT, timeout: 180000, env: { ...process.env, PYTHONNOUSERSITE: '1' } })
       if (pipInstall.exitCode !== 0) {
         console.warn(`  [Warn] mcp install failed: ${pipInstall.stderr.toString()}`)
       } else {
