@@ -170,6 +170,31 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
 - **2026.09.13.6**（快捷键系统 + 关于页仓库地址；仅 gui）
   —— 已上传云，9 组件 sha 全部核对一致；gui sha `5c3bc887…`
   —— ⚠️ **未实机验证**（只跑了 tsc + 703 单测），见下方「快捷键系统」条
+- **2026.09.13.7**（新建笔记无反应 + normalize_tags 失效 + 停止打包 CDP；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `f2ecc8d6…`
+  —— 本版同时含 mac 侧修复（python 自包含 / server 内嵌 / 打开终端 / 菜单语言），
+     但 mac 需 CI 单独构建，见下方「mac 真机验证发现的问题」条
+
+### 2026-09-13 mac 真机验证发现的问题（6 个，全部已修）
+用户首次在 mac 真机跑 `.13.6`，点出 6 个问题。**其中 4 个是"必现且功能完全不可用"**
+—— 说明这些代码路径**从没在 mac 上走通过**。这类 bug 单测/tsc 全抓不到。
+
+| # | 问题 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 内置 python 一启动就 `dyld: Library not loaded` | 旧方案用 python.org 的**.pkg 框架式安装**再 ditto 拷副本 —— 二进制里硬编码 `/Library/Frameworks/Python.framework/Versions/3.12/Python`，用户系统框架升到 3.14 后 3.12 的 dylib 没了。**ditto 改不了二进制内的绝对路径**，重建 symlink 也救不了 | 换 **python-build-standalone**（Astral）：真自包含（`@rpath` + `@executable_path/../lib`，libpython 随包），顺带 176MB→24MB |
+| 2 | 诊断面板「GUI SERVER 已停止」 | `.app` 里根本没有 `claude-gui-server`。embed 列表把 `'server'` 当**目录**找（`existsSync(dist/server)`），但它是**单文件** `claude-gui-server` → 恒为假 → 只 warn 跳过 | 从目录列表移出，作**单文件硬校验**单独嵌入（缺了 exit(1)，它是必须组件不是可选的） |
+| 3 | `note_normalize_tags` 必现失败 | **两个错误叠加**：a) 缺必填 `workDir`；b) **误用返回值** —— `run_cli_print` 是两段式（invoke 只返回 request_id，输出经 `cli-translate-result` 事件回传），原代码直接当输出用 | 抽 `runCliPrintForJson()` 封装契约：先挂监听再 invoke、暂存 early payload、按 request_id 匹配、超时保护 |
+| 4 | 点「新建笔记」无反应 | GUI **没处理两段式契约** —— `note_create` 不带 action 时先查重，命中返回 `conflict_detected` 且**不落库**（无 id）→ `setSelectedId(undefined)`。叠加小语料豁免（≤20 条跳过分数阈值）→ 库里仅 1 篇时必撞 | 新建时带 `action: "store"` 绕过查重（空白笔记没有"重复"语义） |
+| 5 | 「打开终端」必现失败 `-2741 syntax error` | **AppleScript 转义层数搞反**：路径用 bash 双引号包裹，而那对引号**提前闭合了 AppleScript 字面量**（`do script "cd "path""`）。原代码注释写着"两层转义"但顺序是反的 | 改用 **bash 单引号**（与 update.rs 的 osascript 提权同思路），单引号不参与 AppleScript 字面量 |
+| 6 | 系统菜单栏恒英文 | `Info.plist` 只写 `CFBundleDevelopmentRegion=English` 且无 `CFBundleLocalizations` → macOS 判定仅支持英文（标准菜单项的本地化**由系统提供**，应用须声明支持） | 改 `zh_CN` + 加 `CFBundleLocalizations=[zh-Hans, zh_CN, en]` |
+
+**共性**：4 个是**"前端/构建没遵守既定契约"**。可复用的教训：
+- **"缺失就跳过"只对可选组件成立** —— server 是必须组件却走了 warn 分支，问题被静默吞掉（#2）
+- **两段式/事件式 API 不能当同步返回值用** —— #3 #4 都是这个
+- **往 AppleScript/shell 里嵌字符串时，引号层级要想清楚** —— 优先用不冲突的引号种类（#5）
+- **不要靠"看起来对"判断转义/编码类改动** —— #5 我用词法模拟验证了三种路径（普通/含空格/含单引号），旧实现在**所有**情况下都失败
+
+**mac 待验证**：.13.7 的 mac 产物需 CI 构建后真机复验上述 6 条。清单见对话记录。
 
 ### 2026-09-13 快捷键系统（.13.6）
 完整文档 `docs/gui/shortcuts.md`。要点：
