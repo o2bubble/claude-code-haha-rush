@@ -1,15 +1,17 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-11（main @8e84f04）
+# Handoff — Claude Code GUI 开发 · 2026-09-14（main @dfb9a17）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 Memory MCP（`server_96.md`）。
-> ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。历史版本曾因疏漏把云 server root 密码写在此处并推到了公开 gitee（2026-09-11 发现，见「密钥泄露」条）。
+> ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
 
 ## 当前状态
 
-- **分支**: `main`（`8e84f04`）；远端全同步（gitee `main` = `8e84f040`；gitee `github-clean` = GitHub `main` = `a2fc887e`，私有快照分支）。
-- **本批主题**: **Memory MCP 检索层重写**（FTS5 + jieba + RRF，修复"假语义检索"）+ **密钥泄露闭环** + **仓库瘦身**（offline-tools 移出）。
-- **Memory 服务（96）**: 容器 `claude-memory` 已跑新版，端口 **`14020`(MCP) / `40021`(Web)**（40020 因落在内核 ephemeral 端口范围被征用，已迁移；**仅 96 改了**，云仍是 8080）；303 条记忆迁移成功；真机验收 6 项全过。
-- **Memory 服务（云 123.56.66.84）**: 2026-09-12 **已从 7-30 旧版升级到 `claude-memory:20260912`**，端口不变（`8080` MCP / `40021` Web），18 条记忆完整保留。流程 = 本地构建镜像 → workbench 上传 → 云端 `docker load` + compose 切 `image:`（**线上永不构建**，见 `docs/memory-deploy-playbook.md`）。回滚镜像 `rollback-20260730` + 库备份 `claude-memory.db.bak.20260912` 均保留在云上。
-- **凭据脱敏收尾（`e9495ca`）**: 文档/源码中最后的明文凭据已清理（详见「脱敏收尾」条）。
+- **分支**: `main`（`dfb9a17`）；远端全同步（gitee `main` = `dfb9a17`；gitee `github-clean` = GitHub `main` = `9cc8fee` 快照）。
+- **本批主题**: **macOS 平台首次跑通全链路**（真机验证 → 修 8 个 bug → 发布到云端更新服务器）+ **发布 key 泄露事故 #3 轮换**。
+- **macOS 云端版本**: `2026.09.14.1`（首版）→ **`2026.09.14.2`**（含 GUI 组件路径修复）。此前云端 `?platform=macos` **一直 404** —— 服务端/客户端代码都支持 mac，只是**从没上传过**。
+- **Windows 云端版本**: `2026.09.13.8`。
+- **Memory 服务（96）**: 容器 `claude-memory`，端口 **`14020`(MCP) / `40021`(Web)**（40020 因落在内核 ephemeral 端口范围被征用，已迁移；**仅 96 改了**，云仍是 8080）；303 条记忆。
+- **Memory 服务（云 123.56.66.84）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web。流程 = 本地构建镜像 → workbench 上传 → 云端 `docker load` + compose 切 `image:`（**线上永不构建**，见 `docs/memory-deploy-playbook.md`）。
+- **凭据**: 云更新服务上传 key 已于 2026-09-14 **轮换**（事故 #3）；发布脚本改为读环境变量 `RELEASE_API_KEY`。
 
 ## 决策留痕表
 
@@ -132,15 +134,18 @@
 ## 热数据
 
 ### Git 状态
-- branch `main`，HEAD `8e84f04`；工作区 2 处未提交（见上）。
+- branch `main`，HEAD `dfb9a17`；工作区干净，远端全同步。
 
 ```text
-8e84f04 chore: offline-tools/ 移出仓库 — 167MB 二进制不再随源码分发
-9aed0f3 chore: registry.db 的 WAL 附属文件纳入忽略 — 原只忽略主文件
-7617598 feat(memory): FTS5+jieba 中文检索 + 两段式写入契约 — 修复「假语义检索」
-efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .private/（已 gitignore）
-088bbe1 docs: README 补「构建」章节 — 原只讲开发模式，没讲怎么出包
+dfb9a17 fix(scripts): release_mac.py 改从环境变量读 key（不留明文）
+f2dbd54 docs(playbook): mac 发布定论 — sha 沿用内嵌 manifest + 发布脚本入库
+b74906a fix(mac): GUI 组件路径解析错位 — 更新面板误判「未安装」
+a0ed8e6 fix(build): mac 不再生成三个跑不起来的 launcher
+9db1864 docs(playbook): 记录 mac 2026.09.14.1 首次发布 + 四条上传踩坑
 ```
+
+> ⚠️ `f2dbd54` 含已失效的旧上传 key（用户选择不改写历史）。key 已轮换失效，
+> 风险消除；但**不要再从该提交取脚本内容**。
 
 ### Memory 服务（96）
 - 容器 `claude-memory`，镜像 `192.168.186.96:5000/claude-memory:latest`
@@ -150,8 +155,8 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
 
 ### 测试基线
 - Memory MCP：`cd extensions/memory && python -m unittest discover -s tests` → **43 passed**
-- GUI 前端：`node node_modules/vitest/vitest.mjs run` → **586 通过**（50 文件）· `tsc --noEmit` 干净
-- Rust：`cargo check`（gui/src-tauri）通过
+- GUI 前端：`npx vitest run` → **708 通过**（58 文件）· `tsc --noEmit` 干净
+- Rust：`cargo test --lib`（gui/src-tauri）→ 全部通过（含 `update::tests` 6 项）
 
 ### 发布版本 (dist/release)
 - 2026.09.10.5 ~ 2026.09.10.9（含 bun/claude/extensions/git/gui/python/server/tools/updater zip + manifest）
@@ -176,6 +181,58 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
      但 mac 需 CI 单独构建，见下方「mac 真机验证发现的问题」条
 - **2026.09.13.8**（插件 runtime PATH 少一层 bin/ + 笔记列表宽度自适应；仅 gui）
   —— 已上传云，9 组件 sha 全部核对一致；gui sha `fd76b427…`
+
+### macOS 发布（云端，2026-09-14 首次）
+
+| 版本 | 内容 | 组件 |
+|---|---|---|
+| **2026.09.14.1** | 对齐 Windows `.13.8`（PATH 修复 / 笔记宽度）+ mac 专属修复（python 自包含、server 内嵌、打开终端、新建笔记、CDP 移除、菜单中文化） | 6 个（bun/claude/extensions/gui/python/tools），6/6 sha 一致 |
+| **2026.09.14.2** | GUI 组件路径修复（更新面板误判「未安装」）+ 移除三个死 launcher；发布 sha 改为沿用内嵌 manifest（修全量误报） | 仅 gui 变动，其余由服务端从 `.14.1` 复用 |
+
+**mac 组件集**（服务端 `VALID_COMPONENTS_MAC`）= `{gui, claude, bun, tools, python, extensions}`
+—— **无 `server`**（它内嵌在 gui.zip 的 `.app` 里）、无 git（系统自带）、无 updater（osascript 提权替代）。
+
+**发布流程**：`scripts/release_mac.py`（本次入库；改顶部 VERSION/UPLOAD_ONLY/COMPONENTS/RELEASE_NOTES
+→ `make` → `cloud` → `verify`）。细节与踩坑见 `docs/macos-build-playbook.md` §3。
+
+**四条上传踩坑**（都真实踩到，详见 playbook）：
+① 组件文件名必须规范 —— 服务端按 `upload.filename` 判组件，不在集合就**静默 continue**
+（`gui (3).zip` → `"gui (3)"` ≠ `"gui"`，**gui 被丢但接口仍返回 `ok:true`**）
+② `workbench upload` 不自动建目录（报 `PathNoWritePermission`，文案误导）
+③ 同名文件**交互式**问覆盖（非交互环境当取消）
+④ workbench 输出含 Braille 进度字符，**Windows GBK 控制台编解码都崩**
+
+### ⚠️ 发布 sha 算法定论（推翻早先 playbook 的规则）
+
+早先 playbook 写「发布时必须用 `dir_content_hash` 覆盖 gui sha（防 size-only 漏检）」
+—— **这条规则本身就是故障原因**：
+
+客户端读的**本地 manifest 就是 `.app` 内嵌那份**（`update.rs` 的
+`local_manifest_path = Contents/MacOS/manifest.json`），其 sha 是构建期算的
+`dirMetaHash(path,size)`。发布时改用内容 hash → **同一份内容两套算法算出不同值** →
+`local_sha != remote_sha` → **每次检查都报"有更新"**（实测 6 个组件全亮，用户发现的）。
+
+**定论**：sha 一律**沿用内嵌 manifest 的值** —— 比对算法与客户端一致是第一原则，
+"算法更敏感"必须让位。代价是放弃"内容变但 size 恰好不变也能检测"（.25.5 那个坑）；
+若日后要改回内容 hash，**必须同时改客户端 `local_manifest_path` 那份的生成方式**。
+
+**顺带记录**：`gui.zip` 内嵌 manifest 的 `size` 是**陈旧的**（build.ts 在"回填 size 为
+zip 实际大小"之前就打包了 gui.zip，所以 zip 内永远是**解压后目录**大小）—— 发布脚本
+修正 size 即可；sha 不受影响（在打包前就算好了）。
+
+### 2026-09-14 发布 key 泄露事故 #3（硬编码进脚本）
+
+写 `scripts/release_mac.py` 时把云更新服务上传 key **硬编码进源码**并提交 →
+推到**公开的 gitee**（`f2dbd54`）。
+
+- **只有 gitee 中招**；GitHub 被 `sync-github-clean.sh` 的密钥安全闸拦下（它扫暂存 diff）
+- **闸只保护快照分支，挡不住直接 push 主仓** —— 这是漏掉的路径
+- 处理：云端 `api_keys` 表删 id=6、插 id=7，**实测旧 key 返回 401、新 key 422**；
+  用户明确**不清理 git 历史**（key 已失效，风险消除）
+- 脚本改为读 `RELEASE_API_KEY` 环境变量（`HEAD dfb9a17`）
+
+**根因不是技术，是注意力**：同一轮对话里刚引用过"红线是进仓库/公开远端"却仍犯 ——
+把 key 写进**脚本**时没意识到"这也是会提交的文件"。**写任何进仓库的文件一律从环境变量读。**
 
 ### 2026-09-14 插件 runtime 的 PATH 注入少一层（mac 实测，影响 Windows 亦然）
 用户装 nodejs 插件后 mac 上 `node`/`npm`/`npx` 全不可用，**连带弄坏 playwright-mcp**
@@ -400,6 +457,7 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
 | 代码 | `extensions/memory/{tokenizer,store,search_engine,server,api}.py` | 新版实现（`tokenizer.py` 为新增） |
 | 测试 | `extensions/memory/tests/test_memory.py` | 43 单测 |
 | 脚本 | `scripts/sync-github-clean.sh` | 快照同步（已移除 offline-tools 特殊处理） |
+| **mac 发布** | `docs/macos-build-playbook.md` · `scripts/release_mac.py` | **macOS 构建发布手册**（含 sha 算法定论、四条上传踩坑、发布历史） |
 | 架构 | `docs/ARCHITECTURE.md` · `docs/agents/issue-tracker.md` | 架构与工单约定 |
 | **部署** | `docs/memory-deploy-playbook.md` | **memory 服务发版手册**（本地构建→workbench 上传→云端切换；含 WAL 备份/代理/竞态三个坑） |
 | PRD（本地） | `.scratch/gui-plugin-system/PRD.md` | 插件系统完整 PRD（gitignore 不入库） |
