@@ -125,6 +125,8 @@ def _memories_from(result) -> list[dict]:
 
 class TestTokenizer(unittest.TestCase):
     def test_index_expands_subwords(self):
+        if tokenizer.get_tokenizer_status() != "jieba":
+            self.skipTest("jieba not installed — bigram fallback has no whole-word tokens")
         tokens = tokenizer.tokenize_for_index("人工智能的分支").split()
         self.assertIn("智能", tokens)      # cut_for_search subword
         self.assertIn("人工智能", tokens)  # whole word
@@ -296,6 +298,42 @@ class TestFtsSearch(unittest.TestCase):
         hits = self.store.fts_search("人工智能", limit=5)
         self.assertTrue(0.0 < hits[0]["score"] < 1.0)
 
+    def test_scope_exact_matches_only_that_scope(self):
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        self.store.add_memory("fact", "海豚计划乙", "项目乙里的海豚说明。", scope="project:beta")
+        hits = self.store.fts_search("海豚计划", scope=["project:alpha"], limit=5)
+        self.assertEqual([h["title"] for h in hits], ["海豚计划甲"])
+
+    def test_scope_prefix_matches_all_in_namespace(self):
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        self.store.add_memory("fact", "海豚计划乙", "项目乙里的海豚说明。", scope="project:beta")
+        self.store.add_memory("fact", "海豚计划丙", "全局的海豚说明。", scope="global")
+        hits = self.store.fts_search("海豚计划", scope=["project:*"], limit=5)
+        self.assertEqual(sorted(h["title"] for h in hits), ["海豚计划乙", "海豚计划甲"])
+
+    def test_scope_prefix_with_no_match_returns_empty_not_everything(self):
+        # Regression: a prefix matching nothing must not silently drop the
+        # filter and return the whole corpus.
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        hits = self.store.fts_search("海豚计划", scope=["domain:*"], limit=5)
+        self.assertEqual(hits, [])
+
+    def test_scope_prefix_mixed_with_exact(self):
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        self.store.add_memory("fact", "海豚计划丙", "全局的海豚说明。", scope="global")
+        hits = self.store.fts_search("海豚计划", scope=["project:*", "global"], limit=5)
+        self.assertEqual(sorted(h["title"] for h in hits), ["海豚计划丙", "海豚计划甲"])
+
+    def test_scope_blank_entries_match_nothing(self):
+        hits = self.store.fts_search("海豚", scope=["", "  "], limit=5)
+        self.assertEqual(hits, [])
+
+    def test_scope_prefix_like_wildcards_are_escaped(self):
+        # A literal % in the prefix must not act as a LIKE wildcard.
+        self.store.add_memory("fact", "海豚计划甲", "项目甲里的海豚说明。", scope="project:alpha")
+        hits = self.store.fts_search("海豚计划", scope=["pro%"], limit=5)
+        self.assertEqual(hits, [])
+
 
 # ---------------------------------------------------------------------------
 # MT-T3: RRF fusion + strategy
@@ -464,6 +502,53 @@ class TestStoreContract(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # MT-T6: soft delete + version + merge graph transfer
 # ---------------------------------------------------------------------------
+
+
+class TestAssociations(unittest.TestCase):
+    """Symmetric edges are stored once and must not render twice."""
+
+    def setUp(self):
+        self.store, self.path = _new_store()
+        self.a = self.store.add_memory("fact", "记忆 A", "关于苹果的内容。")
+        self.b = self.store.add_memory("fact", "记忆 B", "关于香蕉的内容。")
+
+    def tearDown(self):
+        self.store.close()
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def test_single_edge_visible_from_both_endpoints(self):
+        self.store.add_association(self.a["id"], self.b["id"], weight=0.8)
+        from_a = self.store.get_associations(self.a["id"], direction="both")
+        from_b = self.store.get_associations(self.b["id"], direction="both")
+        self.assertEqual(len(from_a), 1)
+        self.assertEqual(len(from_b), 1)
+        self.assertEqual(from_a[0]["direction"], "outgoing")
+        self.assertEqual(from_b[0]["direction"], "incoming")
+
+    def test_reverse_call_does_not_duplicate_symmetric_edge(self):
+        # Regression: agents sometimes call associate(A,B) and associate(B,A).
+        # Both rows matched at either endpoint, so the UI listed the relation
+        # twice.
+        self.store.add_association(self.a["id"], self.b["id"], weight=0.8)
+        self.store.add_association(self.b["id"], self.a["id"], weight=0.8)
+        self.assertEqual(len(self.store.get_associations(self.a["id"], "both")), 1)
+        self.assertEqual(len(self.store.get_associations(self.b["id"], "both")), 1)
+
+    def test_derived_from_keeps_direction(self):
+        # derived_from is directional, so the mirror is a different statement
+        # and must survive.
+        self.store.add_association(self.a["id"], self.b["id"], type="derived_from")
+        self.store.add_association(self.b["id"], self.a["id"], type="derived_from")
+        self.assertEqual(len(self.store.get_associations(self.a["id"], "both")), 2)
+
+    def test_mirror_cleanup_only_touches_same_type(self):
+        self.store.add_association(self.a["id"], self.b["id"], type="derived_from")
+        self.store.add_association(self.a["id"], self.b["id"], type="related_to")
+        types = sorted(e["type"] for e in self.store.get_associations(self.a["id"], "outgoing"))
+        self.assertEqual(types, ["derived_from", "related_to"])
 
 
 class TestLifecycle(unittest.TestCase):

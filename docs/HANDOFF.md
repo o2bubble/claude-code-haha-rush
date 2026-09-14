@@ -1,14 +1,18 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-11（main @8e84f04）
+# Handoff — Claude Code GUI 开发 · 2026-09-14（main @dfb9a17）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 Memory MCP（`server_96.md`）。
-> ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。历史版本曾因疏漏把云 server root 密码写在此处并推到了公开 gitee（2026-09-11 发现，见「密钥泄露」条）。
+> ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
 
 ## 当前状态
 
-- **分支**: `main`（`8e84f04`）；远端全同步（gitee `main` = `8e84f040`；gitee `github-clean` = GitHub `main` = `a2fc887e`，私有快照分支）。
-- **本批主题**: **Memory MCP 检索层重写**（FTS5 + jieba + RRF，修复"假语义检索"）+ **密钥泄露闭环** + **仓库瘦身**（offline-tools 移出）。
-- **Memory 服务（96）**: 容器 `claude-memory` 已跑新版，端口 **`14020`(MCP) / `40021`(Web)**（40020 因落在内核 ephemeral 端口范围被征用，已迁移）；303 条记忆迁移成功；真机验收 6 项全过。
-- **凭据脱敏收尾（`e9495ca`）**: 文档/源码中最后的明文凭据已清理（详见「脱敏收尾」条）。
+- **分支**: `main`（`dfb9a17`）；远端全同步（gitee `main` = `dfb9a17`；gitee `github-clean` = GitHub `main` = `9cc8fee` 快照）。
+- **本批主题**: **macOS 平台首次跑通全链路**（真机验证 → 修 8 个 bug → 发布到云端更新服务器）+ **发布 key 泄露事故 #3 轮换**。
+- **macOS 云端版本**: `2026.09.14.1`（首版）→ **`2026.09.14.2`**（含 GUI 组件路径修复）。此前云端 `?platform=macos` **一直 404** —— 服务端/客户端代码都支持 mac，只是**从没上传过**。
+- **Windows 版本**: 云端 `2026.09.13.8`；**96 = `2026.09.14.3`**（2026-09-14 本机构建发布：GUI 快捷键/自绘标题栏/终端重复修复、引擎 shell snapshot PATH、GUI server 笔记 FTS5+jieba、内嵌 memory 新前端）。
+- **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**（40020 因落在内核 ephemeral 端口范围被征用，已迁移；**仅 96 改了**，云仍是 8080）；303 条记忆。**2026-09-14 已同步鉴权版** —— 此前 96 停在 9-11 版且**无鉴权**（内网可匿名读写/删库；实测 `/api/stats` 匿名 200）。
+- ⚠️ **本机 Claude Code 的 memory MCP 指向的是 96**（`~/.claude.json` → `http://192.168.186.96:14020/mcp`，已带 `headers.Authorization`）——**不是云**。本文件早先"指向云"的记录有误，2026-09-14 实测纠正。
+- **Memory 服务（云 123.56.66.84）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web。流程 = 本地构建镜像 → workbench 上传 → 云端 `docker load` + compose 切 `image:`（**线上永不构建**，见 `docs/memory-deploy-playbook.md`）。
+- **凭据**: 云更新服务上传 key 已于 2026-09-14 **轮换**（事故 #3）；发布脚本改为读环境变量 `RELEASE_API_KEY`。
 
 ## 决策留痕表
 
@@ -27,10 +31,25 @@
 - 影响：`store.py` 迁移链扩展；**多进程并发迁移用 `BEGIN IMMEDIATE` 串行化**（真机暴露竞态：server.py + api.py 同时迁移撞 duplicate column）。
 - 留痕：SPEC §6；测试 `test_concurrent_migration`。
 
-### 决策：MCP 端口 40020 → 14020（本批）
-- 为什么：40020 落在内核 ephemeral 端口范围（32768-60999），96 上有持续连接风暴，源端口分配征用了它 → Docker bind 失败（41020/42020 同样被污染）。
-- 影响：`docker-compose.yml` 改 `14020:8080`；`~/.claude.json` 的 memory MCP url 同步改。**40021（Web/REST）没动**。
+### 决策：MCP 端口 40020 → 14020（仅 96，本批）
+- 为什么：40020 落在 Linux 内核 ephemeral 端口范围（32768-60999），96 上有持续连接风暴，源端口分配征用了它 → Docker bind 失败（41020/42020 同样被污染）。
+- 影响：**只改了 96 服务器的运行配置 + 本机 `~/.claude.json` 的 memory MCP url。**
+  ⚠️ 2026-09-12 核实修正：`extensions/memory/docker-compose.yml` **并未**改成 `14020`，仍是
+  `40020:8080`；云服务器 `123.56.66.84` 也没改（实测容器仍是 `8080:8080`）。三处端口现状：
+  仓库 compose / 云 = **40020↔8080**，96 = **14020↔8080**。
+- 补充：40020 属于 Linux ephemeral 范围，但在 **Windows 客户端**上是安全的（Windows 动态端口
+  范围默认 49152-65535），所以本地/云用 40020 没问题，无需为新端口改 compose。
 - 留痕：服务器配置 + 用户全局配置（无 commit）。
+
+### 决策：96 memory 同步用增量构建，而非 pip 重装（本批）
+- 为什么：96 停在 9-11 版，缺 bearer 鉴权 + scope 前缀搜索 + `_ensure_meta` 并发保护；
+  而 **96 访问 aliyun pypi 超时**（实测 15s+ 未完成），从头 `docker build`（`FROM python:3.12-slim`
+  + pip install jieba 等）有失败风险。
+- 影响：改用**增量 Dockerfile** —— `FROM <96 现有镜像>` + 只 COPY 应用代码 → **秒级构建、不进 pip**。
+  镜像 tag `claude-memory:20260914-auth` 并 push 到 96 registry；旧镜像打回滚 tag
+  `claude-memory:rollback-20260914`。token 写 96 `/root/claude-memory/.env`（600），
+  compose 用 `${MEMORY_AUTH_TOKEN:?...}`（fail-closed，未设则拒绝启动）。
+- 留痕：`temp/Dockerfile.inc`、`temp/compose-96.yml`、`temp/s96.sh`（SSH 通道）；部署手册 §8。
 
 ### 决策：github-clean 重建为全新孤儿快照（本批）
 - 为什么：原快照 40 个提交累积含明文密钥，且 `079d70d` 把 `.private/` 推到了公开 gitee。
@@ -80,6 +99,22 @@
 5. **jieba 分词上下文歧义** —— "有龙猫"切成 `有龙|猫`，查询"龙猫"整词搜不到；解法 = CJK 字符 bigram 双通道。
 6. **端口别落在 ephemeral 范围**（Linux 默认 32768-60999）—— 被征用时 `ss -tlnp` 看不到（只有 TIME-WAIT 出站），要 `grep :端口hex /proc/net/tcp`。
 
+### 96 SSH 通道：paramiko 不可靠，改用系统 ssh（2026-09-14 实测）
+- **类型**：调查结论（本机实测）
+- **现象**：paramiko 连 96 **间歇性** `AuthenticationException`（一次连续 10 次全失败），
+  但**同一分钟内**系统 `ssh`（OpenSSH 10.3）**一次成功**。密码本身无问题 —— 诊断脚本曾
+  成功登录并列出容器清单（服务器回 `Authentication (password) successful!`）。
+- **已排除**：banner 探测 3/3 正常（IP 未被封）；密码 `len=14`、repr 核对无误；
+  不是密集重试触发的限流（系统 ssh 在同刻可用）。
+- **结论**：paramiko 与本机网络栈/代理交互异常（系统代理 `127.0.0.1:17891` 开启，疑似 TUN 层干扰）。
+  **同类现象**：MCP 请求偶发 `ConnectionResetError`（3 次中 1 次，同刻重试即恢复）—— 疑同一根因的另一表现。
+- **可用通道**：`temp/s96.sh`（系统 ssh + `SSH_ASKPASS`）。用法
+  `SSH_PW='<96密码>' bash temp/s96.sh "<命令>"`；密码经环境变量 → `askpass.exe`，不落盘。
+  `askpass.exe`（112MB）用完即删，脚本会**自动重编译**（`temp/askpass.ts`，~1.5s）。
+- **对下轮价值**：**96 上一切操作走 `temp/s96.sh`，不要再写 paramiko 脚本连 96** ——
+  它会间歇失败且报错信息（`AuthenticationException`）**误导为密码错误**。本次为此白耗大量时间；
+  诊断网络层问题先疑代理（17891）。
+
 ### 密钥泄露事故复盘（本批）
 - **类型**：调查结论
 - **关键内容**：
@@ -88,6 +123,17 @@
   - **gitee 服务端保留旧提交对象**：强推覆盖分支头**不删对象**，`raw/<old-sha>/<path>` 匿名仍可读（实测 200）。处理 = 换 key/密码使其失效。
   - 新快照 `a2fc887` 已验证：`.private` 404、无密钥模式。
 - **对下轮价值**：再做分支/工作区清理类操作前，先确认 `.private/` 状态；快照脚本 `git add -A` 前应显式检查 `git status`。**改文档时逐项核对是否含凭据**（本次的遗漏就是这么来的）。
+
+### 密钥泄露事故 #2（2026-09-12，同根因复发）
+- **类型**：调查结论 —— **上一次只清了数据、没修脚本，所以第二次又犯**
+- **触发**：跑 `sync-github-clean.sh` 同步快照，`.private/release_20260912.1.py`（含 release-platform **上传 key 明文**）被提交为 `337b6de` 并推到 GitHub + 公开 gitee。
+- **根因**：脚本刻意 `git checkout main -- . ':(exclude).gitignore'`，让快照分支沿用自带旧 `.gitignore`；那份比 main 少 `.private/`、`.codex/`、`AGENTS.md` 三条 → `git add -A` 收了凭据目录。**与 079d70d 完全同因**。
+- **止损**：① `github-clean` 重置回 `2f9bf42` 强推覆盖两端；② 云端轮换 key（旧 key 实测 401，新 key 422 通过）；③ 脚本修根因 + 加两道路径/密钥模式安全闸（已实测拦截）。
+- **仍存在的残留**：gitee 旧对象 `raw/337b6de/...` 匿名仍可读（HTTP 200，已验证）——**强推不删对象**。key 已作废故无实际风险，但**下次轮换后同样要意识到这一点**。
+- **对下轮价值**：
+  - **同一事故第二次 = 上次的修复没落到源头**。清数据 ≠ 修脚本；处理完泄露必须回到产生泄露的那行代码。
+  - `.gitignore` 这类"隐式忽略"存在两份副本时会漂移 —— **必须单一权威**，别让分支各持一份。
+  - gitee/远端 `raw/<sha>` 的永久可达性意味着：**任何进过公开远端的凭据，唯一出路是轮换**，覆盖历史没有用。
 
 ### 腾讯 tencentdb-agent-memory 研究结论（本批）
 - **类型**：已读资料（三份精读报告在 `.scratch/memory-borrow/`，共 1377 行）
@@ -115,29 +161,285 @@
 ## 热数据
 
 ### Git 状态
-- branch `main`，HEAD `8e84f04`；工作区 2 处未提交（见上）。
+- branch `main`，HEAD `dfb9a17`；工作区干净，远端全同步。
 
 ```text
-8e84f04 chore: offline-tools/ 移出仓库 — 167MB 二进制不再随源码分发
-9aed0f3 chore: registry.db 的 WAL 附属文件纳入忽略 — 原只忽略主文件
-7617598 feat(memory): FTS5+jieba 中文检索 + 两段式写入契约 — 修复「假语义检索」
-efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .private/（已 gitignore）
-088bbe1 docs: README 补「构建」章节 — 原只讲开发模式，没讲怎么出包
+dfb9a17 fix(scripts): release_mac.py 改从环境变量读 key（不留明文）
+f2dbd54 docs(playbook): mac 发布定论 — sha 沿用内嵌 manifest + 发布脚本入库
+b74906a fix(mac): GUI 组件路径解析错位 — 更新面板误判「未安装」
+a0ed8e6 fix(build): mac 不再生成三个跑不起来的 launcher
+9db1864 docs(playbook): 记录 mac 2026.09.14.1 首次发布 + 四条上传踩坑
 ```
+
+> ⚠️ `f2dbd54` 含已失效的旧上传 key（用户选择不改写历史）。key 已轮换失效，
+> 风险消除；但**不要再从该提交取脚本内容**。
 
 ### Memory 服务（96）
 - 容器 `claude-memory`，镜像 `192.168.186.96:5000/claude-memory:latest`
-- 端口 `14020`→容器 8080(MCP) / `40021`(Web+REST)；宿主库 `/data/claude-memory/claude-memory.db`
+- 端口 `14020`→容器 8080(MCP) / `40021`(Web+REST)；96 宿主库 `/data/claude-memory/claude-memory.db`（云为 `/data/memory/claude-memory.db`，挂载路径两边不同）
 - 数据 303 条（fact 83 / experience 87 / lesson 133）；`capabilities={fts:true, jieba:true, tags:true, like_fallback:false, embedding:false}`
 - 部署前备份：`claude-memory.db.bak.20260911`
 
 ### 测试基线
 - Memory MCP：`cd extensions/memory && python -m unittest discover -s tests` → **43 passed**
-- GUI 前端：`node node_modules/vitest/vitest.mjs run` → 437 通过（前批基线）· `tsc --noEmit` 干净
-- Rust：`cargo check`（gui/src-tauri）通过
+- GUI 前端：`npx vitest run` → **708 通过**（58 文件）· `tsc --noEmit` 干净
+- Rust：`cargo test --lib`（gui/src-tauri）→ 全部通过（含 `update::tests` 6 项）
 
 ### 发布版本 (dist/release)
 - 2026.09.10.5 ~ 2026.09.10.9（含 bun/claude/extensions/git/gui/python/server/tools/updater zip + manifest）
+- **2026.09.12.5**（笔记面板 FTS5 + jieba + 两段式查重；仅 gui/server 重建，其余复用 .4）
+  —— 已上传云 `123.56.66.84:8765`；**96 未上传**（内网不通）
+- **2026.09.13.1**（切会话打断确认 + 子代理工具标记 + 时间线遮挡修复；仅 gui，其余复用 .12.6）
+  —— 已上传云；gui sha `d36b7903…`
+- **2026.09.13.2**（终端输出重复 + 并发串台修复；仅 gui，其余复用 .12.6）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `b43b6005…`
+- **2026.09.13.3**（终端重复第二因：xterm 异步队列堆积 → 合并重绘；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `edd9fdbf…`
+- **2026.09.13.4**（Windows 自绘标题栏 + 工具栏收纳 + 布局预设更新；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `0f1c30b1…`
+- **2026.09.13.5**（预览路径修复 + 时间线默认开启迁移 + 3 处视觉修正；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `27593729…`
+- **2026.09.13.6**（快捷键系统 + 关于页仓库地址；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `5c3bc887…`
+  —— ⚠️ **未实机验证**（只跑了 tsc + 703 单测），见下方「快捷键系统」条
+- **2026.09.13.7**（新建笔记无反应 + normalize_tags 失效 + 停止打包 CDP；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `f2ecc8d6…`
+  —— 本版同时含 mac 侧修复（python 自包含 / server 内嵌 / 打开终端 / 菜单语言），
+     但 mac 需 CI 单独构建，见下方「mac 真机验证发现的问题」条
+- **2026.09.13.8**（插件 runtime PATH 少一层 bin/ + 笔记列表宽度自适应；仅 gui）
+  —— 已上传云，9 组件 sha 全部核对一致；gui sha `fd76b427…`
+
+### macOS 发布（云端，2026-09-14 首次）
+
+| 版本 | 内容 | 组件 |
+|---|---|---|
+| **2026.09.14.1** | 对齐 Windows `.13.8`（PATH 修复 / 笔记宽度）+ mac 专属修复（python 自包含、server 内嵌、打开终端、新建笔记、CDP 移除、菜单中文化） | 6 个（bun/claude/extensions/gui/python/tools），6/6 sha 一致 |
+| **2026.09.14.2** | GUI 组件路径修复（更新面板误判「未安装」）+ 移除三个死 launcher；发布 sha 改为沿用内嵌 manifest（修全量误报） | 仅 gui 变动，其余由服务端从 `.14.1` 复用 |
+
+**mac 组件集**（服务端 `VALID_COMPONENTS_MAC`）= `{gui, claude, bun, tools, python, extensions}`
+—— **无 `server`**（它内嵌在 gui.zip 的 `.app` 里）、无 git（系统自带）、无 updater（osascript 提权替代）。
+
+**发布流程**：`scripts/release_mac.py`（本次入库；改顶部 VERSION/UPLOAD_ONLY/COMPONENTS/RELEASE_NOTES
+→ `make` → `cloud` → `verify`）。细节与踩坑见 `docs/macos-build-playbook.md` §3。
+
+**四条上传踩坑**（都真实踩到，详见 playbook）：
+① 组件文件名必须规范 —— 服务端按 `upload.filename` 判组件，不在集合就**静默 continue**
+（`gui (3).zip` → `"gui (3)"` ≠ `"gui"`，**gui 被丢但接口仍返回 `ok:true`**）
+② `workbench upload` 不自动建目录（报 `PathNoWritePermission`，文案误导）
+③ 同名文件**交互式**问覆盖（非交互环境当取消）
+④ workbench 输出含 Braille 进度字符，**Windows GBK 控制台编解码都崩**
+
+### ⚠️ 发布 sha 算法定论（推翻早先 playbook 的规则）
+
+早先 playbook 写「发布时必须用 `dir_content_hash` 覆盖 gui sha（防 size-only 漏检）」
+—— **这条规则本身就是故障原因**：
+
+客户端读的**本地 manifest 就是 `.app` 内嵌那份**（`update.rs` 的
+`local_manifest_path = Contents/MacOS/manifest.json`），其 sha 是构建期算的
+`dirMetaHash(path,size)`。发布时改用内容 hash → **同一份内容两套算法算出不同值** →
+`local_sha != remote_sha` → **每次检查都报"有更新"**（实测 6 个组件全亮，用户发现的）。
+
+**定论**：sha 一律**沿用内嵌 manifest 的值** —— 比对算法与客户端一致是第一原则，
+"算法更敏感"必须让位。代价是放弃"内容变但 size 恰好不变也能检测"（.25.5 那个坑）；
+若日后要改回内容 hash，**必须同时改客户端 `local_manifest_path` 那份的生成方式**。
+
+**顺带记录**：`gui.zip` 内嵌 manifest 的 `size` 是**陈旧的**（build.ts 在"回填 size 为
+zip 实际大小"之前就打包了 gui.zip，所以 zip 内永远是**解压后目录**大小）—— 发布脚本
+修正 size 即可；sha 不受影响（在打包前就算好了）。
+
+### 2026-09-14 发布 key 泄露事故 #3（硬编码进脚本）
+
+写 `scripts/release_mac.py` 时把云更新服务上传 key **硬编码进源码**并提交 →
+推到**公开的 gitee**（`f2dbd54`）。
+
+- **只有 gitee 中招**；GitHub 被 `sync-github-clean.sh` 的密钥安全闸拦下（它扫暂存 diff）
+- **闸只保护快照分支，挡不住直接 push 主仓** —— 这是漏掉的路径
+- 处理：云端 `api_keys` 表删 id=6、插 id=7，**实测旧 key 返回 401、新 key 422**；
+  用户明确**不清理 git 历史**（key 已失效，风险消除）
+- 脚本改为读 `RELEASE_API_KEY` 环境变量（`HEAD dfb9a17`）
+
+**根因不是技术，是注意力**：同一轮对话里刚引用过"红线是进仓库/公开远端"却仍犯 ——
+把 key 写进**脚本**时没意识到"这也是会提交的文件"。**写任何进仓库的文件一律从环境变量读。**
+
+### 2026-09-14 插件 runtime 的 PATH 注入少一层（mac 实测，影响 Windows 亦然）
+用户装 nodejs 插件后 mac 上 `node`/`npm`/`npx` 全不可用，**连带弄坏 playwright-mcp**
+（`"command": "npx"` 解析不到；即便用绝对路径跑 npx-cli.js，npx 子进程的
+shebang `#!/usr/bin/env node` 仍会失败）。
+
+**根因**：`aggregateRuntimePaths` 把 runtime 声明目录原样当 PATH 条目 ——
+Windows 发行版 `node.exe` 在解压根（命中），mac/Linux 按 Unix 惯例放 `bin/`（差一层）。
+**而 AI_NOTES.md 把缺陷记成了"macOS 已知限制 / 用绝对路径绕行"** —— 那是错的，
+设计意图本就写着「一个 runtime 声明覆盖 node/npm/npx」。
+
+**修法**：注入声明目录**及其 `bin/`**（存在才加；声明已以 `/bin` 结尾则不追加，
+防 `bin/bin`）。一处改动同时修好 A（claude.exe 启动自扫）与 B（GUI 推送）两条通道
+—— 它们共用此函数。Windows 侧 `runtime/bin` 不存在 → 行为不变。
+
+**可复用教训**：**别把实现缺陷当平台限制写进文档** —— 那会固化错误认知，
+后续 AI 会照着文档说"必须用绝对路径"，问题永远不被修。
+
+### 2026-09-13 mac 真机验证发现的问题（6 个，全部已修）
+用户首次在 mac 真机跑 `.13.6`，点出 6 个问题。**其中 4 个是"必现且功能完全不可用"**
+—— 说明这些代码路径**从没在 mac 上走通过**。这类 bug 单测/tsc 全抓不到。
+
+| # | 问题 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 内置 python 一启动就 `dyld: Library not loaded` | 旧方案用 python.org 的**.pkg 框架式安装**再 ditto 拷副本 —— 二进制里硬编码 `/Library/Frameworks/Python.framework/Versions/3.12/Python`，用户系统框架升到 3.14 后 3.12 的 dylib 没了。**ditto 改不了二进制内的绝对路径**，重建 symlink 也救不了 | 换 **python-build-standalone**（Astral）：真自包含（`@rpath` + `@executable_path/../lib`，libpython 随包），顺带 176MB→24MB |
+| 2 | 诊断面板「GUI SERVER 已停止」 | `.app` 里根本没有 `claude-gui-server`。embed 列表把 `'server'` 当**目录**找（`existsSync(dist/server)`），但它是**单文件** `claude-gui-server` → 恒为假 → 只 warn 跳过 | 从目录列表移出，作**单文件硬校验**单独嵌入（缺了 exit(1)，它是必须组件不是可选的） |
+| 3 | `note_normalize_tags` 必现失败 | **两个错误叠加**：a) 缺必填 `workDir`；b) **误用返回值** —— `run_cli_print` 是两段式（invoke 只返回 request_id，输出经 `cli-translate-result` 事件回传），原代码直接当输出用 | 抽 `runCliPrintForJson()` 封装契约：先挂监听再 invoke、暂存 early payload、按 request_id 匹配、超时保护 |
+| 4 | 点「新建笔记」无反应 | GUI **没处理两段式契约** —— `note_create` 不带 action 时先查重，命中返回 `conflict_detected` 且**不落库**（无 id）→ `setSelectedId(undefined)`。叠加小语料豁免（≤20 条跳过分数阈值）→ 库里仅 1 篇时必撞 | 新建时带 `action: "store"` 绕过查重（空白笔记没有"重复"语义） |
+| 5 | 「打开终端」必现失败 `-2741 syntax error` | **AppleScript 转义层数搞反**：路径用 bash 双引号包裹，而那对引号**提前闭合了 AppleScript 字面量**（`do script "cd "path""`）。原代码注释写着"两层转义"但顺序是反的 | 改用 **bash 单引号**（与 update.rs 的 osascript 提权同思路），单引号不参与 AppleScript 字面量 |
+| 6 | 系统菜单栏恒英文 | `Info.plist` 只写 `CFBundleDevelopmentRegion=English` 且无 `CFBundleLocalizations` → macOS 判定仅支持英文（标准菜单项的本地化**由系统提供**，应用须声明支持） | 改 `zh_CN` + 加 `CFBundleLocalizations=[zh-Hans, zh_CN, en]` |
+
+**共性**：4 个是**"前端/构建没遵守既定契约"**。可复用的教训：
+- **"缺失就跳过"只对可选组件成立** —— server 是必须组件却走了 warn 分支，问题被静默吞掉（#2）
+- **两段式/事件式 API 不能当同步返回值用** —— #3 #4 都是这个
+- **往 AppleScript/shell 里嵌字符串时，引号层级要想清楚** —— 优先用不冲突的引号种类（#5）
+- **不要靠"看起来对"判断转义/编码类改动** —— #5 我用词法模拟验证了三种路径（普通/含空格/含单引号），旧实现在**所有**情况下都失败
+
+**mac 待验证**：.13.7 的 mac 产物需 CI 构建后真机复验上述 6 条。清单见对话记录。
+
+### 2026-09-13 快捷键系统（.13.6）
+完整文档 `docs/gui/shortcuts.md`。要点：
+
+- **唯一真相源** `services/shortcuts.ts`：默认表 + 键位解析/格式化 + 冲突检测 + 合并
+- **三类条目**：全局 / 命令型（走 commandRegistry）/ **上下文型**
+  （有焦点/挂载条件 → 设置里只读展示，改了也可能不生效）
+- **软冲突**：允许同键 + 提示 + 警示色；**表内顺序决定优先级**
+  （不用"后注册赢"—— 注册顺序受挂载时机影响、不确定）
+- 键位存规范化字符串 `"mod+shift+p"`；`mod` = Ctrl-or-Cmd，一份配置跨平台
+- 存 `gui.shortcuts`；分发器**按内容缓存**（JSON 作键）每次按键重读 → 改键立即生效
+
+**评审抓到的四个坑（都已修，值得记住）**：
+1. **注释与实现不符** —— 分发器写着"每次按键读最新值"却只读一次，
+   正是 HANDOFF 记过的失败模式（"前端注释与后端实现不符是这次 bug 的根"）。
+   改成按**内容**缓存，不依赖"调用方必须传新对象"的隐式契约
+2. **上下文键的键位要同源** —— 表里只是"描述"、组件仍硬编码时，设置面板
+   显示的键位会与实际行为悄悄脱节。加了 `entryKeysOf` 让组件从注册表读
+3. **Monaco 让位要按 id 不按字面量** —— 按按键匹配时用户改键后就失配
+4. **`+` 键名往返有损**（由测试发现）—— `formatKeys` 产出 `"mod++"`，
+   `parseKeys` 再解析时键名被当空片段丢掉。统一表示为 `plus`
+
+**i18n 键路径无类型安全** —— `shortcuts` 块曾被误放进 `settings` 命名空间而
+代码读顶层路径，整页显示原始键名，而 **tsc 全程干净**。已加
+`i18n/shortcutsKeys.test.ts` 兜底（断言 `t()` 返回值 ≠ 键名 + zh/en 键集合一致）。
+
+### 2026-09-13 「默认值变更」的迁移模式（.13.5，可复用）
+把某个**原先默认关闭**的功能改成默认开启，同时**尊重用户的手动关闭** ——
+靠 `Option<bool>` 的三态天然区分，不需要额外的标记字段：
+
+| 设置文件里的值 | 含义 | 迁移动作 |
+|---|---|---|
+| 字段缺失 / `null` | 从未设过 | **写入 `true`** |
+| `true` | 已开启 | 不动 |
+| **`false`** | **用户手动关过** | **不动**（永不再翻回） |
+
+实现要点（`migrations.rs::migrate_message_timeline_default_on`）：
+- **直接操作 `gui` 段 JSON，不走 `AppSettings` 结构** —— 只有这样才能区分
+  「字段缺失」与「显式 false」（走结构体时 `None` 会被序列化成 `null`）
+- 走已有 `MIGRATION_REGISTRY` 的 `Trigger::Startup`，幂等
+- 前端**同时**把默认值改成 `?? true`（双保险：新装用户不写盘也对）
+- 工作区覆盖全局用 `is_some()` 判定 → 工作区显式 false 能压过全局迁移的 true
+
+> 同类需求（如某开关要从默认关改默认开）直接照抄这个模式。
+
+### 2026-09-13 视觉缺陷只有实机能验（.13.5 复盘）
+本轮有一处我**改错了却没发现**：时间线筛选按钮要修"在蓝色气泡上看不见"，
+我把填充色改成了 `var(--accent)` —— 而用户气泡**本身就是** `var(--accent)`
+（`MessageItem.tsx:578`），同色相叠等于没修。直到提交前复查才发现。
+
+**正确解法**：浮在内容之上的控件，背景一律用**不透明的 `var(--bg-root)`**
+（暗色近黑 / 亮色纯白），与内容形成明暗反差；"激活态"靠**描边+图标着色**
+表达，不要动填充色（填充色要留给对比度）。
+
+**教训**：改配色前先查**目标背景实际是什么 token**（`grep` 那个元素的
+backgroundColor），别凭"看起来是蓝色"就动手。`tsc`/单测对配色零覆盖。
+
+### 2026-09-13 Windows 自绘标题栏（.13.4）
+把系统标题栏与工具栏合并成一条 36px（Windows 专属，mac 保留原生装饰）。
+完整文档见 `docs/gui/window-chrome.md`，四个必踩的坑：
+
+1. **`core:window:allow-start-dragging` 不在 `core:window:default` 里** ——
+   漏加会让所有 `data-tauri-drag-region` 静默失效（窗口拖不动），不报错
+2. **工具栏容器必须 `position: relative` + `z-index`** —— 否则被 `LayoutRenderer`
+   （它是定位元素）盖住；下拉自身的 zIndex 只在**自己堆叠上下文内**有效，救不了父级
+3. **全屏覆盖层必须自带窗口按钮** —— `WorkspaceSelector`(z1000) / `WelcomeWizard`
+   (z2000) 盖住工具栏后就无从关窗（无装饰窗口下工具栏是唯一入口）
+4. **`="deep"` 吞非 BUTTON 元素点击** —— 下拉菜单项是 `div onClick`，被
+   `preventDefault()` 吞掉（表现为"菜单显示正常但点不动"）。弹层一律加
+   `data-tauri-drag-region="false"` 豁免（`Toolbar.tsx` 的 `DROPDOWN_MENU_ATTRS`）
+
+**工具栏收纳架构**（`toolbarItems.ts` 单一数组，顺序即折叠优先级）：
+- **固定降级** `inMenuByDefault` —— 低频功能永远在应用菜单，与宽度无关
+- **响应式折叠** —— 窗口窄了按序折叠（`useToolbarCollapse`：ResizeObserver +
+  实测宽度缓存 + 80ms 防抖，**不持久化**）
+- 两者汇入同一个 `AppMenu`（`AppMark` 图标点开，跨平台）
+
+> ⚠️ **重构工具栏时的教训**：删 JSX 前先确认那个组件能不能用 `ToolbarItem`
+> 表达 —— 自带弹层的（布局预设/终端/模型/面板/权限）**必须固定渲染**。
+> 我把「布局预设」和「系统终端」删了却没换机制，直接丢失功能。
+> 单测覆盖不到"某组件不再渲染"，**改后要做一次渲染清单比对**
+> （`git show HEAD:file | grep` 对比 `<Component` 出现集合）。
+
+### 2026-09-13 终端重复是**两个独立 bug**（重要区分）
+用户第一次报"命令和结果重复"→ 修了 store 层（.13.2）。用户复测后报"当前标签仍
+重复，**切一下标签重复又消失**"→ 这条线索直接排除 store 层（切标签就是从 store
+全量重绘，数据若有问题切了也还在），锁定 xterm 渲染层（.13.3）。
+
+**第二个 bug**：`TerminalPanel.renderActive` 直接 `term.reset()` + 一串 `writeln()`。
+但 xterm 的 `write()/writeln()` 是**异步**的（官方 typings：*data is processed
+asynchronously*），而 `reset()` 是同步清屏 —— reset 不会取消队列里未处理的写入。
+流式输出时每个进度事件都触发一轮「reset + 全量重写」，队列里堆了多份 → 处理完
+就是两整份。切标签时输出已停、队列排空 → 重绘正常。
+**修复**：`createRenderScheduler`（`gui/src/components/chat/terminalRender.ts`），
+同一帧内多次 request 合并为一次渲染（微任务调度）。
+
+> 教训：**"切一下就恢复正常" 是极强的定位线索** —— 它说明持久层（store/DB）
+> 是对的、问题在渲染/缓存层。遇到类似症状先按这条切分。
+
+### 2026-09-13 终端重复根因（store 层）
+- **后端进度回调送的是"滚动尾部窗口"，不是增量** —— `exec` 的 onProgress 传
+  `lastLines`(=最近 5 行) / `allLines`(=最近 100 行)，取自 `CircularBuffer.getRecent`
+  （`src/utils/task/TaskOutput.ts`；pipe 模式走 `#recentLines.getRecent(5)`）。每次 poll
+  窗口滑动且与上次重叠 → 前端按注释 "append only the delta" 直接 `output += text`
+  就会把重叠累积，短输出（≤5 行）整段重复。**前端那句注释与后端实现不符**，
+  是这次 bug 的根。
+- **修复**：`terminalStore.mergeTailWindow` —— 按**行**找 incoming 与已累积文本尾部的
+  最长重叠，只追加新行。整行比较而非字符比较（否则 "…abc" 尾部的 c 会被当成
+  "cde" 的重叠而丢字符）。真实重复（连续 `echo same`）无法与窗口滑动区分 → 保守保留。
+- **同时修掉的寻址 bug**：`terminal.append` 原不带工具 id，永远写"最后一个条目"，
+  并发工具时输出会落到别的卡片上。寻址必须用 **`parent_tool_use_id`** 而非
+  `tool_use_id` —— 后者是 `bash-progress-N` 计数器（`toolExecution.ts:566` /
+  `BashTool.tsx:666` 每包自增），用它寻址会永远找不到条目、终端进度整个失效。
+
+### 发布 notes 格式（易错，已踩）
+`build.ts` 的 `--notes` **不会自动加版本头** —— `vYYYY.MM.DD.N` 那行必须自己写，
+否则更新面板里该版本段没有标题、累积说明断代。累积由脚本自动拼接（本版 + 上一版
+manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已补回并
+修正 13.1 段。
+
+### 2026-09-13 三处 GUI 改动（本批）
+- **切会话打断确认** —— 后端 `handleResumeSession`/`handleNewSession` 首行就是
+  `interruptCurrentTurn()`（`ideMode.ts:2245`/`2486`），点会话行即静默中止在跑的回合、
+  token 白烧。新增 `sessionSwitchGuard.ts`（纯函数）+ 弹窗，判定用 `isBackendBusy()`
+  （**不用 `streaming`** —— 它被 `interrupt()` 乐观清空会漏判；见 `chatReduce.ts:66`）。
+  重击当前会话不弹；`backendBusy === undefined`（后端未报过状态）视为不忙。
+  **未覆盖**命令面板（`useCommandPalette.ts:104`）与 `@ref` 会话链接（`referenceActions.ts:37`）
+  —— 那两处没有弹窗宿主，要加需先提供全局 confirm 容器
+- **子代理工具卡片标记** —— 根因：后端一直给子代理消息带 `parent_tool_use_id`（=主 agent 的
+  Task tool_use id，见 `queryHelpers.ts:120-156` 生成、`ideMode.ts:688-781` 广播），但 GUI
+  **从未读过**（全仓仅 `chatSession.ts:177` 写入 `null`）→ 子代理 tool_use 被 `chatReduce.ts:345`
+  直接 merge 进主 agent 最后一条 assistant 的 `toolUses`，视觉无区别。
+  **关键约束：只能标注、不能过滤** —— 卡片按 id 去重、tool_result 靠 `updateToolByUseId` 回填、
+  `tool_progress` 写最后一张卡，过滤会导致结果无处接收。故给 `ToolUse` 加 `subagent?: boolean`
+  仅在 UI 显示徽章
+- **时间线遮挡** —— 两个源：① 黑框是**原生 `title` tooltip**（`TimeLineBar.tsx:219`），OS 级定位
+  CSS 控制不了 → 删除，改 `role="slider"` + `aria-label`；② 提问预览浮层拖动时贴右侧消息区
+  随指针一路遮 → 拖动时翻到左侧（`barRect.left - PREVIEW_MAX_WIDTH - 6`，用常量偏移避免
+  测量自身宽度形成循环依赖）
+- ⚠️ 发布时 `dist/release/` 若为空（换机器），需先从 `GET /api/updates/latest` 拉回上一版
+  manifest 落盘，否则 build.ts 的 `prevNotes` 取不到基底、更新面板的累积说明会断代。
+  本次即如此处理（拉回 .4 的 manifest 作为基底，见脚本 `prevNotes` 逻辑）
 
 ### 构建命令
 - GUI：`cd gui/src-tauri && cargo tauri build --no-bundle`
@@ -146,16 +448,34 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
 
 ## 待办
 
-- [ ] **重启 Claude Code** —— 当前会话 MCP 仍连旧端口 40020；重启后连 `14020` 用上新 FTS5 检索
-- [ ] **Web UI 复核** —— `http://192.168.186.96:40021/` 搜索走新 FTS5 + jieba
-- [ ] **云上跟进** —— `123.56.66.84` 的 memory 服务未同步本次升级（按惯例）
+- [x] **访问控制** —— 2026-09-12 完成：MCP + REST 加 bearer token 鉴权（此前两者**零鉴权且公网可达**，
+      任何人可读写/投毒/`hard=true` 删库；Web 登录也只是前端装饰）。云已部署 `claude-memory:20260912-auth`，
+      token 存 `/root/claude-memory/.env`（600），本地 `~/.claude.json` 已配 `headers.Authorization`。
+      **当前会话 MCP 显示未连接属正常**（会话启动时读的旧配置），重启后生效。见部署手册 §6
+- [x] **本地接入 memory MCP** —— 2026-09-12 完成：`~/.claude.json` 指向 `http://123.56.66.84:8080/mcp`；
+      3 个 skills 已装新版（旧版备份在 `~/claude-skills-backup-20260912/`）
+- [ ] ⚠️ **本地代理 17891 会间歇 502** —— 2026-09-12 实测：直连云服务器 5/5 正常，走 17891 代理
+      5 次里 3 次返回空 body 的 502（服务器端无异常日志，容器内直连 6/6 稳定）。可能影响 MCP 连接
+      稳定性；今早 docker pull 失败、HANDOFF 旧记的"死代理"疑似同源。待办：给云 IP 配 `NO_PROXY` 或修代理
+- [x] **96 同步修复** —— 2026-09-14 完成（**含鉴权**，比原计划多一项）。96 从 9-11 版直升
+      `claude-memory:20260914-auth`：bearer 鉴权 + scope 前缀搜索 + `_ensure_meta` 并发保护 + 新 Web 前端；
+      数据 303 条完整（部署前已备份 `claude-memory.db.bak.20260914`）。
+      本机 `~/.claude.json` 已同步加 `headers.Authorization`（**需重启会话生效**）。见部署手册 §8
+- [ ] **Web UI 复核** —— 96 `http://192.168.186.96:40021/`（登录框填 token）/ 云 `http://123.56.66.84:40021/`；
+      搜索走新 FTS5 + jieba
+- [ ] **96 release-platform 已发 `.14.3`** —— 复核 GUI 更新面板（点「检查更新」应提示 9 个组件中 4 个需更新）
+- [x] **云上跟进** —— 2026-09-12 完成（本地构建镜像 → workbench 上传 → 云端切换，见部署手册）
 - [x] **云 server root 密码轮换** —— 已完成（新值在内部凭据笔记；96 内网密码无需轮换）
 - [ ] （可选）**向量路** —— SPEC §10 预留：加 OpenAI 兼容 embedding 客户端 + 第三路进 `rrf_merge`，约 150 行
-- [ ] （可选）**web 密码构建注入** —— 见「未提交改动」条
+- [x] ~~web 密码构建注入~~ —— 2026-09-12 该机制已废弃：登录框改为输入 bearer token 并向服务端验证，
+      **不再有构建期注入**，连带消除了"忘记注入导致登录全被拒"的失败模式
 
 ## 环境
 
-- **96 server**: `192.168.186.96:8765`（release-platform）/ `:14020` + `:40021`（memory）；账号/密码见 Memory MCP `server_96.md`
+- **96 server**: `192.168.186.96:8765`（release-platform）/ `:14020` + `:40021`（memory）；
+  账号/密码见 `.private/api-keys.md`。**操作通道**：`temp/s96.sh`（系统 ssh；
+  ⚠️ **不要用 paramiko**，见「96 SSH 通道」条）。部署目录 `/root/claude-memory/`；
+  数据 `/data/claude-memory/claude-memory.db`
 - **云 server**: `123.56.66.84:8765`；ECS `i-2ze2rouoikcqrlbseu8a` / cn-beijing；通过 workbench 通道操作
 - **Workbench**: `C:\Program Files\workbench\workbench.exe`；config `~/.workbench/config.json`（AK 模式）；**Python subprocess 调用**
 - **GitHub**: `o2bubble/claude-code-haha-rush`（private）；push 需 `-c http.proxy= -c https.proxy=` 绕过死代理（17891）
@@ -171,7 +491,9 @@ efc1a7d security: 文档里的明文密钥改为占位符 — 真实值移到 .p
 | 代码 | `extensions/memory/{tokenizer,store,search_engine,server,api}.py` | 新版实现（`tokenizer.py` 为新增） |
 | 测试 | `extensions/memory/tests/test_memory.py` | 43 单测 |
 | 脚本 | `scripts/sync-github-clean.sh` | 快照同步（已移除 offline-tools 特殊处理） |
+| **mac 发布** | `docs/macos-build-playbook.md` · `scripts/release_mac.py` | **macOS 构建发布手册**（含 sha 算法定论、四条上传踩坑、发布历史） |
 | 架构 | `docs/ARCHITECTURE.md` · `docs/agents/issue-tracker.md` | 架构与工单约定 |
+| **部署** | `docs/memory-deploy-playbook.md` | **memory 服务发版手册**（本地构建→workbench 上传→云端切换；含 WAL 备份/代理/竞态三个坑） |
 | PRD（本地） | `.scratch/gui-plugin-system/PRD.md` | 插件系统完整 PRD（gitignore 不入库） |
 
 ## Suggested skills

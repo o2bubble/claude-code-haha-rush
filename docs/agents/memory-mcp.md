@@ -124,7 +124,9 @@ memory_search(query, mode?, scope?, type?, tags?, limit?, min_similarity?)
 - `mode`: `"hybrid"` (default, BM25 + tags fused via RRF) | `"keyword"` (BM25 only) |
   `"tag"` (tag filter only) | `"semantic"` (**not available** — no embedding provider;
   returns an explicit message instead of results)
-- `scope`: Filter by scopes (list), e.g. `["project:claude-code-haha", "domain:devops"]`
+- `scope`: Filter by scopes (list). Exact match by default: `["project:claude-code-haha",
+  "domain:devops"]`. A trailing `*` matches by prefix — `["project:*"]` returns memories from
+  every project scope, `["domain:*"]` every domain. Prefixes can be mixed with exact values.
 - `type`: Filter by memory type, e.g. `["lesson"]` to find only pitfalls
 - `tags`: In tag/hybrid mode, require ALL these tags
 - `limit`: Default 10, max 50
@@ -153,7 +155,10 @@ shorter distinctive terms work well). At most ~3 search attempts per turn, then 
 memory_get(id)
 ```
 
-Returns full content, tags, and all associated memories (both directions). Automatically records access for importance tracking.
+Returns full content, tags, all associated memories (both directions), `content_refs`
+(outgoing `memory://` links) and `referenced_by` (incoming links). Increments the memory's
+`access_count`, which drives the "most accessed" ordering in the web UI — it does not change
+`importance`.
 
 **When to call:**
 - After `memory_search` returns something interesting → get full details
@@ -286,7 +291,7 @@ memory_normalize_tags(mapping=mapping)                 # apply if correct
 
 - **Too granular**: Don't store "the foo function takes 3 parameters" — that's what code search is for. Store "the foo module has a non-obvious initialization requirement".
 - **Too vague**: Don't store "there were some issues with the build" — describe what went wrong and how to fix it.
-- **No associations**: A memory without edges is an island. Always try to link new memories to at least one existing one.
+- **Forced associations**: A memory with no genuinely related neighbours is fine as a standalone entry — a bogus edge is worse than no edge, because `memory_traverse` will surface it as if it were relevant. Link when there's a real relationship, not to avoid "orphans".
 - **Wrong scope**: A universal truth about Docker stored as `project:claude-code-haha` won't be found when working on other projects.
 - **Skipping the pre-task search**: The most valuable memories are the ones that PREVENT you from repeating mistakes. Search first.
 - **Over-normalizing**: Don't `memory_normalize_tags` after every single `memory_store`. It's a batch operation for periodic cleanup.

@@ -1,0 +1,46 @@
+# Cloudflare Tunnel 配置 —— 跑在云服务器上（暴露云本机服务）
+#
+# 隧道：17lumen-cloud（ID 2177c195-32d6-4666-beea-eace3e2d0214）
+#
+# ⚠️ systemd 实际读的是 /etc/cloudflared/config.yml（service install 时复制的）
+#    改配置请改那份，然后 systemctl restart cloudflared
+#
+# 启动：cloudflared tunnel --config /etc/cloudflared/config.yml run
+# 服务化：cloudflared --config <path> service install
+
+tunnel: 2177c195-32d6-4666-beea-eace3e2d0214
+credentials-file: /root/cloudflared/2177c195-32d6-4666-beea-eace3e2d0214.json
+
+loglevel: info
+logfile: /root/cloudflared/tunnel.log
+
+# QUIC 在部分网络受限，http2 更稳
+protocol: http2
+
+# ─────────────────────────────────────────────────────────────
+# 入口规则：按 hostname 分流到不同的本地服务
+#   · CF 边缘收到请求后看 Host header，转发到对应的 service
+#   · 不需要自建 nginx/反向代理 —— 这本身就是反向代理
+#   · ⚠️ 最后一条必须是无 hostname 的兜底规则
+# ─────────────────────────────────────────────────────────────
+ingress:
+  # ① release-platform（更新服务器）
+  - hostname: release.17lumen.cloud
+    service: http://127.0.0.1:8765
+
+  # ② Memory Web（记忆库管理面板）
+  #    originRequest 关掉 TLS 校验（本地是 http，无需 verify）
+  - hostname: mem.17lumen.cloud
+    service: http://127.0.0.1:40021
+    originRequest:
+      noTLSVerify: true
+
+  # ③ Memory MCP（给 AI agent 用的记忆库接口）
+  #    ⚠️ 暴露到公网前确认 MEMORY_AUTH_TOKEN 已设置（服务端强制鉴权）
+  - hostname: mcp.17lumen.cloud
+    service: http://127.0.0.1:8080
+    originRequest:
+      noTLSVerify: true
+
+  # 兜底（必须最后）
+  - service: http_status:404

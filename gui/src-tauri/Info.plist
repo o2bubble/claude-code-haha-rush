@@ -3,7 +3,19 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
-	<string>English</string>
+	<string>zh_CN</string>
+	<!-- 声明应用支持的语言。macOS 据此决定**系统菜单栏**（File/Edit/View…）里
+	     标准项的显示语言 —— Undo/Redo/Cut/Copy/Paste/Select All 这些由系统提供
+	     本地化，应用只需声明支持 zh-Hans，它们就会跟着系统语言变中文。
+	     此前只写 English 且无本数组 → 系统认为本应用仅支持英文 → 菜单栏恒英文，
+	     即使应用内 UI 全中文（见 src/i18n/index.ts 默认 "zh"）。
+	     注：菜单**标题**（File/Edit…）由 Tauri 生成的默认菜单硬编码，不受此处影响。 -->
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hans</string>
+		<string>zh_CN</string>
+		<string>en</string>
+	</array>
 	<key>CFBundleDisplayName</key>
 	<string>Claude Code</string>
 	<key>CFBundleExecutable</key>

@@ -154,6 +154,86 @@ pub fn should_migrate_server_url(skill_registry_url: &str) -> bool {
     skill_registry_url.contains("localhost")
 }
 
+// ── 云服务器地址：裸 IP → Cloudflare Tunnel 域名（一次性） ──
+
+/// 云服务器的旧发布默认地址（云主机裸 IP）。
+const LEGACY_CLOUD_SERVER_URL: &str = "http://123.56.66.84:8765";
+/// 云服务器的新地址（Cloudflare Tunnel 域名）。
+const CLOUD_SERVER_URL: &str = "https://release.17lumen.cloud";
+
+/// 把旧的云主机裸 IP 改写成 Cloudflare Tunnel 域名。返回是否发生改写。
+///
+/// 为什么迁移：裸 IP 在受限网络（企业网等）访问云主机是被静默丢包的，用户选了
+/// 「公网」档却完全连不上；域名走 CF 边缘则处处可达。代价是国内访问绕境外边缘
+/// 多约 200ms，对更新检查无感。
+///
+/// 只改写**精确等于旧发布默认值**的地址 —— 用户自定义的任何其它地址一律不动
+/// （与 [`should_migrate_server_url`] 的克制风格一致）。
+pub fn migrate_legacy_cloud_url(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+    if settings.skill_registry_url == LEGACY_CLOUD_SERVER_URL {
+        settings.skill_registry_url = CLOUD_SERVER_URL.to_string();
+        changed = true;
+    }
+    if settings.update_server_url == LEGACY_CLOUD_SERVER_URL {
+        settings.update_server_url = CLOUD_SERVER_URL.to_string();
+        changed = true;
+    }
+    changed
+}
+
+// ── 消息时间线：默认开启（一次性） ──
+
+/// 消息时间线功能已完善，改为**默认开启**让用户直接体验。
+///
+/// 由于它原先默认关闭，老用户的设置文件里**没有这个字段**（而不是 `false`）——
+/// 这正是本迁移的判定依据：
+///
+/// | 文件里的值 | 含义 | 动作 |
+/// |---|---|---|
+/// | 字段缺失 / `null` | 从未设过 | **写入 `true`**（本次迁移的目标） |
+/// | `true` | 已开启 | 不动 |
+/// | `false` | **用户手动关过** | **不动**（尊重选择，不再翻回） |
+///
+/// 幂等：迁移后字段已是 `true` → 不再匹配「缺失」分支 → no-op。
+///
+/// 直接操作 `gui` 段的 JSON 而不是 `AppSettings` 结构：只有这样才能区分
+/// 「字段缺失」与「显式 false」——`Option<bool>` 读出来都是可分辨的，但走
+/// 结构体写回会把 `None` 序列化成 `null`，白留噪声字段。
+///
+/// 路径可注入（单测用临时目录，绝不碰真实 `~/.claude`）。
+pub(crate) fn migrate_message_timeline_default_on() {
+    migrate_message_timeline_default_on_at(&crate::settings::global_settings_path());
+}
+
+pub(crate) fn migrate_message_timeline_default_on_at(path: &std::path::Path) {
+    let Some(mut gui) = crate::settings::read_gui_section(path) else {
+        // 没有设置文件 = 全新安装，前端默认值 `?? true` 已覆盖，无需写盘
+        return;
+    };
+    let Some(obj) = gui.as_object_mut() else { return };
+
+    // 仅在「键不存在」或「值为 null」时写入 —— 显式 false 绝不覆盖
+    let needs = match obj.get("messageTimeline") {
+        None => true,
+        Some(serde_json::Value::Null) => true,
+        Some(_) => false,
+    };
+    if !needs {
+        return;
+    }
+
+    obj.insert(
+        "messageTimeline".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    if let Err(e) = crate::settings::write_gui_section(path, &gui) {
+        log::warn!("migrate_message_timeline_default_on: write failed: {e}");
+        return;
+    }
+    log::info!("Migrated messageTimeline → true (was unset; explicit false is preserved)");
+}
+
 // ── DeepSeek 模型下线：已有 profile 合并 ──
 
 /// DeepSeek 官方已下线 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`
@@ -439,6 +519,14 @@ pub(crate) const MIGRATION_REGISTRY: &[MigrationEntry] = &[
         run: Some(migrate_legacy_profiles),
     },
     MigrationEntry {
+        name: "migrate_message_timeline_default_on",
+        trigger: Trigger::Startup,
+        target: "gui.messageTimeline 字段缺失 → 写入 true（该功能改为默认开启）",
+        source: "migrations.rs",
+        idempotent: "字段已是 true / false 即跳过；只补缺失，绝不覆盖用户手动关闭的 false",
+        run: Some(migrate_message_timeline_default_on),
+    },
+    MigrationEntry {
         name: "migrate_deepseek_profiles",
         trigger: Trigger::Startup,
         target: "同 api+key 的旧 deepseek profile（v4-pro/v4-flash/vision-exp）→ 单个 deepseek-flash；原文件归档到 profiles/archive/；激活态跟随",
@@ -500,6 +588,15 @@ pub(crate) const MIGRATION_REGISTRY: &[MigrationEntry] = &[
         target: "桌面 DB 旧表结构 → 新增 snap_to_grid 列",
         source: "../shared/src/db.rs",
         idempotent: "ALTER 失败即视为列已存在（SQLite 无版本表，用失败当守卫）",
+        run: None,
+    },
+    MigrationEntry {
+        name: "note_fts + note_meta（FTS5 索引）",
+        trigger: Trigger::LoadPath,
+        target: "笔记 DB 旧表结构 → 新增 FTS5 虚拟表与状态表，并回填已有笔记",
+        source: "../shared/src/note.rs::ensure_fts",
+        idempotent: "IF NOT EXISTS 建表；回填仅在「索引为空且笔记非空」或「分词引擎变更」时触发，\
+                     且 note_meta.fts_enabled='0' 的手动禁用不会被覆盖",
         run: None,
     },
 ];
@@ -658,6 +755,59 @@ mod tests {
         assert!(!should_migrate_server_url("http://123.56.66.84:8765"));
         assert!(!should_migrate_server_url("http://192.168.186.96:8765"));
         assert!(!should_migrate_server_url("http://example.com:8765"));
+    }
+
+    // ── 云服务器地址：裸 IP → CF 域名（一次性） ──
+
+    fn settings_with_urls(skill: &str, update: &str) -> AppSettings {
+        AppSettings {
+            skill_registry_url: skill.to_string(),
+            update_server_url: update.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// 旧发布默认（裸 IP）两处都被改写成 CF 域名。
+    #[test]
+    fn legacy_cloud_url_is_migrated_to_tunnel_domain() {
+        let mut s = settings_with_urls(LEGACY_CLOUD_SERVER_URL, LEGACY_CLOUD_SERVER_URL);
+        assert!(migrate_legacy_cloud_url(&mut s));
+        assert_eq!(s.skill_registry_url, "https://release.17lumen.cloud");
+        assert_eq!(s.update_server_url, "https://release.17lumen.cloud");
+    }
+
+    /// 幂等：迁移过再跑一次不该有变化（否则每次加载都会重写磁盘）。
+    #[test]
+    fn legacy_cloud_url_migration_is_idempotent() {
+        let mut s = settings_with_urls(LEGACY_CLOUD_SERVER_URL, LEGACY_CLOUD_SERVER_URL);
+        migrate_legacy_cloud_url(&mut s);
+        assert!(!migrate_legacy_cloud_url(&mut s), "第二次不应再改写");
+    }
+
+    /// 只有**精确等于**旧默认值才迁移 —— 用户自定义地址一律不动
+    /// （内网 96、自建域名、其它 IP 都不是旧发布默认值）。
+    #[test]
+    fn legacy_cloud_url_migration_leaves_custom_urls_alone() {
+        for custom in [
+            "http://192.168.186.96:8765",
+            "https://release.17lumen.cloud",
+            "http://my-own-server.example.com:8765",
+            "http://123.56.66.84:9999", // 同 IP 不同端口 = 用户自定，不动
+        ] {
+            let mut s = settings_with_urls(custom, custom);
+            assert!(!migrate_legacy_cloud_url(&mut s), "{custom} 不应被迁移");
+            assert_eq!(s.skill_registry_url, custom);
+            assert_eq!(s.update_server_url, custom);
+        }
+    }
+
+    /// 两个字段各自独立判定：只动与旧默认值相等的那一个。
+    #[test]
+    fn legacy_cloud_url_migration_is_per_field() {
+        let mut s = settings_with_urls(LEGACY_CLOUD_SERVER_URL, "http://192.168.186.96:8765");
+        assert!(migrate_legacy_cloud_url(&mut s));
+        assert_eq!(s.skill_registry_url, "https://release.17lumen.cloud");
+        assert_eq!(s.update_server_url, "http://192.168.186.96:8765", "自定义的内网地址不该被改");
     }
 
     // ── DeepSeek 模型下线：profile 合并迁移（临时目录，绝不碰真实 ~/.claude）──
@@ -827,5 +977,93 @@ mod tests {
             !work.join(".claude").join("active-profile").exists(),
             "激活的是无关 profile → 不应写激活标记"
         );
+    }
+
+    // ── messageTimeline 默认开启迁移（临时目录，绝不碰真实 ~/.claude）──
+
+    fn mt_fixture(tag: &str, gui_json: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mt_mig_{}_{}", std::process::id(), tag));
+        let _ = std::fs::create_dir_all(&dir);
+        let settings = dir.join("settings.json");
+        let content = format!("{{\"gui\":{gui_json},\"env\":{{\"ANTHROPIC_MODEL\":\"keep-me\"}}}}");
+        let _ = std::fs::write(&settings, content);
+        settings
+    }
+
+    fn mt_gui(path: &std::path::Path) -> serde_json::Value {
+        read_gui_section(path).expect("gui section")
+    }
+
+    /// 字段缺失（老用户从未设过）→ 写入 true。
+    #[test]
+    fn mt_unset_becomes_true() {
+        let p = mt_fixture("unset", "{}");
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(mt_gui(&p)["messageTimeline"], serde_json::json!(true));
+    }
+
+    /// 显式 false（用户手动关过）→ 绝不动。
+    #[test]
+    fn mt_explicit_false_preserved() {
+        let p = mt_fixture("false", "{\"messageTimeline\":false}");
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(
+            mt_gui(&p)["messageTimeline"],
+            serde_json::json!(false),
+            "用户手动关闭后，迁移不得翻回 true"
+        );
+    }
+
+    /// 已是 true → 不动（幂等）。
+    #[test]
+    fn mt_already_true_noop() {
+        let p = mt_fixture("true", "{\"messageTimeline\":true}");
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(mt_gui(&p)["messageTimeline"], serde_json::json!(true));
+    }
+
+    /// null 等价于缺失 → 写入 true。
+    #[test]
+    fn mt_null_becomes_true() {
+        let p = mt_fixture("null", "{\"messageTimeline\":null}");
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(mt_gui(&p)["messageTimeline"], serde_json::json!(true));
+    }
+
+    /// 幂等：连跑两次结果一致。
+    #[test]
+    fn mt_idempotent() {
+        let p = mt_fixture("idem", "{}");
+        migrate_message_timeline_default_on_at(&p);
+        let first = mt_gui(&p);
+        migrate_message_timeline_default_on_at(&p);
+        assert_eq!(first, mt_gui(&p));
+    }
+
+    /// 不碰其它字段（gui 内与 gui 外的都不能丢）。
+    #[test]
+    fn mt_preserves_other_keys() {
+        let p = mt_fixture("preserve", "{\"terminalMaxEntries\":42,\"theme\":\"dark\"}");
+        migrate_message_timeline_default_on_at(&p);
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(raw["gui"]["terminalMaxEntries"], serde_json::json!(42));
+        assert_eq!(raw["gui"]["theme"], serde_json::json!("dark"));
+        assert_eq!(raw["gui"]["messageTimeline"], serde_json::json!(true));
+        assert_eq!(
+            raw["env"]["ANTHROPIC_MODEL"], "keep-me",
+            "顶层非 gui 键必须保留"
+        );
+    }
+
+    /// 设置文件不存在 → 静默 no-op（不 panic、不创建文件）。
+    #[test]
+    fn mt_missing_file_noop() {
+        let p = std::env::temp_dir()
+            .join(format!("mt_mig_missing_{}", std::process::id()))
+            .join("nope.json");
+        migrate_message_timeline_default_on_at(&p);
+        assert!(!p.exists(), "不应凭空创建设置文件");
     }
 }

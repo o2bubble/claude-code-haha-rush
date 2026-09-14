@@ -79,9 +79,14 @@ async function handleMcpRequest(req: McpRequest): Promise<void> {
     // 所以无条件 await 即可 —— durability 语义归属 store，调用点零判断。
     await forceSaveDesktop();
 
-    // Notify NotesPanel if a note was mutated
+    // Notify NotesPanel if a note was mutated. note_create is two-phase: the
+    // pre-check returns conflict_detected having written nothing, so emitting
+    // there would make the panel reload its list for no reason.
     const NOTE_MUTATIONS = new Set(["note_create","note_update","note_delete","note_associate","note_disassociate","note_normalize_tags","note_apply_tag_mapping"]);
-    if (NOTE_MUTATIONS.has(toolName)) windowBus.emit(Events.NOTES_CHANGED, {});
+    const notePhaseWroteNothing = toolName === "note_create" &&
+      typeof result === "object" && result !== null &&
+      ["conflict_detected", "skipped", "rejected"].includes((result as { status?: string }).status ?? "");
+    if (NOTE_MUTATIONS.has(toolName) && !notePhaseWroteNothing) windowBus.emit(Events.NOTES_CHANGED, {});
 
     // MCP protocol: tools/call responses must be wrapped in { content: [...] }
     const responsePayload = method === "tools/call"
@@ -121,6 +126,98 @@ function clampMcpInt(v: unknown, def: number, min: number, max: number): number 
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+/**
+ * 跑一次 `run_cli_print` 并把 CLI 输出解析成 JSON。
+ *
+ * ⚠️ `run_cli_print` 是**两段式**契约，不是同步返回值：
+ *   ① `invoke("run_cli_print", { prompt, workDir })` 立即返回一个 `request_id`
+ *      （Rust 侧 spawn 后台线程跑 CLI，不阻塞）
+ *   ② CLI 结果经 `cli-translate-result` Tauri 事件回传，用 `request_id` 匹配
+ *
+ * 早先这里写成 `const result = await invoke("run_cli_print", { prompt })` 直接用
+ * 返回值 —— 两个错误叠在一起：缺必填的 `workDir`（invoke 直接报错），且即便补上，
+ * 拿到的也只是 request_id 而非输出。表现即 `note_normalize_tags` 必现失败
+ * （"missing required key workDir"）。
+ *
+ * @param wantKey 期望的顶层键名；缺失即报错（防模型返回别的 JSON 结构时静默拿到空对象）
+ * @param timeoutMs 超时保护 —— CLI 可能因无 profile / 网络问题一直不回事件
+ */
+async function runCliPrintForJson<T extends object>(
+  prompt: string,
+  wantKey: string,
+  timeoutMs = 120000,
+): Promise<T> {
+  const { getSettings } = await import("../stores/settingsStore");
+  const workDir = getSettings().workDir;
+  if (!workDir) throw new Error("工作区未绑定，无法调用 CLI");
+
+  type CliPayload = { request_id: string; ok: boolean; output?: string; error?: string };
+  const payload = await new Promise<CliPayload>((resolve, reject) => {
+    let unlisten: (() => void) | null = null;
+    let settled = false;
+    let wantId: string | null = null;   // invoke resolve 后填入
+    let early: CliPayload | null = null; // invoke 返回前先到的事件（极少见，防御性）
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      unlisten?.();
+      fn();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`CLI 超时（${Math.round(timeoutMs / 1000)}s 无响应）`))),
+      timeoutMs,
+    );
+
+    // 收到事件时的统一处理：id 未知就先存着（**只存第一个**，避免被后续陈旧事件覆盖），
+    // 已知则比对 —— 比对是必需的：上一次调用超时后遗留的迟到事件不能算到这一次头上。
+    const onEvent = (p: CliPayload) => {
+      if (settled) return;
+      if (wantId === null) { if (!early) early = p; return; }
+      if (p.request_id !== wantId) return;
+      finish(() => resolve(p));
+    };
+    const drainEarly = () => {
+      if (early && wantId !== null && early.request_id === wantId) {
+        const p = early;
+        finish(() => resolve(p));
+      }
+    };
+
+    // **先挂监听再 invoke**：CLI 极快完成时事件可能早于 invoke 的 resolve 到达
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<CliPayload>("cli-translate-result", (e) => onEvent(e.payload)))
+      .then((un) => {
+        unlisten = un;
+        if (settled) { un(); return; }  // 监听挂上前已解决 → 立刻注销，防泄漏
+        drainEarly();
+      })
+      .catch((e) => finish(() => reject(e)));
+
+    invoke<string>("run_cli_print", { prompt, workDir }).then(
+      (rid) => {
+        wantId = rid;
+        if (settled) return;
+        drainEarly();
+      },
+      (e) => finish(() => reject(e)),
+    );
+  });
+
+  if (!payload.ok) throw new Error(payload.error || "CLI 调用失败");
+  const text = payload.output || "";
+
+  // 从输出里抓第一个 JSON 对象（模型常带前后说明文字）
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("CLI 输出中未找到 JSON");
+  const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+
+  const value = parsed[wantKey];
+  if (value === undefined) throw new Error(`CLI 输出缺少 "${wantKey}" 字段`);
+  return value as T;
+}
+
 /** diff 截断: AI 上下文预算保护 —— 超 40K 字符截断并注记（可调 context 再看） */
 const DIFF_LIMIT = 40_000;
 function truncateDiff(diff: string): string {
@@ -156,13 +253,13 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
           { name: "desktop_undo", description: "Undo the last operation on a desktop", inputSchema: { type: "object", properties: { desktopId: { type: "string" } }, required: ["desktopId"] } },
           { name: "desktop_redo", description: "Redo the last undone operation", inputSchema: { type: "object", properties: { desktopId: { type: "string" } }, required: ["desktopId"] } },
           // ── Notes tools ──
-          { name: "note_create", description: "Create a note. Scope: global (default), domain:<name>, or project:<name>.", inputSchema: { type: "object", properties: { title: { type: "string" }, content: { type: "string" }, scope: { type: "string" }, tags: { type: "array", items: { type: "string" } } }, required: ["title", "content"] } },
+          { name: "note_create", description: "Create a note (two-phase). WITHOUT `action`: the server checks for similar notes and either stores directly ({status:'stored'}) or returns {status:'conflict_detected', candidates:[...]} WITHOUT persisting — then re-call with action=store|update|merge|skip plus target_ids/merged_content. Ignoring a conflict_detected response leaves the note unstored. Scope: global (default), domain:<name>, or project:<name>.", inputSchema: { type: "object", properties: { title: { type: "string" }, content: { type: "string" }, scope: { type: "string" }, tags: { type: "array", items: { type: "string" } }, action: { type: "string", enum: ["store", "update", "merge", "skip"], description: "Decision action, used to resolve a conflict_detected response. store=create anyway; update=overwrite target; merge=fold targets into the first and delete the rest; skip=nothing persisted" }, target_ids: { type: "array", items: { type: "string" }, description: "Target note ids for update/merge (required for both)" }, merged_content: { type: "string", description: "Content for update/merge; defaults to `content`" } }, required: ["title", "content"] } },
           { name: "note_update", description: "Update a note. Only provided fields are changed. tags replaces all tags.", inputSchema: { type: "object", properties: { id: { type: "string" }, title: { type: "string" }, content: { type: "string" }, scope: { type: "string" }, tags: { type: "array", items: { type: "string" } } }, required: ["id"] } },
           { name: "note_delete", description: "Delete a note by ID", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
           { name: "note_get", description: "Get full note content + tags + associations", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
           { name: "note_list", description: "List notes, optionally filtered by scope or tag", inputSchema: { type: "object", properties: { scope: { type: "string" }, tag: { type: "string" }, limit: { type: "number" } } } },
-          { name: "note_search", description: "Search notes by text. Searches title, content, and tags; multiple whitespace-separated terms accumulate weight. Results ranked: exact/leading title match > partial title or tag match > content match. scope narrows to a scope (or scope* prefix).", inputSchema: { type: "object", properties: { query: { type: "string" }, scope: { type: "string" }, limit: { type: "number" } }, required: ["query"] } },
-          { name: "note_associate", description: "Link two notes", inputSchema: { type: "object", properties: { source_id: { type: "string" }, target_id: { type: "string" }, weight: { type: "number" }, type: { type: "string", enum: ["related_to","derived_from","contradicts","supports"] }, bidirectional: { type: "boolean" } }, required: ["source_id", "target_id"] } },
+          { name: "note_search", description: "Search notes by text (FTS5 + jieba word segmentation, BM25-ranked). Chinese queries match sub-words, so shorter distinctive terms work well; synonyms spread across separate calls are more effective than one long phrase. Each result carries `strategy` ('fts' or 'like') reporting which retrieval path ran. scope narrows to a scope, or a prefix when it ends with '*'.", inputSchema: { type: "object", properties: { query: { type: "string" }, scope: { type: "string" }, limit: { type: "number" } }, required: ["query"] } },
+          { name: "note_associate", description: "Link two notes. related_to / contradicts / supports are symmetric and derived_from is directed (source was learned from target). A single edge is already visible from both endpoints — do NOT create the mirror edge by swapping source/target, that renders the relation twice.", inputSchema: { type: "object", properties: { source_id: { type: "string" }, target_id: { type: "string" }, weight: { type: "number" }, type: { type: "string", enum: ["related_to","derived_from","contradicts","supports"] } }, required: ["source_id", "target_id"] } },
           { name: "note_tags", description: "List all tags with usage counts", inputSchema: { type: "object", properties: { scope: { type: "string" } } } },
           { name: "note_normalize_tags", description: "Normalize tags by grouping similar ones via LLM. Returns mapping of old→canonical tags.", inputSchema: { type: "object", properties: { dry_run: { type: "boolean" } } } },
           // ── Plugin tools ──
@@ -306,6 +403,9 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
         content: params.content as string,
         scope: (params.scope as string) || "global",
         tags: (params.tags as string[]) || [],
+        action: params.action as string | undefined,
+        target_ids: params.target_ids as string[] | undefined,
+        merged_content: params.merged_content as string | undefined,
       }});
 
     case "note_update":
@@ -366,12 +466,7 @@ Return ONLY valid JSON (no markdown, no explanation):
 Only include tags that need to be renamed. Tags that are already canonical should NOT appear in the mappings.`;
 
       try {
-        const result = await invoke<string>("run_cli_print", { prompt });
-        // Parse JSON from the result — extract first { ... } block
-        const jsonMatch = result.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error("No JSON found in response");
-        const parsed = JSON.parse(jsonMatch[0]);
-        const mappings: Record<string, string> = parsed.mappings || {};
+        const mappings = await runCliPrintForJson<Record<string, string>>(prompt, "mappings");
 
         if (!dryRun && Object.keys(mappings).length > 0) {
           await invoke("note_apply_tag_mapping", { mappings });

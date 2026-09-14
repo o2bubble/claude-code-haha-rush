@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { t, setLanguage, getLanguage, type Language } from "../../i18n";
 import { getSettings } from "../../stores/settingsStore";
 import { withTimeout, DEFAULT_LOAD_TIMEOUT_MS } from "../../services/asyncUtils";
+import { WindowControls, isWindowsChrome } from "../TitleBar";
 import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 
@@ -23,9 +24,11 @@ interface WelcomeWizardProps {
 const TOTAL_STEPS = 7;
 
 // ── Server URLs ──
+// public 档 = Cloudflare Tunnel 域名（原为云主机裸 IP 123.56.66.84，受限网络不可达）。
+// 与 App.tsx 的 profile 映射 / diagnosticsService.CLOUD_SERVER_URL 保持一致。
 const SERVER_URLS: Record<ServerProfile, string> = {
   intranet: "http://192.168.186.96:8765",
-  public: "http://123.56.66.84:8765",
+  public: "https://release.17lumen.cloud",
 };
 
 // ── Inline style tokens ──
@@ -954,6 +957,20 @@ export function WelcomeWizard({ onComplete }: WelcomeWizardProps) {
 
   return (
     <div style={C.overlay}>
+      {/* 自绘窗口按钮（仅 Windows）——覆盖层盖住工具栏，没有它无法关窗/最小化。
+          拖动区只取顶部一条：向导内多为 div onClick，deep 会吞掉点击。 */}
+      {isWindowsChrome() && (
+        <div
+          data-tauri-drag-region
+          style={{
+            position: "absolute", top: 0, left: 0, right: 0, height: 36,
+            display: "flex", alignItems: "center", justifyContent: "flex-end",
+            zIndex: 1,
+          }}
+        >
+          <WindowControls />
+        </div>
+      )}
       <div style={C.card}>
         {/* Step Indicator */}
         <div style={C.stepBar}>

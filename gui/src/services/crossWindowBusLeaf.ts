@@ -17,7 +17,7 @@ import {
 } from "../stores/chatStore";
 import { updatePlan, clearPlan } from "../stores/planStore";
 import { upsertSubAgent, setTranscript, setTranscriptLoading } from "../stores/subAgentStore";
-import { startCommand, appendToLastEntry, setOutput, finishCommand, updateCommand } from "../stores/terminalStore";
+import { startCommand, appendOutput, setOutput, finishCommand, updateCommand } from "../stores/terminalStore";
 import { syncDesktopsFromBus, getDesktops, getActiveDesktopId } from "../stores/desktopStore";
 import type { Desktop } from "../types/desktop";
 import { addStatusMessage } from "../stores/statusMsgStore";
@@ -134,7 +134,9 @@ function syncTerminalDelta(payload: { output: string; entryId: string }): void {
     _termEntryId = payload.entryId;
     startCommand(payload.entryId, "");
   }
-  appendToLastEntry(payload.output);
+  // 主窗口发来的是累积输出（非增量，见 crossWindowBusHub）—— appendOutput 内部
+  // 做尾部窗口合并，重复内容不会累积。
+  appendOutput(payload.entryId, payload.output);
 }
 
 function syncTerminalOutput(payload: { entries: unknown[]; activeId: string }): void {

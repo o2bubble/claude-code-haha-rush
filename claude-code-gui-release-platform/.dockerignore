@@ -1,0 +1,27 @@
+# 构建上下文排除 —— 没有这个文件时，`docker build .` 会把**整个目录**（含运行时数据）
+# 打包发给 daemon。本项目 updates-store 有 836MB，白传一遍且可能被 COPY 进镜像。
+
+# ── 运行时数据（compose 用 volume 挂载，绝不能进镜像）──
+skills-store/
+updates-store/
+feedback-images/
+registry.db
+registry.db-*
+registry.db.bak.*
+
+# ── 部署/文档/备份 ──
+*.bak
+*.bak.*
+PUBLISH.md
+skills-registry.service
+docker-compose.yml
+Dockerfile
+
+# ── Python 缓存 ──
+__pycache__/
+*.py[cod]
+.venv/
+
+# ── 版本控制 ──
+.git/
+.gitignore

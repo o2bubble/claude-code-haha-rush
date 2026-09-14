@@ -451,8 +451,26 @@ fn platform_str() -> &'static str {
 ///   updater 专属 Windows。
 fn component_artifact_path(install: &Path, name: &str, platform: &str) -> Option<PathBuf> {
     let is_win = platform == "windows";
+    // ⚠️ mac 的 gui **不是** install 目录里的条目 —— install = current_exe().parent()
+    // = `.app/Contents/MacOS/`，而 gui 就是 `.app` 本身，在它**上两级**。
+    // 早先按 `install.join("Claude Code.app")` 拼 → `.app/Contents/MacOS/Claude Code.app`
+    // **恒不存在** → 更新面板把已装的 GUI 判成「未安装」（2026-09-14 真机踩到）。
+    // 同一错误也影响 `prepare_gui_update_mac` 的写入目标（那处一并修）。
+    // 参照实现：lib.rs 的 spawn_gui_instance 注释「.app 根 = Contents/MacOS/ 上溯两级」。
+    if name == "gui" {
+        return if is_win {
+            Some(install.join("claude-code-gui.exe"))
+        } else {
+            // MacOS → Contents → *.app；校验后缀，避免层级不足时返回 `/` 这类
+            // 无意义路径（如 install 不在 bundle 内——开发态直接跑 target/release）。
+            install
+                .parent()
+                .and_then(|p| p.parent())
+                .filter(|p| p.extension().is_some_and(|e| e == "app"))
+                .map(|p| p.to_path_buf())
+        };
+    }
     let rel = match name {
-        "gui" => if is_win { "claude-code-gui.exe" } else { "Claude Code.app" },
         // GUI server 守护进程 — 必须与 gui.exe 同目录(find_server_exe 从 exe 旁发现)
         "server" => if is_win { "claude-gui-server.exe" } else { "claude-gui-server" },
         "claude" => if is_win { "claude.exe" } else { "claude" },
@@ -881,7 +899,11 @@ fn prepare_gui_update_mac(
 
     let app_bundle = walkdir_find(&temp_dir, "Claude Code.app")
         .ok_or("New Claude Code.app not found in downloaded zip")?;
-    let dst = install_dir.join("Claude Code.app");
+    // 目标 = **当前正在运行的 .app**（上两级：MacOS → Contents → *.app），
+    // 不是 install_dir（= Contents/MacOS）下的条目。用 component_artifact_path
+    // 走同一套解析，避免两处再漂移（此处曾与检测侧犯同一个错，见其注释）。
+    let dst = component_artifact_path(&install_dir, "gui", platform_str())
+        .ok_or("Cannot resolve macOS .app path for update")?;
 
     fn esc(s: &str) -> String {
         s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -1041,7 +1063,6 @@ mod tests {
 
     #[test]
     fn macos_uses_app_bundle_binary_and_system_components() {
-        assert_eq!(artifact("macos", "gui").unwrap(), PathBuf::from("/opt/claude/Claude Code.app"));
         assert_eq!(artifact("macos", "claude").unwrap(), PathBuf::from("/opt/claude/claude"));
         assert_eq!(artifact("macos", "extensions").unwrap(), PathBuf::from("/opt/claude/extensions"));
         // bun/tools/python 自包含 → 可安装
@@ -1052,6 +1073,28 @@ mod tests {
         for name in ["git", "updater"] {
             assert!(artifact("macos", name).is_none(), "{} should be None on macos", name);
         }
+    }
+
+    /// 回归：mac 的 gui **不是** install 目录下的条目。
+    ///
+    /// install = `current_exe().parent()` = `<X>.app/Contents/MacOS/`；gui 是 `<X>.app`
+    /// 本身，在它**上两级**。早先按 `install.join("Claude Code.app")` 拼出
+    /// `<X>.app/Contents/MacOS/Claude Code.app` —— 恒不存在，导致更新面板把已装的
+    /// GUI 判成「未安装」，且 gui 自动更新的写入目标也是这个错路径（2026-09-14 真机踩到）。
+    #[test]
+    fn macos_gui_path_is_the_app_bundle_itself() {
+        let install = Path::new("/Users/x/Applications/Claude Code.app/Contents/MacOS");
+        assert_eq!(
+            component_artifact_path(install, "gui", "macos").unwrap(),
+            PathBuf::from("/Users/x/Applications/Claude Code.app"),
+        );
+        // 同目录的其他组件仍解析到 install 内（对照，防"修 gui 时误伤别的"）
+        assert_eq!(
+            component_artifact_path(install, "claude", "macos").unwrap(),
+            PathBuf::from("/Users/x/Applications/Claude Code.app/Contents/MacOS/claude"),
+        );
+        // 层级不足（不在 .app 内）时返回 None 而非拼出错路径
+        assert!(component_artifact_path(Path::new("/opt/claude"), "gui", "macos").is_none());
     }
 
     #[test]

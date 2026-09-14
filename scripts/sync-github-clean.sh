@@ -18,14 +18,58 @@ git pull origin main 2>/dev/null || true
 
 git checkout github-clean
 # Rebuild the index+worktree from main's latest tree.
-# ':(exclude).gitignore' keeps github-clean's own .gitignore (it diverges from
-# main's — the snapshot version is the source of truth for the snapshot branch).
+# 不要 exclude .gitignore —— main 的 .gitignore 是权威（含 .private/、.codex/、
+# AGENTS.md）。曾经 exclude 它、靠快照分支自带的旧版 .gitignore，结果那份缺
+# .private/ 条目 → 下面 `git add -A` 把 .private/ 里的 API key 收进快照并推到
+# 公开 gitee（2026-09-12 事故）。忽略规则必须与 main 一致。
 git rm -r --cached --quiet . 2>/dev/null || true
-git checkout main -- . ':(exclude).gitignore'
-# 删除 main 已不存在但工作树残留的已跟踪文件（checkout 只覆盖/添加, 不删——
-# 曾导致 guiDiffParse 等删除文件在 github-clean 永久残留, 需手动 git rm）。
-comm -23 <(git ls-files | sort) <(git ls-tree -r --name-only main | sort) | xargs -r git rm -q -- 2>/dev/null || true
+git checkout main -- .
+# 删除 main 已不存在、但工作树仍残留的文件。
+#
+# ⚠️ 顺序陷阱：`git checkout main -- .` 只**覆盖/新增** main 里有的路径，对 main
+# 没有的文件既不删索引也不删工作树。它在上面 `git rm --cached .` 之后执行，于是
+# 这些文件处于「不在索引、但留在工作树」的状态 —— 紧接着的 `git add -A` 又原样
+# 加回来，**每轮同步都保留**。
+#
+# 实际事故（2026-09-13）：services/ 下 4 个改名前的旧文件（dataBus*.ts /
+# serviceBus.ts → crossWindowBus*.ts / windowBus.ts）作为孤儿在快照里存续数周。
+# CI 的 tsc（include: ["src"]）把它们一并编译，直到它们引用的旧 API
+# （terminalStore.appendToLastEntry）被删除才报错 → **CI 构建失败，而本地怎么
+# 跑都是绿的**（本地在 main 上，根本没有这些文件）。
+#
+# 用 `--others` 一并列出**未跟踪**文件再比差集 —— 孤儿此刻正处于
+# 「已从索引移除、但仍在工作树」的状态，只看索引（旧版 `comm` 的做法）会漏掉。
+#
+# 删除分两步，且**不能吞错误**（`git rm` 对「不在索引但存在于工作树」的文件会
+# 报 pathspec 错误；早先版本用 `2>/dev/null || true` 把它盖住，于是命令看似成功
+# 实则一个都没删 —— 这正是本次孤儿能存续数周的直接原因）：
+#   ① `git rm --cached` 清索引（忽略错误：本来就不在索引里）
+#   ② `rm -f` 清工作树（这才是关键 —— 文件留在工作树，下一行 `git add -A` 就会把它加回来）
+ORPHANS=$(comm -23 <(git ls-files --cached --others --exclude-standard | sort -u) \
+                   <(git ls-tree -r --name-only main | sort))
+if [ -n "$ORPHANS" ]; then
+    echo "删除 main 已不存在的孤儿文件（$(echo "$ORPHANS" | wc -l | tr -d ' ') 个）："
+    echo "$ORPHANS" | sed 's/^/  - /'
+    echo "$ORPHANS" | xargs -r -d '\n' git rm -q --cached --ignore-unmatch -- 2>/dev/null || true
+    echo "$ORPHANS" | xargs -r -d '\n' rm -f --
+fi
 git add -A
+
+# ── 安全闸：敏感路径一旦入 stage 立即中止 ────────────────────────────────
+# 这是最后一道防线。上面已对齐忽略规则，但 ignore 规则可能再次漂移（或有人在
+# 快照分支加了 force-add），所以提交前显式核对一次，宁可失败也不泄露。
+FORBIDDEN='^\.private/|^\.codex/|^AGENTS\.md$|^\.env$|^\.env\.'
+if git diff --cached --name-only | grep -qE "$FORBIDDEN"; then
+    echo "!! 中止：暂存区出现敏感路径，拒绝提交 ——" >&2
+    git diff --cached --name-only | grep -E "$FORBIDDEN" >&2
+    echo "!! 修复：git reset 后把这些路径加入快照分支的 .gitignore" >&2
+    exit 1
+fi
+if git diff --cached -U0 | grep -qE '^\+.*(sk-[a-zA-Z0-9]{20,}|LTAI[0-9A-Za-z]{12,}|AKID[A-Za-z0-9]{13,})'; then
+    echo "!! 中止：暂存区 diff 命中密钥模式，拒绝提交 ——" >&2
+    git diff --cached -U0 | grep -nE '^\+.*(sk-[a-zA-Z0-9]{20,}|LTAI[0-9A-Za-z]{12,}|AKID[A-Za-z0-9]{13,})' | head -5 >&2
+    exit 1
+fi
 
 if git diff --cached --quiet; then
     echo "no changes since last snapshot, skipping commit"
@@ -37,5 +81,8 @@ fi
 git push github HEAD:main --force
 git push origin github-clean --force
 
-git checkout main
+# `-f`：即便工作树仍有个别未跟踪文件，也强制切回（否则 git 会以
+# "untracked working tree files would be removed by checkout" 拒绝，
+# 配合 `set -e` 让脚本在最后一步失败）。孤儿已在上面显式清理。
+git checkout -f main
 echo "done"

@@ -65,8 +65,16 @@ export interface AppSettings {
     folders: Array<{ id: string; name: string; parentId?: string }>;
     assignments: Record<string, string>;
   };
-  /** 消息时间线导航栏开关(默认关, 需手动开启) */
+  /** 消息时间线导航栏开关(默认**开**)。
+   *  老用户由启动期迁移 `migrate_message_timeline_default_on` 补写实值；
+   *  用户手动关闭后写 false，迁移只补「字段缺失」故不会再翻回。 */
   messageTimeline?: boolean;
+  /**
+   * 快捷键用户覆盖：功能 ID → 规范化键位字符串（`"mod+shift+p"`）。
+   * 空字符串 = 显式解绑。未出现的 id 用默认表的值。
+   * 默认表与合并逻辑见 `services/shortcuts.ts`。
+   */
+  shortcuts?: Record<string, string>;
   /** 上下文告警开关(默认开): 已用百分比跨过阈值时弹浮动层提示 */
   contextWarningEnabled?: boolean;
   /** 上下文告警阈值百分比(默认 90, 即剩余 10%) */

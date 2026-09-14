@@ -9,7 +9,7 @@ import type { ChatEffect } from "./types";
 import {
   startCommand,
   updateCommand,
-  appendToLastEntry,
+  appendOutput,
   setOutput,
   finishCommand,
   clear as clearTerminal,
@@ -30,7 +30,7 @@ export function applyStoreEffects(effects: ChatEffect[]): ChatEffect[] {
         updateCommand(e.toolUseId, e.command);
         break;
       case "terminal.append":
-        appendToLastEntry(e.text);
+        appendOutput(e.toolUseId, e.text);
         break;
       case "terminal.output":
         setOutput(e.toolUseId, e.text);

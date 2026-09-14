@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Memory MCP Server — dual transport (stdio + Streamable HTTP), 9 tools.
+"""Memory MCP Server — dual transport (stdio + Streamable HTTP), 10 tools.
 
 Usage:
   python server.py                           # stdio transport
@@ -20,6 +20,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from auth import BearerAuthMiddleware, resolve_token
 from normalize import apply_tag_mapping
 from search_engine import hybrid_search
 from store import MemoryStore, _compute_hash
@@ -150,7 +151,7 @@ TOOL_DEFS = [
     {
         "name": "memory_update",
         "description": "Update an existing memory. Only provided fields are changed; others stay unchanged."
-        " If title or content changes, the embedding and content_hash are recomputed automatically."
+        " If title or content changes, the content_hash and version are recomputed automatically."
         " Use this to merge new knowledge into existing memories instead of creating duplicates.",
         "inputSchema": {
             "type": "object",
@@ -205,7 +206,9 @@ TOOL_DEFS = [
                 "scope": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Filter by scopes. Supports prefix: 'domain:*'",
+                    "description": "Filter by scopes. Exact match by default; a trailing '*'"
+                    " matches by prefix (e.g. 'project:*' for every project scope,"
+                    " 'domain:rust' for exactly that one).",
                 },
                 "type": {
                     "type": "array",
@@ -225,8 +228,9 @@ TOOL_DEFS = [
     {
         "name": "memory_get",
         "description": "Get a single memory by ID with full content, tags, content_hash,"
-        " and all associations (both directions)."
-        " Automatically records access for importance tracking.",
+        " and all associations (both directions). Also returns content_refs and referenced_by"
+        " (memory:// links parsed from content)."
+        " Increments the memory's access_count (used for 'most accessed' ordering in the web UI).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -237,9 +241,12 @@ TOOL_DEFS = [
     },
     {
         "name": "memory_associate",
-        "description": "Create or update a weighted relationship edge between two memories."
-        " Supports 4 edge types: related_to, derived_from, contradicts, supports."
-        " Optionally create the reverse edge too (bidirectional).",
+        "description": "Create a weighted relationship edge between two memories."
+        " Supports 4 edge types: related_to (symmetric), contradicts (symmetric),"
+        " supports (symmetric), derived_from (directed: source was learned from target)."
+        " Edges are stored once and are already visible from both endpoints —"
+        " do NOT create the mirror edge by swapping source/target, that renders"
+        " the relation twice.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -251,7 +258,6 @@ TOOL_DEFS = [
                     "enum": ["related_to", "derived_from", "contradicts", "supports"],
                     "default": "related_to",
                 },
-                "bidirectional": {"type": "boolean", "default": False},
             },
             "required": ["source_id", "target_id"],
         },
@@ -576,7 +582,6 @@ async def _handle_memory_associate(arguments: dict) -> list[TextContent]:
         target_id=arguments["target_id"],
         weight=arguments.get("weight", 0.5),
         type=arguments.get("type", "related_to"),
-        bidirectional=arguments.get("bidirectional", False),
     )
     return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
 
@@ -738,6 +743,9 @@ def main() -> None:
 
     global store
 
+    # stdio transport has no network surface, so auth applies only to HTTP.
+    auth_token = resolve_token() if args.transport != "stdio" else None
+
     print(f"[memory-mcp] Opening database: {args.db_path}", file=sys.stderr)
     store = MemoryStore(args.db_path)
     caps = store.get_capabilities()
@@ -800,6 +808,12 @@ def main() -> None:
                 Route("/health", endpoint=health),
             ],
         )
+
+        # Wrap the whole router: the MCP endpoint is raw ASGI (not a FastAPI
+        # route), so middleware added inside the app would not see it.
+        if auth_token is not None:
+            app = BearerAuthMiddleware(app, auth_token)
+            print("[memory-mcp] Authentication enabled (bearer token required).", file=sys.stderr)
 
         print(f"[memory-mcp] Streamable HTTP server listening on {args.host}:{args.port}", file=sys.stderr)
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")

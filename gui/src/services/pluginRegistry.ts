@@ -437,12 +437,29 @@ export function aggregateRuntimePaths(
   pluginsBase: string,
 ): string[] {
   const out: string[] = [];
+  const push = (p: string) => { if (!out.includes(p)) out.push(p); };
+
   for (const m of manifests) {
     if (disabledNames.has(m.pluginName)) continue;
     for (const rt of m.runtimes ?? []) {
       const abs = `${pluginsBase.replace(/[\\/]+$/, "")}/${m.pluginName}/${rt.path}`.replace(/\\/g, "/");
       if (!dirExists(abs)) continue;
-      if (!out.includes(abs)) out.push(abs);
+
+      // 声明目录 + 其 `bin/` 子目录**都注入**，让 node/npm/npx 在两种布局下都能解析：
+      //   · Windows 发行版：node.exe 直接在解压根          → `${abs}/node.exe` ✓
+      //   · mac/Linux 发行版：Unix 惯例放在 `bin/`          → `${abs}/bin/node` ✓
+      // 设计意图本就是「一个 runtime 声明覆盖 node/npm/npx，不为每个命令单加 PATH 条目」
+      // （见 plugins/nodejs/AI_NOTES.md）。早先只注入 `${abs}`，于是 mac 上
+      // node/npm/npx 全部 not found —— 文档把它记成了"macOS 已知限制"，实为实现缺陷：
+      // 连带弄坏了 playwright-mcp（"command": "npx" 解析不到；且即便用绝对路径跑
+      // npx-cli.js，npx 拉起的子进程 shebang `#!/usr/bin/env node` 仍会因 PATH 缺 node 而失败）。
+      // Windows 侧 `${abs}/bin` 不存在 → 不注入，行为不变。
+      push(abs);
+      // 声明本身已指向 bin（如 path: "runtime/bin"）→ 不再追加，否则得到 `.../bin/bin`
+      if (!abs.endsWith("/bin")) {
+        const bin = `${abs}/bin`;
+        if (dirExists(bin)) push(bin);
+      }
     }
   }
   return out;

@@ -41,9 +41,16 @@
 `.tar.gz`（**macOS/Linux**——官方发行包只提供 tar 格式）。
 **每次下载限时 120s**，失败信号 = HTTP 非 200 / 连接超时 / 文件 < 10MB（截断包）→ 立即切换下一级。
 
-1. **npmmirror（国内首选）**：`https://registry.npmmirror.com/-/binary/node/latest-v22.x/<文件名>`
+1. **npmmirror（国内首选）**：`https://registry.npmmirror.com/-/binary/node/v<版本>/<文件名>`
 2. **华为云镜像（国内备选）**：`https://mirrors.huaweicloud.com/nodejs/v<版本>/<文件名>`
 3. **官方（兜底）**：`https://nodejs.org/dist/v<版本>/<文件名>`
+
+> ⚠️ **必须用版本化路径 `v<版本>/`，不要用 `latest-vXX.x` / `latest-krypton` 这类别名。**
+> 实测（2026-09-14）：npmmirror 的 `latest-v24.x` 目录只同步到 v24.1.0，**没有** v24.21.0；
+> `latest-krypton` 停在 v24.11.0 → 照别名拼 URL 会**直接 404**，白白浪费一级 fallback。
+> 别名的滞后是镜像同步策略问题，不是我们的 bug —— 版本化路径才是稳定入口。
+>
+> 版本号来源：设置项 `defaultLtsMajor`（0 = 跟随最新 LTS）。确定为具体版本后再拼 URL。
 
 下载到临时目录（Windows `%TEMP%/nodejs-plugin-download/`；macOS/Linux `/tmp/nodejs-plugin-download/`）。
 **tar.gz 用 `tar -xzf` 解压，不是 zipfile。**
@@ -79,12 +86,19 @@ plugin_set_status(name="nodejs", status="ready", detail={
 
 ### 第 6 步：告知用户生效范围（⚠️ 平台差异要点）
 
-- **Windows**：当前 AI 会话 Bash 直接 `node` / `npm` / `npx` 均可用（GUI 推送 PATH→B 通道）；
-  新会话启动自扫（A 通道）——三者由同一个 runtime 目录条目带来，无需单独配置。
-- **macOS/Linux**：当前 PATH 聚合注入的是 **runtime/ 根目录**（不是 `runtime/bin/`），
-  Bash 里直接 `node` / `npm` 找不到——**用绝对路径调用**：`<runtime>/bin/node --version`、
-  `<runtime>/bin/npm`，或依赖方声明进程时 command 直接用绝对路径。这是已知限制，
-  如实告知用户，不要声称"直接 node 可用"。
+- **Windows / macOS / Linux 三平台一致**：当前 AI 会话 Bash 直接 `node` / `npm` / `npx`
+  均可用（GUI 推送 PATH→B 通道；新会话启动自扫 A 通道兜底）。
+  三者由同一个 runtime 声明带来，无需为每个命令单独配置。
+- **实现细节（备查）**：`aggregateRuntimePaths` 会注入 runtime 声明目录**及其 `bin/`
+  子目录**（若存在）。这样两种发行版布局都能解析：
+  - Windows 发行版把 `node.exe` 放在解压根 → 命中声明目录本身
+  - mac/Linux 发行版按 Unix 惯例放 `bin/` → 命中 `<声明目录>/bin`
+- ⚠️ **历史坑（2026-09-14 修）**：此前只注入声明目录、不加 `bin/`，于是 mac/Linux 上
+  `node`/`npm`/`npx` 全部 `not found`。当时本文档把它记成了"macOS 已知限制 / 用绝对路径
+  绕行"——**那是实现缺陷，不是平台限制**。它连带弄坏了 playwright-mcp
+  （配置 `"command": "npx"` 解析不到；且即便用绝对路径跑 npx-cli.js，
+  npx 子进程的 shebang `#!/usr/bin/env node` 仍会因 PATH 缺 node 而失败）。
+  **若日后又见"必须写绝对路径"的说法，先查 PATH 聚合是否正常，别默认是平台限制。**
 - 若当前会话 Bash 里 node 仍不可用：先重试一次，仍不行则告知用户重启会话/引擎后生效。
 
 ## npm / npx 与依赖安装

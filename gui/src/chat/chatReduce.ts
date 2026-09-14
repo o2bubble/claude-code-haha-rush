@@ -322,16 +322,27 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       if (!inner.data) break;
       if (inner.data.type !== "bash_progress" && inner.data.type !== "powershell_progress") break;
       const output = inner.data.fullOutput || inner.data.output || "";
-      updateLast((m) => {
-        const tools = [...(m.toolUses || [])];
-        if (tools.length === 0) return m;
-        const last = tools[tools.length - 1];
-        tools[tools.length - 1] = { ...last, output, status: "running" };
-        return { ...m, toolUses: tools };
+      // 按 id 更新该工具卡片（fullOutput 是累积值 → 整体替换，不拼接，故不会重复）。
+      // 原先用 updateLast 写"最后一个工具"，并发工具时进度会写到别的卡片上。
+      // updateToolByUseId 找不到时自身回落到 updateLast，不会丢更新。
+      updateToolByUseId(inner.parent_tool_use_id || "", (tool) => ({
+        ...tool,
+        output,
+        status: "running",
+      }));
+      // 后端送的是**滚动尾部窗口**（最近 5 行），不是增量 —— 去重交给
+      // terminalStore.mergeTailWindow（按行找最长重叠）。这里按工具 id 寻址，
+      // 避免并发工具时追加到别的条目（原先只追加到"最后一个"）。
+      //
+      // ⚠️ 用 parent_tool_use_id 而非 tool_use_id：后者是 `bash-progress-N`
+      // 计数器（toolExecution.ts 每次 onProgress 自增），每个进度包都不同；
+      // parentToolUseID 才是真实的 tool_use id，与 terminal.start 的 cb.id、
+      // terminal.output 的 block.tool_use_id 同源。
+      effects.push({
+        type: "terminal.append",
+        toolUseId: inner.parent_tool_use_id || "",
+        text: inner.data.output || output,
       });
-      // fullOutput is cumulative — append only the delta so the terminal entry
-      // doesn't duplicate previously-appended output on each chunk.
-      effects.push({ type: "terminal.append", text: inner.data.output || output });
       break;
     }
     case "assistant": {
@@ -344,6 +355,7 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       }
       updateLast((m) => {
         const existingTools = m.toolUses || [];
+        const isSub = !!inner.parent_tool_use_id;
         const newTools = content
           .filter((b: any) => b.type === "tool_use")
           .filter((b: any) => !existingTools.some((tool) => tool.id === b.id))
@@ -353,6 +365,7 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
             name: b.name || "",
             input: b.input || {},
             status: "running" as const,
+            ...(isSub ? { subagent: true } : {}),
           }));
         for (const b of content) {
           if (b.type !== "tool_use") continue;

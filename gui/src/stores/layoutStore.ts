@@ -28,6 +28,7 @@ function createDefaultTree(): LayoutNode {
           { id: "tab-skills", panelId: "skills", title: pt("skills"), icon: "skills" },
           { id: "tab-quick-prompts", panelId: "quick-prompts", title: pt("quick-prompts"), icon: "quickPrompts" },
           { id: "tab-workers", panelId: "workers", title: pt("workers"), icon: "workers" },
+          { id: "tab-plugin-market", panelId: "plugin-market", title: pt("plugin-market"), icon: "package" },
         ],
         activeTabId: "tab-sessions",
       },
@@ -48,16 +49,15 @@ function createDefaultTree(): LayoutNode {
             activeTabId: "tab-desktop",
           },
           {
+            // 空容器 + 尺寸 0：用户把下栏拖没了，留作可拖出的占位
             type: "group",
             id: "bottom-panel",
             tabStyle: "activity-bottom",
-            tabs: [
-              { id: "tab-terminal", panelId: "terminal", title: pt("terminal"), icon: "terminal" },
-            ],
-            activeTabId: "tab-terminal",
+            tabs: [],
+            activeTabId: "",
           },
         ],
-        sizes: [75, 25],
+        sizes: [100, 0],
       },
       // 右侧栏 — Chat（消息区 + 输入区，上下可拖拽）
       {
@@ -78,6 +78,7 @@ function createDefaultTree(): LayoutNode {
             id: "chat-input-group",
             tabs: [
               { id: "tab-chat-input", panelId: "chat-input", title: pt("chat-input"), icon: "input" },
+              { id: "tab-terminal", panelId: "terminal", title: pt("terminal"), icon: "terminal" },
             ],
             activeTabId: "tab-chat-input",
           },
@@ -85,7 +86,7 @@ function createDefaultTree(): LayoutNode {
         sizes: [65, 35],
       },
     ],
-    sizes: [25, 45, 30],
+    sizes: [21, 48, 30],
   };
 }
 
@@ -1291,6 +1292,9 @@ function buildChatLayout(): LayoutNode {
             tabs: [
               { id: "tab-sessions", panelId: "sessions", title: pt("sessions"), icon: "sessions" },
               { id: "tab-files", panelId: "files", title: pt("files"), icon: "files" },
+              { id: "tab-plan", panelId: "plan", title: pt("plan"), icon: "plan" },
+              { id: "tab-quick-prompts", panelId: "quick-prompts", title: pt("quick-prompts"), icon: "quickPrompts" },
+              { id: "tab-plugin-market", panelId: "plugin-market", title: pt("plugin-market"), icon: "package" },
             ],
             activeTabId: "tab-sessions",
           },
@@ -1316,6 +1320,8 @@ function buildChatLayout(): LayoutNode {
             tabs: [
               { id: "tab-chat-msgs", panelId: "chat-messages", title: pt("chat-messages"), icon: "messages" },
               { id: "tab-editor", panelId: "editor", title: pt("editor"), icon: "editor" },
+              { id: "tab-desktop", panelId: "super-desktop", title: pt("super-desktop"), icon: "superDesktop" },
+              { id: "tab-notes", panelId: "notes", title: pt("notes"), icon: "notes" },
             ],
             activeTabId: "tab-chat-msgs",
           },
@@ -1358,8 +1364,9 @@ function buildDenseLayout(): LayoutNode {
               { id: "tab-subagents", panelId: "subagents", title: pt("subagents"), icon: "subagents" },
               { id: "tab-skills", panelId: "skills", title: pt("skills"), icon: "skills" },
               { id: "tab-workers", panelId: "workers", title: pt("workers"), icon: "workers" },
+              { id: "tab-plugin-market", panelId: "plugin-market", title: pt("plugin-market"), icon: "package" },
             ],
-            activeTabId: "tab-files",
+            activeTabId: "tab-sessions",
           },
           {
             type: "split",
@@ -1386,7 +1393,7 @@ function buildDenseLayout(): LayoutNode {
             sizes: [50, 50],
           },
         ],
-        sizes: [47, 53],
+        sizes: [52, 48],
       },
       {
         type: "split",
@@ -1425,7 +1432,7 @@ function buildDenseLayout(): LayoutNode {
         activeTabId: "tab-chat-msgs",
       },
     ],
-    sizes: [20, 50, 30],
+    sizes: [19, 43, 37],
   };
 }
 

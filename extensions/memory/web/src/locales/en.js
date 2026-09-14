@@ -6,10 +6,9 @@ export const en = {
 
   // Login
   'login.title': 'Memory Explorer',
-  'login.subtitle': 'Enter password to continue',
-  'login.password': 'Password',
-  'login.error': 'Incorrect password',
-  'login.notConfigured': 'Password not configured — set VITE_MEMORY_PASSWORD at build time',
+  'login.subtitle': 'Enter access token to continue',
+  'login.password': 'Access token',
+  'login.error': 'Invalid token — the server rejected it',
   'login.button': 'Login',
   'login.loading': '...',
 
@@ -51,6 +50,8 @@ export const en = {
   'detail.close': 'Close',
   'detail.noContent': '(no content)',
   'detail.associations': 'Associations ({count})',
+  'detail.edge.out': 'this memory is the source (derived from / supports the other)',
+  'detail.edge.in': 'the other memory is the source (this one was derived from it)',
   'detail.importance': 'Importance',
   'detail.accessed': 'Accessed',
   'detail.times': 'times',

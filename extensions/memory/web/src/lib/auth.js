@@ -1,0 +1,74 @@
+// Bearer-token auth for the Memory Explorer.
+//
+// No build-time secret: the user pastes the token into the login form and it is
+// verified against the server (GET /api/stats). A local comparison would be pure
+// decoration — anyone can set localStorage or curl the API — so only the server
+// gates access. The token must match the server's MEMORY_AUTH_TOKEN.
+// (This removes the old VITE_MEMORY_PASSWORD build-injection step, and with it
+// the failure mode where a forgotten injection locked everyone out.)
+
+const STORAGE_KEY = 'memory_web_auth_token';
+
+export function getToken() {
+  try {
+    return localStorage.getItem(STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setToken(token) {
+  try {
+    localStorage.setItem(STORAGE_KEY, token);
+  } catch {
+    /* private mode — the session just won't persist */
+  }
+}
+
+export function clearToken() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+// A rejected request (401) surfaces in the API layer, but the auth *state* lives
+// in App. Reloading the page there is wrong — the data effects run regardless of
+// auth, so the reload re-issues the same 401 and loops forever (this shipped once
+// and produced an endless refresh). Instead the API layer notifies a subscriber
+// that owns the state, and that subscriber renders the login gate.
+let unauthorizedHandler = null;
+
+export function onUnauthorized(handler) {
+  unauthorizedHandler = handler;
+  return () => {
+    if (unauthorizedHandler === handler) unauthorizedHandler = null;
+  };
+}
+
+export function notifyUnauthorized() {
+  clearToken();
+  if (unauthorizedHandler) unauthorizedHandler();
+}
+
+/** Headers for every API call — carries the bearer token when we have one. */
+export function authHeaders(extra = {}) {
+  const token = getToken();
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : { ...extra };
+}
+
+/**
+ * Ask the server whether a token is valid. Resolves true/false; a network
+ * failure resolves false so the caller shows a retryable error rather than
+ * assuming success.
+ */
+export async function verifyToken(token) {
+  if (!token) return false;
+  try {
+    const res = await fetch('/api/stats', { headers: { Authorization: `Bearer ${token}` } });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}

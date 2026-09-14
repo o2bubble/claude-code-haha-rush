@@ -4,6 +4,9 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Search, Filter, ArrowLeft, X, ChevronRight, ChevronDown } from "lucide-react";
 import { t } from "../../i18n";
 import { addStatusMessage } from "../../stores/statusMsgStore";
+import { entryKeysOf, matchesEvent } from "../../services/shortcuts";
+import { isMacPlatform } from "../../services/shortcutDispatcher";
+import { getSettings } from "../../stores/settingsStore";
 import { useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
 import { windowBus } from "../../services/windowBus";
@@ -19,6 +22,10 @@ interface NoteSummary {
   tags: string[];
   snippet?: string;
   updated_at: string;
+  /** Search-only: relevance hint (undefined for note_list results). */
+  score?: number;
+  /** Search-only: which retrieval path ran — "fts" or "like". */
+  strategy?: string;
 }
 
 interface ScopeNode { path: string; label: string; count: number; children: ScopeNode[]; }
@@ -128,7 +135,10 @@ function ensureNotesStyles() {
 .np-pop-sort button.active { border-color: var(--accent); background: var(--accent-subtle); color: var(--accent); font-weight: 600; }
 
 .np-body { flex: 1; min-height: 0; display: flex; }
-.np-list { width: 300px; flex-shrink: 0; border-right: 1px solid var(--border-light); display: flex; flex-direction: column; min-height: 0; }
+/* 列表宽度随面板收缩 —— 原固定 300px + flex-shrink:0 会把编辑器挤到 ~400px
+   不可读（面板总宽刚过 narrow 断点 640 时最明显）。面板宽时封顶 280px，
+   窄时按 24% 收缩，下限 180px（再窄由 .narrow 单栏模式接管）。 */
+.np-list { width: clamp(180px, 24%, 280px); flex-shrink: 0; border-right: 1px solid var(--border-light); display: flex; flex-direction: column; min-height: 0; }
 .np-editor { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .np-filter-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 10px; border-bottom: 1px solid var(--border-light); }
 .np-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; color: var(--accent); background: var(--accent-subtle); border: 1px solid var(--accent-glow); border-radius: 12px; padding: 2px 6px 2px 9px; }
@@ -415,7 +425,18 @@ export default function NotesPanel() {
   // ── 增删 ──
   const handleCreate = async () => {
     try {
-      const n = await invoke<NoteData>("note_create", { input: { title: t("notes.newTitle"), content: "", scope: "global", tags: [] } });
+      // **必须带 `action: "store"`** —— note_create 是两段式契约：
+      // 不带 action 时服务端先做相似度预检，命中就返回 `conflict_detected` 且
+      // **一个字节都不落库**（返回体里没有 id）。此前这里没检查 status，直接拿
+      // `n.id` → undefined → `setSelectedId(undefined)` → 界面毫无变化，
+      // 用户看到的就是"点新建没反应"。
+      //
+      // 而"点新建要个空白页"本来就不该走查重：空白笔记没有"重复"的语义，
+      // 冲突检测是给"AI 写入知识"用的。且小库（≤20 条）走 exempt 分支时
+      // 分数阈值被跳过，几乎必然误报 —— 库里只有 1 篇时新建必撞。
+      const n = await invoke<NoteData>("note_create", {
+        input: { title: t("notes.newTitle"), content: "", scope: "global", tags: [], action: "store" },
+      });
       addStatusMessage(t("notes.created"), "success");
       await loadList();
       setSelectedId(n.id);
@@ -502,7 +523,9 @@ export default function NotesPanel() {
     showCtxMenu(e.clientX, e.clientY, items);
   };
 
-  // ── 快捷键（Ctrl+N / Ctrl+K / Esc）——仅在笔记面板内或非编辑态触发，避免劫持其他面板 ──
+  // ── 快捷键（新建 / 搜索 / Esc）——仅在笔记面板内或非编辑态触发，避免劫持其他面板。
+  //    键位从快捷键注册表读（上下文型条目），保证设置面板显示的键位与实际行为同源。
+  //    生效条件（面板内、非编辑态）由本组件负责 —— 注册表只管键位定义。 ──
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -510,8 +533,10 @@ export default function NotesPanel() {
       const editingElsewhere = !!target.closest?.("input, textarea, [contenteditable='true'], .ProseMirror") && !inNotes;
       if (editingElsewhere) return;
       const k = e.key.toLowerCase();
-      if ((e.ctrlKey || e.metaKey) && k === "n") { e.preventDefault(); handleCreate(); }
-      else if ((e.ctrlKey || e.metaKey) && k === "k") { e.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
+      const isMac = isMacPlatform();
+      const ov = getSettings().shortcuts;
+      if (matchesEvent(e, entryKeysOf("notes.create", ov), isMac)) { e.preventDefault(); handleCreate(); }
+      else if (matchesEvent(e, entryKeysOf("notes.search", ov), isMac)) { e.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
       else if (k === "escape") {
         if (filterOpen) setFilterOpen(false);
         else if (selectedIds.size > 0) setSelectedIds(new Set());

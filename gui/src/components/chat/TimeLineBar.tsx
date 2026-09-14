@@ -33,6 +33,8 @@ const CLUSTER_MIN_GAP = 8;
 // 展开态需容纳「MM-DD HH:MM」日期+时间，故较宽。
 const COLLAPSED_WIDTH = 12;
 const EXPANDED_WIDTH = 72;
+/** 提示预览浮层最大宽度（也是拖动时向左翻边的偏移量） */
+const PREVIEW_MAX_WIDTH = 260;
 // 触发展开/收起的防抖延时 — 鼠标快速经过窄条时不会立即展开抖动
 const HOVER_EXPAND_DELAY = 350;
 const HOVER_COLLAPSE_DELAY = 200;
@@ -216,7 +218,11 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
   return (
     <div
       ref={containerRef}
-      title={t("timeline.dragHint")}
+      role="slider"
+      aria-label={t("timeline.dragHint")}
+      aria-orientation="vertical"
+      // 刻意不加 title —— 原生 tooltip 用 OS 级定位，悬停/拖动时会浮在消息上遮挡
+      // （展开态的日期/时间/提示预览已把用途说清）。原生 tooltip 也无法用 CSS 控制位置。
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -353,21 +359,28 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
           );
         })}
 
-      {/* 悬停到用户提示刻度 → 浮出预览。
+      {/* 悬停/拖动到用户提示刻度 → 浮出预览。
           定位：`left = 栏左边缘 + 展开宽度`，**不用测出的 barRect.right** ——
           栏展开有 350ms 过渡，渲染期测到的矩形是展开前的窄态（12px），
           曾因此把浮层压在栏上。左边缘稳定、展开宽度是常量，二者相加即可。
-          fixed 是必需的：容器 overflow:hidden 会把内部绝对定位的浮层裁掉。 */}
+          fixed 是必需的：容器 overflow:hidden 会把内部绝对定位的浮层裁掉。
+
+          **拖动时翻到栏左侧**（悬停时保持右侧，鼠标就在旁边好读）：拖动的本意是
+          扫过消息定位，浮层压在右侧正好挡住正要找的内容，且随指针移动一路遮。
+          左侧为空的会话栏区域稳定不挡消息；左边缘减去浮层最大宽度即可，
+          无需测量自身尺寸。 */}
       {expanded && hoveredPrompt && barRect && (
         <div
           style={{
             position: "fixed",
-            left: barRect.left + EXPANDED_WIDTH + 6,
+            ...(dragging
+              ? { left: Math.max(4, barRect.left - PREVIEW_MAX_WIDTH - 6) }
+              : { left: barRect.left + EXPANDED_WIDTH + 6 }),
             top: Math.min(
               Math.max(4, barRect.top + hoveredPrompt.pixel - 14),
               (typeof window !== "undefined" ? window.innerHeight : 800) - 64
             ),
-            maxWidth: 260,
+            maxWidth: PREVIEW_MAX_WIDTH,
             padding: "4px 8px",
             borderRadius: 4,
             background: "var(--bg-root)",

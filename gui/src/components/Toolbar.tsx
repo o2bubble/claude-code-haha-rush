@@ -1,11 +1,17 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope, Copy, Brain, Gauge } from "lucide-react";
 import { getTree, findParentSplit, toggleGroupHidden, toggleLeftColumn, toggleRightPanel, addFloatingPanel, getFloatingPanels, bringFloatingToFront, findTabByPanelId, applyLayoutPreset, LAYOUT_PRESETS, togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
 import { iconFor } from "../utils/icons";
 import { getRecent, sortByRecent } from "../utils/recentUsage";
 import { getChatState } from "../stores/chatStore";
 import { GuardButton } from "./chat/GuardButton";
-import { updateSettings, saveSettings } from "../stores/settingsStore";
+import { WindowControls, isWindowsChrome } from "./TitleBar";
+import { AppMenu } from "./AppMenu";
+import { useToolbarCollapse } from "./useToolbarCollapse";
+import { partitionItems, type ToolbarItem } from "./toolbarItems";
+import { DEFAULT_SHORTCUTS, resolveBindings, displayKeys } from "../services/shortcuts";
+import { isMacPlatform } from "../services/shortcutDispatcher";
+import { updateSettings, saveSettings, getSettings } from "../stores/settingsStore";
 import { workspaceBasename } from "../utils/workspace";
 import { isDarkTheme } from "../utils/themeUtils";
 import { t } from "../i18n";
@@ -26,6 +32,20 @@ function isVisible(groupId: string): boolean {
   const parent = findParentSplit(getTree(), groupId);
   if (!parent) return true;
   return parent.split.sizes[parent.index] > 0;
+}
+
+/**
+ * 查某个功能的当前键位（供菜单提示显示）。
+ *
+ * **从快捷键注册表读，不硬编码** —— 用户在设置里改键后提示自动跟随，
+ * 不会出现"菜单写着 Ctrl+R 但实际绑了别的键"。返回 `undefined` 表示
+ * 该功能无快捷键（下拉菜单项就不显示灰字）。
+ */
+function shortcutFor(id: string): string | undefined {
+  const overrides = getSettings().shortcuts;
+  const e = resolveBindings(DEFAULT_SHORTCUTS, overrides).find((x) => x.id === id);
+  if (!e || !e.keys) return undefined;
+  return displayKeys(e.keys, isMacPlatform());
 }
 
 const PERM_MODES = [
@@ -197,6 +217,10 @@ const TOOLBAR_BTN_BASE = {
   border: "none",
   borderRadius: 4,
   cursor: "pointer",
+  // 永不压缩：flex 子项默认 flexShrink:1 会把按钮挤扁、文字压成竖排。
+  // 宽度不够是**折叠机制**要解决的问题（把项收进菜单），不是让按钮变形。
+  flexShrink: 0,
+  whiteSpace: "nowrap",
 } as const;
 
 const btn = (active: boolean): React.CSSProperties => ({
@@ -237,6 +261,17 @@ const DROPDOWN_ITEM_BASE = {
   fontFamily: "var(--font-sans)",
 } as const;
 
+/**
+ * 下拉弹层的容器属性。
+ *
+ * ⚠️ `data-tauri-drag-region="false"` 是必需的：工具栏容器带 `="deep"`
+ * （空白处可拖窗口），而 Tauri 的 drag.js 只豁免 BUTTON/INPUT 等标签 ——
+ * 下拉里的菜单项是 `<div onClick>`，会被 `preventDefault()` **吞掉点击**
+ * （表现为"菜单显示正常但点不动"）。`false` 在遍历路径中命中即返回，
+ * 阻止该子树及祖先的拖拽判定，点击恢复正常。
+ */
+export const DROPDOWN_MENU_ATTRS = { "data-tauri-drag-region": "false" } as const;
+
 const DROPDOWN_EMPTY_MSG = {
   padding: "8px 12px",
   fontSize: "calc(var(--font-scale, 1) * 11px)",
@@ -262,12 +297,35 @@ const TOOLBAR_CONTAINER = {
   display: "flex",
   alignItems: "center",
   gap: 4,
-  padding: "4px 8px",
+  padding: "4px 0 4px 8px", // 右侧留给窗口按钮（自带 padding 语义）
   borderBottom: "1px solid var(--border-light)",
   backgroundColor: "var(--bg-surface)",
   height: 36,
   flexShrink: 0,
+  // 必须定位 + 高于内容区：否则下拉弹层被下面的 LayoutRenderer 盖住
+  // （它有 position:relative，定位元素恒压在非定位元素之上，
+  //  下拉自身的 z-index:100 只在**自己的堆叠上下文内**有效，救不了父级）。
+  position: "relative",
+  zIndex: 20,
+  // 不用 overflow:hidden —— 它会裁掉下拉弹层。溢出交给折叠机制解决
+  // （隐藏只会掩盖折叠算法的偏差，让它露出来才可发现、可修）。
 } as const;
+
+/** 可折叠项上的红点（如「有新版本」）—— 贴按钮右上角。 */
+function ToolbarBadgeDot() {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        position: "absolute", top: 2, right: 2,
+        width: 8, height: 8, borderRadius: "50%",
+        backgroundColor: "var(--semantic-error)",
+        border: "1.5px solid var(--bg-surface)",
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
 
 const TOOLBAR_DIVIDER = {
   width: 1,
@@ -283,6 +341,7 @@ const groups = [
 ];
 
 import { useClickOutside } from "../utils/useClickOutside";
+import { useDropdownAlign } from "./useDropdownAlign";
 
 // ── Permission mode dropdown ──
 
@@ -292,6 +351,8 @@ function PermModeDropdown() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useClickOutside(ref, open, () => setOpen(false));
+  // 权限选项带描述文字，弹层较宽（minWidth 220）；窄窗口下按钮可能已靠近右边界
+  const { align, maxWidth } = useDropdownAlign(ref, 220, open);
 
   const current = PERM_MODES.find((m) => m.value === mode) || PERM_MODES[0];
 
@@ -308,7 +369,7 @@ function PermModeDropdown() {
         <span style={DROPDOWN_ARROW}>▼</span>
       </button>
       {open && (
-        <div style={{ ...DROPDOWN_MENU_BASE, left: 0, minWidth: 220 }}>
+        <div {...DROPDOWN_MENU_ATTRS} style={{ ...DROPDOWN_MENU_BASE, ...align, minWidth: 220, maxWidth }}>
           {PERM_MODES.map((m) => (
             <div
               key={m.value}
@@ -330,118 +391,7 @@ function PermModeDropdown() {
   );
 }
 
-// ── Thinking mode dropdown (3P reasoning-capable models: DeepSeek etc.) ──
-
-function ThinkingDropdown() {
-  const payload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
-  const state = payload?.state ?? getChatState();
-  const cap = state.modelCapabilities;
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useClickOutside(ref, open, () => setOpen(false));
-
-  // Only show for models that report thinking support (Claude `thinking` block
-  // or 3P `reasoning` field). Hide while capabilities haven't arrived yet.
-  if (!cap || (!cap.thinking && !cap.reasoning)) return null;
-
-  const check = state.thinkingModeEnabled;
-  const label = check ? t("toolbar.thinkingOn") : t("toolbar.thinkingOff");
-
-  const options = [
-    { id: true, label: t("toolbar.thinkingOn") },
-    { id: false, label: t("toolbar.thinkingOff") },
-  ];
-
-  return (
-    <div ref={ref} style={{ position: "relative" }}>
-      <button
-        type="button"
-        title={t("toolbar.thinkingMode")}
-        style={{ ...btn(check), ...DROPDOWN_TRIGGER_BTN }}
-        onClick={() => setOpen(!open)}
-      >
-        <Brain size={13} />
-        <span>{label}</span>
-        <span style={DROPDOWN_ARROW}>▼</span>
-      </button>
-      {open && (
-        <div style={{ ...DROPDOWN_MENU_BASE, left: 0, minWidth: 140 }}>
-          {options.map((o) => (
-            <div
-              key={String(o.id)}
-              onClick={() => { commandRegistry.execute("SET_THINKING_MODE", { enabled: o.id, effort: state.effort ?? undefined }); setOpen(false); }}
-              style={{
-                ...DROPDOWN_ITEM_BASE,
-                backgroundColor: o.id === check ? "var(--accent-subtle)" : "transparent",
-                color: o.id === check ? "var(--accent)" : "var(--fg-primary)",
-              }}
-            >
-              {o.label}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Effort strength dropdown ──
-
-function EffortDropdown() {
-  const payload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
-  const state = payload?.state ?? getChatState();
-  const cap = state.modelCapabilities;
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useClickOutside(ref, open, () => setOpen(false));
-
-  // Only show when the model supports the effort parameter (or reasoning).
-  if (!cap || !(cap.effort || cap.reasoning)) return null;
-
-  const effort = state.effort;
-  // Reasoning-capable providers (DeepSeek) accept low/high/max, not 'medium'
-  // (Claude-native supports all four) — GUI decides the tiers, so drop medium.
-  const baseLevels = cap.reasoning ? ["low", "high"] : ["low", "medium", "high"];
-  const levels: Array<{ id: string }> = baseLevels.map((id) => ({ id }));
-  if (cap.maxEffort) levels.push({ id: "max" });
-
-  const current = levels.find((l) => l.id === (effort ?? cap.defaultEffort));
-  const label = current ? t(`toolbar.effort_${current.id}`) : t("toolbar.effortAuto");
-
-  return (
-    <div ref={ref} style={{ position: "relative" }}>
-      <button
-        type="button"
-        title={t("toolbar.effort")}
-        style={{ ...btn(false), ...DROPDOWN_TRIGGER_BTN }}
-        onClick={() => setOpen(!open)}
-      >
-        <Gauge size={13} />
-        <span>{label}</span>
-        <span style={DROPDOWN_ARROW}>▼</span>
-      </button>
-      {open && (
-        <div style={{ ...DROPDOWN_MENU_BASE, left: 0, minWidth: 140 }}>
-          {levels.map((l) => (
-            <div
-              key={l.id}
-              onClick={() => { commandRegistry.execute("SET_EFFORT", l.id); setOpen(false); }}
-              style={{
-                ...DROPDOWN_ITEM_BASE,
-                backgroundColor: l.id === (effort ?? cap.defaultEffort) ? "var(--accent-subtle)" : "transparent",
-                color: l.id === (effort ?? cap.defaultEffort) ? "var(--accent)" : "var(--fg-primary)",
-              }}
-            >
-              {t(`toolbar.effort_${l.id}`)}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Model profile dropdown ──
+// ── Model profile dropdown（含思考/档位/Profile 管理，见 ModelTuningSections）──
 
 interface ModelProfile {
   id: string;
@@ -519,7 +469,8 @@ function ModelDropdown() {
         <span style={{ ...DROPDOWN_ARROW, flexShrink: 0 }}>{switching ? "⏳" : "▼"}</span>
       </button>
       {open && (
-        <div style={{ ...DROPDOWN_MENU_BASE, right: 0, minWidth: 180, maxHeight: 300, overflow: "auto" }}>
+        <div {...DROPDOWN_MENU_ATTRS} style={{ ...DROPDOWN_MENU_BASE, right: 0, minWidth: 200, maxHeight: 340, overflowY: "auto" }}>
+          {/* ── 模型 ── */}
           {profiles.length === 0 && (
             <div style={DROPDOWN_EMPTY_MSG}>
               {t("toolbar.noProfiles")}
@@ -554,35 +505,133 @@ function ModelDropdown() {
               {p.model && <span style={{ fontSize: 10, color: "var(--fg-muted)", marginLeft: 6 }}>{p.model}</span>}
             </div>
           ))}
+
+          <DropdownSep />
+
+          {/* ── 思考 / 档位（原独立下拉，收进这里：重要但不常改） ── */}
+          <ModelTuningSections onPicked={() => setOpen(false)} />
+
+          {/* ── Profile 管理 ── */}
+          <DropdownSep />
+          <div
+            onClick={() => { setOpen(false); openProfileFloat(); }}
+            style={{ ...DROPDOWN_ITEM_BASE, display: "flex", alignItems: "center", gap: 7, color: "var(--fg-primary)" }}
+          >
+            <User size={12} />
+            {t("toolbar.profileManage")}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
+/** 下拉里的分隔线。 */
+function DropdownSep() {
+  return <div style={{ height: 1, background: "var(--border-light)", margin: "4px 0" }} />;
+}
+
+/**
+ * 「思考」「档位」两段（从原 ThinkingDropdown / EffortDropdown 合并而来）。
+ *
+ * 收进模型下拉的理由：两者都只在支持对应能力的模型下出现、都属"模型行为调参"，
+ * 且**不常改动** —— 工具栏常态不值得各占一个按钮。能力判断沿用各自原逻辑，
+ * 某段不可用则该段不渲染。
+ *
+ * 自带数据订阅（不依赖父组件传值），因为它渲染在下拉内部、位置由父决定。
+ */
+function ModelTuningSections({ onPicked }: { onPicked: () => void }) {
+  const payload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
+  const state = payload?.state ?? getChatState();
+  const cap = state.modelCapabilities;
+
+  const canThink = !!cap && (cap.thinking || cap.reasoning);
+  const canEffort = !!cap && (cap.effort || cap.reasoning);
+  if (!canThink && !canEffort) return null;
+
+  const thinkingOn = state.thinkingModeEnabled;
+
+  // Reasoning-capable providers (DeepSeek) accept low/high/max, not 'medium'
+  // (Claude-native supports all four) — GUI decides the tiers, so drop medium.
+  const effort = state.effort;
+  const baseLevels = cap?.reasoning ? ["low", "high"] : ["low", "medium", "high"];
+  const levels: Array<{ id: string }> = baseLevels.map((id) => ({ id }));
+  if (cap?.maxEffort) levels.push({ id: "max" });
+  const effortNow = effort ?? cap?.defaultEffort;
+
+  return (
+    <>
+      {canThink && (
+        <>
+          <DropdownSectionLabel icon={<Brain size={11} />} text={t("toolbar.thinkingMode")} />
+          {[{ id: true }, { id: false }].map((o) => (
+            <div
+              key={String(o.id)}
+              onClick={() => {
+                commandRegistry.execute("SET_THINKING_MODE", { enabled: o.id, effort: state.effort ?? undefined });
+                onPicked();
+              }}
+              style={{
+                ...DROPDOWN_ITEM_BASE,
+                backgroundColor: o.id === thinkingOn ? "var(--accent-subtle)" : "transparent",
+                color: o.id === thinkingOn ? "var(--accent)" : "var(--fg-primary)",
+              }}
+            >
+              {o.id ? t("toolbar.thinkingOn") : t("toolbar.thinkingOff")}
+            </div>
+          ))}
+        </>
+      )}
+      {canThink && canEffort && <DropdownSep />}
+      {canEffort && (
+        <>
+          <DropdownSectionLabel icon={<Gauge size={11} />} text={t("toolbar.effort")} />
+          {levels.map((l) => (
+            <div
+              key={l.id}
+              onClick={() => { commandRegistry.execute("SET_EFFORT", l.id); onPicked(); }}
+              style={{
+                ...DROPDOWN_ITEM_BASE,
+                backgroundColor: l.id === effortNow ? "var(--accent-subtle)" : "transparent",
+                color: l.id === effortNow ? "var(--accent)" : "var(--fg-primary)",
+              }}
+            >
+              {t(`toolbar.effort_${l.id}`)}
+            </div>
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
+/** 下拉内的分段小标题（不可点，仅视觉分组）。 */
+function DropdownSectionLabel({ icon, text }: { icon: React.ReactNode; text: string }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 5,
+      padding: "4px 12px 2px",
+      fontSize: "calc(var(--font-scale, 1) * 10px)",
+      color: "var(--fg-muted)",
+      fontFamily: "var(--font-sans)",
+      userSelect: "none",
+    }}>
+      {icon}
+      <span>{text}</span>
+    </div>
+  );
+}
+
 // ── System terminal launcher ──
 
-function NewInstanceButton() {
-  async function openNew() {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("spawn_gui_instance");
-    } catch (e) {
-      console.warn("spawn new instance failed:", e);
-    }
+/** 开一个新 GUI 实例（工具栏按钮与折叠后的菜单项共用同一动作）。 */
+export async function spawnNewInstance() {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("spawn_gui_instance");
+  } catch (e) {
+    console.warn("spawn new instance failed:", e);
   }
-  return (
-    <button
-      type="button"
-      title={t("toolbar.newInstance")}
-      aria-label={t("toolbar.newInstance")}
-      style={{ ...btn(false), ...DROPDOWN_TRIGGER_BTN }}
-      onClick={openNew}
-    >
-      <Copy size={13} />
-      <span style={{ marginLeft: 5, fontSize: 11, fontWeight: 500, whiteSpace: "nowrap" }}>{t("toolbar.newInstanceShort")}</span>
-    </button>
-  );
 }
 
 function TerminalDropdown() {
@@ -626,7 +675,7 @@ function TerminalDropdown() {
         <span style={DROPDOWN_ARROW}>▼</span>
       </button>
       {open && (
-        <div style={{ ...DROPDOWN_MENU_BASE, right: 0, minWidth: 160 }}>
+        <div {...DROPDOWN_MENU_ATTRS} style={{ ...DROPDOWN_MENU_BASE, right: 0, minWidth: 160 }}>
           {terminals.map((t) => (
             <div
               key={t.id}
@@ -678,7 +727,7 @@ function PanelDropdown() {
         <span style={DROPDOWN_ARROW}>▼</span>
       </button>
       {open && (
-        <div style={{ ...DROPDOWN_MENU_BASE, right: 0, minWidth: 200 }}>
+        <div {...DROPDOWN_MENU_ATTRS} style={{ ...DROPDOWN_MENU_BASE, right: 0, minWidth: 200 }}>
           {allPanels.length === 0 && (
             <div style={DROPDOWN_EMPTY_MSG}>
               {t("toolbar.noPanels")}
@@ -768,11 +817,16 @@ function PresetMini({ id }: { id: string }) {
   );
 }
 
+/** 布局预设弹层的最大宽度（3 张 150px 预览卡 + gap + padding）。 */
+const PRESET_MENU_WIDTH = 520;
+
 function LayoutPresetDropdown() {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState<(typeof LAYOUT_PRESETS)[number] | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   useClickOutside(ref, open, () => setOpen(false));
+  // 弹层很宽（~520px）：按钮靠右时翻左展开；两边都放不下时靠 maxWidth 收缩
+  const { align, maxWidth } = useDropdownAlign(ref, PRESET_MENU_WIDTH, open);
 
   return (
     <>
@@ -788,10 +842,11 @@ function LayoutPresetDropdown() {
         </button>
         {open && (
           <div
+            {...DROPDOWN_MENU_ATTRS}
             style={{
               position: "absolute",
               top: "100%",
-              left: 0,
+              ...align,
               marginTop: 2,
               zIndex: 100,
               background: "var(--bg-root)",
@@ -800,7 +855,9 @@ function LayoutPresetDropdown() {
               boxShadow: "0 6px 20px rgba(0,0,0,0.15)",
               padding: 10,
               display: "flex",
+              flexWrap: "wrap",
               gap: 10,
+              maxWidth,
             }}
           >
             {LAYOUT_PRESETS.map((p) => (
@@ -833,6 +890,7 @@ function LayoutPresetDropdown() {
       </div>
       {confirming && (
         <div
+          {...DROPDOWN_MENU_ATTRS}
           style={{
             position: "fixed",
             inset: 0,
@@ -942,6 +1000,8 @@ export default function Toolbar() {
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const workDir = settingsPayload?.settings?.workDir ?? "";
   const workspaceName = workspaceBasename(workDir);
+  // Windows 用自绘标题栏（Rust 侧 decorations(false)）；mac 保留原生装饰。
+  const chrome = isWindowsChrome();
 
   // Session name
   const chatPayload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
@@ -953,12 +1013,67 @@ export default function Toolbar() {
     return () => { u2(); };
   }, []);
 
+  // ── 应用菜单 + 响应式折叠（两套独立机制，最终汇入同一个菜单）──
+  //
+  //   ① `inMenuByDefault` —— **固定降级**：功能低频，就该待在菜单里，与窗口宽度无关
+  //   ② 折叠 —— **被动降级**：窗口太窄放不下，从数组头开始依次折进菜单
+  //
+  // 数组顺序只影响 ②（靠前先折）。①的项不参与折叠计算（本来就不在工具栏）。
+  //
+  // 只收「简单动作按钮」——带自身弹出层的下拉组件（模型/权限/面板/布局预设/
+  // 终端）不参与：塞进菜单会变成嵌套下拉，交互难看且易错。它们常驻工具栏。
+  const barItems: ToolbarItem[] = useMemo(() => [
+    // ① 固定降级（永远在菜单里）
+    { id: "theme", label: isDark ? t("toolbar.switchToLight") : t("toolbar.switchToDark"),
+      icon: isDark ? <Sun size={14} /> : <Moon size={14} />, onClick: toggleTheme,
+      inMenuByDefault: true },
+    { id: "hardRefresh", label: t("toolbar.hardRefresh"),
+      // 从快捷键注册表读 —— 唯一真相源。用户在设置里改了键，菜单提示自动跟随。
+      shortcut: shortcutFor("app.hardRefresh"),
+      icon: <RefreshCw size={14} />, onClick: () => window.location.reload(),
+      inMenuByDefault: true },
+    { id: "layoutMode", label: t("toolbar.layoutMode"), icon: <Grid3x3 size={14} />,
+      onClick: () => layoutMode.toggle(), inMenuByDefault: true },
+    // profile 管理不在这里 —— 已归入模型下拉（模型相关的设置聚在一处）
+    { id: "update", label: t("update.title"), icon: <Download size={14} />,
+      onClick: openUpdateFloat, hasBadge: hasUpdate, inMenuByDefault: true },
+    // 帮助原先标着 shortcut: "F1" —— 但 F1 是**命令面板**不是帮助，是错误提示。
+    // 快捷键表里也没有"帮助"这个功能，故不显示（显示错的比不显示更糟）。
+    { id: "help", label: t("help.title"), icon: <HelpCircle size={14} />,
+      onClick: openHelpFloat, inMenuByDefault: true },
+    { id: "diagnostics", label: t("toolbar.diagnostics"), icon: <Stethoscope size={14} />,
+      onClick: openDiagnosticsFloat, inMenuByDefault: true },
+    { id: "feedback", label: t("feedback.title"), icon: <Bug size={14} />,
+      onClick: openFeedbackFloat, inMenuByDefault: true },
+    // ② 常驻（高频：很多人靠它快速开新窗口）——不进菜单、不参与折叠。
+    //    用短标签「新实例」而非完整描述（完整描述留给 title 悬停提示）。
+    { id: "newInstance", label: t("toolbar.newInstance"), shortLabel: t("toolbar.newInstanceShort"),
+      title: t("toolbar.newInstance"), icon: <Copy size={14} />,
+      onClick: spawnNewInstance, showLabel: true, alwaysVisible: true },
+  ], [isDark, hasUpdate, toggleTheme]);
+
+  const { containerRef, collapsed } = useToolbarCollapse(barItems);
+  const { inBar, inMenu } = partitionItems(barItems, collapsed);
+  const menuItems = inMenu;
+
   return (
-    <div style={TOOLBAR_CONTAINER}>
+    <div
+      ref={containerRef}
+      style={TOOLBAR_CONTAINER}
+      {...(chrome ? { "data-tauri-drag-region": "deep" } : {})}
+    >
+      {/* 应用菜单入口（跨平台）：图标可点 → 弹出低频功能区。
+          拖拽靠容器的 data-tauri-drag-region="deep" —— 子树内空白处都能拖，
+          按钮天然阻止拖拽（Tauri drag.js 对 BUTTON 的处理），无需逐个排除。 */}
+      <div data-toolbar-item="__appmenu">
+        <AppMenu items={menuItems} hasBadge={hasUpdate} />
+      </div>
+
       {groups.map(({ id, icon: Icon, key }) => (
         <button
           type="button"
           key={id}
+          data-toolbar-item={`group-${id}`}
           title={t(key)}
           aria-label={t(key)}
           style={btn(isVisible(id))}
@@ -971,6 +1086,7 @@ export default function Toolbar() {
       <div style={TOOLBAR_DIVIDER} />
       <button
         type="button"
+        data-toolbar-item="__workspace"
         title={workspaceName ? workDir : t("workspace.title")}
         aria-label={t("workspace.title")}
         style={{
@@ -999,6 +1115,7 @@ export default function Toolbar() {
       {/* Command palette — 全局搜索入口 */}
       <button
         type="button"
+        data-toolbar-item="__search"
         title={t("toolbar.commandPalette")}
         aria-label={t("toolbar.commandPalette")}
         style={btn(false)}
@@ -1006,39 +1123,10 @@ export default function Toolbar() {
       >
         <Search size={15} style={{ pointerEvents: "none" }} />
       </button>
-      <button
-        type="button"
-        title={t("toolbar.layoutMode")}
-        aria-label={t("toolbar.layoutMode")}
-        style={lmBtn(layoutMode.enabled)}
-        onClick={() => layoutMode.toggle()}
-      >
-        <Grid3x3 size={16} style={{ pointerEvents: "none" }} />
-      </button>
-      <LayoutPresetDropdown />
-      {/* Hard refresh */}
-      <button
-        type="button"
-        title={t("toolbar.hardRefresh")}
-        aria-label={t("toolbar.hardRefresh")}
-        style={btn(false)}
-        onClick={() => window.location.reload()}
-      >
-        <RefreshCw size={15} style={{ pointerEvents: "none" }} />
-      </button>
-      {/* Theme toggle */}
-      <button
-        type="button"
-        title={isDark ? t("toolbar.switchToLight") : t("toolbar.switchToDark")}
-        aria-label={isDark ? t("toolbar.switchToLight") : t("toolbar.switchToDark")}
-        style={btn(false)}
-        onClick={toggleTheme}
-      >
-        {isDark ? <Sun size={15} style={{ pointerEvents: "none" }} /> : <Moon size={15} style={{ pointerEvents: "none" }} />}
-      </button>
 
-      {/* Middle area: session name */}
-      <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, marginLeft: 8 }}>
+      {/* Middle area: session name —— minWidth:0 让它真正可压缩；
+          没有它 flex 子项默认 min-width:auto，长会话名会把右侧按钮推出可视区 */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, marginLeft: 8 }}>
         {sessionTitle && (
           <span title={`Session: ${sessionTitle}`} style={{
             fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-secondary)",
@@ -1049,74 +1137,48 @@ export default function Toolbar() {
         )}
       </div>
 
+      {/* 可折叠项（未折叠的那些）。逐个渲染，带 data-toolbar-item 供折叠器实测宽度。
+          放在此处（中间弹性区之后、核心控件之前）：折叠时右侧核心控件位置稳定，
+          不会因为折叠而左右抖动。 */}
+      {inBar.map((it) => (
+        <button
+          key={it.id}
+          type="button"
+          data-toolbar-item={it.id}
+          title={it.title ?? it.label}
+          aria-label={it.title ?? it.label}
+          style={{
+            ...btn(false),
+            position: "relative",
+            ...(it.showLabel ? { width: "auto", padding: "0 8px", gap: 5 } : {}),
+          }}
+          onClick={it.onClick}
+        >
+          <span style={{ pointerEvents: "none", display: "flex" }}>{it.icon}</span>
+          {it.showLabel && (
+            <span style={{ fontSize: 11, fontWeight: 500, whiteSpace: "nowrap" }}>
+              {it.shortLabel ?? it.label}
+            </span>
+          )}
+          {it.hasBadge && <ToolbarBadgeDot />}
+        </button>
+      ))}
+
       <PermModeDropdown />
-      <ThinkingDropdown />
-      <EffortDropdown />
-      <ModelDropdown />
-      <button
-        type="button"
-        title={t("toolbar.profileManage")}
-        aria-label={t("toolbar.profileManage")}
-        style={btn(false)}
-        onClick={openProfileFloat}
-      >
-        <User size={15} style={{ pointerEvents: "none" }} />
-      </button>
-      <PanelDropdown />
+      {/* 布局预设：自带弹层（预览网格 + 确认框），与"布局模式"同族，故相邻放置。
+          有独立弹层的组件都是**固定渲染**（不走 barItems 折叠数组）—— 折叠需要
+          ToolbarItem 的 onClick 形态，装不下"点开弹层"这类交互。 */}
+      <LayoutPresetDropdown />
+      {/* 系统终端：自带弹层（选终端类型），同样固定渲染 */}
       <TerminalDropdown />
-      <NewInstanceButton />
-      <button
-        type="button"
-        title={t("update.title")}
-        aria-label={t("update.title")}
-        style={{ ...btn(false), position: "relative" }}
-        onClick={openUpdateFloat}
-      >
-        <Download size={15} style={{ pointerEvents: "none" }} />
-        {hasUpdate && (
-          <span style={{
-            position: "absolute",
-            top: 2,
-            right: 2,
-            width: 8,
-            height: 8,
-            borderRadius: "50%",
-            backgroundColor: "var(--semantic-error)",
-            border: "1.5px solid var(--bg-root)",
-            pointerEvents: "none",
-          }} />
-        )}
-      </button>
-      <button
-        type="button"
-        title={t("help.title")}
-        aria-label={t("help.title")}
-        style={btn(false)}
-        onClick={openHelpFloat}
-      >
-        <HelpCircle size={15} style={{ pointerEvents: "none" }} />
-      </button>
-      <button
-        type="button"
-        title={t("toolbar.diagnostics")}
-        aria-label={t("toolbar.diagnostics")}
-        style={btn(false)}
-        onClick={openDiagnosticsFloat}
-      >
-        <Stethoscope size={15} style={{ pointerEvents: "none" }} />
-      </button>
+      {/* 模型名 = 模型相关设置的统一入口：点开含 模型列表 / 思考 / 档位 / Profile 管理。
+          这些设置重要但不常改，工具栏常态不提供切换交互、只显示当前模型名。 */}
+      <ModelDropdown />
+      <PanelDropdown />
       <GuardButton />
       <button
         type="button"
-        title={t("feedback.title")}
-        aria-label={t("feedback.title")}
-        style={btn(false)}
-        onClick={openFeedbackFloat}
-      >
-        <Bug size={15} style={{ pointerEvents: "none" }} />
-      </button>
-      <button
-        type="button"
+        data-toolbar-item="__settings"
         title={t("toolbar.settings")}
         aria-label={t("toolbar.settings")}
         style={btn(false)}
@@ -1124,6 +1186,16 @@ export default function Toolbar() {
       >
         <Settings size={16} style={{ pointerEvents: "none" }} />
       </button>
+
+      {/* 自绘窗口按钮（仅 Windows）。放最右且与工具栏按钮留有间距 ——
+          Win11 的关闭按钮贴角，视觉上不该和功能按钮挤在一起。
+          这三个永不折叠：无装饰窗口下失去它们 = 窗口无法控制。 */}
+      {chrome && (
+        <>
+          <div style={{ width: 6, flexShrink: 0 }} />
+          <WindowControls />
+        </>
+      )}
     </div>
   );
 }

@@ -10,3 +10,6 @@ services:
     restart: unless-stopped
     environment:
       - DB_PATH=/data/claude-memory.db
+      # 必填：MCP 与 REST(/api/*) 都校验这个 bearer token。
+      # 未设置则服务拒绝启动（fail-closed）。真实值见 .private/api-keys.md
+      - MEMORY_AUTH_TOKEN=${MEMORY_AUTH_TOKEN:?MEMORY_AUTH_TOKEN is required}

@@ -13,7 +13,7 @@ use jsonrpsee::ws_client::{WsClient, WsClientBuilder};
 use serde::{Deserialize, Serialize};
 
 use claude_gui_shared::note::{
-    Note, NoteAssocInput, NoteInput, NoteSummary, NoteUpdate, TagCount,
+    Note, NoteAssocInput, NoteCreateResult, NoteInput, NoteSummary, NoteUpdate, TagCount,
 };
 use claude_gui_shared::presence::{PresenceEvent, SessionStatus};
 use claude_gui_shared::{DesktopRecord, PlanRecord, PlanSession, ServerEvent};
@@ -209,9 +209,9 @@ impl ServerClient {
     // ── Notes (user-level, not workspace-scoped). Writes inject our client_id as
     // the `origin` so the server's db_changed echo is skipped by our forwarder. ──
 
-    pub async fn note_create(&self, input: NoteInput) -> Result<Note, String> {
+    pub async fn note_create(&self, input: NoteInput) -> Result<NoteCreateResult, String> {
         self.client
-            .request::<Note, _>("note_create", (input, self.client_id.clone()))
+            .request::<NoteCreateResult, _>("note_create", (input, self.client_id.clone()))
             .await
             .map_err(|e| e.to_string())
     }

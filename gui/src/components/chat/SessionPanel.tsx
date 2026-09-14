@@ -2,6 +2,8 @@ import React, { memo, useState, useEffect, useCallback, useRef } from "react";
 import { ListChecks, Folder, FolderInput, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ExternalLink, ArrowUpRight } from "lucide-react";
 import type { Session } from "../../stores/chatStore";
 import { getChatState } from "../../stores/chatStore";
+import { isBackendBusy } from "../../chat/chatReduce";
+import { shouldConfirmSwitch } from "./sessionSwitchGuard";
 import { getSettings, updateSettings, saveSettings } from "../../stores/settingsStore";
 import { partitionSessions } from "./sessionFavorites";
 import {
@@ -97,6 +99,7 @@ function SessionPanelImpl() {
   useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [confirmOpenElsewhere, setConfirmOpenElsewhere] = useState<Session | null>(null);
+  const [confirmBusySwitch, setConfirmBusySwitch] = useState<Session | null>(null);
   const [batchDeleteCount, setBatchDeleteCount] = useState(0);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -322,6 +325,10 @@ function SessionPanelImpl() {
         } else if (openElsewhere.length > 0 && !isCurrent) {
           // 已在另一窗口打开（且不是当前会话）→ 软警告，用户确认才切换（best-effort）
           setConfirmOpenElsewhere(s);
+        } else if (shouldConfirmSwitch({ backendBusy: isBackendBusy(chatState) }, chatState.sessionId, s.id)) {
+          // 后端仍在跑（思考/工具中）→ 切换会 interruptCurrentTurn() 打断本回合，
+          // 已消耗的 token 不可恢复。先确认，避免误点打断。
+          setConfirmBusySwitch(s);
         } else {
           switchSession(s.id);
           commandRegistry.execute(Commands.CHAT_FOCUS_INPUT);
@@ -647,6 +654,34 @@ function SessionPanelImpl() {
                 style={dialogBtn("var(--semantic-error)", "none", "var(--fg-inverse)")}
               >
                 {t("sessions.openAnyway")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 切会话打断确认：后端忙时切换会 abort 当前回合 */}
+      {confirmBusySwitch && (
+        <div
+          onClick={() => setConfirmBusySwitch(null)}
+          style={{ position: "fixed", inset: 0, zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.3)" }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ backgroundColor: "var(--bg-root)", borderRadius: 8, boxShadow: "0 8px 32px rgba(0,0,0,0.2)", padding: 20, minWidth: 280, maxWidth: 400, fontFamily: "var(--font-sans)" }}>
+            <div style={{ color: "var(--fg-primary)", fontWeight: 600, marginBottom: 8 }}>{t("sessions.switchBusyTitle")}</div>
+            <div style={{ color: "var(--fg-secondary)", marginBottom: 14, lineHeight: 1.4 }}>{t("sessions.switchBusyWarn", { title: confirmBusySwitch.title })}</div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" onClick={() => setConfirmBusySwitch(null)} style={dialogBtn("var(--bg-root)", "var(--border-medium)", "var(--fg-primary)")}>{t("sessions.cancel")}</button>
+              <button
+                type="button"
+                onClick={() => {
+                  const sid = confirmBusySwitch.id;
+                  setConfirmBusySwitch(null);
+                  switchSession(sid);
+                  commandRegistry.execute(Commands.CHAT_FOCUS_INPUT);
+                }}
+                style={dialogBtn("var(--semantic-error)", "none", "var(--fg-inverse)")}
+              >
+                {t("sessions.switchAnyway")}
               </button>
             </div>
           </div>

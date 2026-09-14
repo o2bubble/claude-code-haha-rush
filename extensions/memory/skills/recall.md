@@ -31,6 +31,9 @@ memory_search(query="<angle 1>", mode="hybrid", scope=["project:<current>", "dom
 memory_search(query="<angle 2>", mode="hybrid", limit=5)
 ```
 
+Scope entries match exactly; a trailing `*` matches by prefix. To sweep every project at
+once use `scope=["project:*"]` (and `["domain:*"]` for all domains).
+
 For debugging tasks, also search specifically for lessons:
 
 ```
@@ -96,7 +99,7 @@ User: I need to update the VSIX packaging for all 3 IDE plugins.
 Agent:
 → memory_search("VSIX packaging IDE plugins", scope=["project:claude-code-haha"])
 → memory_search("Visual Studio VSIX build", type=["lesson"])
-→ Found: "VS VSIX webview flat structure" (similarity 0.82) —
+→ Found: "VS VSIX webview flat structure" (ranked top; strategy=hybrid) —
   webview files are flat under media/webview/ unlike source tree
 → memory_traverse(start_id=<that>)
 → Found linked: "Inno Setup ISPP limitations" — compute dates externally

@@ -17,6 +17,7 @@ COPY normalize.py .
 COPY search_engine.py .
 COPY server.py .
 COPY api.py .
+COPY auth.py .
 
 # Copy pre-built frontend (build with: cd web && bun install && bun run build)
 COPY web/dist/ ./web/dist/

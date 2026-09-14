@@ -10,3 +10,5 @@ crate-type = ["lib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+jieba-rs = "0.10"
+log = "0.4"

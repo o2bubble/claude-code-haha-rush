@@ -46,5 +46,14 @@ async def startup():
 
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8765, reload=True)
+
+    # reload=True 是开发用的（改代码自动重启）：它起一个 StatReload 进程**持续扫描
+    # 整个 /app 目录树**。本项目 skills-store 有 160MB，在 2 核小机上实测：
+    # 持续 ~18% CPU、5 天累计 22 小时 CPU，内存紧张时 stat 还会引发 inode 缺页读盘，
+    # 把 cloud_essd_entry（IOPS 上限仅 2520）的磁盘打满 → 所有进程卡在 D 状态、
+    # 容器健康检查超时。生产环境必须关掉。
+    # 本地开发需要热重载时设 RELOAD=1 显式开启。
+    _reload = os.environ.get("RELOAD") == "1"
+    uvicorn.run("main:app", host="0.0.0.0", port=8765, reload=_reload)

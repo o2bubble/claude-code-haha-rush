@@ -36,6 +36,32 @@ const SERVERDIR = join(GUILDIR, 'server')   // GUI server daemon (独立二进�
 const UPDDIR = join(ROOT, 'updater')
 const BIN_DIR = join(ROOT, 'bin')
 
+/**
+ * 打印 `cargo tauri build` 的失败详情。
+ *
+ * **必须打 stdout**：cargo-tauri 把 `beforeBuildCommand`（前端 `tsc && vite build`）
+ * 的报错写在 stdout，stderr 只有 "Info Looking up installed tauri packages..."
+ * 这类进度噪声。只打 stderr 会让日志变成
+ * `[Error] GUI build failed: Info Looking up...`，真正的类型错误全丢。
+ *
+ * 代价实例（2026-09-13）：.13.6 的 CI 失败，日志里看不到任何有用信息，
+ * 排查一轮才从"快照分支有改名前的孤儿文件"定位到根因。
+ *
+ * 取 stdout 的**尾部**（前端错误在最后），避免把几千行 vite 输出全刷进日志。
+ */
+function reportGuiBuildFailure(build: { stdout: Buffer | string; stderr: Buffer | string; exitCode: number | null }) {
+  const tail = (s: Buffer | string, n: number) =>
+    s.toString().split('\n').filter((l) => l.trim()).slice(-n).join('\n')
+  console.error(`[Error] GUI build failed (exit ${build.exitCode})`)
+  console.error('--- stdout (tail) ---')
+  console.error(tail(build.stdout, 40))
+  const err = tail(build.stderr, 15)
+  if (err) {
+    console.error('--- stderr (tail) ---')
+    console.error(err)
+  }
+}
+
 // 构建目标平台解析（macOS 移植 seam: planComponents 决定每组件怎么构建/是否打包）。
 // 默认自动检测当前 OS（Windows 构建行为与引入前完全一致；macOS 走平台分支）。
 // 可用 --platform <macos|windows> 显式覆盖——注意执行层命令平台绑定
@@ -67,6 +93,12 @@ async function main() {
   const RELEASE_VER = RELEASE_IDX >= 0 ? process.argv[RELEASE_IDX + 1] : null
   const NOTES_IDX = process.argv.indexOf('--notes')
   const NOTES = NOTES_IDX >= 0 ? process.argv[NOTES_IDX + 1] : ''
+  // --expect-prev <version>: 声明"上一发行版本号"（服务器上真正在跑的上一版）。
+  // 复用未改动组件的 zip 时校验来源版本一致——防止本地 dist/release 缺失该版本时
+  // 静默复用更老版本的包（2026.09.12.1 事故：bun/python 等被换成 09.04 的旧包，
+  // sha 全变 → 用户端全量"有更新"）。
+  const EXPECT_PREV_IDX = process.argv.indexOf('--expect-prev')
+  const EXPECT_PREV = EXPECT_PREV_IDX >= 0 ? process.argv[EXPECT_PREV_IDX + 1] : null
 
   // ── Component selection ──
   // Known components: gui, claude, bun, updater (exe) + tools, python, git, extensions (dir).
@@ -93,6 +125,35 @@ async function main() {
   // selected(name): 显式选中 → 强制重建；want(name): 产物该存在 → 未选中时复用现有/上一版本
   const selected = (name: string) => COMPONENT_SET !== null && COMPONENT_SET.has(name)
   const want = (name: string) => COMPONENT_SET === null || COMPONENT_SET.has(name)
+
+  // --expect-prev 前置校验（仅"部分构建+复用"场景相关）：本地 dist/release 里最"新"的
+  // 版本目录必须就是声明的上一发行版——否则未选中组件会静默复用更老的包
+  //（2026.09.12.1 事故：本地最新是 09.04.11，09.10.x 的 zip 缺失 → bun/python 等被换成
+  //  09.04 的旧包，sha 全变，用户端全量"有更新"）。构建前快速失败，避免白跑编译。
+  if (EXPECT_PREV && COMPONENT_SET !== null && RELEASE_VER) {
+    const releasesDir = join(DIST, 'release')
+    const localPrev = (() => {
+      if (!existsSync(releasesDir)) return null
+      const prevs = readdirSync(releasesDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && d.name !== RELEASE_VER && /^\d{4}\.\d{2}\.\d{2}(\.\d+)?$/.test(d.name))
+        .map((d) => d.name)
+        .sort((a, b) => {
+          const pa = a.split('.').map(Number), pb = b.split('.').map(Number)
+          for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+            const na = pa[i] ?? 0, nb = pb[i] ?? 0
+            if (na !== nb) return na - nb
+          }
+          return 0
+        })
+      return prevs.length ? prevs[prevs.length - 1] : null
+    })()
+    if (localPrev !== EXPECT_PREV) {
+      console.error(`[Error] --expect-prev ${EXPECT_PREV} but local prev release is ${localPrev ?? '(none)'}.`)
+      console.error(`        Fetch that version's component zips into dist/release/${EXPECT_PREV}/ first,`)
+      console.error(`        or omit --expect-prev (only needed when reusing unselected components).`)
+      process.exit(1)
+    }
+  }
 
   const TOTAL_STEPS = RELEASE_VER ? 11 : 10
 
@@ -189,7 +250,12 @@ async function main() {
       // mac: 出 .app bundle（beforeBuildCommand 编译前端）；dmg 由 CI/分发单独出
       const build = spawnSync(['cargo', 'tauri', 'build', '--bundles', 'app'], { cwd: GUILDIR, timeout: 600000 })
       if (build.exitCode !== 0) {
-        console.error('[Error] GUI build failed:', build.stderr.toString())
+        // ⚠️ 必须打 **stdout**：cargo-tauri 把 beforeBuildCommand 的输出
+        // （前端 `tsc && vite build` 的**类型错误**）写在 stdout，stderr 只有
+        // "Info Looking up installed tauri packages..." 这类进度噪声。
+        // 只打 stderr 会让 CI 日志变成 "GUI build failed: Info Looking up..."，
+        // 真正的报错全丢 —— .13.6 的 CI 失败因此排查了一轮才定位到根因。
+        reportGuiBuildFailure(build)
         process.exit(1)
       }
     } else {
@@ -197,7 +263,7 @@ async function main() {
       // --no-bundle: runs beforeBuildCommand (bun run build = 编译前端), compiles, skips MSI/DMG
       const build = spawnSync(['cargo', 'tauri', 'build', '--no-bundle'], { cwd: GUILDIR, timeout: 600000 })
       if (build.exitCode !== 0) {
-        console.error('[Error] GUI build failed:', build.stderr.toString())
+        reportGuiBuildFailure(build)
         process.exit(1)
       }
     }
@@ -256,7 +322,7 @@ async function main() {
   mkdirSync(join(DIST, 'scripts'), { recursive: true })
   const keepScripts = [
     'claude-profile.ts', 'install.ts', 'install-tools.ts',
-    'cdp-browser.ts', 'cdp-setup.ts', 'kill-claude.ts',
+    'kill-claude.ts',
     'memory-setup.ts', 'gui-profile.py', 'inject-office-bridge.ts',
   ]
   for (const f of keepScripts) {
@@ -358,7 +424,7 @@ async function main() {
   // Memory MCP Server — Python source + frontend + skills
   // Skip wheels/ (183MB), model/ (88MB), docker images, temp files
   for (const f of [
-    'server.py', 'store.py', 'search_engine.py', 'api.py', 'embeddings.py', 'normalize.py',
+    'server.py', 'store.py', 'search_engine.py', 'api.py', 'auth.py', 'tokenizer.py', 'normalize.py',
     'requirements.txt', 'Dockerfile', 'docker-compose.yml', 'config.example.json', '.dockerignore',
   ]) {
     copy(`extensions/memory/${f}`, `memory/${f}`)
@@ -445,65 +511,69 @@ async function main() {
   }
 
   // 8. Setup full Python environment
-  // macOS: 自包含 python — 下载官方 .pkg → pkgutil 解包 → 提取 Python.framework 到 dist/python
+  // macOS: 自包含 python —— 用 **python-build-standalone**（Astral 维护）。
+  //
+  // 为什么不用 python.org 的官方 .pkg（旧方案，2026-09-13 废弃）：
+  //   pkg 装出来的是**框架式**安装，二进制里硬编码
+  //   `/Library/Frameworks/Python.framework/Versions/3.12/Python`。ditto 拷走副本
+  //   只能搬文件、**改不了二进制里的绝对路径** → 用户机器上系统框架一旦升到别的
+  //   版本（如 3.14），那份 3.12 dylib 就没了，内置 python 直接
+  //   `dyld: Library not loaded` 起不来。**"分发副本"从根上不成立**。
+  //   （注意：重建 symlink 救不了 —— 问题不在链接，在 LC_LOAD_DYLIB 的绝对路径。）
+  //
+  // standalone 是**真自包含**：自身引用走 `@rpath` / `@executable_path/../lib`，
+  // libpython3.12.dylib 随包分发；只依赖 /System/Library 下的系统库（永远存在）。
+  // 顺带体积从 ~176MB 降到 ~24MB。
   if (PLATFORM === 'macos') {
     if (!selected('python') && existsSync(join(DIST, 'python'))) {
       console.log('[8/10] python not in components — reusing existing')
     } else {
       console.log('[8/10] Building self-contained Python (macOS)...')
-      const PYTHON_PKG = 'python-3.12.10-macos11.pkg'
-      const PKG_URL = `https://mirrors.huaweicloud.com/python/3.12.10/${PYTHON_PKG}`
+      // 版本固定（可复现构建）。升级时改这两行 + 下面 pip 的版本约束一并复核。
+      const PBS_TAG = '20260901'                     // release tag
+      const PBS_PY = '3.12.14'                       // CPython 版本
+      const PBS_ARCH = 'aarch64-apple-darwin'        // 只出 Apple Silicon（架构决策见 docs/macos-build-playbook.md）
+      const PBS_NAME = `cpython-${PBS_PY}+${PBS_TAG}-${PBS_ARCH}-install_only.tar.gz`
+      const PBS_URL = `https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${PBS_NAME}`
       const PYTHON_DIR = join(DIST, 'python')
-      const LOCAL_PKG = join(ROOT, 'offline-tools', 'macos', PYTHON_PKG)
+      const LOCAL_TGZ = join(ROOT, 'offline-tools', 'macos', PBS_NAME)
 
-      if (!existsSync(LOCAL_PKG)) {
-        mkdirSync(dirname(LOCAL_PKG), { recursive: true })
-        console.log(`  Downloading ${PKG_URL}...`)
-        const dl = spawnSync(['curl', '-L', '-f', '-o', LOCAL_PKG, PKG_URL], { cwd: ROOT, timeout: 600000 })
+      if (!existsSync(LOCAL_TGZ)) {
+        mkdirSync(dirname(LOCAL_TGZ), { recursive: true })
+        console.log(`  Downloading ${PBS_NAME}...`)
+        const dl = spawnSync(['curl', '-L', '-f', '-o', LOCAL_TGZ, PBS_URL], { cwd: ROOT, timeout: 600000 })
         if (dl.exitCode !== 0) {
-          console.error(`[Error] Python pkg download failed: ${dl.stderr.toString()}`)
+          console.error(`[Error] python-build-standalone download failed: ${dl.stderr.toString()}`)
           process.exit(1)
         }
-        console.log(`  Saved ${LOCAL_PKG}`)
+        console.log(`  Saved ${LOCAL_TGZ}`)
       } else {
-        console.log(`  Using offline pkg: ${LOCAL_PKG}`)
+        console.log(`  Using offline archive: ${LOCAL_TGZ}`)
       }
 
-      // 用 macOS 官方 installer 直接安装 pkg，从标准位置提取 Python.framework。
-      // pkgutil --expand-full 对 python.org 嵌套 pkg 不可靠（Python_Framework.pkg
-      // 有 Payload 却找不到 framework）。installer 正确处理所有嵌套子包。
-      // CI runner 是临时环境，装到 /Library/Frameworks 无副作用。
+      // 解压 —— tarball 顶层就是 `python/`（内含 bin/ lib/ include/ share/），
+      // 正好等于 dist/python 想要的结构，解到 DIST 即可，**无需再建 bin 链接**
+      // （旧方案要手建 `python/bin/python3`，那步随 pkg 方案一起消失）。
       rmSync(PYTHON_DIR, { recursive: true, force: true })
-      // installer -target / 需 root（GitHub macOS runner 有免密 sudo）
-      const inst = spawnSync(['sudo', 'installer', '-pkg', LOCAL_PKG, '-target', '/'], { cwd: ROOT, timeout: 600000 })
-      if (inst.exitCode !== 0) {
-        console.error(`[Error] installer failed: ${inst.stderr.toString()}`)
+      const ex = spawnSync(['tar', '-xzf', LOCAL_TGZ, '-C', DIST], { cwd: ROOT, timeout: 600000 })
+      if (ex.exitCode !== 0) {
+        console.error(`[Error] python archive extract failed: ${ex.stderr.toString()}`)
         process.exit(1)
       }
-      const fwSrc = '/Library/Frameworks/Python.framework'
-      if (!existsSync(fwSrc)) {
-        console.error(`[Error] Python.framework not found after install: ${fwSrc}`)
+      const py3 = join(PYTHON_DIR, 'bin', 'python3')
+      if (!existsSync(py3)) {
+        // 下游契约：settings.rs 用 {exe}/python/bin/python3 注册 office MCP。
+        // 布局变了必须在这里失败，而不是等用户装完发现 python 起不来。
+        console.error(`[Error] expected interpreter missing after extract: ${py3}`)
         process.exit(1)
       }
-      const cp = spawnSync(['ditto', fwSrc, PYTHON_DIR], { cwd: ROOT, timeout: 600000 })
-      if (cp.exitCode !== 0) {
-        console.error(`[Error] framework copy failed: ${cp.stderr.toString()}`)
-        process.exit(1)
-      }
-      console.log('  Extracted Python.framework → dist/python/')
-      // 不做瘦身 —— 保持 python.org 完整 framework（universal2 双架构 + 完整标准库）。
-      // 实机测试：lipo -thin arm64 / 删 test/idlelib/lib2to3 会破坏 Framework，
-      // python 解释器报「缺少 Framework」。代价是体积增大，但优先可用性（宁可大也要能跑）。
-      // 建 python3 兼容入口：settings.rs 注册 office MCP 用 {exe}/python/bin/python3，
-      // 而 pkg 提取的 framework 顶层没有 bin/（python 在 Versions/<ver>/bin/ 下）。
-      mkdirSync(join(PYTHON_DIR, 'bin'), { recursive: true })
-      spawnSync(['ln', '-sf', '../Versions/Current/bin/python3', join(PYTHON_DIR, 'bin', 'python3')], { cwd: ROOT })
+      console.log('  Extracted python-build-standalone → dist/python/')
+
       // 安装 mcp SDK（office MCP server 依赖；mac 走 osascript，无 COM，不需要 pywin32）。
-      const fwPy3 = join(PYTHON_DIR, 'Versions', 'Current', 'bin', 'python3')
       console.log('  Installing mcp SDK...')
       // PYTHONNOUSERSITE=1：隔离 user site-packages，强制全部依赖装进 dist 自带
       // site-packages——否则构建机/user 有缓存依赖时 pip 跳过，发版打包丢依赖。
-      const pipInstall = spawnSync([fwPy3, '-m', 'pip', 'install', 'mcp==1.28.1'], { cwd: ROOT, timeout: 180000, env: { ...process.env, PYTHONNOUSERSITE: '1' } })
+      const pipInstall = spawnSync([py3, '-m', 'pip', 'install', 'mcp==1.28.1'], { cwd: ROOT, timeout: 180000, env: { ...process.env, PYTHONNOUSERSITE: '1' } })
       if (pipInstall.exitCode !== 0) {
         console.warn(`  [Warn] mcp install failed: ${pipInstall.stderr.toString()}`)
       } else {
@@ -667,14 +737,6 @@ async function main() {
     console.log('  IntelliJ extension')
   } else { console.warn('  [Warn] IntelliJ ZIP not found') }
 
-  // CDP Inspector (MCP server for browser debugging)
-  const cdpDir = join(ROOT, 'extensions', 'cdp-inspector')
-  if (existsSync(cdpDir)) {
-    mkdirSync(join(EXT_PKG, 'cdp-inspector'), { recursive: true })
-    cpSync(cdpDir, join(EXT_PKG, 'cdp-inspector'), { recursive: true })
-    console.log('  CDP Inspector')
-  } else { console.warn('  [Warn] CDP Inspector not found') }
-
   }
 
   // launcher scripts — at dist/ root (Windows .cmd；macOS 用 bin/ shell 脚本 + .app 自带启动)
@@ -691,12 +753,8 @@ async function main() {
       ') else (',
       '  echo [Error] bun.exe not found.',
       ')', ''],
-    'cdp-browser.cmd': ['@echo off', 'chcp 65001 >nul', 'setlocal',
-      '"%~dp0bun.exe" "%~dp0scripts\\cdp-browser.ts" %*', ''],
     'kill-claude.cmd': ['@echo off', 'chcp 65001 >nul', 'setlocal',
       '"%~dp0bun.exe" "%~dp0scripts\\kill-claude.ts" %*', ''],
-    'cdp-setup.cmd': ['@echo off', 'chcp 65001 >nul', 'setlocal',
-      '"%~dp0bun.exe" "%~dp0scripts\\cdp-setup.ts" %*', ''],
 
     'memory-setup.cmd': ['@echo off', 'chcp 65001 >nul', 'setlocal',
       '"%~dp0bun.exe" "%~dp0scripts\\memory-setup.ts" %*', ''],
@@ -719,17 +777,20 @@ async function main() {
     // macOS launcher：Unix shebang，跟 claude 二进制平级放 dist/ 根。IDE 插件
     // （vscode/intellij：extension.ts IDE_SCRIPT / intellij ProcessManager）按平台找
     // 无扩展名 claude-ide，此前 mac 分支零 launcher → mac IDE 找不到启动脚本。
-    // CLI 用 shebang 调 claude；bun 脚本用 bun 调 .ts。claude/claude-haha 不生成
-    // （会与 mac 的 claude 二进制同名冲突，命令行直接用二进制）。
+    // CLI 用 shebang 调 claude。claude/claude-haha 不生成（会与 mac 的 claude
+    // 二进制同名冲突，命令行直接用二进制）。
+    //
+    // ⚠️ **不生成依赖 `$DIR/scripts/*.ts` 的那三个**（claude-profile / kill-claude /
+    // memory-setup）：.app 的 Contents/MacOS/ 下**没有 `scripts/` 目录**
+    // （embedDirs 只含 claude/bun/bin/python/extensions，scripts 不打进去），
+    // 这几个 launcher 必然 `exec: .../scripts/xxx.ts: No such file` 跑不起来 ——
+    // 是纯死文件。且这三个功能在 mac 上都由 GUI 界面提供（Profile 管理 / 杀进程 /
+    // 记忆 MCP 配置），命令行入口对 mac 用户没有实际用途。
+    // （真机验证时发现，见 docs/macos-build-playbook.md。）
     const unix: Record<string, string> = {
       'claude-ide': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" --ide-mode "$@"\n',
       'cla': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" "$@"\n',
       'cla-bypass': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/claude" --permission-mode bypassPermissions "$@"\n',
-      'claude-profile': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/claude-profile.ts" "$@"; else echo "[Error] bun not found."; fi\n',
-      'cdp-browser': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/cdp-browser.ts" "$@"; else echo "[Error] bun not found."; fi\n',
-      'kill-claude': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/kill-claude.ts" "$@"; else echo "[Error] bun not found."; fi\n',
-      'cdp-setup': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/cdp-setup.ts" "$@"; else echo "[Error] bun not found."; fi\n',
-      'memory-setup': '#!/bin/sh\nDIR="$(cd "$(dirname "$0")" && pwd)"\nif [ -x "$DIR/bun" ]; then exec "$DIR/bun" "$DIR/scripts/memory-setup.ts" "$@"; else echo "[Error] bun not found."; fi\n',
     };
     for (const [name, content] of Object.entries(unix)) {
       const p = join(DIST, name)
@@ -763,6 +824,11 @@ async function main() {
   const planActive = new Set(buildPlan.filter((p) => p.action !== 'system' && p.action !== 'skip').map((p) => p.name))
   for (const p of buildPlan) {
     console.log(`    ${p.name}: ${p.action}${p.artifact !== 'none' ? ` (${p.artifact})` : ''}${p.requiresMacTools ? ` — brew: ${p.requiresMacTools.join(' ')}` : ''}`)
+  }
+
+  // 读取 JSON（失败返回 null——调用方按可选处理，不中断构建）
+  function readJsonSafe(path: string): { components?: Record<string, { sha256?: string; size?: number }> } | null {
+    try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
   }
 
   // SHA256 for single files
@@ -826,8 +892,17 @@ async function main() {
   // 否则服务器 manifest 的 gui sha 与完整 .app 不符，客户端永远提示 gui 需更新。
   if (PLATFORM === 'macos') {
     const appMacOS = join(DIST, 'Claude Code.app', 'Contents', 'MacOS')
-    // gui 自身是 .app，不嵌；server 必须随 .app（GUI 从 current_exe 同目录找 claude-gui-server）
-    const embedDirs = ['claude', 'bun', 'bin', 'python', 'extensions', 'server']
+    // gui 自身是 .app，不嵌。
+    //
+    // ⚠️ `server` **不在** embedDirs 里 —— 它在 dist 下是**单文件**
+    // `claude-gui-server`（见上面 serverDistPath），不是同名目录。早先把 'server'
+    // 混在目录列表里 → `existsSync(dist/server)` 恒为假 → 只打一行 [Warn] 静默跳过
+    // → .app 里没有 server 二进制 → GUI 的 find_server_exe()（找 current_exe 同目录）
+    // 失败 → 诊断面板显示「GUI SERVER 已停止」。整个 GUI server 功能在 mac 上缺失。
+    //
+    // 教训：这里的"缺失"分支只 warn 不 fail，而 warn 混在长日志里没人看。
+    // 所以下面给 server 单独做**硬校验**（它是必须存在的，不是可选组件）。
+    const embedDirs = ['claude', 'bun', 'bin', 'python', 'extensions']
     for (const rel of embedDirs) {
       const srcP = join(DIST, rel)
       if (existsSync(srcP)) {
@@ -841,10 +916,28 @@ async function main() {
         console.warn(`  [Warn] embed ${rel}: dist/${rel} missing, skipping`)
       }
     }
+    // server 单文件：必须嵌入（GUI 启动时从 exe 同目录 spawn 它）。
+    {
+      const src = join(DIST, 'claude-gui-server')
+      if (!existsSync(src)) {
+        console.error(`  [Error] 缺少 GUI server 二进制: ${src}`)
+        console.error('          它在 dist 下叫 claude-gui-server（单文件，不是 server/ 目录）。')
+        console.error('          检查 build.ts 第 8.5 步的 GUI Server 构建是否被 --components 跳过。')
+        process.exit(1)
+      }
+      const run = spawnSync(['ditto', src, join(appMacOS, 'claude-gui-server')], { cwd: DIST, timeout: 600000 })
+      if (run.exitCode !== 0) {
+        console.error('  [Error] embed claude-gui-server failed:', run.stderr.toString())
+        process.exit(1)
+      }
+      spawnSync(['chmod', '+x', join(appMacOS, 'claude-gui-server')])
+      console.log('  embed claude-gui-server → .app/Contents/MacOS/')
+    }
     // mac launcher 也复制进 .app 根（跟 claude 二进制平级）——IDE 插件按平台找
     // 无扩展名 claude-ide（extension.ts:57 IDE_SCRIPT / intellij ProcessManager），
     // 否则 .app 里只有 claude 没有 claude-ide，mac IDE 找不到启动脚本。
-    for (const name of ['claude-ide', 'cla', 'cla-bypass', 'claude-profile', 'cdp-browser', 'kill-claude', 'cdp-setup', 'memory-setup']) {
+    // 列表与上面的 unix 生成清单保持一致（那三个依赖 scripts/*.ts 的已不再生成）。
+    for (const name of ['claude-ide', 'cla', 'cla-bypass']) {
       const srcP = join(DIST, name)
       if (existsSync(srcP)) {
         copyFileSync(srcP, join(appMacOS, name))
@@ -947,17 +1040,59 @@ async function main() {
   // 目录组件（mac 的 gui=.app、python/tools 等）之前用 dirSize()（未压缩目录总大小），
   // 与实际分发下载的压缩 zip 差数倍 —— 客户端据此显示"动辄上G"。改为 zip 实际大小。
   const zipSizes: Record<string, number> = {}
+  // 复用组件的 sha 覆盖表：复用的 zip 来自 prevRelDir，其内容 sha 就是 prevManifest
+  // 记录值——必须沿用。不能等会去算 dist/ 源文件（未重建组件的 dist/ 可能是本地
+  // 遗留的其它版本 → sha 错误 → 用户端全量误提示更新，09.12.1 事故同类）。
+  const reusedSha: Record<string, string> = {}
   const compress = (name: string, src: { kind: 'file' | 'dir'; path: string }) => {
     const srcPath = join(DIST, src.path)
     const zipPath = join(RELEASE_DIR, `${name}.zip`)
     if (!want(name)) {
       if (existsSync(zipPath)) {
+        // 本版目录里已存在该组件的 zip（重复构建同一版本时会走到这里）。它的 sha
+        // 同样必须沿用来源 manifest —— 不能留给后面的 fallback 去算 dist/ 源文件，
+        // 那可能是本地遗留的其它版本（→ sha 错误 → 用户端全量误提示更新，
+        // 2026.09.12.1 与 09.12.5 事故同因）。
+        // 先看本版 manifest（上次构建写的），再回退到来源版本 —— 本版 manifest
+        // 可能缺失（首次跑到这里）或本身已被写坏。
+        const recorded =
+          readJsonSafe(join(RELEASE_DIR, 'manifest.json'))?.components?.[name]?.sha256 ??
+          (prevRelDir ? readJsonSafe(join(prevRelDir, 'manifest.json'))?.components?.[name]?.sha256 : undefined)
+        if (recorded) {
+          reusedSha[name] = recorded
+          console.log(`  ${name}.zip (kept existing, sha from manifest)`)
+        } else {
+          // 无来源可依 —— 宁可报错也不要写出可能错误的 sha。
+          console.error(`  [Error] ${name}.zip exists in ${version} but no manifest records its sha.`)
+          console.error(`          Delete dist/release/${version}/ and rebuild so the source is unambiguous.`)
+          process.exit(1)
+        }
         zipSizes[name] = statSync(zipPath).size
-        console.log(`  ${name}.zip (kept existing)`); return
+        return
       }
       if (prevRelDir) {
+        // 复用来源校验：声明了 --expect-prev 时，来源版本必须一致——否则本地缺该版本
+        // 会静默复用更老的包（2026.09.12.1 事故根因），此处直接报错停止。
+        if (EXPECT_PREV && prevLabel !== EXPECT_PREV) {
+          console.error(`  [Error] --expect-prev ${EXPECT_PREV} but local prev release is ${prevLabel}.`)
+          console.error(`          Fetch that version's component zips into dist/release/${EXPECT_PREV}/ first`)
+          console.error(`          (or omit --expect-prev if a full build is intended).`)
+          process.exit(1)
+        }
         const prevZip = join(prevRelDir, `${name}.zip`)
         if (existsSync(prevZip)) {
+          // 复用 zip 的完整性校验：zip 实际字节数必须与来源 manifest 记录的 size 一致
+          // （manifest 的 size = zip 字节数）。挡住半途替换/损坏的脏包。
+          const prevManifest = readJsonSafe(join(prevRelDir, 'manifest.json'))
+          const recSize = prevManifest?.components?.[name]?.size
+          const recSha = prevManifest?.components?.[name]?.sha256
+          const zipSize = statSync(prevZip).size
+          if (typeof recSize === 'number' && recSize !== zipSize) {
+            console.error(`  [Error] ${name}.zip in ${prevLabel} is ${zipSize} bytes but manifest records ${recSize}.`)
+            console.error(`          Refusing to reuse a mismatched component zip.`)
+            process.exit(1)
+          }
+          if (recSha) reusedSha[name] = recSha
           copyFileSync(prevZip, zipPath)
           zipSizes[name] = statSync(zipPath).size
           console.log(`  ${name}.zip (reused from ${prevLabel})`)
@@ -994,10 +1129,16 @@ async function main() {
   // 回填 Manifest 各组件 size 为实际压缩 zip 字节数（目录组件在 848-852 处用 dirSize
   // 未压缩目录总大小，虚标数倍）。zip 此刻已全部生成，逐一改写 manifest 对象并重写
   // 三个副本：release/<ver>/、dist/、.app/Contents/MacOS/（mac 内嵌）。
+  // 复用组件的 sha 同时覆盖为来源 manifest 的值（见 reusedSha 注释）——不能沿用
+  // dist/ 源文件算出的 hash。
   let manifestRewritten = false
   for (const name of Object.keys(manifestComponents)) {
     if (zipSizes[name] !== undefined && manifestComponents[name] && typeof manifestComponents[name] === 'object') {
       ;(manifestComponents[name] as { size: number }).size = zipSizes[name]
+      if (reusedSha[name]) {
+        ;(manifestComponents[name] as { sha256: string }).sha256 = reusedSha[name]
+        console.log(`  [manifest] ${name}: sha kept from reused zip (${reusedSha[name].slice(0, 16)})`)
+      }
       manifestRewritten = true
     }
   }

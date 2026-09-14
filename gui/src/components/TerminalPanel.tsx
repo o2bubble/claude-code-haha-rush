@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useState } from "react";
 import { shouldScrollTabBar } from "./terminalTabBar";
+import { createRenderScheduler } from "./chat/terminalRender";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Trash2, X } from "lucide-react";
@@ -84,6 +85,17 @@ export default function TerminalPanel() {
     try { term.scrollToBottom(); } catch {}
   }, []);
 
+  const renderActiveRef = useRef(renderActive);
+  renderActiveRef.current = renderActive;
+
+  // xterm 的 write 是异步的、reset 是同步的 —— 流式输出时每个事件都直接重绘，
+  // 会让内部队列堆积多份「reset + 全文」，画面出现重复（切标签即恢复，因为那时
+  // 输出已停）。改为合并重绘：同一帧内多次事件只渲染一次。见 terminalRender.ts。
+  const schedulerRef = useRef<ReturnType<typeof createRenderScheduler> | null>(null);
+  if (!schedulerRef.current) {
+    schedulerRef.current = createRenderScheduler(() => renderActiveRef.current());
+  }
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -103,7 +115,7 @@ export default function TerminalPanel() {
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    renderActive();
+    schedulerRef.current?.flush(); // 挂载首帧立即渲染
 
     const observer = new ResizeObserver(() => {
       try { fitAddon.fit(); } catch {}
@@ -118,6 +130,7 @@ export default function TerminalPanel() {
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
     return () => {
+      schedulerRef.current?.cancel(); // 卸载后别再往已 dispose 的 term 上写
       themeObserver.disconnect();
       observer.disconnect();
       term.dispose();
@@ -126,7 +139,7 @@ export default function TerminalPanel() {
 
   useEventHandler<TerminalChangedPayload>(Events.TERMINAL_CHANGED, () => {
     setTick((t) => t + 1);
-    renderActive();
+    schedulerRef.current?.request(); // 合并重绘（见上）
   });
 
   const handleClear = () => {

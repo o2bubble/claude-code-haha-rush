@@ -162,10 +162,14 @@ describe("chatReduce — tool progress + terminal", () => {
     return s;
   }
 
-  it("tool_progress updates last tool output + emits terminal.append delta", () => {
-    const r = reduce({ type: "tool_progress", data: { type: "bash_progress", output: "delta", fullOutput: "full" } }, baseWithTool());
+  it("tool_progress updates last tool output + emits addressed terminal.append", () => {
+    // 真实 id 在 parent_tool_use_id（tool_use_id 是每包自增的 bash-progress-N）
+    const r = reduce(
+      { type: "tool_progress", tool_use_id: "bash-progress-0", parent_tool_use_id: "t1", data: { type: "bash_progress", output: "delta", fullOutput: "full" } },
+      baseWithTool(),
+    );
     expect(r.nextState.messages[0].toolUses![0].output).toBe("full");
-    expect(r.effects).toEqual([{ type: "terminal.append", text: "delta" }]);
+    expect(r.effects).toEqual([{ type: "terminal.append", toolUseId: "t1", text: "delta" }]);
   });
 
   it("non-bash tool_progress is ignored", () => {
@@ -226,6 +230,36 @@ describe("chatReduce — assistant messages", () => {
     ]);
     expect(r.effects).toEqual([
       { type: "plan.update", tasks: [{ content: "a", activeForm: "b", status: "pending" }] },
+    ]);
+  });
+
+  it("tags tool_uses from a subagent (parent_tool_use_id set)", () => {
+    let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } });
+    r = reduce(
+      {
+        type: "assistant",
+        parent_tool_use_id: "task-tool-1",
+        message: { content: [{ type: "tool_use", id: "s1", name: "Bash", input: {} }] },
+      },
+      r.nextState,
+    );
+    expect(r.nextState.messages[0].toolUses).toEqual([
+      { id: "s1", index: 0, name: "Bash", input: {}, status: "running", subagent: true },
+    ]);
+  });
+
+  it("does not tag main-agent tool_uses (parent_tool_use_id null)", () => {
+    let r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } });
+    r = reduce(
+      {
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] },
+      },
+      r.nextState,
+    );
+    expect(r.nextState.messages[0].toolUses).toEqual([
+      { id: "t1", index: 0, name: "Bash", input: {}, status: "running" },
     ]);
   });
 });

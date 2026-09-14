@@ -17,7 +17,9 @@ function ChatMessagesPanelImpl() {
   const backend = useBackend();
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   // 时间线导航栏默认关闭，需在设置中手动开启
-  const showTimeline = settingsPayload?.settings?.messageTimeline ?? false;
+  // 默认 true（该功能已完善，默认开启体验）。老用户由启动期迁移写入实值；
+  // 用户手动关闭写 false，此后再也不会被翻回（迁移只补「字段缺失」）。
+  const showTimeline = settingsPayload?.settings?.messageTimeline ?? true;
   const [manualPort, setManualPort] = useState(4889);
   const [showSearch, setShowSearch] = useState(false);
   const [userOnly, setUserOnly] = useState(false);
@@ -105,23 +107,32 @@ function ChatMessagesPanelImpl() {
             onlyUser={userOnly}
           />
 
-          {/* 浮动工具 — 消息区右上角：只看用户消息 toggle + 搜索 */}
+          {/* 浮动工具 — 消息区右上角：只看用户消息 toggle + 搜索。
+              按钮会浮在消息之上，必须保证在**任何背景下**都看得见 ——
+              尤其开启筛选后满屏都是用户消息，而用户气泡是 `var(--accent)` 实底
+              （MessageItem.tsx:578），此前按钮也用 accent 系（描边+accent-subtle）
+              就糊在一起、视觉上"消失"（用户实测反馈）。
+
+              修法：背景一律用**不透明的 `var(--bg-root)`**（暗色近黑 / 亮色纯白），
+              与蓝气泡形成明暗反差；激活态改用 accent 描边 + accent 图标来
+              表达"已开启"，而不是靠填充色（填充色必须留给对比）。
+              静止态 0.7 透明度是为了不抢内容，激活态恒为 1。 */}
           <button
             type="button"
             onClick={() => setUserOnly((v) => !v)}
             title={userOnly ? t("message.showAllMessages") : t("message.onlyUser")}
             aria-label={userOnly ? t("message.showAllMessages") : t("message.onlyUser")}
             onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
-            onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.7")}
+            onMouseLeave={(e) => (e.currentTarget.style.opacity = userOnly ? "1" : "0.7")}
             style={{
               position: "absolute", top: 8, right: 40, zIndex: 10,
               display: "flex", alignItems: "center", justifyContent: "center",
               border: userOnly ? "1px solid var(--accent)" : "1px solid var(--border-medium)",
-              background: userOnly ? "var(--accent-subtle)" : "var(--bg-surface)",
+              background: "var(--bg-root)",
               borderRadius: 6, cursor: "pointer", padding: 4,
               color: userOnly ? "var(--accent)" : "var(--fg-secondary)",
               boxShadow: "var(--shadow-sm)", opacity: userOnly ? 1 : 0.7,
-              transition: "opacity 0.15s",
+              transition: "opacity 0.15s, border-color 0.15s, color 0.15s",
             }}
           >
             <User size={13} />

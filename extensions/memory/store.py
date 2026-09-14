@@ -31,6 +31,13 @@ import tokenizer
 
 SCHEMA_VERSION = 3
 
+# Edge types whose meaning is direction-independent ("A relates to B" == "B
+# relates to A"). For these, storing the swapped pair as well is pure
+# duplication: get_associations(direction="both") already finds one row from
+# either endpoint, so a mirror edge makes the relation render twice.
+# derived_from is excluded — direction carries meaning there.
+SYMMETRIC_TYPES = frozenset({"related_to", "contradicts", "supports"})
+
 
 def _compute_hash(title: str, content: str) -> str:
     """Stable hash of core memory fields for change detection."""
@@ -54,6 +61,37 @@ def _unpack_embedding(blob: bytes) -> list[float]:
     """
     n = len(blob) // 4
     return list(struct.unpack(f"{n}f", blob))
+
+
+def _scope_condition(scope: list[str]) -> tuple[str, list[Any]]:
+    """Build a WHERE fragment matching any of the given scopes.
+
+    Exact values match exactly; values ending in '*' are prefix matches
+    ('project:*' → scope LIKE 'project:%'). The wildcard is compiled into the
+    SQL rather than expanded into a separate lookup query, so a prefix that
+    matches nothing yields an empty result set instead of silently dropping
+    the filter (which would return everything).
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    for raw in scope:
+        s = (raw or "").strip()
+        if not s:
+            continue
+        if s.endswith("*"):
+            prefix = s[:-1]
+            # Escape LIKE's own wildcards so a literal % or _ in the prefix
+            # can't widen the match.
+            escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("m.scope LIKE ? ESCAPE '\\'")
+            params.append(f"{escaped}%")
+        else:
+            clauses.append("m.scope = ?")
+            params.append(s)
+    if not clauses:
+        # Every entry was blank — match nothing rather than everything.
+        return "1=0", []
+    return "(" + " OR ".join(clauses) + ")", params
 
 
 def _open_db(db_path: str) -> sqlite3.Connection:
@@ -137,9 +175,12 @@ def _open_db(db_path: str) -> sqlite3.Connection:
 def _ensure_meta(conn: sqlite3.Connection) -> None:
     row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     if row is None:
-        # Fresh database — schema is already current.
+        # Fresh database — schema is already current. server.py and api.py open
+        # the same file concurrently, so both may find the row missing and race
+        # to insert it; the loser would hit "UNIQUE constraint failed". Let the
+        # last writer win instead of raising.
         conn.execute(
-            "INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
+            "INSERT OR IGNORE INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
         )
         return
 
@@ -634,8 +675,14 @@ class MemoryStore:
         target_id: str,
         weight: float = 0.5,
         type: str = "related_to",
-        bidirectional: bool = False,
     ) -> dict[str, Any]:
+        """Store a single directed edge.
+
+        The reverse edge is deliberately NOT stored: get_associations(direction=
+        "both") queries source_id and target_id independently, so one row is
+        already visible from either endpoint. Storing both directions made every
+        symmetric relation (related_to, contradicts, supports) render twice.
+        """
         now = _now()
         with self._conn:
             self._conn.execute(
@@ -644,12 +691,13 @@ class MemoryStore:
                    VALUES (?, ?, ?, ?, ?)""",
                 (source_id, target_id, weight, type, now),
             )
-            if bidirectional:
+            if type in SYMMETRIC_TYPES:
+                # Drop a pre-existing mirror edge. Without this, an agent that
+                # calls associate(A,B) then associate(B,A) creates two rows that
+                # both match at either endpoint and render as a duplicate.
                 self._conn.execute(
-                    """INSERT OR REPLACE INTO associations
-                       (source_id, target_id, weight, type, created_at)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (target_id, source_id, weight, type, now),
+                    "DELETE FROM associations WHERE source_id=? AND target_id=? AND type=?",
+                    (target_id, source_id, type),
                 )
         return {"source_id": source_id, "target_id": target_id, "weight": weight, "type": type}
 
@@ -763,8 +811,9 @@ class MemoryStore:
         ]
         params: list[Any] = [fts_q]
         if scope:
-            conditions.append(f"m.scope IN ({','.join('?' * len(scope))})")
-            params.extend(scope)
+            cond, scope_params = _scope_condition(scope)
+            conditions.append(cond)
+            params.extend(scope_params)
         if type:
             conditions.append(f"m.type IN ({','.join('?' * len(type))})")
             params.extend(type)
@@ -812,9 +861,9 @@ class MemoryStore:
         params: list[Any] = []
 
         if scope:
-            scope_ph = ",".join("?" * len(scope))
-            conditions.append(f"m.scope IN ({scope_ph})")
-            params.extend(scope)
+            cond, scope_params = _scope_condition(scope)
+            conditions.append(cond)
+            params.extend(scope_params)
         if type:
             type_ph = ",".join("?" * len(type))
             conditions.append(f"m.type IN ({type_ph})")
@@ -903,9 +952,9 @@ class MemoryStore:
         ]
 
         if scope:
-            scope_ph = ",".join("?" * len(scope))
-            conditions.append(f"m.scope IN ({scope_ph})")
-            params.extend(scope)
+            cond, scope_params = _scope_condition(scope)
+            conditions.append(cond)
+            params.extend(scope_params)
         if type:
             type_ph = ",".join("?" * len(type))
             conditions.append(f"m.type IN ({type_ph})")

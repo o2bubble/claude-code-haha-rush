@@ -215,7 +215,8 @@ describe("aggregateRuntimePaths — PATH 聚合纯函数", () => {
   };
 
   it("collects runtime dirs for enabled plugins with existing dirs", () => {
-    const exists = (p: string) => p.includes("nodejs");
+    // Windows 布局：node.exe 就在解压根，无 bin/ 子目录 → 只注入根
+    const exists = (p: string) => p === "C:/base/nodejs/runtime";
     const out = aggregateRuntimePaths(
       [makeM("nodejs", [{ id: "node", path: "runtime" }]), makeM("other", [])],
       new Set<string>(), exists, "C:/base");
@@ -223,7 +224,7 @@ describe("aggregateRuntimePaths — PATH 聚合纯函数", () => {
   });
 
   it("excludes disabled plugins' runtimes", () => {
-    const exists = () => true;
+    const exists = (p: string) => !p.endsWith("/bin");
     const out = aggregateRuntimePaths(
       [makeM("nodejs", [{ id: "node", path: "runtime" }]), makeM("py", [{ id: "py", path: "rt" }])],
       new Set(["py"]), exists, "C:/base");
@@ -239,7 +240,7 @@ describe("aggregateRuntimePaths — PATH 聚合纯函数", () => {
   });
 
   it("deduplicates identical dirs across manifests", () => {
-    const exists = () => true;
+    const exists = (p: string) => !p.endsWith("/bin");
     const out = aggregateRuntimePaths(
       [makeM("a", [{ id: "x", path: "shared" }]), makeM("b", [{ id: "y", path: "shared" }])],
       new Set<string>(), exists, "C:/base");
@@ -248,6 +249,56 @@ describe("aggregateRuntimePaths — PATH 聚合纯函数", () => {
 
   it("returns empty for no manifests", () => {
     expect(aggregateRuntimePaths([], new Set(), () => true, "C:/base")).toEqual([]);
+  });
+
+  // ── 回归：mac/Linux 上 node 在 `runtime/bin/` 下，只注入根会找不到 node/npm/npx ──
+  // 曾因此连带弄坏 playwright-mcp（"command": "npx" 解析不到；即便用绝对路径跑
+  // npx-cli.js，npx 子进程的 shebang `#!/usr/bin/env node` 仍会失败）。
+  // 文档把它记成了"macOS 已知限制"，实为实现缺陷。
+
+  it("mac/Linux 布局：bin/ 子目录存在时一并注入", () => {
+    const exists = (p: string) => p === "C:/base/nodejs/runtime" || p === "C:/base/nodejs/runtime/bin";
+    const out = aggregateRuntimePaths(
+      [makeM("nodejs", [{ id: "node", path: "runtime" }])],
+      new Set<string>(), exists, "C:/base");
+    expect(out).toEqual(["C:/base/nodejs/runtime", "C:/base/nodejs/runtime/bin"]);
+  });
+
+  it("根目录不存在 → 整体跳过（不会只注入 bin）", () => {
+    const exists = (p: string) => p.endsWith("/bin");
+    const out = aggregateRuntimePaths(
+      [makeM("nodejs", [{ id: "node", path: "runtime" }])],
+      new Set<string>(), exists, "C:/base");
+    expect(out).toEqual([]);
+  });
+
+  it("声明已指向 bin 时不追加 bin/bin", () => {
+    const exists = () => true;
+    const out = aggregateRuntimePaths(
+      [makeM("a", [{ id: "x", path: "rt" }]), makeM("b", [{ id: "y", path: "rt/bin" }])],
+      new Set<string>(), exists, "C:/base");
+    // a 的 rt → rt + rt/bin；b 的 rt/bin 是**另一个插件的不同目录**（B 布局），
+    // 保留；且它本身以 /bin 结尾 → 不再追加，避免 rt/bin/bin
+    expect(out).toEqual(["C:/base/a/rt", "C:/base/a/rt/bin", "C:/base/b/rt/bin"]);
+  });
+
+  it("同一插件内 path 以 /bin 结尾时不产生 bin/bin", () => {
+    const exists = () => true;
+    const out = aggregateRuntimePaths(
+      [makeM("a", [{ id: "x", path: "runtime/bin" }])],
+      new Set<string>(), exists, "C:/base");
+    expect(out).toEqual(["C:/base/a/runtime/bin"]);
+  });
+
+  it("多个插件各自贡献 根+bin，保持声明顺序", () => {
+    const exists = () => true;
+    const out = aggregateRuntimePaths(
+      [makeM("n1", [{ id: "n", path: "runtime" }]), makeM("n2", [{ id: "n", path: "rt" }])],
+      new Set<string>(), exists, "C:/base");
+    expect(out).toEqual([
+      "C:/base/n1/runtime", "C:/base/n1/runtime/bin",
+      "C:/base/n2/rt", "C:/base/n2/rt/bin",
+    ]);
   });
 });
 

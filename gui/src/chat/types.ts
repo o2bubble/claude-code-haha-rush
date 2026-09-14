@@ -16,7 +16,7 @@ export type WireMessage = Record<string, any>;
 export type ChatEffect =
   | { type: "terminal.start"; toolUseId: string; command: string }
   | { type: "terminal.update"; toolUseId: string; command: string }
-  | { type: "terminal.append"; text: string }
+  | { type: "terminal.append"; toolUseId: string; text: string }
   | { type: "terminal.output"; toolUseId: string; text: string }
   | { type: "terminal.finish"; toolUseId: string; exitCode: number }
   | { type: "terminal.clear" }

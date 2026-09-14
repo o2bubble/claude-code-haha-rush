@@ -157,6 +157,67 @@ fn ensure_db<'a>(
 }
 
 
+/// 前置工具目录到 PATH（平台化）。Windows: bin / git\usr\bin / git\bin / python / python\Scripts；
+/// macOS: bin（自包含工具 rg/fd/jq/yq/shellcheck）。目录不存在则跳过。
+pub(crate) fn prepend_tool_dirs(install_dir: &std::path::Path, orig: &str) -> String {
+    let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
+    // ⚠️ 后缀必须用相对路径（无前导分隔符）：Windows 上 Path::join("\\bin")
+    // 解析为「当前盘根 \bin」(C:\bin) 而非 install_dir\bin——旧写法带前导
+    // 反斜杠导致 bin/python/python\Scripts 永远 is_dir=false 被跳过，
+    // fd/jq/yq（装于 bin/）一直进不了 PATH。
+    let suffixes: &[&str] = if cfg!(target_os = "windows") {
+        &["", "bin", "git\\usr\\bin", "git\\bin", "python", "python\\Scripts"]
+    } else {
+        &["", "bin"]
+    };
+    let mut dirs: Vec<String> = Vec::new();
+    for sfx in suffixes {
+        // 空后缀 = install_dir 本身（join("") 会产生尾部反斜杠，避免重复条目）
+        let d = if sfx.is_empty() { install_dir.to_path_buf() } else { install_dir.join(sfx) };
+        if d.is_dir() {
+            dirs.push(d.to_string_lossy().to_string());
+        }
+    }
+    for entry in orig.split(sep).filter(|s| !s.is_empty()) {
+        if !dirs.iter().any(|d| d.eq_ignore_ascii_case(entry)) {
+            dirs.push(entry.to_string());
+        }
+    }
+    dirs.join(&sep.to_string())
+}
+
+/// 定位 git 的真实 bash.exe（`git\usr\bin\bash.exe`，非 shim）——供
+/// CLAUDE_CODE_GIT_BASH_PATH 使用。优先安装目录自带 git；否则探系统
+/// Git for Windows 常见安装位置（开发机/精简安装无自带 git 时）。
+/// 返回 None = 找不到——后端将回退 PATH 查找（可能被 WSL bash 截胡）。
+/// 供 GUI 启动的 apply_process_env 与诊断修复共用（单一定位逻辑）。
+/// 注：区别于 find_git_bash()（找 git-bash.exe 给终端用，另一用途）。
+pub(crate) fn find_git_usrin_bash(install_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let bundled = install_dir.join("git").join("usr").join("bin").join("bash.exe");
+    if bundled.is_file() {
+        return Some(bundled);
+    }
+    let rel = std::path::Path::new("Git").join("usr").join("bin").join("bash.exe");
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"] {
+        if let Ok(base) = std::env::var(key) {
+            let p = std::path::Path::new(&base).join(&rel);
+            if p.is_file() {
+                candidates.push(p);
+            }
+        }
+    }
+    // 用户级安装: %LOCALAPPDATA%/Programs/Git/usr/bin/bash.exe
+    if let Ok(la) = std::env::var("LOCALAPPDATA") {
+        let p = std::path::Path::new(&la)
+            .join("Programs").join("Git").join("usr").join("bin").join("bash.exe");
+        if p.is_file() {
+            candidates.push(p);
+        }
+    }
+    candidates.into_iter().next()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let log_dir = dirs_next().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -249,36 +310,11 @@ pub fn run() {
         // git\usr\bin\bash.exe，防 WSL bash 截胡）；未设置才回退 PATH 找 git 的
         // bin\bash.exe（shim）。进程级设上，系统注册表就不必再持久化该变量（新策略
         // 只留 CLAUDE_CODE_HAHA_HOME）。仅在真实 bash 存在时设——缺失则回退逻辑兜底。
-        let bash = install_dir.join("git").join("usr").join("bin").join("bash.exe");
-        if bash.is_file() {
+        if let Some(bash) = find_git_usrin_bash(&install_dir) {
             std::env::set_var("CLAUDE_CODE_GIT_BASH_PATH", &bash);
         }
         let orig = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", prepend_tool_dirs(&install_dir, &orig));
-    }
-
-    /// 前置工具目录到 PATH（平台化）。Windows: bin / git\usr\bin / git\bin / python / python\Scripts；
-    /// macOS: bin（自包含工具 rg/fd/jq/yq/shellcheck）。目录不存在则跳过。
-    fn prepend_tool_dirs(install_dir: &std::path::Path, orig: &str) -> String {
-        let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
-        let suffixes: &[&str] = if cfg!(target_os = "windows") {
-            &["", "\\bin", "\\git\\usr\\bin", "\\git\\bin", "\\python", "\\python\\Scripts"]
-        } else {
-            &["", "/bin"]
-        };
-        let mut dirs: Vec<String> = Vec::new();
-        for sfx in suffixes {
-            let d = install_dir.join(sfx);
-            if d.is_dir() {
-                dirs.push(d.to_string_lossy().to_string());
-            }
-        }
-        for entry in orig.split(sep).filter(|s| !s.is_empty()) {
-            if !dirs.iter().any(|d| d.eq_ignore_ascii_case(entry)) {
-                dirs.push(entry.to_string());
-            }
-        }
-        dirs.join(&sep.to_string())
     }
 
     tauri::Builder::default()
@@ -337,7 +373,7 @@ pub fn run() {
             // folder — a shared default folder makes a second GUI instance's webview
             // fail with HRESULT 0x8007139F (process survives, but the webview never
             // loads → no window). Keying by PID isolates every instance.
-            let main_window = tauri::WebviewWindowBuilder::new(
+            let main_builder = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
                 tauri::WebviewUrl::App("index.html".into()),
@@ -349,8 +385,15 @@ pub fn run() {
             .data_directory(webview_data_dir(app.handle()))
             // 纵深防御：主窗口只允许应用自身 origin 导航，外部链接无法替换 GUI。
             // （点击 http(s) 链接由前端委托走 open_url_window 内置窗口打开）
-            .on_navigation(is_allowed_navigation)
-            .build()?;
+            .on_navigation(is_allowed_navigation);
+
+            // Windows: 自绘标题栏（前端 TitleBar 组件），关掉系统标题栏让工具栏
+            // 与标题栏合并成一条。mac 保留原生装饰 —— 红绿灯与系统整合更好，
+            // 且 Tauri 在 mac 上对无装饰窗口的处理方式不同（titleBarStyle 而非
+            // decorations(false)）。见 docs/gui/window-chrome.md。
+            #[cfg(windows)]
+            let main_builder = main_builder.decorations(false);
+            let main_window = main_builder.build()?;
 
             // Restore window position first (only if not maximized).
             // When maximized, the OS manages position — skip to avoid
@@ -2606,10 +2649,27 @@ fn apply_active_profile(cmd: &mut Command) {
     };
 
     let profile_path = profiles_dir.join(format!("{}.env", profile_id));
-    if !profile_path.exists() {
-        log::warn!("[profile] Profile file not found: {}", profile_path.display());
-        return;
-    }
+    // marker 指向的 profile 文件被删/改名(如归档)时回退到目录里第一个可用 .env——
+    // 静默 return 会让后端用默认配置启动(连错端点/模型, 且难排查)。
+    let profile_path = if profile_path.exists() {
+        profile_path
+    } else {
+        log::warn!(
+            "[profile] Profile file not found: {} — falling back to first available",
+            profile_path.display()
+        );
+        match std::fs::read_dir(&profiles_dir).ok().and_then(|rd| {
+            rd.flatten()
+                .find(|e| e.path().extension().map_or(false, |ext| ext == "env"))
+                .map(|e| e.path())
+        }) {
+            Some(p) => p,
+            None => {
+                log::warn!("[profile] No .env profile available — backend runs with defaults");
+                return;
+            }
+        }
+    };
 
     let content = match std::fs::read_to_string(&profile_path) {
         Ok(c) => c,
@@ -2975,21 +3035,28 @@ fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch:
     } else {
         work_dir.clone()
     };
-    // 转义 work_dir 供 bash 引号内使用，再整体作为 AppleScript 字符串字面量转义。
-    // 两层：`"` → `\"`（AppleScript 字面量），`\` → `\\`（保持 bash 路径原样）。
-    let work = target_dir.replace('\\', "\\\\").replace('"', "\\\"");
+    // 转义策略：路径用 **bash 单引号**包裹，而不是双引号。
+    //
+    // 为什么不能用双引号：整段 bash 命令最终要嵌进 AppleScript 字符串字面量
+    //（`do script "..."`）。路径外层若也用 `"`，这对引号会**提前闭合** AppleScript
+    // 的字面量 → osascript 报 `-2741 syntax error: 预期是行的结尾，却找到"`。
+    // 早先的写法正是如此（先转义 `"`→`\"`，再拼上**未转义**的 `"` 包裹），
+    // 所以 mac 上「打开终端」必现失败。
+    //
+    // 单引号不参与 AppleScript 字面量，天然规避；bash 侧单引号内除 `'` 外无特殊
+    // 字符，只需把路径里的 `'` 按 `'\''` 转义（与 update.rs 的 osascript 提权同思路）。
+    let work = target_dir.replace('\'', "'\\''");
     let body = if launch {
-        format!("cd \"{}\" && CLAUDE_CODE_SKIP_PROMPT_HISTORY=true claude", work)
+        format!("cd '{}' && CLAUDE_CODE_SKIP_PROMPT_HISTORY=true claude", work)
     } else {
-        format!("cd \"{}\"", work)
+        format!("cd '{}'", work)
     };
     let script = format!(
         "tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{}\"",
         body
     );
-    // 用 .output() 而非 .spawn()：osascript 可能因 macOS 自动化权限(TCC)被拒而返回
-    // 非零退出码，但 spawn 不检查 → Rust 谎报 Ok、前端也以为成功，实际终端没开。
-    // 检查退出码，权限被拒(-1743)时给用户可读错误。
+    // 用 .output() 而非 .spawn()：osascript 会因权限被拒(TCC)返回非零退出码，
+    // 而 spawn 不检查 → Rust 谎报 Ok、前端也以为成功，实际终端没开。
     let out = Command::new("osascript")
         .arg("-e")
         .arg(&script)
@@ -2997,8 +3064,20 @@ fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch:
         .map_err(|e| format!("Failed to run osascript: {}", e))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
+        // 按错误码区分原因 —— 早先不管什么错都提示"权限未授权"，而 AppleScript
+        // 语法错(-2741)与权限拒绝(-1743)是完全不同的问题，误导排查方向。
+        // 错误码见 AppleScript 错误约定：-2741 = 语法错，-1743 = 用户未授权。
+        let hint = if stderr.contains("-1743") || stderr.contains("-600") {
+            "（macOS「自动化」权限未授权 — 请到 系统设置→隐私与安全性→自动化，允许本 App 控制「终端」）"
+        } else if stderr.contains("-2741") || stderr.contains("syntax error") {
+            // 走到这里说明转义逻辑有 bug，而非用户环境问题
+            "（AppleScript 语法错误 — 这是应用内部 bug，请连同本条报错反馈）"
+        } else {
+            "（请查看上方 osascript 原始报错）"
+        };
+        log::warn!("open_system_terminal: osascript failed, script={script:?}");
         return Err(format!(
-            "osascript failed (exit {:?}): {}. 可能是 macOS「自动化」权限未授权 — 请到 系统设置→隐私与安全性→自动化 允许本 App 控制「终端」(Terminal)",
+            "osascript failed (exit {:?}): {} {hint}",
             out.status.code(),
             stderr.trim()
         ));
@@ -3764,7 +3843,7 @@ fn find_plugin_root(temp_dir: &std::path::Path) -> Result<std::path::PathBuf, St
 async fn note_create(
     server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
     input: notes::NoteInput,
-) -> Result<notes::Note, String> {
+) -> Result<notes::NoteCreateResult, String> {
     if let Some(client) = server_client_or(&server_state, "").await {
         match client.note_create(input.clone()).await {
             Ok(v) => return Ok(v),
@@ -3908,6 +3987,32 @@ async fn note_get_all_tag_names(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── prepend_tool_dirs: 安装目录子目录必须用相对后缀（Windows join 语义）──
+
+    /// 回归：suffix 带前导反斜杠时 Path::join 会解析成盘根（C:\bin）而非
+    /// install_dir\bin → bin/python 永远进不了 PATH（fd/jq/yq 找不到）。
+    /// 本测试用真实临时目录验证子目录被正确前置。
+    #[test]
+    fn prepend_tool_dirs_includes_subdirs_with_relative_suffix() {
+        let base = std::env::temp_dir().join(format!("prepend_dirs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for sub in ["bin", "python"] {
+            std::fs::create_dir_all(base.join(sub)).unwrap();
+        }
+        // 把 base 当成 install_dir 传入（内部只看这些子目录是否存在）
+        let out = prepend_tool_dirs(&base, "ORIG");
+        let parts: Vec<&str> = out.split(if cfg!(target_os = "windows") { ';' } else { ':' }).collect();
+
+        let base_s = base.to_string_lossy().to_string();
+        let expect_bin = format!("{}{}bin", base_s, std::path::MAIN_SEPARATOR);
+        let expect_py = format!("{}{}python", base_s, std::path::MAIN_SEPARATOR);
+        assert!(parts.iter().any(|p| *p == expect_bin), "bin subdir missing: {:?}", parts);
+        assert!(parts.iter().any(|p| *p == expect_py), "python subdir missing: {:?}", parts);
+        // 原始条目保留在尾部
+        assert_eq!(parts.last(), Some(&"ORIG"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     // ── 更新安装时保护 runtimes 目录（安装产物跨覆盖保留）──
 

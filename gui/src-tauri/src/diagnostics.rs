@@ -215,12 +215,20 @@ pub fn check_env_scope(
 /// CLAUDE_CODE_GIT_BASH_PATH：设置 + %VAR% 展开后 bash.exe 存在。
 /// 缺失/指向不存在 → 失败（claude 后端会直接 process::exit(1)）。
 /// 仅注册表有值（进程未读到）→ 警告需重启——否则存活的后端进程仍会 exit。
+/// path_fallback_exists: 进程/注册表都没值时，PATH 里存在可用的 git bash（后端
+/// findGitBashPath 的回退路径）→ Warn 而非 Fail——能跑，但不推荐（PATH 顺序可能
+/// 被 WSL bash 截胡）。
 pub fn check_git_bash_path(
     process: Option<&str>,
     registry: Option<&str>,
     expanded_exists: bool,
+    path_fallback_exists: bool,
 ) -> DiagnosticCheck {
     let (status, detail) = match (process, registry) {
+        (None, None) if path_fallback_exists => (
+            CheckStatus::Warn,
+            "未设置 CLAUDE_CODE_GIT_BASH_PATH，但 PATH 中存在 git bash（claude 后端将回退 PATH 查找，可运行）。建议安装自带 git 的完整版以固定路径。".to_string(),
+        ),
         (None, None) => (
             CheckStatus::Fail,
             "未设置 CLAUDE_CODE_GIT_BASH_PATH。claude 后端找不到 bash 会直接退出。请重新安装或设置该变量指向 git-bash 的 bash.exe。".to_string(),
@@ -440,7 +448,15 @@ fn install_env_checks(install_dir: &std::path::Path) -> Vec<DiagnosticCheck> {
     let reg_git = sys_git.clone().or(user_git.clone());
     let expanded_git = proc_git.as_deref().map(|p| expand_env_vars(p, |n| std::env::var(n).ok()));
     let git_exists = expanded_git.as_deref().map(|p| std::path::Path::new(p).is_file()).unwrap_or(false);
-    let git_check = check_git_bash_path(proc_git.as_deref(), reg_git.as_deref(), git_exists).with_group(GROUP_INSTALL_ENV);
+    // PATH 回退探测: 后端 findGitBashPath 在未设变量时会走 PATH 找 git 的 bash——
+    // 检测须识别这条可用路径, 否则开发机(系统 git, 安装目录无 git/)会被误报 fail。
+    let path_fallback_exists = std::env::var("PATH").unwrap_or_default()
+        .split(';')
+        .any(|dir| {
+            let d = dir.trim().trim_matches('"');
+            !d.is_empty() && std::path::Path::new(d).join("bash.exe").is_file()
+        });
+    let git_check = check_git_bash_path(proc_git.as_deref(), reg_git.as_deref(), git_exists, path_fallback_exists).with_group(GROUP_INSTALL_ENV);
 
     // PATH — 进程级策略：GUI 启动已 setvar PATH（前置安装目录），注册表 PATH 不再读取/要求。
     let proc_path = std::env::var("PATH").unwrap_or_default();
@@ -572,7 +588,10 @@ pub fn check_profile_injected(inject_var_count: usize, active: Option<&str>) -> 
     DiagnosticCheck::new("profile_injected", status, "后端注入", detail)
 }
 
-const CLOUD_SERVER_URL: &str = "http://123.56.66.84:8765";
+/// 云服务器地址（Cloudflare Tunnel 域名，非云主机裸 IP）。
+/// 裸 IP 在受限网络（如企业网）会被静默拦掉；走 CF 边缘则各处可达。
+/// 前端 `services/diagnosticsService.ts` 的同名常量必须与此保持一致。
+const CLOUD_SERVER_URL: &str = "https://release.17lumen.cloud";
 /// 内网更新/注册服务器（skillRegistryUrl）：可达 → 通过，否则失败。
 pub fn check_update_server(reachable: bool, url: &str) -> DiagnosticCheck {
     let (status, detail) = if reachable {
@@ -583,7 +602,7 @@ pub fn check_update_server(reachable: bool, url: &str) -> DiagnosticCheck {
     DiagnosticCheck::new("update_server", status, "更新/注册服务器", detail)
 }
 
-/// 云服务器（123.56.66.84:8765）：可达 → 通过，否则失败。
+/// 云服务器（CLOUD_SERVER_URL）：可达 → 通过，否则失败。
 pub fn check_cloud_server(reachable: bool, url: &str) -> DiagnosticCheck {
     let (status, detail) = if reachable {
         (CheckStatus::Pass, format!("{} — 可达", url))
@@ -1022,34 +1041,43 @@ mod tests {
 
     #[test]
     fn git_bash_path_missing_everywhere_fails() {
-        let c = check_git_bash_path(None, None, false);
+        let c = check_git_bash_path(None, None, false, false);
         assert_eq!(c.status, CheckStatus::Fail);
         assert!(c.detail.contains("直接退出"));
     }
 
     #[test]
     fn git_bash_path_exists_passes() {
-        let c = check_git_bash_path(Some("C:/app/git/usr/bin/bash.exe"), Some("C:/app/git/usr/bin/bash.exe"), true);
+        let c = check_git_bash_path(Some("C:/app/git/usr/bin/bash.exe"), Some("C:/app/git/usr/bin/bash.exe"), true, false);
         assert_eq!(c.status, CheckStatus::Pass);
     }
 
     #[test]
     fn git_bash_path_missing_file_fails() {
-        let c = check_git_bash_path(Some("C:/app/git/usr/bin/bash.exe"), Some("C:/app/git/usr/bin/bash.exe"), false);
+        let c = check_git_bash_path(Some("C:/app/git/usr/bin/bash.exe"), Some("C:/app/git/usr/bin/bash.exe"), false, false);
         assert_eq!(c.status, CheckStatus::Fail);
     }
 
     #[test]
     fn git_bash_path_registry_only_warns_restart() {
         // 仅注册表有值、进程未读到 —— 存活的后端进程仍会 exit，必须警告
-        let c = check_git_bash_path(None, Some("C:/app/git/usr/bin/bash.exe"), false);
+        let c = check_git_bash_path(None, Some("C:/app/git/usr/bin/bash.exe"), false, false);
         assert_eq!(c.status, CheckStatus::Warn);
         assert!(c.detail.contains("重启"));
     }
 
     #[test]
-    fn git_bash_path_no_process_no_registry_is_fail_even_if_file_known() {
-        let c = check_git_bash_path(None, None, true);
+    fn git_bash_path_path_fallback_warns_not_fails() {
+        // 变量未设但 PATH 有 git bash（后端回退可用）—— 不误报 fail
+        let c = check_git_bash_path(None, None, false, true);
+        assert_eq!(c.status, CheckStatus::Warn);
+        assert!(c.detail.contains("PATH"));
+    }
+
+    #[test]
+    fn git_bash_path_no_process_no_registry_no_fallback_is_fail() {
+        // 进程/注册表都没有 且 PATH 也无 git bash 回退 → Fail
+        let c = check_git_bash_path(None, None, true, false);
         assert_eq!(c.status, CheckStatus::Fail);
     }
 
@@ -2418,27 +2446,43 @@ pub fn fix_environment_vars() -> Result<Vec<EnvVarFix>, String> {
         });
     }
 
-    // CLAUDE_CODE_GIT_BASH_PATH 遗留：进程由 GUI 启动 setvar 提供，注册表值（系统/用户）
-    // 为历史遗留 → 删除。进程值保留（删了会破坏 GUI 后端的 bash 解析）。
+    // CLAUDE_CODE_GIT_BASH_PATH：进程值由 GUI 启动 setvar 提供（注册表值为历史遗留 → 删）。
+    // 进程值也缺失时（安装目录无自带 git）→ 探测系统 git bash 并设进程级变量——
+    // 否则"修复"按钮对此项无操作，检测永远 fail（用户观察到的"点了没用"）。
     {
         let (user_git, sys_git) = read_registry_env("CLAUDE_CODE_GIT_BASH_PATH");
+        let proc_git = std::env::var("CLAUDE_CODE_GIT_BASH_PATH").ok();
+        let mut parts: Vec<String> = Vec::new();
+        let mut action_parts: Vec<String> = Vec::new();
+
+        if proc_git.is_none() {
+            // 探测系统 git bash（与 GUI 启动的 find_git_usrin_bash 同源逻辑）
+            if let Some(bash) = crate::find_git_usrin_bash(&install_dir) {
+                let b = bash.to_string_lossy().to_string();
+                std::env::set_var("CLAUDE_CODE_GIT_BASH_PATH", &b);
+                parts.push(format!("进程未设置 → 探测到系统 git bash: {}", b));
+                action_parts.push("设置进程级变量(探测系统 git)".into());
+            } else {
+                parts.push("进程未设置且未探测到系统 git bash — 需安装 Git for Windows 或完整版 GUI".into());
+                action_parts.push("无法自动修复(缺 git)".into());
+            }
+        }
         if user_git.is_some() || sys_git.is_some() {
-            let mut parts: Vec<String> = vec!["新策略进程级提供，注册表值为历史遗留".into()];
+            parts.push("注册表值为历史遗留".into());
             if sys_git.is_some() {
                 ops.push(EnvOp::Delete { name: "CLAUDE_CODE_GIT_BASH_PATH".into() });
+                action_parts.push("删系统级残留".into());
             }
             if user_git.is_some() {
                 ops.push(EnvOp::DeleteUser { name: "CLAUDE_CODE_GIT_BASH_PATH".into() });
-                parts.push("用户级残留".into());
+                action_parts.push("删用户级残留".into());
             }
-            if sys_git.is_some() {
-                parts.push("系统级残留".into());
-            }
-            let action = "删除系统+用户级遗留(进程由 GUI 启动提供)".into();
+        }
+        if !parts.is_empty() {
             fixes.push(EnvVarFix {
                 name: "CLAUDE_CODE_GIT_BASH_PATH".into(),
                 problem: parts.join("；"),
-                action,
+                action: action_parts.join(" + "),
             });
         }
     }

@@ -8,6 +8,7 @@ import MemoryDetail from './components/MemoryDetail';
 import GraphView from './components/GraphView';
 import TagView from './components/TagView';
 import Login, { isAuthenticated } from './components/Login';
+import { clearToken, getToken, onUnauthorized, verifyToken } from './lib/auth';
 import ThemeToggle, { getTheme, applyTheme } from './components/ThemeToggle';
 import { useT } from './lib/i18n';
 import styles from './App.module.css';
@@ -64,9 +65,12 @@ function reducer(state, action) {
 export default function App() {
   const { t } = useT();
   const [state, dispatch] = useReducer(reducer, initialState);
-  const [authenticated, setAuthenticated] = useState(isAuthenticated());
+  // 'checking' until the stored token is verified against the server. A token
+  // merely *existing* in localStorage is not proof it is still accepted.
+  const [authState, setAuthState] = useState(isAuthenticated() ? 'checking' : 'none');
   const debouncedQ = useDebounce(state.filters.q, 300);
   const requestId = useRef(0);
+  const authenticated = authState === 'ok';
 
   // ── Hash routing ──────────────────────────────────────
   function getHash() {
@@ -168,15 +172,43 @@ export default function App() {
     }
   }, []);
 
-  // Initial load
-  useEffect(() => { loadStats(); loadTags(); }, [loadStats, loadTags]);
+  // Verify the stored token before showing the app. On failure, drop it so the
+  // login gate renders instead of the app loading data it has no access to.
+  useEffect(() => {
+    if (authState !== 'checking') return;
+    let cancelled = false;
+    verifyToken(getToken()).then((ok) => {
+      if (cancelled) return;
+      if (!ok) clearToken();
+      setAuthState(ok ? 'ok' : 'none');
+    });
+    return () => { cancelled = true; };
+  }, [authState]);
+
+  // Any 401 raised later (token rotated out from under us) returns to the gate.
+  useEffect(() => onUnauthorized(() => setAuthState('none')), []);
+
+  // Initial load — skipped until authenticated, otherwise every request 401s.
+  useEffect(() => {
+    if (!authenticated) return;
+    loadStats();
+    loadTags();
+  }, [authenticated, loadStats, loadTags]);
+
   // Reload when filters change
-  useEffect(() => { loadMemories(); }, [loadMemories]);
+  useEffect(() => {
+    if (!authenticated) return;
+    loadMemories();
+  }, [authenticated, loadMemories]);
 
   const ctx = { state, dispatch, selectMemory, reloadMemories: loadMemories, reloadStats: loadStats, reloadTags: loadTags };
 
+  if (authState === 'checking') {
+    return null; // brief; avoids flashing the login form for a valid token
+  }
+
   if (!authenticated) {
-    return <Login onLogin={() => setAuthenticated(true)} />;
+    return <Login onLogin={() => setAuthState('ok')} />;
   }
 
   return (

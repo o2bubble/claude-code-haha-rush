@@ -22,8 +22,14 @@ export interface DiagnosticsReport {
   categories: DiagnosticCategory[];
 }
 
-/** 云服务器镜像地址 — 与后端探测常量一致，用于「切换到云服务器」 */
-export const CLOUD_SERVER_URL = "http://123.56.66.84:8765";
+/**
+ * 云服务器地址 — 与后端探测常量一致，用于「切换到云服务器」。
+ *
+ * 2026-09-14 起改用 Cloudflare Tunnel 域名，而非云主机裸 IP：
+ * 裸 IP 在企业网络里访问云主机是被拦的（静默丢包），域名走 CF 边缘则处处可用；
+ * 代价是国内访问绕境外边缘（+约 200ms），对更新检查无感。
+ */
+export const CLOUD_SERVER_URL = "https://release.17lumen.cloud";
 
 export const diagnosticsService = {
   async run(): Promise<DiagnosticsReport> {
