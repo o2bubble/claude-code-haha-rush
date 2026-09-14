@@ -1,6 +1,7 @@
 import { getSettings } from "../stores/settingsStore";
+import { INTRANET_SERVER_URL } from "../utils/serverProfile";
 
-const BASE = () => getSettings().skillRegistryUrl ?? "http://192.168.186.96:8765";
+const BASE = () => getSettings().skillRegistryUrl ?? INTRANET_SERVER_URL;
 
 export interface FeedbackForm {
   type: "bug" | "suggestion";

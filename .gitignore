@@ -39,15 +39,12 @@ docs/memory-export/
 offline-tools/
 # tools/ 下只保留**自己写的配置与文档**；第三方二进制一律忽略。
 # 用白名单（先全忽略再逐项放行）—— 靠扩展名枚举会漏掉解压出来的无扩展名
-# Linux 二进制（实测 cloudflared-linux-amd64 38MB、frpc 16MB 差点被提交）。
+# Linux 二进制（实测 cloudflared-linux-amd64 38MB 差点被提交）。
 # 需要二进制时按 `docs/cloudflare-tunnel-*.md` 里的命令重新下载。
 tools/*
 !tools/cloudflared/
-!tools/frp/
 tools/cloudflared/*
 !tools/cloudflared/config-*.yml
-tools/frp/*
-!tools/frp/*.toml
 __pycache__/
 # 运行环境诊断等功能相关的运行时/实例文件
 .mcp.json

@@ -1,20 +1,143 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-14（main @dfb9a17）
+# Handoff — Claude Code GUI 开发 · 2026-09-14（main @3390839）
 
-> 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 Memory MCP（`server_96.md`）。
+> 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
+
+## 🆕 本会话后续（承接下行"上一批"内容）
+
+### 云服务入口：Cloudflare Tunnel（取代裸 IP）
+
+**企业网络封禁了「访问云主机 IP」**（本机 + 96 都在该网络内；实测 TCP 全端口超时 +
+路由追踪无响应，而全球 6 国节点访问同一台云 **6/6 全通** → 云本身没问题）。
+
+解法：**云主动连出**（CF Tunnel 出站，方向与"你连云"相反 → 不受策略影响）。
+
+| 公网地址 | 云上服务 | 鉴权 |
+|---|---|---|
+| `https://release.17lumen.cloud` | release-platform `127.0.0.1:8765` | 无 |
+| `https://mem.17lumen.cloud` | Memory Web `127.0.0.1:40021` | bearer token |
+| `https://mcp.17lumen.cloud` | Memory MCP `127.0.0.1:8080` | bearer token |
+
+- 隧道 `17lumen-cloud`（ID `2177c195-32d6-4666-beea-eace3e2d0214`），systemd `cloudflared.service`（开机自启）
+- 配置 `/etc/cloudflared/config.yml`（⚠️ systemd 读这份，不是 `/root/cloudflared/`）
+- 域名 `17lumen.cloud` 的 NS 已从 DNSPod 迁到 CF（`riya`/`skip.ns.cloudflare.com`）
+- 完整记录：`docs/cloudflare-tunnel-cloud-playbook.md` + GUI 笔记「Cloudflare Tunnel 配置」(id `82eb2816-…`)
+
+### 云服务器性能事故（已修复）
+
+`load 9.30` / `iowait 84.6%`、容器健康检查超时、`workbench exec` 报
+`CloudAssistantInvokeTimeout` —— **一串看似无关的症状，根因是磁盘 I/O 饱和**。
+
+真凶：**`release-platform/main.py` 的 `uvicorn(reload=True)`**（开发模式跑在生产）——
+StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU，把
+`cloud_essd_entry`（IOPS 上限仅 2520）打满。
+
+修复后：CPU 18.6%→0.2%、load 9.30→0.05、iowait→0。详见 `claude-code-gui-release-platform/DEPLOY.md`。
+
+同时加固：journal 限 200M、Docker 日志 `max-size=50m`。
+
+### 部署规范（新）
+
+**release-platform 镜像一律本地构建，服务器只 `docker load`**（2核2G 扛不住 build）。
+构建在 **WSL**（`Ubuntu-22.04`，docker 28.5.1）；WSL 访问宿主机代理要用**网关 IP**
+（`172.25.x.1:17891`，非 127.0.0.1）。完整流程见 `DEPLOY.md`。
+
+### 发布记录（本批）
+
+- **Windows**: 云端 `2026.09.13.8` → **`2026.09.14.4`**；96 `2026.09.14.3` → **`2026.09.14.4`**（两端 sha 9/9 一致）
+  - 本版内容：GUI「公网」档改用 CF 域名 + 旧地址自动迁移
+  - 云另传了 `server/claude/extensions` 以补齐 `.14.3` 的内容（那次只发了 96）
+  - ⚠️ **随后又发了 `2026.09.14.5`** —— 见下方「设置面板」小节，**那才是当前版本**
+- **macOS**: `2026.09.14.2` → **待发布**（代码已推，CI `#99` 构建中；产物出来后跑 `scripts/release_mac.py`）
+
+### 设置面板：服务器地址改三档切换（本会话稍后）
+
+用户在设置里看到「服务器地址」是自由文本框，问**公网该填哪个域名** ——
+`release` / `mem` / `mcp` / `nps` 四个二级域名各有用途，自由文本框完全无法表达该填哪个。
+
+改成三档按钮组：**内网 96 / 公网云 / 自定义**，选「自定义」才露出输入框。
+向导仍只提供前两档（那两档要跑连通性探测），与设置面板共用同一份档位类型。
+
+顺带修两个既有缺陷（都不是本轮引入的）：
+
+1. **字段漂移** —— 旧文本框只写 `skillRegistryUrl`，不写 `updateServerUrl`
+   → 用户在设置里改了地址，**自动更新仍指向旧地址**。向导和诊断面板本来都同时写
+   两个字段，只有设置面板漏了。
+2. **工作区 scope 下静默丢失** —— 服务器地址走通用的 `dirty + scope` 保存机制，
+   保存栏选「工作区」时会被写进 `settings.local.json`；而 Rust 侧
+   `merge_workspace_overrides` 的白名单**不含**这两个字段，它从不被合并回来
+   → **重启后无提示回退到旧值**。修法：新增 `applyServer` 绕开 dirty、固定落 global
+   （与快捷键字段的既有做法一致）。
+
+**常量收敛**：内网字面量原在 TS 侧散落 8 处、公网 3 处，靠注释维持一致
+（`diagnostics.rs` 甚至写了"前端同名常量必须与此保持一致"）。新建
+`gui/src/utils/serverProfile.ts` 作唯一真源（类型 + 两常量 + 三个纯函数），配 15 个单测；
+`settingsStore` / 四个 service / `FeedbackDialog` / `WelcomeWizard` / `App` /
+`DiagnosticPanel` 全部改 import。**两字段不一致时反推为「自定义」而不猜哪个对** ——
+覆盖历史漂移残留，用户一保存即收敛自愈。
+
+**验证**：`bun run build`（tsc + vite）通过 · `723 passed`；Playwright 实测四条路径
+（默认内网选中 / 点公网云两字段同步写入 / 漂移态显示自定义并预填 `skillRegistryUrl` /
+外部变更时按钮跟着跳档）。
+
+**发布**：**`2026.09.14.5`** 已上传 96 + 云（9/9 组件可下载，`gui.zip` 两端字节数一致
+`24,286,895`）。留痕 `3390839`。
 
 ## 当前状态
 
-- **分支**: `main`（`dfb9a17`）；远端全同步（gitee `main` = `dfb9a17`；gitee `github-clean` = GitHub `main` = `9cc8fee` 快照）。
-- **本批主题**: **macOS 平台首次跑通全链路**（真机验证 → 修 8 个 bug → 发布到云端更新服务器）+ **发布 key 泄露事故 #3 轮换**。
-- **macOS 云端版本**: `2026.09.14.1`（首版）→ **`2026.09.14.2`**（含 GUI 组件路径修复）。此前云端 `?platform=macos` **一直 404** —— 服务端/客户端代码都支持 mac，只是**从没上传过**。
-- **Windows 版本**: 云端 `2026.09.13.8`；**96 = `2026.09.14.3`**（2026-09-14 本机构建发布：GUI 快捷键/自绘标题栏/终端重复修复、引擎 shell snapshot PATH、GUI server 笔记 FTS5+jieba、内嵌 memory 新前端）。
-- **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**（40020 因落在内核 ephemeral 端口范围被征用，已迁移；**仅 96 改了**，云仍是 8080）；303 条记忆。**2026-09-14 已同步鉴权版** —— 此前 96 停在 9-11 版且**无鉴权**（内网可匿名读写/删库；实测 `/api/stats` 匿名 200）。
-- ⚠️ **本机 Claude Code 的 memory MCP 指向的是 96**（`~/.claude.json` → `http://192.168.186.96:14020/mcp`，已带 `headers.Authorization`）——**不是云**。本文件早先"指向云"的记录有误，2026-09-14 实测纠正。
-- **Memory 服务（云 123.56.66.84）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web。流程 = 本地构建镜像 → workbench 上传 → 云端 `docker load` + compose 切 `image:`（**线上永不构建**，见 `docs/memory-deploy-playbook.md`）。
-- **凭据**: 云更新服务上传 key 已于 2026-09-14 **轮换**（事故 #3）；发布脚本改为读环境变量 `RELEASE_API_KEY`。
+- **分支**: `main`（`3390839`）；工作区干净；`github-clean` = `e460e10` 快照
+- **本批主题**: CF Tunnel 打通云服务入口 + 云服务器性能事故修复 + 部署规范 + **设置面板服务器地址三档切换**
+- **Windows 版本**: **两端均 `2026.09.14.5`**
+- **macOS 云端版本**: `2026.09.14.2`（新版待 CI 产物）
+- **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；300 条记忆；**已加 bearer 鉴权**
+- **Memory 服务（云）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web
+- **release-platform（云）**: 镜像 **`claude-release-platform:20260914`**（compose 已从 `build: .` 改为 `image:`）
+- ⚠️ **本机 memory MCP 指向的是 96**（`~/.claude.json` → `http://192.168.186.96:14020/mcp`）——**不是云**
+- **凭据**: 云更新服务 key 已于 2026-09-14 轮换；发布脚本读环境变量
 
 ## 决策留痕表
+
+### 决策：服务器地址收敛为「三档 + 单一真源」（本会话稍后）
+- 为什么：设置面板是个**自由文本框**，用户无从判断公网该填哪个域名（四个二级域名各有用途）；
+  且地址字面量在 TS 侧散落 8 处、Rust 侧 3 处，靠注释维持一致 —— 这正是漂移的温床。
+- 影响：新建 `gui/src/utils/serverProfile.ts`（三档类型 + 两常量 + `serverProfileUrls` /
+  `deriveServerProfile` / `customServerUrlForDisplay` 三纯函数，配 15 单测）；
+  设置面板改三档按钮组，向导保持两档但共用类型（用 `PresetServerProfile = Exclude<…, "custom">` 别名，
+  向导内部字面量零改动）。
+- 两个取舍：
+  - **两字段不一致 → 判「自定义」不猜**。宁可把"其实是内网"的用户显示成自定义，
+    也不静默沿用某一个字段；用户一保存即收敛自愈。
+  - **服务器字段绕开 `dirty + scope`，固定落 global**。它被写进 workspace 文件后
+    Rust 从不合并回来（白名单无此项）→ 静默丢失，比"写错文件"更严重。
+- 留痕：`3390839`；`gui/src/utils/serverProfile.ts`
+
+### 决策：云服务入口改用 Cloudflare Tunnel，弃用裸 IP（本批）
+- 为什么：**企业网络封禁「访问云主机 IP」**——frp 的原理是"本机→云公网 TCP"，这条路不通，
+  装了也连不上；深挖发现拦的不是端口/协议而是**目标 IP 本身**（全球 6 国节点访问同一台云
+  全通，证明云无问题）。CF Tunnel 是**云主动连出**，方向相反不受该策略影响。
+- 影响：新增 `docs/cloudflare-tunnel-cloud-playbook.md`（实战）+ `cloudflare-tunnel-playbook.md`
+  （通用）；域名单收费（`*.trycloudflare.com` 会变 → 用自有域名 `17lumen.cloud` 建命名隧道）；
+  GUI「公网」档改为 CF 域名 + `migrate_legacy_cloud_url` 自动迁移。
+- 关键坑：Zero Trust 面板路径会引导到**付款页**（即使选 $0 Free）——**建隧道+绑域名根本
+  不需要进 Zero Trust**，命令行 `tunnel login/create/route dns` 全程无支付。
+- 留痕：`09a7555`（GUI 改造）、`a9f814d`（手册）；GUI 笔记 `82eb2816-…`
+
+### 决策：release-platform 镜像本地构建，服务器只 load（本批）
+- 为什么：云是 **2核2G + `cloud_essd_entry`（IOPS 上限仅 2520）**，`docker build`
+  的 pip 安装 + 层解压会把磁盘打满 → 全系统卡死。
+- 影响：构建移到 **WSL**（docker 28.5.1）；compose 从 `build: .` 改为 `image:`；
+  新增 `.dockerignore`（此前没有 → `docker build` 会把 836MB 的 updates-store 传给 daemon）；
+  Dockerfile 不再 `COPY skills-store/`（运行时数据，volume 已挂载）。
+- 留痕：`0a54fe4`；`claude-code-gui-release-platform/DEPLOY.md`
+
+### 决策：生产关闭 uvicorn reload（本批，性能事故修复）
+- 为什么：`uvicorn(reload=True)` 是开发模式，StatReload 进程**持续扫描整个工作目录**
+  （本项目 `skills-store` 160MB）→ 2核机上烧 18.6% CPU、5 天 22 小时；内存紧张时
+  stat 引发 inode 缺页读盘 → 打满入门级 SSD → **全系统卡在 D 状态**。
+  连带症状：容器健康检查超时、`workbench exec` 报 `CloudAssistantInvokeTimeout`
+  （**都不是各自的问题，是同一个瓶颈的下游**）。
+- 影响：改为 `RELOAD=1` 才开；实测 CPU ↓93 倍、load 9.30→0.05。
+- 留痕：`0a54fe4`；记忆 `ad6862e2`（uvicorn reload）+ `a4beae15`（磁盘 I/O 饱和）
 
 ### 决策：检索层用 FTS5 + jieba 纯本地方案，不做向量（本批）
 - 为什么：原 embedding 通道在 7-30 瘦身重构时被移除，但代码假装还在（embedder 恒未加载 + **静默降级**）；且不接受"代理整个大模型 API"的重型方案。
@@ -161,28 +284,42 @@
 ## 热数据
 
 ### Git 状态
-- branch `main`，HEAD `dfb9a17`；工作区干净，远端全同步。
+- branch `main`，HEAD `3390839`；工作区干净；`github-clean` = `e460e10` 快照
 
 ```text
-dfb9a17 fix(scripts): release_mac.py 改从环境变量读 key（不留明文）
-f2dbd54 docs(playbook): mac 发布定论 — sha 沿用内嵌 manifest + 发布脚本入库
-b74906a fix(mac): GUI 组件路径解析错位 — 更新面板误判「未安装」
-a0ed8e6 fix(build): mac 不再生成三个跑不起来的 launcher
-9db1864 docs(playbook): 记录 mac 2026.09.14.1 首次发布 + 四条上传踩坑
+3390839 feat(gui): 设置面板服务器地址改三档切换 — 内网 96 / 公网云 / 自定义
+d8c4689 fix(nps): 端口全部挪进安全组已放行的 50000-50010 段
+dbf8d5d feat(infra): 用 nps 取代 frp — 自带 Web 管理面板
+0d0be3f docs(HANDOFF): 补本会话后半段 — CF Tunnel 入口 + 性能事故 + 部署规范
+796429e docs(cf): 修正 workbench 超时的错误归因 + 补三域名/多服务用法
+a9f814d docs: Cloudflare Tunnel 实战手册 + 96 部署流程 + 工具配置
+0a54fe4 fix(release-platform): 生产关闭 uvicorn reload — 2核机上烧掉 93 倍 CPU
 ```
 
 > ⚠️ `f2dbd54` 含已失效的旧上传 key（用户选择不改写历史）。key 已轮换失效，
 > 风险消除；但**不要再从该提交取脚本内容**。
 
 ### Memory 服务（96）
-- 容器 `claude-memory`，镜像 `192.168.186.96:5000/claude-memory:latest`
+- 容器 `claude-memory`，镜像 `192.168.186.96:5000/claude-memory:20260914-auth`
 - 端口 `14020`→容器 8080(MCP) / `40021`(Web+REST)；96 宿主库 `/data/claude-memory/claude-memory.db`（云为 `/data/memory/claude-memory.db`，挂载路径两边不同）
-- 数据 303 条（fact 83 / experience 87 / lesson 133）；`capabilities={fts:true, jieba:true, tags:true, like_fallback:false, embedding:false}`
-- 部署前备份：`claude-memory.db.bak.20260911`
+- 数据 **300 条**（记忆整理后；原 303，删 7 条时效流水 + 合并 1 对 + 加经验）；标签 818 / 关联边 239
+- ⚠️ **96 与云的 memory token 不同值**（两套独立部署），见 GUI 笔记「账号密码」
+- 部署前备份：`claude-memory.db.bak.20260911` / `.20260914`
+
+### 云服务器
+- ECS `i-2ze2rouoikcqrlbseu8a`（cn-beijing）；**2核2G + `cloud_essd_entry`（IOPS 上限 2520）**
+- ⚠️ **磁盘是瓶颈**，别在服务器上 `docker build`（见 `DEPLOY.md`）
+- 运维通道：**workbench**（`exec` 走 Session Manager）；资源饱和时会超时 → 改用 `RunCommand` API
+- 容器：`release-platform`（`claude-release-platform:20260914`）、`claude-memory`
+- systemd：`cloudflared.service`（CF 隧道）、`nps.service`（内网穿透，**当前网络下连不上**）
+  - nps v0.26.9 部署于 `/root/nps/`：**端口全在安全组已放行的 `50000-50010` 段**
+    —— bridge 50000 / http代理 50001 / https代理 50002 / web面板 50003
+  - 面板 `https://nps.17lumen.cloud`（经 CF 隧道）；**默认弱口令已改成随机强值**（见凭据笔记）
+  - ⚠️ 与 frp 同类架构（客户端主动连云）→ 当前网络下不可用，换网络才行
 
 ### 测试基线
 - Memory MCP：`cd extensions/memory && python -m unittest discover -s tests` → **43 passed**
-- GUI 前端：`npx vitest run` → **708 通过**（58 文件）· `tsc --noEmit` 干净
+- GUI 前端：`cd gui && bun run test` → **723 通过**（59 文件）· `bun run build`（含 `tsc`）干净
 - Rust：`cargo test --lib`（gui/src-tauri）→ 全部通过（含 `update::tests` 6 项）
 
 ### 发布版本 (dist/release)
@@ -208,6 +345,17 @@ a0ed8e6 fix(build): mac 不再生成三个跑不起来的 launcher
      但 mac 需 CI 单独构建，见下方「mac 真机验证发现的问题」条
 - **2026.09.13.8**（插件 runtime PATH 少一层 bin/ + 笔记列表宽度自适应；仅 gui）
   —— 已上传云，9 组件 sha 全部核对一致；gui sha `fd76b427…`
+- **2026.09.14.3**（9-12~9-14 累积：快捷键/自绘标题栏/终端重复/笔记 FTS5+jieba/内嵌 memory 新前端；重建 gui/server/claude/extensions）
+  —— ⚠️ **只传了 96**（当时任务是"更新 96"），**云未上传** → 后续用 .14.4 补齐
+- **2026.09.14.5**（设置面板服务器地址改三档切换 + 字段漂移/scope 静默丢失两修；仅 gui 重建）
+  —— ✅ **两端都已上传**，9 组件逐个验证可下载、`gui.zip` 两端字节数一致（`24,286,895`）
+  —— gui sha `a79a0b71…`；其余 8 个组件服务端从 `.14.4` 按 sha 复用
+  —— 发布脚本改用**统一入口** `temp/release_windows_20260914.5.py`（`96` / `cloud` / `verify`），
+     云走 CF 隧道域名、**不再经 workbench 中转**
+- **2026.09.14.4**（GUI「公网」档改用 CF 域名 + 旧地址自动迁移；仅 gui 重建）
+  —— ✅ **两端都已上传，9 组件 sha 全部核对一致**
+  —— 96：只需 gui（其余复用 .14.3）；云：另传 server/claude/extensions 补齐 .14.3 内容
+  —— gui sha `d07cb8e0…`（.14.4 的 gui）；其余组件沿用 .14.3 的 sha
 
 ### macOS 发布（云端，2026-09-14 首次）
 
@@ -215,6 +363,10 @@ a0ed8e6 fix(build): mac 不再生成三个跑不起来的 launcher
 |---|---|---|
 | **2026.09.14.1** | 对齐 Windows `.13.8`（PATH 修复 / 笔记宽度）+ mac 专属修复（python 自包含、server 内嵌、打开终端、新建笔记、CDP 移除、菜单中文化） | 6 个（bun/claude/extensions/gui/python/tools），6/6 sha 一致 |
 | **2026.09.14.2** | GUI 组件路径修复（更新面板误判「未安装」）+ 移除三个死 launcher；发布 sha 改为沿用内嵌 manifest（修全量误报） | 仅 gui 变动，其余由服务端从 `.14.1` 复用 |
+| **2026.09.14.4 / `.14.5`**（待发） | 对齐 Windows：`.14.4` = GUI「公网」档改 CF 域名 + 旧地址迁移；`.14.5` = 设置面板服务器地址三档切换 | ⏳ **等 CI** —— 代码已推（`3390839`），CI `#99` 构建中<br>产物在 GitHub Actions artifact / Codemagic；出来后跑 `scripts/release_mac.py`（改 `VERSION`/`RELEASE_NOTES` → `make` → `cloud` → `verify`）<br>可一次发到 `.14.5`、跳过 `.14.4` |
+
+> ⚠️ **CI 只出 artifact，不自动发布** —— 版本号固定为 `ci-build`，需下载产物后由
+> `release_mac.py` 改成正式号并上传。别以为推完代码就完事了。
 
 **mac 组件集**（服务端 `VALID_COMPONENTS_MAC`）= `{gui, claude, bun, tools, python, extensions}`
 —— **无 `server`**（它内嵌在 gui.zip 的 `.app` 里）、无 git（系统自带）、无 updater（osascript 提权替代）。
@@ -452,8 +604,11 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
       任何人可读写/投毒/`hard=true` 删库；Web 登录也只是前端装饰）。云已部署 `claude-memory:20260912-auth`，
       token 存 `/root/claude-memory/.env`（600），本地 `~/.claude.json` 已配 `headers.Authorization`。
       **当前会话 MCP 显示未连接属正常**（会话启动时读的旧配置），重启后生效。见部署手册 §6
-- [x] **本地接入 memory MCP** —— 2026-09-12 完成：`~/.claude.json` 指向 `http://123.56.66.84:8080/mcp`；
+- [x] **本地接入 memory MCP** —— 2026-09-12 完成：`~/.claude.json` 加 `headers.Authorization`；
       3 个 skills 已装新版（旧版备份在 `~/claude-skills-backup-20260912/`）
+      ⚠️ **勘误（2026-09-14 核实）**：本机指向的是 **96**（`http://192.168.186.96:14020/mcp`），
+      **不是云** —— 早期记为云的 `123.56.66.84:8080` 是错的。改任一端 token 都会让本机 MCP 断开，
+      必须同步改 `~/.claude.json` 并重启会话
 - [ ] ⚠️ **本地代理 17891 会间歇 502** —— 2026-09-12 实测：直连云服务器 5/5 正常，走 17891 代理
       5 次里 3 次返回空 body 的 502（服务器端无异常日志，容器内直连 6/6 稳定）。可能影响 MCP 连接
       稳定性；今早 docker pull 失败、HANDOFF 旧记的"死代理"疑似同源。待办：给云 IP 配 `NO_PROXY` 或修代理
@@ -461,9 +616,11 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
       `claude-memory:20260914-auth`：bearer 鉴权 + scope 前缀搜索 + `_ensure_meta` 并发保护 + 新 Web 前端；
       数据 303 条完整（部署前已备份 `claude-memory.db.bak.20260914`）。
       本机 `~/.claude.json` 已同步加 `headers.Authorization`（**需重启会话生效**）。见部署手册 §8
-- [ ] **Web UI 复核** —— 96 `http://192.168.186.96:40021/`（登录框填 token）/ 云 `http://123.56.66.84:40021/`；
-      搜索走新 FTS5 + jieba
-- [ ] **96 release-platform 已发 `.14.3`** —— 复核 GUI 更新面板（点「检查更新」应提示 9 个组件中 4 个需更新）
+- [ ] **Web UI 复核** —— 96 `http://192.168.186.96:40021/`（登录框填 token）/
+      云 `https://mem.17lumen.cloud`；搜索走新 FTS5 + jieba
+- [ ] **复核 GUI 更新面板** —— 96 + 云均已发 `.14.5`；客户端点「检查更新」应提示更新到该版
+- [ ] **mac `.14.4` / `.14.5` 待发布** —— 代码已推，等 CI 产物；下载后跑 `scripts/release_mac.py`
+      （⚠️ **CI 只出 artifact、不自动发布**；且用户明确说过 GitHub CI 那边**他自己处理，别主动去下载**）
 - [x] **云上跟进** —— 2026-09-12 完成（本地构建镜像 → workbench 上传 → 云端切换，见部署手册）
 - [x] **云 server root 密码轮换** —— 已完成（新值在内部凭据笔记；96 内网密码无需轮换）
 - [ ] （可选）**向量路** —— SPEC §10 预留：加 OpenAI 兼容 embedding 客户端 + 第三路进 `rrf_merge`，约 150 行
@@ -476,7 +633,10 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
   账号/密码见 `.private/api-keys.md`。**操作通道**：`temp/s96.sh`（系统 ssh；
   ⚠️ **不要用 paramiko**，见「96 SSH 通道」条）。部署目录 `/root/claude-memory/`；
   数据 `/data/claude-memory/claude-memory.db`
-- **云 server**: `123.56.66.84:8765`；ECS `i-2ze2rouoikcqrlbseu8a` / cn-beijing；通过 workbench 通道操作
+- **云 server**: 公网入口 = **`https://release.17lumen.cloud`**（CF 隧道）—— 裸 IP
+  `123.56.66.84:8765` 在本机网络**不可达**（见「云服务入口」条）；另有 `mem.` / `mcp.` /
+  `nps.` 三个子域指向云上其它服务。ECS `i-2ze2rouoikcqrlbseu8a` / cn-beijing；
+  **运维通道 workbench**（`exec` 走 Session Manager，资源饱和时超时 → 改 `RunCommand` API）
 - **Workbench**: `C:\Program Files\workbench\workbench.exe`；config `~/.workbench/config.json`（AK 模式）；**Python subprocess 调用**
 - **GitHub**: `o2bubble/claude-code-haha-rush`（private）；push 需 `-c http.proxy= -c https.proxy=` 绕过死代理（17891）
 - **凭据**: 真实值见 `.private/api-keys.md`（gitignored）；⚠️ 不要把真实值写回本文件
@@ -493,7 +653,11 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
 | 脚本 | `scripts/sync-github-clean.sh` | 快照同步（已移除 offline-tools 特殊处理） |
 | **mac 发布** | `docs/macos-build-playbook.md` · `scripts/release_mac.py` | **macOS 构建发布手册**（含 sha 算法定论、四条上传踩坑、发布历史） |
 | 架构 | `docs/ARCHITECTURE.md` · `docs/agents/issue-tracker.md` | 架构与工单约定 |
-| **部署** | `docs/memory-deploy-playbook.md` | **memory 服务发版手册**（本地构建→workbench 上传→云端切换；含 WAL 备份/代理/竞态三个坑） |
+| **部署（memory）** | `docs/memory-deploy-playbook.md` | **memory 服务发版手册**（本地构建→workbench 上传→云端切换） |
+| **部署（release-platform）** | `claude-code-gui-release-platform/DEPLOY.md` | **发布平台部署手册**（WSL 构建→上传→服务器只 load；含禁 build/禁 reload 的理由） |
+| **CF Tunnel（实战）** | `docs/cloudflare-tunnel-cloud-playbook.md` | 本环境完整记录：为什么弃 frp 转 CF、7 个实测坑、诊断方法论 |
+| **CF Tunnel（通用）** | `docs/cloudflare-tunnel-playbook.md` | 通用用法：快速隧道/命名隧道/服务化/原理 |
+| 工具配置 | `tools/cloudflared/config-17lumen.yml` | 隧道 ingress 配置（二进制不入库，用时按手册下载） |
 | PRD（本地） | `.scratch/gui-plugin-system/PRD.md` | 插件系统完整 PRD（gitignore 不入库） |
 
 ## Suggested skills

@@ -9,6 +9,13 @@ import {
 import { t, setLanguage, getLanguage, type Language } from "../../i18n";
 import { DEFAULT_CONTEXT_WARNING_ENABLED, DEFAULT_CONTEXT_WARNING_PERCENT } from "../../utils/contextWarning";
 import { DEFAULT_STALL_WAKE_PROMPT } from "../../utils/streamStallDecision";
+import {
+  customServerUrlForDisplay,
+  deriveServerProfile,
+  serverProfileUrls,
+  type PresetServerProfile,
+  type ServerProfile,
+} from "../../utils/serverProfile";
 import { EmptyState } from "../SharedStates";
 import { S } from "./settingsStyles";
 import ShortcutsPanel from "./ShortcutsPanel";
@@ -378,10 +385,11 @@ function CompactSettingsSection({ settings, update }: {
 
 // ── Content renderer per category ──
 
-function CategoryContent({ cat, settings, update, flashField }: {
+function CategoryContent({ cat, settings, update, applyServer, flashField }: {
   cat: string;
   settings: AppSettings;
   update: (patch: Partial<AppSettings>) => void;
+  applyServer: (patch: Partial<AppSettings>, persist: boolean) => void;
   flashField: string | null;
 }) {
   switch (cat) {
@@ -439,14 +447,7 @@ function CategoryContent({ cat, settings, update, flashField }: {
               onChange={(v) => update({ saveLayoutToGlobal: v })} />
             <FieldHint text={t("settings.saveLayoutToGlobalDesc")} />
           </div>
-          <div>
-            <Label text={t("settings.serverAddr")} />
-            <input type="text"
-              value={settings.skillRegistryUrl ?? "http://192.168.186.96:8765"}
-              onChange={(e) => update({ skillRegistryUrl: e.target.value })}
-              style={{ ...S.input, width: "100%", boxSizing: "border-box" }} />
-            <FieldHint text={t("settings.serverAddrDesc")} />
-          </div>
+          <ServerAddressField settings={settings} applyServer={applyServer} flashField={flashField} />
         </div>
       );
 
@@ -703,6 +704,66 @@ function scopeBtnStyle(active: boolean): React.CSSProperties {
   };
 }
 
+// ── 服务器地址：三档切换 ──
+//
+// 预设两档一键选定并立即落盘；自定义档露出输入框，逐键只写内存、失焦/回车才落盘。
+// 服务器地址是全局字段 —— 落盘一律走 applyServer 的 global 通道，理由见其注释。
+function ServerAddressField({ settings, applyServer, flashField }: {
+  settings: AppSettings;
+  applyServer: (patch: Partial<AppSettings>, persist: boolean) => void;
+  flashField: string | null;
+}) {
+  const derived = deriveServerProfile(settings.skillRegistryUrl, settings.updateServerUrl);
+  // 允许「值仍是预设但停在自定义档」—— 否则点「自定义」会立刻跳回预设按钮
+  const [customMode, setCustomMode] = useState(false);
+  // 档位变了才退出自定义档：外部改动（向导 / 诊断面板 / 其它窗口）要反映到按钮上，
+  // 但用户自己在输入框里打字（derived 保持 custom）不能被打断 —— 依赖 derived 而非
+  // 两个原始值，正是为了区分这两种情况。
+  const prevDerivedRef = useRef(derived);
+  useEffect(() => {
+    if (prevDerivedRef.current !== derived) {
+      prevDerivedRef.current = derived;
+      setCustomMode(false);
+    }
+  }, [derived]);
+
+  const profile: ServerProfile = customMode ? "custom" : derived;
+  const customValue = customServerUrlForDisplay(settings.skillRegistryUrl, settings.updateServerUrl);
+
+  const pick = (p: PresetServerProfile) => {
+    setCustomMode(false);
+    applyServer(serverProfileUrls(p), true);
+  };
+  const commitCustom = () => applyServer(serverProfileUrls("custom", customValue), true);
+
+  return (
+    <div data-setting-field="serverAddr" style={{ ...S.fieldFlash(flashField === "serverAddr") }}>
+      <Label text={t("settings.serverAddr")} />
+      <div style={{ ...S.row, marginTop: 2 }}>
+        <button type="button" onClick={() => pick("intranet")} style={scopeBtnStyle(profile === "intranet")}>
+          {t("settings.serverProfileIntranet")}
+        </button>
+        <button type="button" onClick={() => pick("public")} style={scopeBtnStyle(profile === "public")}>
+          {t("settings.serverProfileCloud")}
+        </button>
+        <button type="button" onClick={() => setCustomMode(true)} style={scopeBtnStyle(profile === "custom")}>
+          {t("settings.serverProfileCustom")}
+        </button>
+      </div>
+      {profile === "custom" && (
+        <input type="text"
+          value={customValue}
+          placeholder={t("settings.serverCustomPlaceholder")}
+          onChange={(e) => applyServer({ skillRegistryUrl: e.target.value, updateServerUrl: e.target.value }, false)}
+          onBlur={commitCustom}
+          onKeyDown={(e) => { if (e.key === "Enter") commitCustom(); }}
+          style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 6 }} />
+      )}
+      <FieldHint text={t("settings.serverAddrDesc")} />
+    </div>
+  );
+}
+
 // ── Main component ──
 
 function SettingsPanelImpl() {
@@ -763,6 +824,16 @@ function SettingsPanelImpl() {
     updateSettings(patch);
   };
 
+  // 服务器地址绕开 dirty，直接落 global —— 若跟着保存栏的 scope 走，用户选「工作区」
+  // 时地址会被写进 settings.local.json，而 Rust 侧 merge_workspace_overrides 的白名单
+  // 不含 skill_registry_url / update_server_url（gui/src-tauri/src/settings.rs），
+  // 该字段从不被合并回来 → 重启静默回退到 global 值且无任何报错。
+  const applyServer = (patch: Partial<AppSettings>, persist: boolean) => {
+    setSettings((s) => (s ? { ...s, ...patch } : s));
+    updateSettings(patch);
+    if (persist) void saveSettings(patch, "global").catch(() => {});
+  };
+
   const handleSave = async () => {
     if (!settings) return;
     setSaving(true);
@@ -793,7 +864,7 @@ function SettingsPanelImpl() {
         </div>
 
         <div ref={contentRef} style={{ flex: 1, overflow: "auto" }}>
-          <CategoryContent cat={cat} settings={settings} update={update} flashField={flashField} />
+          <CategoryContent cat={cat} settings={settings} update={update} applyServer={applyServer} flashField={flashField} />
         </div>
 
         <div style={S.saveBar}>

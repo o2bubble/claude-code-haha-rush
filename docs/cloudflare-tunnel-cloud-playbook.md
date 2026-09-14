@@ -74,22 +74,25 @@ iptables -D INPUT -p tcp --dport 7000 -j ACCEPT
 
 ---
 
-## 2. 为什么 frp 不可行（对比说明）
+## 2. 为什么「自己连云」的方案不可行（frp / nps 同理）
 
-frp 的架构是 **frpc（本机）主动连 frps（云）**：
+frp、nps 都是同一类架构：**客户端（内网）主动连服务端（公网）**：
 
 ```
-本机 frpc ──TCP──> 云 frps:7000        ← 这条正是被拦的路径
+本机 frpc/npc ──TCP──> 云 frps/nps:端口        ← 这条正是被拦的路径
 ```
 
-**所以 frp 在当前网络下用不了**，换端口/换协议都没用（拦的是 IP 不是端口）。
+**所以这类方案在当前网络下都用不了**，换端口/换协议都没用（拦的是 IP 不是端口）。
 
 | 方案 | 连接方向 | 当前网络 |
 |---|---|---|
-| frp | 本机 → 云（入站方向发起） | ❌ 被拦 |
+| frp / nps | 本机 → 云（**入站方向发起**） | ❌ 被拦 |
 | **CF Tunnel** | 云 → CF（**出站**） | ✅ 可用 |
 
 > 💡 **判断口诀**：受限制的网络里，**「让远端连出来」永远比「自己连过去」更可能成功**。
+
+> 📌 2026-09-14 后续：frp 已被移除，换成 **nps**（自带 Web 管理面板）。但两者架构相同，
+> **当前网络下一样连不上** —— 部署它只为"换到不受限网络后可用"。见 §6。
 
 ---
 
@@ -419,12 +422,35 @@ curl -4 https://www.baidu.com    # 强制 IPv4，通了 → 确认是 IPv6 问�
 
 | 方案 | 何时用 | 代价 |
 |---|---|---|
+| **CF 命名隧道** | 长期使用（**当前实际在用**） | 需 CF 账号 + 域名 + 等 NS 生效 |
 | **CF 快速隧道** | 临时验证、域名没到位 | 域名会变、不能服务化 |
-| **CF 命名隧道** | 长期使用（推荐） | 需 CF 账号 + 域名 + 等 NS 生效 |
-| **frp + 云** | **换到不受限的网络**（手机热点/家里） | 国内延迟低，但要能直连云 |
+| **nps + 云** | **换到不受限的网络**（手机热点/家里） | 国内延迟低，但要能直连云 |
 | **手机热点** | 应急 | 每次都要切换网络 |
 
-> 💡 **最佳实践**：两个都部署好（CF 负责受限网络，frp 负责正常网络），按场景切换。
+> 💡 **最佳实践**：两套都部署好（CF 负责受限网络，nps 负责正常网络），按场景切换。
+
+### nps（v0.26.9，2026-09-14 部署，取代 frp）
+
+```bash
+# 服务端（云，已装好）：/root/nps/，systemd nps.service
+#   端口（全部落在安全组已放行的 50000-50010 段）：
+#     bridge 50000 · http代理 50001 · https代理 50002 · web面板 50003
+#   面板 https://nps.17lumen.cloud（经 CF 隧道）
+# 客户端（内网机器）需从 nps release 单独下载 npc
+npc -server=<云公网IP>:50000 -vkey=<PUBLIC_VKEY>
+```
+
+> ⚠️ **端口要落在安全组已放行的段内** —— 本次踩过：先按习惯配了 `8024`（bridge），
+> 后来查安全组才发现**只放行了 `22/3389/8080/8765/40021/50000-50010`** →
+> 全部挪进 `50000-50010` 才做到零配置可用。**配端口前先查安全组。**
+
+**为什么从 frp 换成 nps**：nps 自带 **Web 管理面板**（浏览器里配隧道，不用改配置文件重启）。
+
+⚠️ **两个必读**：
+1. **nps 与 frp 是同类架构**（npc 主动连 nps 的 bridge 端口）→ **当前网络下同样连不上**，
+   与 CF 的"云主动连出"方向相反。换网络才可用。
+2. **v0.26.9 有硬编码默认弱口令**（`admin` / `123` / `public_vkey=123`）——
+   面板要暴露公网，**部署时必须全改成随机强值**（本次已改，值见凭据笔记）。
 
 ---
 
@@ -482,9 +508,9 @@ curl -H "Accept: application/json" "https://check-host.net/check-tcp?host=<ip>:<
 | 本地手册 | `docs/cloudflare-tunnel-playbook.md` |
 | 本实战文档 | `docs/cloudflare-tunnel-cloud-playbook.md` |
 | 配置笔记 | GUI 笔记「Cloudflare Tunnel 配置 · 云服务器穿透」(id `82eb2816-…`) |
-| frp 服务端 | 云 `/root/frp/`（systemd `frp.service`，端口 7000）— ⚠️ 当前不可用 |
-| frp 客户端（本机） | `tools/frp/win/.../frpc.exe` + `tools/frp/frpc.toml` |
-| frp 配置（入库） | `tools/frp/frpc.toml` · `tools/frp/frps.toml` |
+| nps 服务端 | 云 `/root/nps/`（systemd `nps.service`；bridge 50000 / http代理 50001 / https代理 50002 / web面板 50003） |
+| nps 面板 | `https://nps.17lumen.cloud`（经 CF 隧道） |
+| ~~frp~~ | **已于 2026-09-14 移除**（云上服务与目录已删，本机 `tools/frp/` 已删） |
 
 ---
 
@@ -507,4 +533,5 @@ curl -H "Accept: application/json" "https://check-host.net/check-tcp?host=<ip>:<
 | 改名 | `tunnel.` → `release.`（域名体现服务职能），删旧 DNS 记录 |
 | **性能事故** | 发现云 `load 9.3` / `iowait 84.6%` → 查出 `uvicorn reload=True` 烧 CPU<br>（详见 `claude-code-gui-release-platform/DEPLOY.md`，修复后 load 0.05） |
 | 部署规范 | release-platform 定下"本地构建 → 上传 → 服务器只 load"铁律（服务器扛不住 build） |
-| GUI 适配 | 客户端"公网"档从裸 IP 改为 CF 域名 + 旧值自动迁移（**待发版生效**） |
+| GUI 适配 | 客户端"公网"档从裸 IP 改为 CF 域名 + 旧值自动迁移（**已发版 2026.09.14.4**） |
+| 换穿透工具 | **移除 frp，改装 nps v0.26.9**（自带 Web 面板）；改掉其硬编码默认弱口令；<br>端口全部挪进安全组已放行的 `50000-50010`（bridge 50000 / 代理 50001-50002 / 面板 50003）；<br>面板经 CF 代理成 `nps.17lumen.cloud` |

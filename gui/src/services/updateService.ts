@@ -3,6 +3,7 @@
 import { getSettings } from "../stores/settingsStore";
 import { windowBus } from "./windowBus";
 import { Events } from "./events";
+import { INTRANET_SERVER_URL } from "../utils/serverProfile";
 
 // Latest known update availability — drives the toolbar red-dot badge.
 // Updated by both the startup background check and the manual UpdatePanel check.
@@ -63,7 +64,7 @@ export interface LocalManifest {
 }
 
 function getBaseUrl(): string {
-  return getSettings().skillRegistryUrl ?? "http://192.168.186.96:8765";
+  return getSettings().skillRegistryUrl ?? INTRANET_SERVER_URL;
 }
 
 // 平台化下载：mac 走 ?platform=macos（服务器按平台分目录存 manifest + 组件 zip）。

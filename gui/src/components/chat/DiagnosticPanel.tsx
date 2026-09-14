@@ -1,7 +1,8 @@
 import React, { memo, useCallback, useEffect, useState } from "react";
 import { t } from "../../i18n";
 import { EmptyState } from "../SharedStates";
-import { diagnosticsService, CLOUD_SERVER_URL, type CheckStatus, type DiagnosticCheck, type DiagnosticCategory, type DiagnosticsReport } from "../../services/diagnosticsService";
+import { diagnosticsService, type CheckStatus, type DiagnosticCheck, type DiagnosticCategory, type DiagnosticsReport } from "../../services/diagnosticsService";
+import { deriveServerProfile, serverProfileUrls } from "../../utils/serverProfile";
 import { getSettings, saveSettings } from "../../stores/settingsStore";
 import { addStatusMessage } from "../../stores/statusMsgStore";
 import { BackendService } from "../../services/backendService";
@@ -191,14 +192,16 @@ export const DiagnosticPanel: React.FC = memo(function DiagnosticPanel() {
   const networkCat = report?.categories.find((c) => c.id === "network");
   const updateCheck = networkCat?.checks.find((c) => c.id === "update_server");
   const cloudCheck = networkCat?.checks.find((c) => c.id === "cloud_server");
-  const onCloud = getSettings().skillRegistryUrl === CLOUD_SERVER_URL
-    && getSettings().updateServerUrl === CLOUD_SERVER_URL;
+  const onCloud = deriveServerProfile(
+    getSettings().skillRegistryUrl,
+    getSettings().updateServerUrl,
+  ) === "public";
   const showCloudSwitch = !!networkCat && !networkLoading
     && updateCheck?.status === "fail" && cloudCheck?.status === "pass" && !onCloud;
 
   const switchToCloud = useCallback(async () => {
     try {
-      await saveSettings({ skillRegistryUrl: CLOUD_SERVER_URL, updateServerUrl: CLOUD_SERVER_URL }, "global");
+      await saveSettings(serverProfileUrls("public"), "global");
       addStatusMessage(t("diagnostics.cloudSwitched"), "info");
       await runNetwork();
     } catch {

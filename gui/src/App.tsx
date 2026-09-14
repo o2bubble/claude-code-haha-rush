@@ -14,6 +14,7 @@ import { ALL_PANEL_DEFS } from "./services/panelDefs";
 import { getSettings, loadSettings, reloadSettings, saveSettings, updateSettings } from "./stores/settingsStore";
 import { workspaceBasename } from "./utils/workspace";
 import { normalizeTheme, isDarkTheme } from "./utils/themeUtils";
+import { serverProfileUrls } from "./utils/serverProfile";
 import { resolveLinkAction, isNavigableHref } from "./utils/linkOpen";
 import { setLanguage, t } from "./i18n";
 import { windowBus } from "./services/windowBus";
@@ -327,14 +328,10 @@ export default function App() {
     s.autoEnterRecentWorkspace = ws.autoEnterRecentWorkspace;
     s.isFirstLaunch = false;
 
-    // Apply server profile
-    // 公网档走 Cloudflare Tunnel 域名而非云主机裸 IP —— 裸 IP 在受限网络会被拦掉。
-    // 与 WelcomeWizard 的 SERVER_URLS / diagnosticsService 的 CLOUD_SERVER_URL 保持一致。
-    const serverUrl = ws.serverProfile === "intranet"
-      ? "http://192.168.186.96:8765"
-      : "https://release.17lumen.cloud";
-    s.skillRegistryUrl = serverUrl;
-    s.updateServerUrl = serverUrl;
+    // Apply server profile（档位 → 地址的唯一映射在 utils/serverProfile）
+    const serverUrls = serverProfileUrls(ws.serverProfile);
+    s.skillRegistryUrl = serverUrls.skillRegistryUrl;
+    s.updateServerUrl = serverUrls.updateServerUrl;
     // Wizard runs before a workspace is bound — these are global baseline fields,
     // so write them globally (a default workspace-scoped save would be skipped).
     await saveSettings(s, "global");
