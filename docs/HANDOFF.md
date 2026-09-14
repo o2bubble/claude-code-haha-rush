@@ -363,10 +363,14 @@ a9f814d docs: Cloudflare Tunnel 实战手册 + 96 部署流程 + 工具配置
 |---|---|---|
 | **2026.09.14.1** | 对齐 Windows `.13.8`（PATH 修复 / 笔记宽度）+ mac 专属修复（python 自包含、server 内嵌、打开终端、新建笔记、CDP 移除、菜单中文化） | 6 个（bun/claude/extensions/gui/python/tools），6/6 sha 一致 |
 | **2026.09.14.2** | GUI 组件路径修复（更新面板误判「未安装」）+ 移除三个死 launcher；发布 sha 改为沿用内嵌 manifest（修全量误报） | 仅 gui 变动，其余由服务端从 `.14.1` 复用 |
-| **2026.09.14.4 / `.14.5`**（待发） | 对齐 Windows：`.14.4` = GUI「公网」档改 CF 域名 + 旧地址迁移；`.14.5` = 设置面板服务器地址三档切换 | ⏳ **等 CI** —— 代码已推（`3390839`），CI `#99` 构建中<br>产物在 GitHub Actions artifact / Codemagic；出来后跑 `scripts/release_mac.py`（改 `VERSION`/`RELEASE_NOTES` → `make` → `cloud` → `verify`）<br>可一次发到 `.14.5`、跳过 `.14.4` |
+| **2026.09.14.4 / `.14.5`**（待发） | 对齐 Windows：`.14.4` = GUI「公网」档改 CF 域名 + 旧地址迁移；`.14.5` = 设置面板服务器地址三档切换 | ⏳ **等 mac 构建产物** —— 代码已推（`3390839`）<br>产物出来后跑 `scripts/release_mac.py`（改 `VERSION`/`RELEASE_NOTES` → `make` → `cloud` → `verify`）<br>可一次发到 `.14.5`、跳过 `.14.4` |
 
+> ⚠️ **mac 构建走 Codemagic 平台，GitHub Actions 已停用**（2026-09-14 用户确认：
+> `.github/workflows/macos-build.yml` 已禁用、**推代码不会触发任何构建**）。
+> 需要 mac 产物时**由用户去 Codemagic 平台触发**，不要以为推完 GitHub 就自动有了。
+>
 > ⚠️ **CI 只出 artifact，不自动发布** —— 版本号固定为 `ci-build`，需下载产物后由
-> `release_mac.py` 改成正式号并上传。别以为推完代码就完事了。
+> `release_mac.py` 改成正式号并上传。别以为构建完就完事了。
 
 **mac 组件集**（服务端 `VALID_COMPONENTS_MAC`）= `{gui, claude, bun, tools, python, extensions}`
 —— **无 `server`**（它内嵌在 gui.zip 的 `.app` 里）、无 git（系统自带）、无 updater（osascript 提权替代）。
@@ -619,8 +623,9 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
 - [ ] **Web UI 复核** —— 96 `http://192.168.186.96:40021/`（登录框填 token）/
       云 `https://mem.17lumen.cloud`；搜索走新 FTS5 + jieba
 - [ ] **复核 GUI 更新面板** —— 96 + 云均已发 `.14.5`；客户端点「检查更新」应提示更新到该版
-- [ ] **mac `.14.4` / `.14.5` 待发布** —— 代码已推，等 CI 产物；下载后跑 `scripts/release_mac.py`
-      （⚠️ **CI 只出 artifact、不自动发布**；且用户明确说过 GitHub CI 那边**他自己处理，别主动去下载**）
+- [ ] **mac `.14.4` / `.14.5` 待发布** —— 代码已推；等 mac 构建产物后跑 `scripts/release_mac.py`
+      （⚠️ **构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**；且用户明确说过
+      mac 构建/产物那边**他自己处理，别主动去碰**）
 - [x] **云上跟进** —— 2026-09-12 完成（本地构建镜像 → workbench 上传 → 云端切换，见部署手册）
 - [x] **云 server root 密码轮换** —— 已完成（新值在内部凭据笔记；96 内网密码无需轮换）
 - [ ] （可选）**向量路** —— SPEC §10 预留：加 OpenAI 兼容 embedding 客户端 + 第三路进 `rrf_merge`，约 150 行

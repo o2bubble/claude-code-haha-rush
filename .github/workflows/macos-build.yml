@@ -1,5 +1,9 @@
 name: macOS Build
 
+# ⚠️ 已停用（2026-09-14）：mac 构建改走 Codemagic 平台，本 workflow 不再使用。
+#    仓库里保留仅为历史参考 —— 别指望推送触发它，产物不会在这里出现。
+#    （历史上它是"无 mac 机器时的出包路径"，GitHub runner 出包较慢。）
+#
 # 无 mac 机器时的出包路径：推送到本分支/手动触发即用 GitHub 的 macOS runner
 # 完整跑 build.ts --platform macos 管线（不再是只 cargo tauri build）：
 #   claude 二进制(bun-darwin-arm64) + GUI(.app) + 自包含 bun/tools/python 下载
