@@ -1,4 +1,4 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-15（main @99d3c0e）
+# Handoff — Claude Code GUI 开发 · 2026-09-16（main @44ed947）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
@@ -186,8 +186,8 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
      `.15.4` 是补发的 color-scheme 修复（`.15.3` 不含该修复）
   ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 这个孤儿版本（号比用户已发的
      `.15.2/.15.3` 低，客户端永远拿不到），还白挤掉了 `.14.5`
-- **macOS 云端版本**: **`2026.09.15.1`**（已恢复，6 组件齐全）
-  —— 之前被误删致 macos 404，见「续②」；**构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**
+- **macOS 云端版本**: **`2026.09.15.6`**（6 组件齐全；含 `.15.5` 的更新 bug 修复 + `.15.6` 的 MCP/终端 PATH 注入）
+  —— 更早的 `.15.1` 曾被误删致 macos 404，见「续②」；**构建：GitHub Actions（免费，push 自动触发）或 Codemagic（快，付费）**
 - **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；300 条记忆；**已加 bearer 鉴权**
 - **Memory 服务（云）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web
 - **release-platform（云）**: 镜像 **`claude-release-platform:20260914`**（compose 已从 `build: .` 改为 `image:`）
@@ -481,9 +481,13 @@ e81ba5a fix(api): thinking-only 消息被剥离后成空数组 → 400 卡死会
 | **2026.09.14.2** | GUI 组件路径修复（更新面板误判「未安装」）+ 移除三个死 launcher；发布 sha 改为沿用内嵌 manifest（修全量误报） | 仅 gui 变动，其余由服务端从 `.14.1` 复用 |
 | **2026.09.14.4 / `.14.5`**（待发） | 对齐 Windows：`.14.4` = GUI「公网」档改 CF 域名 + 旧地址迁移；`.14.5` = 设置面板服务器地址三档切换 | ⏳ **等 mac 构建产物** —— 代码已推（`3390839`）<br>产物出来后跑 `scripts/release_mac.py`（改 `VERSION`/`RELEASE_NOTES` → `make` → `cloud` → `verify`）<br>可一次发到 `.14.5`、跳过 `.14.4` |
 
-> ⚠️ **mac 构建走 Codemagic 平台，GitHub Actions 已停用**（2026-09-14 用户确认：
-> `.github/workflows/macos-build.yml` 已禁用、**推代码不会触发任何构建**）。
-> 需要 mac 产物时**由用户去 Codemagic 平台触发**，不要以为推完 GitHub 就自动有了。
+> **mac 构建两条路**（2026-09-16 起 GitHub Actions 重新启用）：
+> - **GitHub Actions**（默认）—— 本仓库 public，macOS runner **免费不限分钟**。
+>   **push 到 GitHub 快照即自动触发**，无需手动。缺点：无缓存、约 15-25 分钟。
+> - **Codemagic** —— 快（约 13 分钟，有缓存）但按 $0.095/分钟计费（约 ¥9/次）
+>   且只收实体卡。需要快时用，由用户在平台侧触发。
+>
+> 两条路的产物**都由 build.ts 生成、内容等价**（命令完全相同）。见 playbook §1。
 >
 > ⚠️ **CI 只出 artifact，不自动发布** —— 版本号固定为 `ci-build`，需下载产物后由
 > `release_mac.py` 改成正式号并上传。别以为构建完就完事了。
@@ -741,7 +745,7 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
 - [ ] **复核 GUI 更新面板** —— 96 + 云均已发 `.15.4`；客户端点「检查更新」应提示更新到该版
 - [x] **mac 通道恢复** —— 2026-09-15 完成：两处删除点修好并部署后，用 `~/Downloads`
       的既有产物重发 `2026.09.15.1`，云端 6 组件齐全。见「续②」节
-      （⚠️ **构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**）
+      （构建：GitHub Actions 免费自动触发 / Codemagic 快但付费）
 - [x] **云上跟进** —— 2026-09-12 完成（本地构建镜像 → workbench 上传 → 云端切换，见部署手册）
 - [x] **云 server root 密码轮换** —— 已完成（新值在内部凭据笔记；96 内网密码无需轮换）
 - [ ] （可选）**向量路** —— SPEC §10 预留：加 OpenAI 兼容 embedding 客户端 + 第三路进 `rrf_merge`，约 150 行
