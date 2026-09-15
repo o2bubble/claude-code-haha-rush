@@ -20,5 +20,15 @@
     "types": [
       "bun-types"
     ]
-  }
+  },
+  "include": [
+    "src/**/*",
+    "stubs/**/*"
+  ],
+  "exclude": [
+    "dist",
+    "gui",
+    "web",
+    "node_modules"
+  ]
 }

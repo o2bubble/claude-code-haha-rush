@@ -191,6 +191,7 @@ import {
 } from 'src/utils/toolSearch.js'
 import { API_MAX_MEDIA_PER_REQUEST } from '../../constants/apiLimits.js'
 import { ADVISOR_BETA_HEADER } from '../../constants/betas.js'
+import { NO_CONTENT_MESSAGE } from '../../constants/messages.js'
 import {
   formatDeferredToolLine,
   isDeferredTool,
@@ -990,9 +991,33 @@ export function stripThinkingFromAssistantMessages(
     const stripped = content.filter(
       b => b.type !== 'thinking' && b.type !== 'redacted_thinking',
     )
-    return stripped.length === content.length
-      ? msg
-      : { ...msg, message: { ...msg.message, content: stripped } }
+    if (stripped.length === content.length) return msg
+
+    // Thinking-only message → stripping leaves []. Must not ship an empty
+    // content array: the API rejects it with `messages.N: all messages must
+    // have non-empty content`.
+    //
+    // The empty-content guard in normalizeMessagesForAPI cannot catch this —
+    // it runs BEFORE this strip, when the message still holds [thinking] and
+    // therefore looks non-empty.
+    //
+    // Why it shows up with reasoning models: a thinking-only singleton is
+    // normally a split sibling that gets merged with its text/tool_use partner
+    // (see stripSignatureBlocks). When that merge does not happen — far more
+    // likely with a model that emits a lot of thinking — the message survives
+    // to here alone and becomes empty. Reported on deepseek-v4-pro at 1038
+    // thinking-only messages in one session; same code on flash (715) never hit it.
+    if (stripped.length === 0) {
+      return {
+        ...msg,
+        message: {
+          ...msg.message,
+          content: [{ type: 'text' as const, text: NO_CONTENT_MESSAGE, citations: [] }],
+        },
+      } as typeof msg
+    }
+
+    return { ...msg, message: { ...msg.message, content: stripped } }
   })
 }
 
