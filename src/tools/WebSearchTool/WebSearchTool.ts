@@ -212,9 +212,10 @@ async function makeLocalFallbackOutput(
     return { query, results, durationSeconds }
   } catch (e) {
     logError(e)
+    // localSearch 抛出的消息已自包含（含失败源与原因分类），不再套一层前缀。
     return {
       query,
-      results: [`Local web search fallback failed: ${(e as Error).message}`],
+      results: [(e as Error).message],
       durationSeconds,
     }
   }

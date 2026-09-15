@@ -100,9 +100,16 @@ class BearerAuthMiddleware:
         self.protect_prefixes = tuple(protect_prefixes) if protect_prefixes else None
 
     def _needs_auth(self, path: str) -> bool:
+        # `exempt` (exact paths) applies in BOTH modes — it is the explicit
+        # "this single endpoint is public" escape hatch. Without this,
+        # protect_prefixes mode ignores exempt entirely and every /api/* path
+        # forces a token, which is exactly what broke the public landing page
+        # (it fetches aggregate counts before the user has any token).
+        if path in self.exempt:
+            return False
         if self.protect_prefixes is not None:
             return path.startswith(self.protect_prefixes)
-        return not (path in self.exempt or path.startswith(self.exempt_prefixes))
+        return not path.startswith(self.exempt_prefixes)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not self._needs_auth(scope.get("path", "")):

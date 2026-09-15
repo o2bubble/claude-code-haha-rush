@@ -4,3 +4,19 @@ __pycache__/
 # 会把 WAL 文件暴露在 git status 里（有写入时 WAL 含真实数据）。
 registry.db*
 .venv/
+
+# 前端（web/）：依赖与构建产物都不入库。
+# static/admin/ 是 web/dist 的部署副本（Dockerfile 多阶段构建会重新生成）。
+web/node_modules/
+web/dist/
+static/admin/
+
+# 运行时数据 —— 服务器上由 compose 的 volume 挂载提供，`.dockerignore` 里同样排除。
+# 只保留目录占位（.gitkeep），内容不入库：本地跑一遍就会产生一堆技能包/版本包，
+# 那些是环境状态，不是源码。
+skills-store/*
+!skills-store/.gitkeep
+updates-store/*
+!updates-store/.gitkeep
+feedback-images/*
+!feedback-images/.gitkeep

@@ -199,6 +199,66 @@ cd /root/claude-memory && docker compose up -d
 
 **DB 路径**：容器内 `/data/claude-memory.db`（由 `DB_PATH` env 决定），宿主 `/data/memory/`（compose bind mount）。
 
-## 8. 本项目特有：同时改云端与 96
+## 8. 96 同步（2026-09-14 首次跑通，**别再照抄云的流程**）
 
-96 与云是**两套独立部署**，端口/挂载都不同（见 §0 表），镜像需分别上传。本次升级只做了云——**96 仍为旧版**（14020 端口那份）。同步时记得 96 的 compose 端口映射是 `14020:8080`，别照抄云的。
+96 与云是**两套独立部署**：端口（`14020:8080` vs `8080:8080`）、**挂载路径不同**
+（96 `/data/claude-memory` vs 云 `/data/memory`），数据目录也不同。云走 workbench，**96 走 SSH**。
+
+### 8.1 通道：用 `temp/s96.sh`，不要用 paramiko
+
+```bash
+SSH_PW='<96 root 密码>' bash temp/s96.sh "<远端命令>"
+```
+（系统 OpenSSH + `SSH_ASKPASS`；`askpass.exe` 会自动重编译。**paramiko 连 96 会间歇性
+报 `AuthenticationException` 并误导为密码错误** —— 详见 HANDOFF「96 SSH 通道」条。）
+
+### 8.2 构建：增量构建，**不要在 96 上跑 pip**
+
+- ❌ `FROM python:3.12-slim` + `pip install`：96 访问 aliyun pypi **超时**（实测 15s+ 未完成），
+  且违背"线上不重装依赖"。
+- ✅ **增量 Dockerfile**（`temp/Dockerfile.inc`）：`FROM 192.168.186.96:5000/claude-memory:latest`
+  + `COPY` 应用代码 → **秒级**完成，不碰依赖层。
+
+```bash
+# 本地打包源码 → 上传（tar over ssh stdin）
+tar czf - store.py tokenizer.py normalize.py search_engine.py server.py api.py auth.py \
+    requirements.txt Dockerfile web/dist web/landing.html \
+  | SSH_PW='...' bash temp/s96.sh "rm -rf /root/mem-deploy && mkdir -p /root/mem-deploy && tar xzf - -C /root/mem-deploy"
+# 上传增量 Dockerfile → 构建
+cat temp/Dockerfile.inc | SSH_PW='...' bash temp/s96.sh "cat > /root/mem-deploy/Dockerfile.inc"
+SSH_PW='...' bash temp/s96.sh "cd /root/mem-deploy && docker build -f Dockerfile.inc -t claude-memory:20260914-auth ."
+```
+
+### 8.3 切镜像 + 鉴权（2026-09-14 起 96 也强制鉴权）
+
+1. **先备份 DB**（SQLite `backup()` API，**别用 cp**，见 §4）→ `claude-memory.db.bak.<日期>`
+2. **旧镜像打回滚 tag**：`docker tag <现用镜像> claude-memory:rollback-<日期>`
+3. **push 新镜像**到 96 registry：`docker push 192.168.186.96:5000/claude-memory:<新 tag>`
+4. **写 `.env`**（600 权限）含 `MEMORY_AUTH_TOKEN=<值>`（值见 `.private/api-keys.md`；
+   ⚠️ 经 stdin 写、别让值出现在命令行里）
+5. **compose**（`temp/compose-96.yml`）：`image:` 指向新 tag +
+   `MEMORY_AUTH_TOKEN=${MEMORY_AUTH_TOKEN:?...}`（fail-closed）
+6. `docker compose up -d` → 重建容器（**env 变更必须重建才生效**）
+7. **客户端要同步改**：本机 `~/.claude.json` 的 `mcpServers.memory` 加
+   `"headers": {"Authorization": "Bearer <token>"}`，**改完需重启 Claude Code 会话**才生效
+
+### 8.4 验证（7 项，全过才算成功）
+
+```
+① 匿名  /api/stats        → 401      （鉴权生效）
+② 带 token /api/stats     → 200
+③ 错 token /api/stats     → 401
+④ /health（无 token）     → 200      （HEALTHCHECK 豁免；health 在 MCP 端口 8080/14020）
+⑤ MCP tools/list 无 token → 401 / 带 token → 200（10 个工具）
+⑥ scope 前缀搜索：scope=["project:*"] 结果**全部**是 project: 开头
+   （要抽查返回的实际 scope 值 —— 只看条数区分不出"过滤生效"还是"忽略过滤"）
+⑦ 记忆总数与部署前一致（2026-09-14 为 303）
+```
+
+### 8.5 回滚
+
+```bash
+cd /root/claude-memory && cp docker-compose.yml.bak.<日期> docker-compose.yml
+docker tag claude-memory:rollback-<日期> 192.168.186.96:5000/claude-memory:<原 tag>
+docker compose up -d
+```

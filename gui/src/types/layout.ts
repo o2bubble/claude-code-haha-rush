@@ -47,6 +47,21 @@ export interface TabGroup {
   visibility?: Visibility;
 }
 
+/** 悬浮面板外壳配置 — 缺省即传统浮窗（带标题栏、不透明、可缩放）。
+ *  **仅作用于主窗口内的 FloatingWindow**；TauriWindow（外部子窗口）不受影响。 */
+export interface FloatingChrome {
+  /** 标题栏（含标题/tab、关闭按钮、拖拽入坞、右键菜单）。默认 true */
+  titleBar?: boolean
+  /** 面板背景与圆角。false = 透明，由内容自绘。默认 true */
+  background?: boolean
+  /** 边框。默认 true */
+  border?: boolean
+  /** 投影。默认 true */
+  shadow?: boolean
+  /** 8 方向缩放手柄。默认 true */
+  resizable?: boolean
+}
+
 /** 悬浮面板 — 脱离布局树的 position:fixed 窗口，内嵌一个完整 TabGroup */
 export interface FloatingWindow {
   type: "floating";
@@ -60,6 +75,10 @@ export interface FloatingWindow {
   height: number;
   /** 层叠次序：值越大越靠前 */
   zIndex: number;
+  /** 外壳配置。缺省 = 传统浮窗（等价于全部 true）。
+   *  拖动入口：有标题栏走标题栏；无标题栏时，内容中标记 `data-float-drag`
+   *  的元素（可多个）即为拖拽区，宿主委托处理 —— 没标就拖不动。 */
+  chrome?: FloatingChrome;
 }
 
 /** Tauri 原生子窗口 — 独立的 WebView2 窗口，内嵌一个 TabGroup */

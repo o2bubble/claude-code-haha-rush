@@ -76,6 +76,7 @@ import type { PermissionDecision, PermissionUpdateDestination } from 'src/types/
 import { QueryEngine } from 'src/QueryEngine.js'
 import type { Command } from 'src/commands.js'
 import { isCommandEnabled, getCommandName } from 'src/commands.js'
+import { forkConversation } from '../commands/branch/branch.js'
 import type { MCPServerConnection } from 'src/services/mcp/types.js'
 import type { AgentDefinition } from 'src/tools/AgentTool/loadAgentsDir.js'
 import { getAgentDefinitionsWithOverrides } from 'src/tools/AgentTool/loadAgentsDir.js'
@@ -2521,6 +2522,46 @@ async function handleNewSession(ws: WebSocket): Promise<void> {
   }
 }
 
+/**
+ * Fork a session into a new one, leaving BOTH untouched as conversations.
+ *
+ * Deliberately does not interrupt the current turn, clear the message state, or
+ * switch sessions — unlike handleNewSession. Forking produces a new transcript
+ * file on disk; which session the user looks at next is their call.
+ *
+ * Because of that, the reply is `session_forked`, NOT `session_created`: the
+ * latter is wired in the GUI to `set({ sessionId })`, which would yank the user
+ * out of the session they are in.
+ *
+ * `sourceSessionId` may be any session, not just the active one — see
+ * createFork's sourceSessionId parameter.
+ */
+async function handleForkSession(
+  ws: WebSocket,
+  sourceSessionId: string,
+): Promise<void> {
+  try {
+    const { sessionId, effectiveTitle } = await forkConversation({
+      sourceSessionId: sourceSessionId as SessionId,
+    })
+
+    ws.send(jsonStringify({
+      type: 'session_forked',
+      session_id: sessionId,
+      forked_from: sourceSessionId,
+      title: effectiveTitle,
+    }))
+
+    // Refresh the list so the new session shows up immediately.
+    await handleListSessions(ws)
+  } catch (err) {
+    ws.send(jsonStringify({
+      type: 'error',
+      message: `Failed to fork session: ${err instanceof Error ? err.message : String(err)}`,
+    }))
+  }
+}
+
 async function handlePinSession(
   ws: WebSocket,
   sessionId: string,
@@ -2969,6 +3010,11 @@ async function handleClientMessage(
 
     case 'new_session': {
       void handleNewSession(ws)
+      break
+    }
+
+    case 'fork_session': {
+      void handleForkSession(ws, message.session_id)
       break
     }
 

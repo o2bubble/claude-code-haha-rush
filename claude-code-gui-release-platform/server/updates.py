@@ -78,6 +78,52 @@ def _zip_dir(dir_path: Path) -> io.BytesIO:
     return buf
 
 
+def list_versions(platform: str = "windows") -> list[dict]:
+    """列出该平台所有带 manifest 的版本（新 → 旧），附组件名与体积。
+
+    注意：上传时 _prune_old_versions 只保留最近 3 版 —— 这里不是完整发布历史，
+    是「当前还在服务器上的版本」。UI 不要把它当成发布记录。
+    """
+    if not UPDATES_STORE.exists():
+        return []
+    out = []
+    for entry in UPDATES_STORE.iterdir():
+        if not (entry.is_dir() and VERSION_RE.match(entry.name)):
+            continue
+        manifest = _read_manifest(entry.name, platform)
+        if not manifest:
+            continue
+        vdir = _platform_dir(entry.name, platform)
+        components = {}
+        for comp in sorted(_valid_components(platform)):
+            zp = vdir / f"{comp}.zip"
+            if zp.exists():
+                components[comp] = zp.stat().st_size
+        out.append({
+            "version": entry.name,
+            "published_at": manifest.get("published_at", ""),
+            "release_notes": manifest.get("release_notes", ""),
+            "components": components,
+            "total_size": sum(components.values()),
+        })
+    out.sort(key=lambda d: _version_key(d["version"]), reverse=True)
+    return out
+
+
+def store_usage() -> int:
+    """updates-store 占用字节数（2 核小盘，值得盯着）。"""
+    if not UPDATES_STORE.exists():
+        return 0
+    total = 0
+    for root, _, files in os.walk(UPDATES_STORE):
+        for f in files:
+            try:
+                total += (Path(root) / f).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
 # ── Public Endpoints ──
 
 @router.get("/updates/latest")
@@ -141,17 +187,66 @@ async def download_component(version: str, component: str, platform: str = "wind
 
 # ── Upload (API key required) ──
 
+def _remove_platform_version(version: str, platform: str) -> None:
+    """删掉某版本的**单个平台**内容，保留另一平台。
+
+    ⚠️ windows 的内容（manifest.json + *.zip）就在版本目录**顶层**，与 macos/
+    子目录同级 —— 所以只能逐个删文件，不能 rmtree 整个目录（那会连 macos 一起删，
+    正是本函数存在的原因）。
+    """
+    pdir = _platform_dir(version, platform)
+    if not pdir.exists():
+        return
+    if platform != "windows":
+        # macos 独占 {version}/macos/ 子目录，整目录删安全
+        shutil.rmtree(pdir, ignore_errors=True)
+        return
+    for f in pdir.iterdir():
+        if f.is_file() and (f.name == "manifest.json" or f.suffix == ".zip"):
+            f.unlink(missing_ok=True)
+
+
 def _prune_old_versions(current: str, keep: int = 3) -> None:
-    """上传成功后保留最近 keep 个版本目录，删除更旧的（含该版本下 windows/macos 子目录），
-    防止 updates-store 无限累积把磁盘撑满（发布平台早期缺陷：每版留一个副本）。"""
+    """上传成功后按**平台各自**保留最近 keep 个版本，清掉更旧的。
+
+    防止 updates-store 无限累积把磁盘撑满（2 核小盘）；同时避免「按版本号整体删」
+    把另一平台的版本误伤。
+
+    ⚠️ 为什么必须按平台分开算（2026-09-15 修复）：
+    版本目录由两平台共享 —— windows 用 {version}/、macos 用 {version}/macos/。
+    旧实现对超额版本直接 `rmtree(UPDATES_STORE / v)`，会把**另一个平台**的内容
+    一并删除。而 mac 发版频率天然低于 windows、版本号永远更旧，于是每次 windows
+    发布都把它挤出保留窗口 → 「程序更新」页 mac 列表最终全空，
+    `/api/updates/latest?platform=macos` 返回 404（mac 客户端检查更新直接失效）。
+
+    现在各平台独立算保留集，只删该平台自己的内容；某版本两平台都清空了才删目录。
+
+    `current` 是刚落盘的版本：它在自己的平台上必然是最新，但**可能比该平台其它
+    已有版本号更旧**（重传旧版本号的场景）—— 那种情况下它也会落进淘汰区，故仍需
+    显式放行，不能顺手清掉调用方刚上传的东西。
+    """
     try:
-        vers = [d.name for d in UPDATES_STORE.iterdir()
-                if d.is_dir() and VERSION_RE.match(d.name)]
-        vers = sorted(vers, key=_version_key, reverse=True)
-        for v in vers[keep:]:
-            if v == current:
-                continue
-            shutil.rmtree(UPDATES_STORE / v, ignore_errors=True)
+        vers = sorted(
+            (d.name for d in UPDATES_STORE.iterdir()
+             if d.is_dir() and VERSION_RE.match(d.name)),
+            key=_version_key,
+            reverse=True,
+        )
+
+        for platform in sorted(PLATFORMS):
+            have = [v for v in vers if _read_manifest(v, platform)]
+            for v in have[keep:]:
+                if v == current:
+                    continue
+                _remove_platform_version(v, platform)
+
+        # 两个平台都已清空的版本目录 → 整个删掉，不留空壳
+        for v in vers:
+            vdir = UPDATES_STORE / v
+            if vdir.exists() and not any(
+                (_platform_dir(v, p) / "manifest.json").exists() for p in PLATFORMS
+            ):
+                shutil.rmtree(vdir, ignore_errors=True)
     except Exception:
         pass
 
@@ -185,11 +280,15 @@ async def upload_release(
             detail=f"Manifest version '{manifest_data.get('version')}' does not match URL '{version}'",
         )
 
-    # Create platform-scoped version directory
+    # Create platform-scoped version directory.
+    # ⚠️ 覆盖重传时**只清本平台的内容**，不能 rmtree 整个目录 ——
+    # windows 的 version_dir 是版本目录顶层，与 macos/ 子目录同级，整体删会连
+    # 另一平台一起端掉（2026-09-15 mac 被误删就是这个：发 windows 同版本号时
+    # 把当天刚发的 macos/ 一并 rmtree 了）。详见 _remove_platform_version。
     version_dir = _platform_dir(version, platform)
     if version_dir.exists():
-        shutil.rmtree(version_dir)
-    version_dir.mkdir(parents=True)
+        _remove_platform_version(version, platform)
+    version_dir.mkdir(parents=True, exist_ok=True)
 
     # Save manifest
     (version_dir / "manifest.json").write_text(

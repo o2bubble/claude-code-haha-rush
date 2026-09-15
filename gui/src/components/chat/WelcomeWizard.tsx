@@ -5,8 +5,10 @@ import { withTimeout, DEFAULT_LOAD_TIMEOUT_MS } from "../../services/asyncUtils"
 import { WindowControls, isWindowsChrome } from "../TitleBar";
 import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
+import { CLOUD_SERVER_URL, INTRANET_SERVER_URL, type PresetServerProfile } from "../../utils/serverProfile";
 
-export type ServerProfile = "intranet" | "public";
+/** 向导只提供两档预设；「自定义」只在设置面板里给。 */
+type ServerProfile = PresetServerProfile;
 
 export interface WizardSettings {
   language: "zh" | "en";
@@ -24,9 +26,10 @@ interface WelcomeWizardProps {
 const TOTAL_STEPS = 7;
 
 // ── Server URLs ──
+// 地址常量集中在 utils/serverProfile（前端唯一真源）。
 const SERVER_URLS: Record<ServerProfile, string> = {
-  intranet: "http://192.168.186.96:8765",
-  public: "http://123.56.66.84:8765",
+  intranet: INTRANET_SERVER_URL,
+  public: CLOUD_SERVER_URL,
 };
 
 // ── Inline style tokens ──

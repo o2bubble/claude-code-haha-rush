@@ -18,10 +18,11 @@ describe('aggregatePluginRuntimePaths — contract twin of GUI aggregateRuntimeP
   const base = 'C:/base'
 
   test('collects existing runtime dirs for enabled plugins', () => {
+    // exists 只认 runtime 根（不认 bin）→ 只输出根
     const out = aggregatePluginRuntimePaths(
       [{ name: 'nodejs', manifestJson: manifest([{ id: 'node', path: 'runtime' }]) }],
       new Set(),
-      p => p.includes('nodejs'),
+      p => p === `${base}/nodejs/runtime`,
       base,
     )
     expect(out).toEqual([`${base}/nodejs/runtime`])
@@ -49,10 +50,45 @@ describe('aggregatePluginRuntimePaths — contract twin of GUI aggregateRuntimeP
         { name: 'ok', manifestJson: manifest([{ id: 'o', path: 'runtime' }]) },
       ],
       new Set(),
-      () => true,
+      p => !p.endsWith('/bin'),
       base,
     )
     expect(out).toEqual([`${base}/ok/runtime`])
+  })
+
+  // ── 回归：mac/Linux 的 node 在 `runtime/bin/`，只注入根会找不到 node/npm/npx ──
+  // 2026-09-14 修 PATH 时只改了 GUI 侧、漏了这里 → A 通道（启动自扫）仍只注入根
+  // → mac 上重启 GUI 后裸 node/npm/npx 依旧 not found（playwright-mcp 起不来）。
+  // 这组测试是那次漏改的直接防线。
+
+  test('mac/Linux 布局：bin/ 存在时一并注入', () => {
+    const out = aggregatePluginRuntimePaths(
+      [{ name: 'nodejs', manifestJson: manifest([{ id: 'node', path: 'runtime' }]) }],
+      new Set(),
+      p => p === `${base}/nodejs/runtime` || p === `${base}/nodejs/runtime/bin`,
+      base,
+    )
+    expect(out).toEqual([`${base}/nodejs/runtime`, `${base}/nodejs/runtime/bin`])
+  })
+
+  test('根不存在时不注入（不去试 bin）', () => {
+    const out = aggregatePluginRuntimePaths(
+      [{ name: 'nodejs', manifestJson: manifest([{ id: 'node', path: 'runtime' }]) }],
+      new Set(),
+      p => p.endsWith('/bin'),
+      base,
+    )
+    expect(out).toEqual([])
+  })
+
+  test('声明已指向 bin 时不产生 bin/bin', () => {
+    const out = aggregatePluginRuntimePaths(
+      [{ name: 'a', manifestJson: manifest([{ id: 'x', path: 'runtime/bin' }]) }],
+      new Set(),
+      () => true,
+      base,
+    )
+    expect(out).toEqual([`${base}/a/runtime/bin`])
   })
 
   test('deduplicates identical dirs', () => {
@@ -62,7 +98,7 @@ describe('aggregatePluginRuntimePaths — contract twin of GUI aggregateRuntimeP
         { name: 'b', manifestJson: manifest([{ id: 'y', path: 'shared' }]) },
       ],
       new Set(),
-      () => true,
+      p => !p.endsWith('/bin'),
       base,
     )
     expect(out).toEqual([`${base}/a/shared`, `${base}/b/shared`])
@@ -95,7 +131,8 @@ describe('contract symmetry — GUI aggregateRuntimePaths vs claude aggregatePlu
     { name: 'empty', manifestJson: mk('empty', []) },
   ]
   const disabled = new Set(['py'])
-  const exists = (p: string) => p.includes('nodejs')
+  // 只认 runtime 根（不认 bin）：两侧都不产生 bin 条目，便于比对纯聚合逻辑
+  const exists = (p: string) => p === `${base}/nodejs/runtime`
   const base = 'C:/base'
 
   test('same input → same output on both sides', () => {

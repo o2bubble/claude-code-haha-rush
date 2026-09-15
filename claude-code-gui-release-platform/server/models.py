@@ -60,6 +60,14 @@ def init_db() -> None:
             created_at  TEXT NOT NULL
         )
     """)
+    # 迁移: 老库无 note/updated_at → ALTER 补齐（管理后台的「处理备注」用）。
+    # 常量默认值 → SQLite 只改元数据，2 核小机上瞬时完成，无重写表风险。
+    # 这是本文件第 2 处补丁；再出现第 3 处就该引入 schema_version 表了。
+    fb_cols = [r[1] for r in conn.execute("PRAGMA table_info(feedback)").fetchall()]
+    if "note" not in fb_cols:
+        conn.execute("ALTER TABLE feedback ADD COLUMN note TEXT DEFAULT ''")
+    if "updated_at" not in fb_cols:
+        conn.execute("ALTER TABLE feedback ADD COLUMN updated_at TEXT DEFAULT ''")
     conn.commit()
     conn.close()
 
@@ -222,7 +230,177 @@ def update_feedback_status(fid: int, status: str) -> dict | None:
     return get_feedback(fid)
 
 
+def update_feedback(fid: int, status: str | None = None, note: str | None = None) -> dict | None:
+    """状态与备注的局部更新（None = 该项不动）。管理后台 PATCH 用。"""
+    sets, params = [], []
+    if status is not None:
+        sets.append("status = ?")
+        params.append(status)
+    if note is not None:
+        sets.append("note = ?")
+        params.append(note)
+    if not sets:
+        return get_feedback(fid)
+    sets.append("updated_at = ?")
+    params.append(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    params.append(fid)
+    conn = get_conn()
+    conn.execute(f"UPDATE feedback SET {', '.join(sets)} WHERE id = ?", params)
+    conn.commit()
+    conn.close()
+    return get_feedback(fid)
+
+
+# ── Admin queries (分页 / 搜索 / 统计) ──
+# 与上面的 GUI 查询分开：GUI 侧要全量、要稳定（改动会打断客户端）；
+# 管理后台要分页、搜索、总数、聚合。两者互不影响。
+
+_PKG_SORTS = {
+    "download": "download_count DESC",
+    "name": "name ASC",
+    "created": "created_at DESC",
+    "updated": "updated_at DESC",
+}
+
+
+def list_packages_admin(
+    pkg_type: str | None = None,
+    q: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    sort: str = "updated",
+) -> dict:
+    """管理后台分页列表 → {items, total, page, page_size, pages}。"""
+    where, params = [], []
+    if pkg_type:
+        where.append("type = ?")
+        params.append(pkg_type)
+    if q:
+        where.append("(slug LIKE ? OR name LIKE ? OR author LIKE ? OR description LIKE ?)")
+        like = f"%{q}%"
+        params += [like, like, like, like]
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    # sort 经白名单字典映射 —— 不拼接用户输入，无注入面
+    order = _PKG_SORTS.get(sort, _PKG_SORTS["updated"])
+
+    conn = get_conn()
+    total = conn.execute(f"SELECT COUNT(*) FROM packages {clause}", params).fetchone()[0]
+    rows = conn.execute(
+        f"SELECT * FROM packages {clause} ORDER BY {order} LIMIT ? OFFSET ?",
+        params + [page_size, (page - 1) * page_size],
+    ).fetchall()
+    conn.close()
+    return {
+        "items": [_row_to_pkg(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
+    }
+
+
+def list_feedback_admin(
+    status: str | None = None,
+    fb_type: str | None = None,
+    q: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """管理后台反馈分页列表（比 GUI 版多 type/关键字筛选与总数）。"""
+    where, params = [], []
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    if fb_type:
+        where.append("type = ?")
+        params.append(fb_type)
+    if q:
+        where.append("(message LIKE ? OR note LIKE ?)")
+        like = f"%{q}%"
+        params += [like, like]
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+
+    conn = get_conn()
+    total = conn.execute(f"SELECT COUNT(*) FROM feedback {clause}", params).fetchone()[0]
+    rows = conn.execute(
+        f"SELECT * FROM feedback {clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        params + [page_size, (page - 1) * page_size],
+    ).fetchall()
+    conn.close()
+    return {
+        "items": [_row_to_feedback(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
+    }
+
+
+def stats_packages() -> dict:
+    """包聚合统计。全部来自现有列 —— 无下载明细，故做不了趋势。"""
+    conn = get_conn()
+    total = conn.execute("SELECT COUNT(*) FROM packages").fetchone()[0]
+    by_type = {r["type"]: r["c"] for r in conn.execute(
+        "SELECT type, COUNT(*) AS c FROM packages GROUP BY type").fetchall()}
+    sums = conn.execute(
+        "SELECT COALESCE(SUM(download_count),0) AS dl, COALESCE(SUM(skill_count),0) AS sk "
+        "FROM packages").fetchone()
+    top = conn.execute(
+        "SELECT slug, name, type, download_count FROM packages "
+        "ORDER BY download_count DESC LIMIT 10").fetchall()
+    by_author = conn.execute(
+        "SELECT author, COUNT(*) AS c, COALESCE(SUM(download_count),0) AS dl FROM packages "
+        "GROUP BY author ORDER BY c DESC LIMIT 10").fetchall()
+    zero = conn.execute("SELECT COUNT(*) FROM packages WHERE download_count = 0").fetchone()[0]
+    recent = conn.execute(
+        "SELECT slug, name, type, version, updated_at FROM packages "
+        "ORDER BY updated_at DESC LIMIT 5").fetchall()
+    conn.close()
+    return {
+        "total": total,
+        "by_type": by_type,
+        "download_total": sums["dl"],
+        "skill_total": sums["sk"],
+        "top_downloads": [dict(r) for r in top],
+        "by_author": [dict(r) for r in by_author],
+        "zero_download": zero,
+        "recent_updated": [dict(r) for r in recent],
+    }
+
+
+def stats_feedback(days: int = 30) -> dict:
+    """反馈聚合统计。created_at 是 UTC（Z 后缀），按日分桶也是 UTC —— 前端需标注。"""
+    conn = get_conn()
+    total = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+    by_status = {r["status"]: r["c"] for r in conn.execute(
+        "SELECT status, COUNT(*) AS c FROM feedback GROUP BY status").fetchall()}
+    by_type = {r["type"]: r["c"] for r in conn.execute(
+        "SELECT type, COUNT(*) AS c FROM feedback GROUP BY type").fetchall()}
+    with_image = conn.execute(
+        "SELECT COUNT(*) FROM feedback WHERE image_path IS NOT NULL AND image_path != ''"
+    ).fetchone()[0]
+    # 哪个版本最招 bug —— 发布质量的高价值信号
+    by_version = conn.execute(
+        "SELECT COALESCE(NULLIF(app_version,''),'(未上报)') AS version, COUNT(*) AS c "
+        "FROM feedback GROUP BY version ORDER BY c DESC LIMIT 10").fetchall()
+    by_day = conn.execute(
+        "SELECT substr(created_at,1,10) AS day, COUNT(*) AS c FROM feedback "
+        "GROUP BY day ORDER BY day DESC LIMIT ?", (days,)).fetchall()
+    conn.close()
+    return {
+        "total": total,
+        "by_status": by_status,
+        "by_type": by_type,
+        "backlog": by_status.get("open", 0) + by_status.get("in_progress", 0),
+        "with_image": with_image,
+        "by_version": [dict(r) for r in by_version],
+        "by_day": [dict(r) for r in by_day],
+        "timezone": "UTC",
+    }
+
+
 def _row_to_feedback(row: sqlite3.Row) -> dict:
+    keys = row.keys()
     return {
         "id": row["id"],
         "type": row["type"],
@@ -231,6 +409,9 @@ def _row_to_feedback(row: sqlite3.Row) -> dict:
         "app_version": row["app_version"],
         "status": row["status"],
         "created_at": row["created_at"],
+        # 老库（迁移前建的）可能没有这两列，用 keys() 兜底 —— 同 _row_to_pkg 的写法
+        "note": row["note"] if "note" in keys else "",
+        "updated_at": row["updated_at"] if "updated_at" in keys else "",
     }
 
 

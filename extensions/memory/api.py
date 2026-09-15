@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from auth import BearerAuthMiddleware, resolve_token
+from auth import DEFAULT_EXEMPT, BearerAuthMiddleware, resolve_token
 from normalize import apply_tag_mapping
 from search_engine import hybrid_search
 from store import MemoryStore, _scope_condition
@@ -62,6 +62,10 @@ def create_app(auth_token: Optional[str] = None) -> FastAPI:
         app.add_middleware(
             BearerAuthMiddleware,
             token=auth_token,
+            # /api/public-stats 是唯一的公开 API：landing 页在**未登录**时就要
+            # 显示「有多少条记忆」，那时它还没有 token。只暴露三个总数，
+            # 不含 by_scope 明细（那会泄露内部项目名）。其余 /api/* 一律要 token。
+            exempt=DEFAULT_EXEMPT | {"/api/public-stats"},
             protect_prefixes=("/api/",),
         )
 
@@ -104,6 +108,22 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/stats")
     async def get_stats():
         return store.get_stats()
+
+    @app.get("/api/public-stats")
+    async def get_public_stats():
+        """Public aggregate counts for the landing page (no token required).
+
+        Deliberately narrow: three totals only. `by_scope` is NOT exposed here —
+        scope names contain internal project identifiers. This endpoint is
+        registered in the auth middleware's exempt set; keep the response shape
+        minimal if you ever extend it.
+        """
+        s = store.get_stats()
+        return {
+            "total_memories": s.get("total_memories", 0),
+            "total_tags": s.get("total_tags", 0),
+            "total_associations": s.get("total_associations", 0),
+        }
 
     @app.get("/api/tags")
     async def get_tags(scope: Optional[str] = None):

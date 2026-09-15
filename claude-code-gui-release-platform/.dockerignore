@@ -1,0 +1,31 @@
+# 构建上下文排除 —— 没有这个文件时，`docker build .` 会把**整个目录**（含运行时数据）
+# 打包发给 daemon。本项目 updates-store 有 836MB，白传一遍且可能被 COPY 进镜像。
+
+# ── 运行时数据（compose 用 volume 挂载，绝不能进镜像）──
+skills-store/
+updates-store/
+feedback-images/
+registry.db
+registry.db-*
+registry.db.bak.*
+
+# ── 部署/文档/备份 ──
+*.bak
+*.bak.*
+PUBLISH.md
+skills-registry.service
+docker-compose.yml
+Dockerfile
+
+# ── 前端 ──
+# node_modules 必排：几万个文件，不排会把构建上下文撑到几百 MB。
+# 注意**不要**排除 web/ 本身（Dockerfile 阶段 1 要 COPY 它）。
+web/node_modules/
+web/dist/
+# static/admin/ 是前端构建产物，唯一来源应是 Dockerfile 阶段 1 的 `--from=web`。
+# 不排的话本机残留的旧产物会混进上下文（且让别人的机器构建出不同结果）。
+static/admin/
+
+# ── 版本控制 ──
+.git/
+.gitignore

@@ -9,9 +9,16 @@
 - mac 组件集：`{gui, claude, bun, tools, python, extensions}`（无 git=系统自带、无 updater=osascript 提权替代）
 - mac 无更新 stager：gui→osascript 提权 ditto 替换 .app；其他组件→osascript 提权复制
 
-## 1. 构建流程（触发 CI）
+## 1. 构建流程（触发构建）
 
-Codemagic（免费 mac_mini_m2）自动监听 GitHub 镜像仓库 push。改代码后：
+> ⚠️ **现状（2026-09-14 用户确认）**：GitHub Actions 侧的 mac 构建**已停用** ——
+> 推代码**不会**触发任何构建。mac 构建改由**用户在 Codemagic 平台侧触发**。
+> 需要 mac 产物时找用户要，**不要**以为推完 GitHub 就有了。
+>
+> 下面这段「推 GitHub → Codemagic 自动构建」是**历史流程**，保留供参考；
+> 其中第 3 步的自动触发已失效。
+
+Codemagic（免费 mac_mini_m2）监听 GitHub 镜像仓库 push。改代码后：
 
 ```bash
 # 1. 提交到本地 main
@@ -20,9 +27,9 @@ git add <files> && git commit -m "..."
 # 2. push gitee main（主仓库）
 git push origin main
 
-# 3. sync 到 GitHub 触发 Codemagic（关键！不 sync 不构建）
+# 3. sync 到 GitHub（历史上这步会触发 Codemagic 构建 —— 现已不自动触发）
 bash scripts/sync-github-clean.sh
-# → 推 GitHub main + gitee github-clean，Codemagic 收到 push 自动构建
+# → 推 GitHub main + gitee github-clean
 ```
 
 **⚠️ 代理坑（2026-09-04）**：本机 git global http.proxy = `socks5h://127.0.0.1:17891`，代理进程死了会 `Failed to connect to 127.0.0.1 port 17891`。绕过法（不动全局配置）：

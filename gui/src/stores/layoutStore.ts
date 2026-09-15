@@ -1,4 +1,4 @@
-import type { IconKey, LayoutNode, SplitNode, TabGroup, TabInstance, FloatingWindow, TauriWindow, Visibility } from "../types/layout";
+import type { IconKey, LayoutNode, SplitNode, TabGroup, TabInstance, FloatingWindow, FloatingChrome, TauriWindow, Visibility } from "../types/layout";
 import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { addStatusMessage } from "./statusMsgStore";
@@ -121,6 +121,8 @@ function serializeFloating(fp: FloatingWindow): any {
   return {
     type: "floating", id: fp.id,
     x: fp.x, y: fp.y, width: fp.width, height: fp.height, zIndex: fp.zIndex,
+    // 缺省不写该字段 —— 保持存量数据的形态，不为传统浮窗平白增加持久化噪音
+    ...(fp.chrome ? { chrome: fp.chrome } : {}),
     group: serializeNode(fp.group),
   };
 }
@@ -199,6 +201,9 @@ function deserializeFloating(data: any): FloatingWindow | null {
   return {
     type: "floating", id: data.id,
     x: data.x, y: data.y, width: data.width, height: data.height, zIndex: data.zIndex,
+    // 老数据无该字段 → undefined → resolveChrome 视作全 true（传统浮窗）。
+    // 形状不校验：resolveChrome 用 `!== false` 判定，垃圾值安全降级为传统形态。
+    ...(data.chrome ? { chrome: data.chrome } : {}),
     group,
   };
 }
@@ -334,11 +339,29 @@ export function getFloatingPanels(): FloatingWindow[] {
   return floatingPanels;
 }
 
-export function addFloatingPanel(group: TabGroup, x: number, y: number, width: number, height: number): string {
+/** 创建主窗口内的浮动面板。
+ *  @param chrome 外壳配置；缺省 = 传统浮窗（标题栏 + 不透明 + 可缩放）。
+ *                传 `{ titleBar: false, background: false }` 即无标题栏的透明浮层
+ *                —— 此时拖动靠内容中标记 `data-float-drag` 的元素。 */
+export function addFloatingPanel(
+  group: TabGroup,
+  x: number, y: number, width: number, height: number,
+  chrome?: FloatingChrome,
+): string {
   const id = `float-${crypto.randomUUID()}`;
-  floatingPanels.push({ type: "floating", id, group, x, y, width, height, zIndex: _floatingZCounter++ });
+  floatingPanels.push({ type: "floating", id, group, x, y, width, height, zIndex: _floatingZCounter++, chrome });
   notifyFloatingChange();
   return id;
+}
+
+/** 更新外壳配置。传 undefined = 恢复传统浮窗（全部 true）。
+ *  让「请求打开」幂等：反复 open-panel 同一面板，呈现代码终态一致。 */
+export function updateFloatingChrome(id: string, chrome?: FloatingChrome) {
+  const fp = floatingPanels.find((fp) => fp.id === id);
+  if (!fp) return;
+  if (chrome) fp.chrome = chrome;
+  else delete fp.chrome;
+  notifyFloatingChange();
 }
 
 export function removeFloatingPanel(id: string) {

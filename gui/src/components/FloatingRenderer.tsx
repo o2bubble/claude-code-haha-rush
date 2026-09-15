@@ -6,7 +6,7 @@ import { resolveTabRender } from "../stores/panelRegistry";
 import { prepareDrag, ensureGlobalDragListeners, subscribeDragState, computeDropTarget, ROOT_EDGE_GROUPS } from "./LayoutRenderer";
 import { showCtxMenu } from "./ContextMenu";
 import type { ContextMenuItem } from "./ContextMenu";
-import type { FloatingWindow, TabInstance } from "../types/layout";
+import type { FloatingWindow, FloatingChrome, TabInstance } from "../types/layout";
 import { iconFor } from "../utils/icons";
 import { t } from "../i18n";
 
@@ -14,11 +14,30 @@ const FLOATING_WIN_BASE = {
   position: "fixed",
   display: "flex",
   flexDirection: "column",
-  backgroundColor: "var(--bg-root)",
-  border: "1px solid var(--border-medium)",
-  borderRadius: 6,
-  boxShadow: "0 8px 32px rgba(0,0,0,0.24), 0 2px 8px rgba(0,0,0,0.12)",
   overflow: "hidden",
+} as const;
+
+/** 外壳配置解析 —— 缺省字段一律视为 true（= 现有全部浮窗的行为）。
+ *  导出供单测锁定默认值语义。 */
+export function resolveChrome(chrome: FloatingChrome | undefined) {
+  return {
+    titleBar: chrome?.titleBar !== false,
+    background: chrome?.background !== false,
+    border: chrome?.border !== false,
+    shadow: chrome?.shadow !== false,
+    resizable: chrome?.resizable !== false,
+  };
+}
+
+const FLOATING_BG = {
+  backgroundColor: "var(--bg-root)",
+  borderRadius: 6,
+} as const;
+
+const FLOATING_BORDER = { border: "1px solid var(--border-medium)" } as const;
+
+const FLOATING_SHADOW = {
+  boxShadow: "0 8px 32px rgba(0,0,0,0.24), 0 2px 8px rgba(0,0,0,0.12)",
 } as const;
 
 const FLOATING_TITLE_BAR = {
@@ -165,6 +184,7 @@ function FloatingPanelView({ panel }: { panel: FloatingWindow }) {
     iw: number; ih: number;
   } | null>(null);
 
+  const chrome = resolveChrome(panel.chrome);
   const group = panel.group;
   const activeTab = group.tabs.find((t) => t.id === group.activeTabId);
 
@@ -179,9 +199,9 @@ function FloatingPanelView({ panel }: { panel: FloatingWindow }) {
     contentRender = resolveTabRender(activeTab);
   }
 
-  // ── 标题栏拖拽移动 ──
+  // ── 拖拽移动（标题栏，或内容中标记 data-float-drag 的元素）──
 
-  const onTitleMouseDown = useCallback((e: React.MouseEvent) => {
+  const onDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     bringFloatingToFront(panel.id);
     dragRef.current = {
@@ -282,9 +302,28 @@ function FloatingPanelView({ panel }: { panel: FloatingWindow }) {
     <div
       ref={panelRef}
       data-floating-id={panel.id}
-      onMouseDown={() => bringFloatingToFront(panel.id)}
+      onMouseDown={(e) => {
+        bringFloatingToFront(panel.id);
+        // 拖拽入口委托：命中 data-float-drag 才启动移动。标题栏自带该标记；
+        // 无标题栏时由注册方在自己的内容里标。标题栏内的 tab / dock 手柄各有
+        // stopPropagation，不会串到这里。没标任何元素 = 该浮窗不可拖动。
+        const target = e.target as Element | null;
+        if (target?.closest?.("[data-float-drag]")) onDragStart(e);
+      }}
+      onContextMenu={(e) => {
+        // 无标题栏时没有关闭入口 —— 右键兜底一个「关闭」，避免注册方未自绘
+        // 关闭按钮时浮窗关不掉。注册方自行处理右键（stopPropagation）即不触发。
+        if (chrome.titleBar) return;
+        e.preventDefault();
+        showCtxMenu(e.clientX, e.clientY, [
+          { label: t("layout.closeGroup"), action: () => removeFloatingPanel(panel.id) },
+        ]);
+      }}
       style={{
         ...FLOATING_WIN_BASE,
+        ...(chrome.background ? FLOATING_BG : null),
+        ...(chrome.border ? FLOATING_BORDER : null),
+        ...(chrome.shadow ? FLOATING_SHADOW : null),
         left: panel.x,
         top: panel.y,
         width: panel.width,
@@ -293,7 +332,8 @@ function FloatingPanelView({ panel }: { panel: FloatingWindow }) {
       }}
     >
       {/* 标题栏 */}
-      <div style={FLOATING_TITLE_BAR} onMouseDown={onTitleMouseDown}>
+      {chrome.titleBar && (
+      <div style={FLOATING_TITLE_BAR} data-float-drag>
         {/* Dock handle — 拖拽入坞，与标题栏移动分离 */}
         <div
           onMouseDown={(e) => {
@@ -440,6 +480,7 @@ function FloatingPanelView({ panel }: { panel: FloatingWindow }) {
           ×
         </div>
       </div>
+      )}
 
       {/* 复合 tab bar */}
       {compoundTabs && (
@@ -492,7 +533,7 @@ function FloatingPanelView({ panel }: { panel: FloatingWindow }) {
       </div>
 
       {/* Resize 把手 (8 方向) */}
-      {resizeDirs.map((dir) => {
+      {chrome.resizable && resizeDirs.map((dir) => {
         const isN = dir.includes("n"), isS = dir.includes("s");
         const isE = dir.includes("e"), isW = dir.includes("w");
 

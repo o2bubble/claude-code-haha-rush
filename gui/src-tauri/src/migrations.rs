@@ -154,6 +154,34 @@ pub fn should_migrate_server_url(skill_registry_url: &str) -> bool {
     skill_registry_url.contains("localhost")
 }
 
+// ── 云服务器地址：裸 IP → Cloudflare Tunnel 域名（一次性） ──
+
+/// 云服务器的旧发布默认地址（云主机裸 IP）。
+const LEGACY_CLOUD_SERVER_URL: &str = "http://123.56.66.84:8765";
+/// 云服务器的新地址（Cloudflare Tunnel 域名）。
+const CLOUD_SERVER_URL: &str = "https://release.17lumen.cloud";
+
+/// 把旧的云主机裸 IP 改写成 Cloudflare Tunnel 域名。返回是否发生改写。
+///
+/// 为什么迁移：裸 IP 在受限网络（企业网等）访问云主机是被静默丢包的，用户选了
+/// 「公网」档却完全连不上；域名走 CF 边缘则处处可达。代价是国内访问绕境外边缘
+/// 多约 200ms，对更新检查无感。
+///
+/// 只改写**精确等于旧发布默认值**的地址 —— 用户自定义的任何其它地址一律不动
+/// （与 [`should_migrate_server_url`] 的克制风格一致）。
+pub fn migrate_legacy_cloud_url(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+    if settings.skill_registry_url == LEGACY_CLOUD_SERVER_URL {
+        settings.skill_registry_url = CLOUD_SERVER_URL.to_string();
+        changed = true;
+    }
+    if settings.update_server_url == LEGACY_CLOUD_SERVER_URL {
+        settings.update_server_url = CLOUD_SERVER_URL.to_string();
+        changed = true;
+    }
+    changed
+}
+
 // ── 消息时间线：默认开启（一次性） ──
 
 /// 消息时间线功能已完善，改为**默认开启**让用户直接体验。
@@ -727,6 +755,59 @@ mod tests {
         assert!(!should_migrate_server_url("http://123.56.66.84:8765"));
         assert!(!should_migrate_server_url("http://192.168.186.96:8765"));
         assert!(!should_migrate_server_url("http://example.com:8765"));
+    }
+
+    // ── 云服务器地址：裸 IP → CF 域名（一次性） ──
+
+    fn settings_with_urls(skill: &str, update: &str) -> AppSettings {
+        AppSettings {
+            skill_registry_url: skill.to_string(),
+            update_server_url: update.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// 旧发布默认（裸 IP）两处都被改写成 CF 域名。
+    #[test]
+    fn legacy_cloud_url_is_migrated_to_tunnel_domain() {
+        let mut s = settings_with_urls(LEGACY_CLOUD_SERVER_URL, LEGACY_CLOUD_SERVER_URL);
+        assert!(migrate_legacy_cloud_url(&mut s));
+        assert_eq!(s.skill_registry_url, "https://release.17lumen.cloud");
+        assert_eq!(s.update_server_url, "https://release.17lumen.cloud");
+    }
+
+    /// 幂等：迁移过再跑一次不该有变化（否则每次加载都会重写磁盘）。
+    #[test]
+    fn legacy_cloud_url_migration_is_idempotent() {
+        let mut s = settings_with_urls(LEGACY_CLOUD_SERVER_URL, LEGACY_CLOUD_SERVER_URL);
+        migrate_legacy_cloud_url(&mut s);
+        assert!(!migrate_legacy_cloud_url(&mut s), "第二次不应再改写");
+    }
+
+    /// 只有**精确等于**旧默认值才迁移 —— 用户自定义地址一律不动
+    /// （内网 96、自建域名、其它 IP 都不是旧发布默认值）。
+    #[test]
+    fn legacy_cloud_url_migration_leaves_custom_urls_alone() {
+        for custom in [
+            "http://192.168.186.96:8765",
+            "https://release.17lumen.cloud",
+            "http://my-own-server.example.com:8765",
+            "http://123.56.66.84:9999", // 同 IP 不同端口 = 用户自定，不动
+        ] {
+            let mut s = settings_with_urls(custom, custom);
+            assert!(!migrate_legacy_cloud_url(&mut s), "{custom} 不应被迁移");
+            assert_eq!(s.skill_registry_url, custom);
+            assert_eq!(s.update_server_url, custom);
+        }
+    }
+
+    /// 两个字段各自独立判定：只动与旧默认值相等的那一个。
+    #[test]
+    fn legacy_cloud_url_migration_is_per_field() {
+        let mut s = settings_with_urls(LEGACY_CLOUD_SERVER_URL, "http://192.168.186.96:8765");
+        assert!(migrate_legacy_cloud_url(&mut s));
+        assert_eq!(s.skill_registry_url, "https://release.17lumen.cloud");
+        assert_eq!(s.update_server_url, "http://192.168.186.96:8765", "自定义的内网地址不该被改");
     }
 
     // ── DeepSeek 模型下线：profile 合并迁移（临时目录，绝不碰真实 ~/.claude）──

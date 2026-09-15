@@ -1,6 +1,7 @@
 // skillMarketplace.ts — API client for the skill registry server
 
 import { getSettings } from "../stores/settingsStore";
+import { INTRANET_SERVER_URL } from "../utils/serverProfile";
 
 export interface PackageSummary {
   slug: string;
@@ -37,7 +38,7 @@ export interface PackageDetail extends PackageSummary {
 }
 
 function getBaseUrl(): string {
-  return getSettings().skillRegistryUrl ?? "http://192.168.186.96:8765";
+  return getSettings().skillRegistryUrl ?? INTRANET_SERVER_URL;
 }
 
 async function fetchWithTimeout(url: string, timeoutMs = 5000): Promise<Response> {

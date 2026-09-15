@@ -1,5 +1,5 @@
 import React, { memo, useState, useEffect, useCallback, useRef } from "react";
-import { ListChecks, Folder, FolderInput, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ExternalLink, ArrowUpRight } from "lucide-react";
+import { ListChecks, Folder, FolderInput, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ArrowUpRight, MoreHorizontal } from "lucide-react";
 import type { Session } from "../../stores/chatStore";
 import { getChatState } from "../../stores/chatStore";
 import { isBackendBusy } from "../../chat/chatReduce";
@@ -18,7 +18,9 @@ import {
   createSession,
   removeSession,
   renameSession,
+  forkSession,
 } from "./useChatBridge";
+import { showCtxMenu, type ContextMenuItem } from "../ContextMenu";
 import { t } from "../../i18n";
 import { addStatusMessage } from "../../stores/statusMsgStore";
 import { commandRegistry } from "../../services/windowBus";
@@ -311,6 +313,61 @@ function SessionPanelImpl() {
     );
   };
 
+  /**
+   * 单个会话行的操作菜单（⋯ 按钮与右键共用同一份，保证两处一致）。
+   *
+   * 行内只保留最高频的「切换（点整行）」与「收藏（★，需看到状态）」；
+   * 其余都收进这里，避免一行堆五个按钮。
+   *
+   * 顺序按 高频/安全 → 低频/危险，删除放最后且标红。
+   *
+   * 刻意**不用 useCallback**：它引用的 `startRename` 定义在本文件更靠后的位置，
+   * 而 useCallback 的依赖数组在渲染时求值 → 会触发 TDZ
+   * （Cannot access 'startRename' before initialization）。
+   * 这个函数只在用户点击时调用，重建开销可忽略。
+   */
+  const buildSessionMenu = (s: Session): ContextMenuItem[] => {
+    const items: ContextMenuItem[] = [
+      {
+        label: t("sessions.copyName"),
+        action: () => {
+          navigator.clipboard.writeText(s.title).catch(() => {});
+          addStatusMessage(t("sessions.copyNameDone"), "info");
+        },
+      },
+      {
+        // 分叉 = 以该会话为源复制一份新会话，**不切换**当前会话（新会话出现在列表里）。
+        // 若源会话正在流式写入，复制到的是「此刻已落盘的内容」—— 与复制文件语义一致。
+        label: t("sessions.fork"),
+        action: () => {
+          forkSession(s.id);
+          addStatusMessage(t("sessions.forkDone"), "info");
+        },
+      },
+      { separator: true },
+      { label: t("sessions.rename"), action: () => startRename(s) },
+    ];
+    if (foldersEnabled) {
+      items.push({
+        label: t("sessions.moveToFolder"),
+        action: () => setMovePickerFor([s.id]),
+      });
+    }
+    items.push(
+      {
+        label: t("sessions.openInNewWindow"),
+        action: () => void openInNewWindow(s.id),
+      },
+      { separator: true },
+      {
+        label: t("sessions.delete"),
+        action: () => setDeleteTarget(s),
+        danger: true,
+      },
+    );
+    return items;
+  };
+
   const renderSessionRow = (s: Session) => {
     // 当前会话高亮：优先后端 is_active，兜底前端 sessionId（后端不总是下发激活标记）
     const isCurrent = s.isActive || s.id === chatState.sessionId;
@@ -356,6 +413,14 @@ function SessionPanelImpl() {
       draggable={foldersEnabled && !selectMode}
       onDragStart={(e) => { e.stopPropagation(); setDragSessionId(s.id); }}
       onDragEnd={() => setDragSessionId(null)}
+      // 右键与 ⋯ 按钮共用同一份菜单，两处入口行为一致。
+      // 多选模式下不弹（保持框选交互），正在改名时也不弹（避免打断输入）。
+      onContextMenu={(e) => {
+        if (selectMode || editingId === s.id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        showCtxMenu(e.clientX, e.clientY, buildSessionMenu(s));
+      }}
     >
       {/* Checkbox in select mode */}
       {selectMode && (
@@ -416,7 +481,8 @@ function SessionPanelImpl() {
           {s.title}
         </span>
       )}
-      {/* Favorite star + rename + delete — only in non-select mode */}
+      {/* 行内只留两个：收藏（最高频且需看到选中态）+ ⋯（其余操作）。
+          重命名 / 移动 / 新窗口 / 删除 / 复制 / 分叉 全在菜单里（右键同样可达）。 */}
       {!selectMode && editingId !== s.id && (
         <>
           <button
@@ -433,62 +499,24 @@ function SessionPanelImpl() {
           >
             {favSet.has(s.id) ? "★" : "☆"}
           </button>
-          {foldersEnabled && (
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setMovePickerFor([s.id]); }}
-              title={t("sessions.moveToFolder")}
-              aria-label={t("sessions.moveToFolder")}
-              style={{
-                ...iconBtnStyle, fontSize: 12, marginLeft: 2,
-                opacity: hoveredId === s.id ? 0.7 : 0,
-                transition: "opacity 0.1s",
-              }}
-            >
-              📁
-            </button>
-          )}
           <button
             type="button"
             onClick={(e) => {
               e.stopPropagation();
-              startRename(s);
+              // 锚到按钮右下角展开，而不是鼠标位置 —— 键盘/触屏触发时也有合理落点
+              const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+              showCtxMenu(r.right - 4, r.bottom + 4, buildSessionMenu(s));
             }}
-            title={t("sessions.rename")}
-            aria-label={t("sessions.rename")}
-            style={{
-              ...iconBtnStyle, fontSize: 10, opacity: 0.4, marginLeft: 2,
-            }}
-          >
-            ✎
-          </button>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setDeleteTarget(s);
-            }}
-            title={t("sessions.delete")}
-            aria-label={t("sessions.delete")}
-            style={{
-              ...iconBtnStyle, fontSize: 10, opacity: 0.5, marginLeft: 2,
-            }}
-          >
-            ×
-          </button>
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); void openInNewWindow(s.id); }}
-            title={t("sessions.openInNewWindow")}
-            aria-label={t("sessions.openInNewWindow")}
+            title={t("sessions.more")}
+            aria-label={t("sessions.more")}
             style={{
               ...iconBtnStyle, display: "flex", alignItems: "center",
-              opacity: hoveredId === s.id ? 0.7 : 0,
+              opacity: favSet.has(s.id) ? 0.55 : hoveredId === s.id ? 0.55 : 0,
               transition: "opacity 0.1s",
               color: "var(--fg-secondary)", marginLeft: 2,
             }}
           >
-            <ExternalLink size={11} />
+            <MoreHorizontal size={13} />
           </button>
         </>
       )}

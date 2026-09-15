@@ -196,6 +196,9 @@ export function createChatSession(): ChatSession {
       case "resume_session":
       case "delete_session":
       case "rename_session":
+      // fork_session 的 session_id 是**源会话**（可不同于当前活跃会话）；
+      // 后端据此复制出一份新会话并回 session_forked，不切换当前会话。
+      case "fork_session":
         msg.type = type;
         msg.session_id = p.session_id;
         msg.title = p.title;

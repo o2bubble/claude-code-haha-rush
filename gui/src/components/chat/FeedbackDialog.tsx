@@ -1,6 +1,7 @@
 import { useState, useRef } from "react";
 import { t } from "../../i18n";
 import { getSettings } from "../../stores/settingsStore";
+import { INTRANET_SERVER_URL } from "../../utils/serverProfile";
 import { submitFeedback } from "../../services/feedbackService";
 import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
@@ -86,7 +87,7 @@ export default function FeedbackDialog() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const version = getSettings()._version ?? "1.0.0-preview";
-  const adminUrl = (getSettings().skillRegistryUrl ?? "http://192.168.186.96:8765") + "/admin";
+  const adminUrl = (getSettings().skillRegistryUrl ?? INTRANET_SERVER_URL) + "/admin";
 
   const handleBrowse = async () => {
     try {

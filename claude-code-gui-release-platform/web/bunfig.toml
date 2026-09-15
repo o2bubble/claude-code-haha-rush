@@ -1,0 +1,4 @@
+# 子目录不会自动继承仓库根的 bunfig.toml —— 这里显式指定国内镜像，
+# 否则 bun install 走默认源在本网络下会 FailedToOpenSocket。
+# 刻意不带根配置里的 preload（那是 claude 引擎自身的启动预载，与此无关）。
+registry = "https://registry.npmmirror.com"

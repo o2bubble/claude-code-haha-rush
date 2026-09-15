@@ -76,7 +76,23 @@ export function aggregatePluginRuntimePaths(
       if (!isRelativeInside(path)) continue
       const abs = join(base, entry.name, path).replace(/\\/g, '/')
       if (!existsFn(abs)) continue
+
+      // ⚠️ 声明目录 + 其 `bin/` 子目录**都注入**，让 node/npm/npx 在两种发行版
+      // 布局下都能解析：
+      //   · Windows 发行版：node.exe 在解压根          → `${abs}/node.exe` ✓
+      //   · mac/Linux 发行版：Unix 惯例放 `bin/`        → `${abs}/bin/node` ✓
+      //
+      // **必须与 GUI 侧 `gui/src/services/pluginRegistry.ts` 的 aggregateRuntimePaths
+      // 保持同一逻辑** —— 那两条通道（A 启动自扫 / B GUI 推送）覆盖同一个 PATH。
+      // 2026-09-14 修 PATH 时**只改了 GUI 侧**，漏了这里 → A 通道仍只注入根 →
+      // mac 上重启 GUI 后 node/npm/npx 依旧 not found（playwright-mcp 起不来）。
+      //
+      // 声明本身已以 `/bin` 结尾则不追加，防 `bin/bin`。
       if (!out.includes(abs)) out.push(abs)
+      if (!abs.endsWith('/bin')) {
+        const bin = `${abs}/bin`
+        if (existsFn(bin) && !out.includes(bin)) out.push(bin)
+      }
     }
   }
   return out

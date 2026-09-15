@@ -641,6 +641,15 @@ pub fn load_global_settings() -> AppSettings {
         save_global_settings(&s).ok();
     }
 
+    // Migrate the legacy cloud default (bare IP → Cloudflare Tunnel domain).
+    // The bare IP is unreachable from restricted networks (the whole point of
+    // the switch); only the exact legacy default is rewritten, custom URLs are
+    // left alone. See `migrations::migrate_legacy_cloud_url`.
+    if migrate_legacy_cloud_url(&mut s) {
+        log::info!("Migrating cloud server URL from bare IP to tunnel domain");
+        save_global_settings(&s).ok();
+    }
+
     // Migrate per-workspace quickPrompts into the global baseline. quickPrompts
     // are meant to be shared across workspaces, but older versions saved them
     // workspace-scoped — so each workspace's copy must be folded into global
@@ -654,7 +663,9 @@ pub fn load_global_settings() -> AppSettings {
 // ── 全局配置字段迁移 ──
 // 本体已集中到 src/migrations.rs（全清单见其 MIGRATION_REGISTRY）。
 // re-export 保持原有 `settings::xxx` 调用路径与测试不变。
-pub use crate::migrations::{migrate_quick_prompts_to_global, should_migrate_server_url};
+pub use crate::migrations::{
+    migrate_legacy_cloud_url, migrate_quick_prompts_to_global, should_migrate_server_url,
+};
 
 /// Merge `extra` prompts into `base`, dedup by id (first occurrence wins).
 /// Pure — extracted for testability; the idempotency guarantee of the migration

@@ -5103,18 +5103,28 @@ export function stripSignatureBlocks(messages: Message[]): Message[] {
     })
     if (filtered.length === content.length) return msg
 
-    // Strip to [] even for thinking-only messages. Streaming yields each
-    // content block as a separate same-id AssistantMessage (claude.ts:2150),
-    // so a thinking-only singleton here is usually a split sibling that
-    // mergeAssistantMessages (2232) rejoins with its text/tool_use partner.
-    // If we returned the original message, the stale signature would survive
-    // the merge. Empty content is absorbed by merge; true orphans are handled
-    // by the empty-content placeholder path in normalizeMessagesForAPI.
-
+    // Thinking-only messages get stripped to []. Streaming yields each content
+    // block as a separate same-id AssistantMessage, so a thinking-only
+    // singleton is usually a split sibling that mergeAssistantMessages
+    // rejoins with its text/tool_use partner. Returning the original message
+    // would let the stale signature survive that merge, so we do strip it.
+    //
+    // But if the merge does NOT happen, a [] here reaches the API and gets
+    // rejected: `messages.N: all messages must have non-empty content`.
+    // ⚠️ The empty-content guard in normalizeMessagesForAPI does NOT cover
+    // this: it runs earlier (when the message still holds [thinking], so it
+    // looks non-empty) AND skips the final message. So place a placeholder
+    // here rather than relying on that path.
     changed = true
     return {
       ...msg,
-      message: { ...msg.message, content: filtered },
+      message: {
+        ...msg.message,
+        content:
+          filtered.length === 0
+            ? [{ type: 'text' as const, text: NO_CONTENT_MESSAGE, citations: [] }]
+            : filtered,
+      },
     } as typeof msg
   })
 

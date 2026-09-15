@@ -387,6 +387,15 @@ fn env_category() -> Vec<DiagnosticCheck> {
     ];
     checks.extend(install_env_checks(&install_dir));
     checks.extend(profile_checks());
+
+    // macOS：`.app` 内关键二进制的可执行位（更新后丢失会导致引擎起不来）。
+    // install_dir = `<X>.app/Contents/MacOS/`，上溯两级即 .app 根。
+    #[cfg(target_os = "macos")]
+    if let Some(app) = install_dir.parent().and_then(|p| p.parent()) {
+        let (states, _) = scan_and_fix_app_exec_bits(app, true);
+        checks.push(check_mac_exec_bits(&states));
+    }
+
     checks
 }
 
@@ -588,7 +597,10 @@ pub fn check_profile_injected(inject_var_count: usize, active: Option<&str>) -> 
     DiagnosticCheck::new("profile_injected", status, "后端注入", detail)
 }
 
-const CLOUD_SERVER_URL: &str = "http://123.56.66.84:8765";
+/// 云服务器地址（Cloudflare Tunnel 域名，非云主机裸 IP）。
+/// 裸 IP 在受限网络（如企业网）会被静默拦掉；走 CF 边缘则各处可达。
+/// 前端 `services/diagnosticsService.ts` 的同名常量必须与此保持一致。
+const CLOUD_SERVER_URL: &str = "https://release.17lumen.cloud";
 /// 内网更新/注册服务器（skillRegistryUrl）：可达 → 通过，否则失败。
 pub fn check_update_server(reachable: bool, url: &str) -> DiagnosticCheck {
     let (status, detail) = if reachable {
@@ -599,7 +611,7 @@ pub fn check_update_server(reachable: bool, url: &str) -> DiagnosticCheck {
     DiagnosticCheck::new("update_server", status, "更新/注册服务器", detail)
 }
 
-/// 云服务器（123.56.66.84:8765）：可达 → 通过，否则失败。
+/// 云服务器（CLOUD_SERVER_URL）：可达 → 通过，否则失败。
 pub fn check_cloud_server(reachable: bool, url: &str) -> DiagnosticCheck {
     let (status, detail) = if reachable {
         (CheckStatus::Pass, format!("{} — 可达", url))
@@ -634,6 +646,102 @@ pub fn check_api_endpoint(
         (true, Some(hp), false) => (CheckStatus::Fail, format!("{} — TCP 不可达（AI 服务地址连不上）", hp)),
     };
     DiagnosticCheck::new("api_endpoint", status, "API BaseURL", detail)
+}
+
+/// macOS：`.app/Contents/MacOS/` 下关键二进制是否**可执行**。
+///
+/// 为什么需要这条检查：mac 自动更新时解压用 `File::create`（默认 0o644）且不还原
+/// zip 条目的 unix mode → `claude` 等丢失 +x → `claude-ide: ... claude: Permission
+/// denied` → 引擎起不来（"IDE backend did not announce port within timeout"）。
+/// 该故障**只在更新后出现**，且报错信息指向"权限"却不说是哪个文件，极难自查。
+///
+/// `binaries` 传 (文件名, 是否有可执行位)。
+///
+/// 不加 `cfg(target_os)` —— 它是**纯逻辑**（只用 `DiagnosticCheck`），去掉门控才能
+/// 在任意平台单测。mac 专属的是**调用点**与扫描/修复实现，不是这个判定函数。
+/// （非 mac 平台只有单测调用它 → 需要 allow，否则 dead_code 警告。）
+#[allow(dead_code)]
+pub fn check_mac_exec_bits(binaries: &[(String, bool)]) -> DiagnosticCheck {
+    if binaries.is_empty() {
+        return DiagnosticCheck::new(
+            "mac_exec_bits", CheckStatus::Na, "可执行权限", "未找到关键二进制（路径解析失败）".into(),
+        );
+    }
+    let missing: Vec<&str> = binaries.iter().filter(|(_, x)| !x).map(|(n, _)| n.as_str()).collect();
+    if missing.is_empty() {
+        DiagnosticCheck::new(
+            "mac_exec_bits", CheckStatus::Pass, "可执行权限",
+            format!("{} 个关键二进制均有可执行位", binaries.len()),
+        )
+    } else {
+        DiagnosticCheck::new(
+            "mac_exec_bits", CheckStatus::Fail, "可执行权限",
+            format!(
+                "{} 个缺少可执行位（更新后常见，会导致引擎无法启动）：{}。点「修复」可自动补上。",
+                missing.len(), missing.join("、")
+            ),
+        )
+    }
+}
+
+/// 需要可执行位的关键二进制（相对 `.app/Contents/MacOS/`）。与 build.ts 的产物一致。
+#[cfg(target_os = "macos")]
+pub const MAC_EXEC_BINARIES: &[&str] = &[
+    "claude", "claude-ide", "claude-code-gui", "claude-gui-server", "bun", "cla", "cla-bypass",
+];
+
+/// 扫描并（可选）修复 `.app/Contents/MacOS/` 下关键二进制的可执行位。
+///
+/// `dry_run` = true 只返回当前状态（检测）；false 则对缺位的补 chmod 755。
+/// 用户级安装（`~/Applications`）无需提权；系统级（`/Applications`）若写失败，
+/// 由调用方决定是否走 osascript 提权（见 lib.rs 的 fix 命令）。
+#[cfg(target_os = "macos")]
+pub fn scan_and_fix_app_exec_bits(app: &std::path::Path, dry_run: bool) -> (Vec<(String, bool)>, Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let macos = app.join("Contents").join("MacOS");
+    let mut states = Vec::new();
+    let mut fixed = Vec::new();
+    for name in MAC_EXEC_BINARIES {
+        let p = macos.join(name);
+        if !p.is_file() {
+            continue; // 不存在的条目不算"缺位"（可能该平台不生成）
+        }
+        let mode = match std::fs::metadata(&p) {
+            Ok(m) => m.permissions().mode(),
+            Err(_) => { states.push((name.to_string(), false)); continue; }
+        };
+        let has_x = mode & 0o111 != 0;
+        if !has_x && !dry_run {
+            let perm = std::fs::Permissions::from_mode(0o755);
+            if std::fs::set_permissions(&p, perm).is_ok() {
+                fixed.push(name.to_string());
+                states.push((name.to_string(), true));
+                continue;
+            }
+        }
+        states.push((name.to_string(), has_x));
+    }
+    // bin/ 下的 CLI 工具（rg/fd/jq/yq）同样需要可执行位
+    let bin_dir = macos.join("bin");
+    if let Ok(entries) = std::fs::read_dir(&bin_dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_file() { continue; }
+            let mode = match std::fs::metadata(&p) { Ok(m) => m.permissions().mode(), Err(_) => continue };
+            if mode & 0o111 == 0 {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if !dry_run {
+                    let perm = std::fs::Permissions::from_mode(0o755);
+                    if std::fs::set_permissions(&p, perm).is_ok() {
+                        fixed.push(format!("bin/{name}"));
+                        continue;
+                    }
+                }
+                states.push((format!("bin/{name}"), false));
+            }
+        }
+    }
+    (states, fixed)
 }
 
 /// 从 URL 提取主机 + 端口（缺省按协议：https→443，http→80）。
@@ -953,6 +1061,44 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── macOS 可执行位检测（纯逻辑，跨平台可测）──
+    // 背景：自动更新解压丢 +x → claude 不可执行 → 引擎起不来。检测要能准确
+    // 区分「全有 / 部分缺 / 全缺 / 空」，且 detail 要点名缺了哪些，便于用户判断。
+
+    #[test]
+    fn mac_exec_bits_all_present_is_pass() {
+        let c = check_mac_exec_bits(&[
+            ("claude".into(), true),
+            ("claude-ide".into(), true),
+        ]);
+        assert_eq!(c.status, CheckStatus::Pass);
+        assert!(c.detail.contains("2 个"));
+    }
+
+    #[test]
+    fn mac_exec_bits_missing_is_fail_and_names_them() {
+        let c = check_mac_exec_bits(&[
+            ("claude".into(), false),
+            ("claude-ide".into(), true),
+            ("claude-gui-server".into(), false),
+        ]);
+        assert_eq!(c.status, CheckStatus::Fail);
+        // 必须点名 —— 报错只说 "Permission denied" 不说哪个文件是本故障难自查的原因
+        assert!(c.detail.contains("claude"), "detail={}", c.detail);
+        assert!(c.detail.contains("claude-gui-server"), "detail={}", c.detail);
+        // 正常的那个不该被列进缺失清单
+        assert!(!c.detail.contains("claude-ide"), "detail={}", c.detail);
+        assert!(c.detail.contains("2 个"), "应报缺失数量, detail={}", c.detail);
+    }
+
+    #[test]
+    fn mac_exec_bits_empty_is_na() {
+        // 路径解析失败 → 找不到任何二进制，不该误报 fail
+        let c = check_mac_exec_bits(&[]);
+        assert_eq!(c.status, CheckStatus::Na);
+        assert_eq!(c.id, "mac_exec_bits");
+    }
 
     #[test]
     fn install_dir_exists_is_pass() {
@@ -2350,6 +2496,68 @@ pub enum EnvOp {
     SetUserPath { value: String },
     /// reg delete HKCU PATH
     DeleteUserPath,
+}
+
+/// macOS 修复：给 `.app` 内关键二进制补上可执行位。
+///
+/// 用户级安装（`~/Applications`）直接 chmod 即可；系统级（`/Applications`）属主是
+/// root 时直接写会失败 → 回退到 osascript 提权（弹一次密码框）。
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn fix_mac_exec_bits() -> Result<Vec<EnvVarFix>, String> {
+    let install_dir = crate::update::get_install_dir();
+    let app = install_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("无法解析 .app 路径（不在 bundle 内？）")?
+        .to_path_buf();
+
+    let (states, fixed) = scan_and_fix_app_exec_bits(&app, false);
+    if !fixed.is_empty() {
+        return Ok(vec![EnvVarFix {
+            name: "可执行权限".into(),
+            problem: format!("{} 个二进制缺少可执行位", fixed.len()),
+            action: format!("已修复（chmod 755）：{}", fixed.join("、")),
+        }]);
+    }
+    // fixed 为空说明一个都没改成（多为属主 root）→ 收集仍缺位的，走提权
+    let still_missing: Vec<&str> = states.iter().filter(|(_, x)| !x).map(|(n, _)| n.as_str()).collect();
+    if still_missing.is_empty() {
+        return Ok(vec![EnvVarFix {
+            name: "可执行权限".into(),
+            problem: "无需修复".into(),
+            action: "所有关键二进制均可执行".into(),
+        }]);
+    }
+    chmod_elevated(&app, &still_missing)?;
+    Ok(vec![EnvVarFix {
+        name: "可执行权限".into(),
+        problem: format!("{} 个二进制缺少可执行位（需提权）", still_missing.len()),
+        action: format!("已通过管理员权限修复：{}", still_missing.join("、")),
+    }])
+}
+
+/// osascript 提权 chmod（系统级安装属主为 root 时用）。
+/// 复用 `update.rs` 的转义约定：shell 侧用**单引号**（不参与 AppleScript 字面量）。
+#[cfg(target_os = "macos")]
+fn chmod_elevated(app: &std::path::Path, names: &[&str]) -> Result<(), String> {
+    use std::process::Command;
+    let macos = app.join("Contents").join("MacOS");
+    let targets: Vec<String> = names.iter()
+        .map(|n| format!("'{}'", macos.join(n).to_string_lossy().replace('\'', "'\\''")))
+        .collect();
+    let script = format!(
+        "do shell script \"chmod 755 {}\" with administrator privileges",
+        targets.join(" ")
+    );
+    let out = Command::new("osascript").arg("-e").arg(&script).output()
+        .map_err(|e| format!("osascript 调用失败: {}", e))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        // 用户点了"取消"也是非零退出 —— 如实回报，不谎报成功
+        return Err(format!("提权修复失败（可能被取消）：{}", err.trim()));
+    }
+    Ok(())
 }
 
 /// 诊断修复: 探测环境变量(进程 + 注册表)相对安装目录的偏差, 逐项修正。

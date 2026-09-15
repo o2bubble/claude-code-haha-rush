@@ -118,6 +118,10 @@ def main() -> int:
     req = urllib.request.Request(f"{args.host.rstrip('/')}/api/packages", data=body, method="POST")
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     req.add_header("X-API-Key", args.api_key)
+    # 云市场挂在 Cloudflare 后面，它按浏览器指纹拦截 urllib 的默认 UA
+    # （实测：默认 UA → 403 error code 1010；换 curl/浏览器形态即通）。
+    # 必须显式声明一个非 Python-urllib 的 UA，否则只能发到 96、发不到云。
+    req.add_header("User-Agent", "Mozilla/5.0 (compatible; claude-plugin-publisher/1.0)")
 
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:

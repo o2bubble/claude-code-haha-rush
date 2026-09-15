@@ -10,7 +10,7 @@ import { rerenderPanel, unregisterPanel, getAllPanels } from "../stores/panelReg
 import { removePanelsFromTree } from "../stores/pluginLayout";
 import { getTree, setTree, getFloatingPanels, removeFloatingPanel } from "../stores/layoutStore";
 import { pluginPanelId, getGuiPlatform, type GuiPlatform, type PluginManifest, type PluginPanel } from "./pluginRegistry";
-import type { IconKey } from "../types/layout";
+import type { IconKey, FloatingChrome } from "../types/layout";
 import { usePluginProcesses } from "./pluginProcessBridge";
 import type { PanelView } from "../stores/panelRegistry";
 
@@ -155,7 +155,21 @@ function PluginIframePanel({ manifest, panel }: { manifest: PluginManifest; pane
       const origin = e.origin || String(e.origin);
       if (!isPluginFrameOrigin(origin)) return;
       if (d.kind === "open-panel") {
-        void openPluginPanel(manifest.pluginName, (d.payload ?? {}) as { panelId?: string }).catch(() => {});
+        // payload 形状不可信 —— 各字段由 openPluginPanel / sanitizeChrome 各自校验
+        void openPluginPanel(
+          manifest.pluginName,
+          (d.payload ?? {}) as {
+            panelId?: string; params?: Record<string, unknown>;
+            title?: string; width?: number; height?: number; chrome?: unknown;
+          },
+        ).catch(() => {});
+        return;
+      }
+      if (d.kind === "float-drag-start") {
+        void startPluginFloatDrag(
+          e.source as Window | null,
+          (d.payload ?? {}) as { x?: number; y?: number },
+        ).catch(() => {});
         return;
       }
       void sendPluginViewerChip(d).catch(() => {});
@@ -247,18 +261,40 @@ export function setPanelIntent(panelId: string, params: Record<string, unknown>)
   panelIntents.set(panelId, params);
 }
 
+/** 插件请求的浮窗外壳 → 白名单过滤后的 FloatingChrome。
+ *
+ *  **这是跨信任边界的输入**（payload 来自插件 iframe 的 postMessage）——
+ *  只接受 5 个已知键的布尔值，其余键、非布尔值一律丢弃：插件能开关预设项，
+ *  但灌不进任意值。全部非法/未声明 → undefined（= 传统浮窗，安全默认）。
+ *  导出供单测。 */
+export function sanitizeChrome(raw: unknown): FloatingChrome | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: FloatingChrome = {};
+  let any = false;
+  for (const k of ["titleBar", "background", "border", "shadow", "resizable"] as const) {
+    if (typeof r[k] === "boolean") {
+      out[k] = r[k];
+      any = true;
+    }
+  }
+  return any ? out : undefined;
+}
+
 /** 浮窗单例引用: 面板 id → 浮窗 id（同一插件面板复用同一浮窗, 连续点列表项不抖动） */
 const floatRefs = new Map<string, string>();
 
-/** 请求宿主打开插件面板（通用）: 已开 → 置顶 + 推送新参数; 未开 → 浮窗打开(居中)。 */
+/** 请求宿主打开插件面板（通用）: 已开 → 置顶 + 推送新参数 + 刷新外壳; 未开 → 浮窗打开(居中)。
+ *  payload.chrome 经 sanitizeChrome 白名单过滤后才落到渲染层（见该函数注释）。 */
 async function openPluginPanel(
   pluginName: string,
-  payload: { panelId?: string; params?: Record<string, unknown>; title?: string; width?: number; height?: number },
+  payload: { panelId?: string; params?: Record<string, unknown>; title?: string; width?: number; height?: number; chrome?: unknown },
 ): Promise<void> {
   const { panelId, params } = payload;
   if (!panelId) return;
   const fullId = `plugin:${pluginName}:${panelId}`;
-  const { addFloatingPanel, bringFloatingToFront, getFloatingPanels } = await import("../stores/layoutStore");
+  const { addFloatingPanel, bringFloatingToFront, getFloatingPanels, updateFloatingChrome } =
+    await import("../stores/layoutStore");
   const { getPanel } = await import("../stores/panelRegistry");
   const def = getPanel(fullId);
   if (!def) return; // 插件声明的面板不存在（旧版/拼错）→ 静默忽略
@@ -267,8 +303,11 @@ async function openPluginPanel(
   if (params) setPanelIntent(fullId, params);
   pushParamsToPanelFrames(pluginName, panelId, params);
 
+  const chrome = sanitizeChrome(payload.chrome);
   const existing = floatRefs.get(fullId);
   if (existing && getFloatingPanels().some((fp) => fp.id === existing)) {
+    // 已开 → 按本次声明刷新外壳，使 open-panel 幂等（未声明 chrome 即恢复传统浮窗）
+    updateFloatingChrome(existing, chrome);
     bringFloatingToFront(existing);
     return;
   }
@@ -284,8 +323,67 @@ async function openPluginPanel(
     Math.max(20, (window.innerWidth - W) / 2),
     Math.max(20, (window.innerHeight - H) / 2),
     W, H,
+    chrome,
   );
   floatRefs.set(fullId, id);
+}
+
+/** 插件 iframe 请求拖动其所在浮窗（上行 kind: "float-drag-start"，payload 带 iframe 内坐标）。
+ *
+ *  **为什么必须走协议**：iframe 是独立文档，其内部 mousedown **不冒泡到宿主文档**
+ *  —— 宿主那份 `data-float-drag` 委托对 iframe 面板收不到事件。非 iframe 的
+ *  浮窗（宿主自己渲染的内容）仍用 data-float-drag；iframe 面板只能显式上行请求。
+ *
+ *  **为什么要铺遮罩**：鼠标一停在 iframe 上方，mousemove 就归 iframe 文档，
+ *  宿主的 document 监听会断流 → 拖动一顿一顿甚至停住。拖动期间盖一层全屏
+ *  透明遮罩，把事件收归宿主，鼠标就始终"在宿主手里"。
+ *
+ *  坐标换算：iframe 元素在视口中的位置 + 插件报来的 iframe 内坐标。 */
+async function startPluginFloatDrag(
+  win: Window | null,
+  payload?: { x?: number; y?: number },
+): Promise<void> {
+  if (!win) return;
+  // 从 contentWindow 反查 iframe → 其所在的浮窗容器。不用 floatRefs：
+  // 浮窗也可能由布局拖出等其它路径创建，未必登记在那里。
+  const iframeEl = [...document.querySelectorAll("iframe")].find(
+    (f) => f.contentWindow === win,
+  );
+  const panelEl = iframeEl?.closest("[data-floating-id]") as HTMLElement | null;
+  const floatId = panelEl?.getAttribute("data-floating-id");
+  if (!iframeEl || !panelEl || !floatId) return;
+
+  const { getFloatingPanels, updateFloatingPosition, bringFloatingToFront } =
+    await import("../stores/layoutStore");
+  const fp = getFloatingPanels().find((f) => f.id === floatId);
+  if (!fp) return;
+  bringFloatingToFront(floatId);
+
+  const rect = iframeEl.getBoundingClientRect();
+  const startX = rect.left + (payload?.x ?? 0);
+  const startY = rect.top + (payload?.y ?? 0);
+  const ix = fp.x;
+  const iy = fp.y;
+
+  const mask = document.createElement("div");
+  mask.style.cssText =
+    "position:fixed;inset:0;z-index:2147483647;cursor:grabbing;";
+  document.body.appendChild(mask);
+
+  const onMove = (ev: MouseEvent) => {
+    // 拖动中只改 DOM —— 与标题栏拖动一致，避免每帧触发持久化
+    panelEl.style.left = `${ix + ev.clientX - startX}px`;
+    panelEl.style.top = `${iy + ev.clientY - startY}px`;
+  };
+  const onUp = () => {
+    mask.remove();
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    const r = panelEl.getBoundingClientRect();
+    updateFloatingPosition(floatId, r.left, r.top);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp, { once: true });
 }
 
 /** 向"已挂载的该插件面板 iframe"推送参数（跨源 postMessage, 目标 = plugins:// iframe）。

@@ -22,9 +22,6 @@ export interface DiagnosticsReport {
   categories: DiagnosticCategory[];
 }
 
-/** 云服务器镜像地址 — 与后端探测常量一致，用于「切换到云服务器」 */
-export const CLOUD_SERVER_URL = "http://123.56.66.84:8765";
-
 export const diagnosticsService = {
   async run(): Promise<DiagnosticsReport> {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -59,6 +56,18 @@ export const diagnosticsService = {
   async fixProfiles(): Promise<EnvVarFix[]> {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<EnvVarFix[]>("fix_profiles");
+  },
+
+  /**
+   * 修复(macOS): 给 `.app` 内关键二进制补可执行位。
+   *
+   * 场景：自动更新解压时丢了 +x（`File::create` 不还原 zip 的 unix mode）→
+   * `claude` 不可执行 → 引擎起不来（"IDE backend did not announce port"）。
+   * 用户级安装直接改；系统级属主 root 时走 osascript 提权（弹一次密码框）。
+   */
+  async fixMacExecBits(): Promise<EnvVarFix[]> {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<EnvVarFix[]>("fix_mac_exec_bits");
   },
 };
 

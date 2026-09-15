@@ -3,6 +3,7 @@
 import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { migrateWorkspaceSeed } from "../migrations";
+import { INTRANET_SERVER_URL } from "../utils/serverProfile";
 
 export interface QuickPrompt {
   id: string;
@@ -101,7 +102,8 @@ let settings: AppSettings = {
   isFirstLaunch: true,
   language: "zh",
   terminalMaxEntries: 50,
-  skillRegistryUrl: "http://192.168.186.96:8765",
+  skillRegistryUrl: INTRANET_SERVER_URL,
+  updateServerUrl: INTRANET_SERVER_URL,
   _version: "1.0.0-preview",
   uiFontSize: 100,
 };
@@ -139,7 +141,7 @@ export async function loadSettings(): Promise<AppSettings> {
     } catch {
       // First launch or error — use defaults
       const def = await getDefaultWorkDir();
-      settings = { workDir: def, workspaces: [], isFirstLaunch: true, language: "zh", terminalMaxEntries: 50 };
+      settings = { workDir: def, workspaces: [], isFirstLaunch: true, language: "zh", terminalMaxEntries: 50, skillRegistryUrl: INTRANET_SERVER_URL, updateServerUrl: INTRANET_SERVER_URL };
     }
   } else {
     // Browser dev: use localStorage
@@ -148,7 +150,7 @@ export async function loadSettings(): Promise<AppSettings> {
       try { settings = JSON.parse(raw); } catch {}
     }
     if (!settings.workDir) {
-      settings = { workDir: await getDefaultWorkDir(), workspaces: [], isFirstLaunch: true, language: "zh", terminalMaxEntries: 50 };
+      settings = { workDir: await getDefaultWorkDir(), workspaces: [], isFirstLaunch: true, language: "zh", terminalMaxEntries: 50, skillRegistryUrl: INTRANET_SERVER_URL, updateServerUrl: INTRANET_SERVER_URL };
     }
   }
 
