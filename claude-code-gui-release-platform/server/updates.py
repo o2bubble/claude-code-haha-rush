@@ -280,11 +280,15 @@ async def upload_release(
             detail=f"Manifest version '{manifest_data.get('version')}' does not match URL '{version}'",
         )
 
-    # Create platform-scoped version directory
+    # Create platform-scoped version directory.
+    # ⚠️ 覆盖重传时**只清本平台的内容**，不能 rmtree 整个目录 ——
+    # windows 的 version_dir 是版本目录顶层，与 macos/ 子目录同级，整体删会连
+    # 另一平台一起端掉（2026-09-15 mac 被误删就是这个：发 windows 同版本号时
+    # 把当天刚发的 macos/ 一并 rmtree 了）。详见 _remove_platform_version。
     version_dir = _platform_dir(version, platform)
     if version_dir.exists():
-        shutil.rmtree(version_dir)
-    version_dir.mkdir(parents=True)
+        _remove_platform_version(version, platform)
+    version_dir.mkdir(parents=True, exist_ok=True)
 
     # Save manifest
     (version_dir / "manifest.json").write_text(

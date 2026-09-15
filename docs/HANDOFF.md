@@ -1,33 +1,70 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-15（main @ef43d1d）
+# Handoff — Claude Code GUI 开发 · 2026-09-15（main @99d3c0e）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
 
-## 🆕 2026-09-15 续②：mac 发版列表为空 —— 版本清理误伤
+## 🆕 2026-09-15 续②：mac 发版被误删（**两个删除点**，已修复 + 通道已恢复）
 
-用户报「服务器上 mac 的发版是空的」。实测两端
-`/api/updates/latest?platform=macos` **404** → **mac 客户端检查更新失效**。
+用户报「服务器上 mac 的发版是空的」。实测 `/api/updates/latest?platform=macos`
+**404** → **mac 客户端检查更新失效**。
 
-**根因**（`server/updates.py::_prune_old_versions`）：
-版本目录被两个平台**共享** —— windows 用 `{version}/`、macos 用 `{version}/macos/`。
-而旧实现对超额版本直接 `rmtree(UPDATES_STORE / v)` 整个删，把另一平台一并带走。
-mac 发版频率天然低于 windows、版本号永远更旧 → 每次 windows 发布都把它挤出保留
-窗口（`keep=3`）。最后一次 mac 是 `.14.2`，windows 已到 `.15.4` → `.14.2` 被清掉。
+### 根因：同一类错误的**两处**实现
 
-**修法**：各平台独立算保留集，只删该平台自己的内容。
-⚠️ 关键细节：**windows 的内容在版本目录顶层、与 `macos/` 同级** → 只能逐个删文件，
-不能 rmtree；macos 独占子目录才可整删。某版本两平台都清空后才删空壳目录。
+版本目录被两平台**共享**（windows 用 `{version}/`、macos 用 `{version}/macos/`），
+而两处清理都按**版本号**无差别 `rmtree`：
 
-**验证**：单元仿真含**旧实现对照组**（先证明测试能抓到该 bug）、4 场景 15 断言全过；
-部署后再在**真实容器内**用部署的那份代码跑同一测试（临时 store，不碰生产数据），
+| # | 位置 | 代码 | 作用 |
+|---|---|---|---|
+| ① | **`upload_release` 覆盖重传** | `if version_dir.exists(): rmtree(version_dir)` | **本次的直接元凶** |
+| ② | `_prune_old_versions` | `for v in vers[keep:]: rmtree(UPDATES_STORE / v)` | 事后清掉空壳 |
+
+⚠️ **① 才是真凶，② 只是善后** —— 我一开始只发现 ② 就下了结论，是错的。
+windows 的 `version_dir` 就是版本目录**顶层**，与 `macos/` 同级，所以
+**上传同版本号的 windows 会把已存在的 `macos/` 一并端掉**。
+
+### 完整事故链
+
+```
+15:50  用户从 Codemagic 下载 mac 产物（6 个 zip）
+16:09  用户发布 mac → 服务器出现 2026.09.15.1/macos/
+18:29  上传 windows 2026.09.15.1（同版本号）→ rmtree 整个目录 → mac 消失
+18:36  上传 2026.09.15.4 → prune 清掉只剩 windows 的 .15.1
+```
+
+### 修法
+
+- ① 准备目录时只清本平台内容（复用 `_remove_platform_version`），`mkdir` 补 `exist_ok=True`
+- ② 各平台独立算保留集，只删该平台自己的内容
+- ⚠️ 关键细节：**windows 内容在版本目录顶层、与 `macos/` 同级 → 只能逐个删文件，
+  不能 rmtree**；macos 独占子目录才可整删。两平台路径不对称，是易错点。
+- **覆盖语义不能丢**：同平台重传仍要清掉旧文件（测试 ①d 锁住这点）
+
+### 验证
+
+综合回归测试覆盖两处，**每处都带旧实现对照组**（先证明测试能复现故障再证明修好）：
+`①a/②a` 对照组复现 → `①b/①c/①d/②b/②c` 全过。
+部署后再在**真实容器内**用部署的那份代码复跑（临时 store，不碰生产数据）：
 96 与云均 ALL PASSED。
 
-**部署**（按用户要求 docker cp，未重建镜像）：96 经 `temp/s96.sh`、
-云经 workbench exec + base64 分块（命令行长限制）。两端 `/app/server` **均非挂载卷**
-→ docker cp 可留存；原文件备份为容器内 `updates.py.bak-20260915`。
+### 部署（docker cp，未重建镜像）
 
-⚠️ **遗留**：服务器上已无任何 mac 版本 —— 本次修复只保证"不再被删"，
-**mac 通道要恢复仍需重新上传一份 mac 构建产物**。
+96 经 `temp/s96.sh`；云经 workbench exec + base64 分块（命令行长限制）。
+两端 `/app/server` **均非挂载卷** → docker cp 可留存；原文件已备份为容器内
+`updates.py.bak-20260915` / `.bak2-20260915`。
+
+### ✅ mac 通道已恢复
+
+产物仍在 `~/Downloads`，跑 `release_mac.py make/cloud` 重发成功：
+**云** `macos latest = 2026.09.15.1`，**6 个组件齐全**。
+（96 的 macos 仍 404 —— `release_mac.py` 只发云，mac 从没发过 96，属正常。）
+
+顺带修掉 `release_mac.py` 的 `verify` 必崩：workbench 输出含省略号 / Braille
+进度符，Windows GBK 控制台 `UnicodeEncodeError`（跟接口无关，上传其实早成功）。
+加 `_safe()` 按控制台编码降级替换。
+
+> 💡 **可复用教训**：同一类缺陷常有**多处实现**（这里 upload 与 prune 各一份）。
+> 找到一处别急着下结论 —— 先全仓搜同类模式（本例搜 `rmtree`）。
+> 另：`rmtree` 一个"容器目录"前，先问**里面有没有不属于当前清理维度的内容**。
 
 ## 🆕 2026-09-15 续：插件浮窗「全透明」失效根因
 
@@ -142,14 +179,15 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 
 ## 当前状态
 
-- **分支**: `main`（`ef43d1d`）；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
+- **分支**: `main`（`99d3c0e`）；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
 - **本批主题**: CF Tunnel 入口 + 云性能事故修复 + 设置面板三档切换 + **插件浮窗全透明修复**
 - **Windows 版本**: **两端均 `2026.09.15.4`**
   —— 期间用户自行发过 `.15.2`（WebSearch 重试）/ `.15.3`（浮窗外壳+拖动+会话面板）；
      `.15.4` 是补发的 color-scheme 修复（`.15.3` 不含该修复）
   ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 这个孤儿版本（号比用户已发的
      `.15.2/.15.3` 低，客户端永远拿不到），还白挤掉了 `.14.5`
-- **macOS 云端版本**: `2026.09.14.2`（新版待构建产物；**构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**）
+- **macOS 云端版本**: **`2026.09.15.1`**（已恢复，6 组件齐全）
+  —— 之前被误删致 macos 404，见「续②」；**构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**
 - **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；300 条记忆；**已加 bearer 鉴权**
 - **Memory 服务（云）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web
 - **release-platform（云）**: 镜像 **`claude-release-platform:20260914`**（compose 已从 `build: .` 改为 `image:`）
@@ -345,9 +383,11 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 ## 热数据
 
 ### Git 状态
-- branch `main`，HEAD `ef43d1d`；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
+- branch `main`，HEAD `99d3c0e`；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
 
 ```text
+99d3c0e fix(mac): release_mac.py 的 verify 必崩 — 非 ASCII 撞 GBK 控制台
+8b2b9a6 fix(release-platform): 覆盖重传不再跨平台 rmtree — mac 被删的直接元凶
 ef43d1d fix(release-platform): 版本清理按平台各算 — mac 版本不再被 windows 发布挤掉
 16a41f3 fix(gui): 暗色下插件浮窗「全透明」失效 — iframe 色系需与内嵌文档对齐
 ea7c947 fix(publish-plugin): 显式声明 UA — 云市场在 Cloudflare 后面会拦 urllib 默认 UA
@@ -698,12 +738,10 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
       本机 `~/.claude.json` 已同步加 `headers.Authorization`（**需重启会话生效**）。见部署手册 §8
 - [ ] **Web UI 复核** —— 96 `http://192.168.186.96:40021/`（登录框填 token）/
       云 `https://mem.17lumen.cloud`；搜索走新 FTS5 + jieba
-- [ ] **复核 GUI 更新面板** —— 96 + 云均已发 `.14.5`；客户端点「检查更新」应提示更新到该版
-- [ ] 🔴 **mac 通道待恢复（当前为空）** —— 服务器上**已无任何 mac 版本**（prune 误删，
-      见「续②」节）。代码已修但只保证"不再被删"，**需重新上传一份 mac 构建产物**：
-      跑 `scripts/release_mac.py`（改 `VERSION`/`RELEASE_NOTES` → `make` → `cloud` → `verify`）。
-      ⚠️ **构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**；且用户明确说过
-      mac 构建/产物那边**他自己处理，别主动去碰**
+- [ ] **复核 GUI 更新面板** —— 96 + 云均已发 `.15.4`；客户端点「检查更新」应提示更新到该版
+- [x] **mac 通道恢复** —— 2026-09-15 完成：两处删除点修好并部署后，用 `~/Downloads`
+      的既有产物重发 `2026.09.15.1`，云端 6 组件齐全。见「续②」节
+      （⚠️ **构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**）
 - [x] **云上跟进** —— 2026-09-12 完成（本地构建镜像 → workbench 上传 → 云端切换，见部署手册）
 - [x] **云 server root 密码轮换** —— 已完成（新值在内部凭据笔记；96 内网密码无需轮换）
 - [ ] （可选）**向量路** —— SPEC §10 预留：加 OpenAI 兼容 embedding 客户端 + 第三路进 `rrf_merge`，约 150 行

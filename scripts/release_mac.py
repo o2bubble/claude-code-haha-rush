@@ -148,15 +148,26 @@ def make() -> int:
     return 0
 
 
+def _safe(s: str) -> str:
+    """让任意文本能打印到当前控制台：workbench 的输出含 Braille 进度符 / 省略号等
+    非 ASCII 字符，Windows GBK 控制台会直接 UnicodeEncodeError 崩掉（verify 就死在
+    这里，跟接口无关）。按控制台编码降级替换，不让日志打印拖垮整个流程。"""
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return s.encode(enc, "replace").decode(enc, "replace")
+    except Exception:
+        return s.encode("ascii", "replace").decode("ascii")
+
+
 def _workbench(cmd: str) -> int:
     """经由 workbench 在云 ECS 上执行（私网机器无公网 IP）。"""
     r = subprocess.run(
         ["workbench", "exec", "-i", "i-2ze2rouoikcqrlbseu8a", "-r", "cn-beijing", "-c", cmd],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
     )
-    print(r.stdout[-2000:] if r.stdout else "", end="")
+    print(_safe(r.stdout[-2000:]) if r.stdout else "", end="")
     if r.stderr:
-        print(r.stderr[-500:], file=sys.stderr, end="")
+        print(_safe(r.stderr[-500:]), file=sys.stderr, end="")
     return r.returncode
 
 
