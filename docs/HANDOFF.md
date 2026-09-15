@@ -1,7 +1,33 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-15（main @16a41f3）
+# Handoff — Claude Code GUI 开发 · 2026-09-15（main @ef43d1d）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
+
+## 🆕 2026-09-15 续②：mac 发版列表为空 —— 版本清理误伤
+
+用户报「服务器上 mac 的发版是空的」。实测两端
+`/api/updates/latest?platform=macos` **404** → **mac 客户端检查更新失效**。
+
+**根因**（`server/updates.py::_prune_old_versions`）：
+版本目录被两个平台**共享** —— windows 用 `{version}/`、macos 用 `{version}/macos/`。
+而旧实现对超额版本直接 `rmtree(UPDATES_STORE / v)` 整个删，把另一平台一并带走。
+mac 发版频率天然低于 windows、版本号永远更旧 → 每次 windows 发布都把它挤出保留
+窗口（`keep=3`）。最后一次 mac 是 `.14.2`，windows 已到 `.15.4` → `.14.2` 被清掉。
+
+**修法**：各平台独立算保留集，只删该平台自己的内容。
+⚠️ 关键细节：**windows 的内容在版本目录顶层、与 `macos/` 同级** → 只能逐个删文件，
+不能 rmtree；macos 独占子目录才可整删。某版本两平台都清空后才删空壳目录。
+
+**验证**：单元仿真含**旧实现对照组**（先证明测试能抓到该 bug）、4 场景 15 断言全过；
+部署后再在**真实容器内**用部署的那份代码跑同一测试（临时 store，不碰生产数据），
+96 与云均 ALL PASSED。
+
+**部署**（按用户要求 docker cp，未重建镜像）：96 经 `temp/s96.sh`、
+云经 workbench exec + base64 分块（命令行长限制）。两端 `/app/server` **均非挂载卷**
+→ docker cp 可留存；原文件备份为容器内 `updates.py.bak-20260915`。
+
+⚠️ **遗留**：服务器上已无任何 mac 版本 —— 本次修复只保证"不再被删"，
+**mac 通道要恢复仍需重新上传一份 mac 构建产物**。
 
 ## 🆕 2026-09-15 续：插件浮窗「全透明」失效根因
 
@@ -116,7 +142,7 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 
 ## 当前状态
 
-- **分支**: `main`（`16a41f3`）；工作区干净；`github-clean` = `e460e10` 快照
+- **分支**: `main`（`ef43d1d`）；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
 - **本批主题**: CF Tunnel 入口 + 云性能事故修复 + 设置面板三档切换 + **插件浮窗全透明修复**
 - **Windows 版本**: **两端均 `2026.09.15.4`**
   —— 期间用户自行发过 `.15.2`（WebSearch 重试）/ `.15.3`（浮窗外壳+拖动+会话面板）；
@@ -319,9 +345,10 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 ## 热数据
 
 ### Git 状态
-- branch `main`，HEAD `16a41f3`；工作区干净；`github-clean` = `e460e10` 快照
+- branch `main`，HEAD `ef43d1d`；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
 
 ```text
+ef43d1d fix(release-platform): 版本清理按平台各算 — mac 版本不再被 windows 发布挤掉
 16a41f3 fix(gui): 暗色下插件浮窗「全透明」失效 — iframe 色系需与内嵌文档对齐
 ea7c947 fix(publish-plugin): 显式声明 UA — 云市场在 Cloudflare 后面会拦 urllib 默认 UA
 6cc1d1a feat(gui): 插件 iframe 浮窗的拖动支持 — postMessage 协议 + 拖动遮罩
@@ -672,9 +699,11 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
 - [ ] **Web UI 复核** —— 96 `http://192.168.186.96:40021/`（登录框填 token）/
       云 `https://mem.17lumen.cloud`；搜索走新 FTS5 + jieba
 - [ ] **复核 GUI 更新面板** —— 96 + 云均已发 `.14.5`；客户端点「检查更新」应提示更新到该版
-- [ ] **mac `.14.4` / `.14.5` 待发布** —— 代码已推；等 mac 构建产物后跑 `scripts/release_mac.py`
-      （⚠️ **构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**；且用户明确说过
-      mac 构建/产物那边**他自己处理，别主动去碰**）
+- [ ] 🔴 **mac 通道待恢复（当前为空）** —— 服务器上**已无任何 mac 版本**（prune 误删，
+      见「续②」节）。代码已修但只保证"不再被删"，**需重新上传一份 mac 构建产物**：
+      跑 `scripts/release_mac.py`（改 `VERSION`/`RELEASE_NOTES` → `make` → `cloud` → `verify`）。
+      ⚠️ **构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**；且用户明确说过
+      mac 构建/产物那边**他自己处理，别主动去碰**
 - [x] **云上跟进** —— 2026-09-12 完成（本地构建镜像 → workbench 上传 → 云端切换，见部署手册）
 - [x] **云 server root 密码轮换** —— 已完成（新值在内部凭据笔记；96 内网密码无需轮换）
 - [ ] （可选）**向量路** —— SPEC §10 预留：加 OpenAI 兼容 embedding 客户端 + 第三路进 `rrf_merge`，约 150 行
