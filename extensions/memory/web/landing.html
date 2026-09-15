@@ -204,18 +204,23 @@
   </footer>
 
   <script>
-    // Fetch live stats from API
-    fetch('/api/stats')
-      .then(r => r.json())
+    // 公开聚合计数（/api/public-stats，唯一免 token 的 API）。
+    // 不能用 /api/stats —— 那个要 Bearer token，而访客在登录前没有，
+    // 于是 401 被静默吞掉、页面永远显示占位符。
+    fetch('/api/public-stats')
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
       .then(s => {
-        document.getElementById('statMem').textContent = s.total_memories || '-';
-        document.getElementById('statTags').textContent = s.total_tags || '-';
-        document.getElementById('statEdges').textContent = s.total_associations || '-';
+        document.getElementById('statMem').textContent = s.total_memories;
+        document.getElementById('statTags').textContent = s.total_tags;
+        document.getElementById('statEdges').textContent = s.total_associations;
       })
       .catch(() => {
-        document.getElementById('statMem').textContent = '9';
-        document.getElementById('statTags').textContent = '23';
-        document.getElementById('statEdges').textContent = '7';
+        // 保持占位符「—」而**不填演示数字**：假数据会让「统计挂了」这件事
+        // 无声无息 —— 之前这里兜底的 9/23/7 就是如此。
+        for (const id of ['statMem', 'statTags', 'statEdges']) {
+          const el = document.getElementById(id);
+          if (el) el.textContent = '—';
+        }
       });
   </script>
 </body>

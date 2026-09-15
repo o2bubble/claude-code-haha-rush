@@ -78,6 +78,52 @@ def _zip_dir(dir_path: Path) -> io.BytesIO:
     return buf
 
 
+def list_versions(platform: str = "windows") -> list[dict]:
+    """列出该平台所有带 manifest 的版本（新 → 旧），附组件名与体积。
+
+    注意：上传时 _prune_old_versions 只保留最近 3 版 —— 这里不是完整发布历史，
+    是「当前还在服务器上的版本」。UI 不要把它当成发布记录。
+    """
+    if not UPDATES_STORE.exists():
+        return []
+    out = []
+    for entry in UPDATES_STORE.iterdir():
+        if not (entry.is_dir() and VERSION_RE.match(entry.name)):
+            continue
+        manifest = _read_manifest(entry.name, platform)
+        if not manifest:
+            continue
+        vdir = _platform_dir(entry.name, platform)
+        components = {}
+        for comp in sorted(_valid_components(platform)):
+            zp = vdir / f"{comp}.zip"
+            if zp.exists():
+                components[comp] = zp.stat().st_size
+        out.append({
+            "version": entry.name,
+            "published_at": manifest.get("published_at", ""),
+            "release_notes": manifest.get("release_notes", ""),
+            "components": components,
+            "total_size": sum(components.values()),
+        })
+    out.sort(key=lambda d: _version_key(d["version"]), reverse=True)
+    return out
+
+
+def store_usage() -> int:
+    """updates-store 占用字节数（2 核小盘，值得盯着）。"""
+    if not UPDATES_STORE.exists():
+        return 0
+    total = 0
+    for root, _, files in os.walk(UPDATES_STORE):
+        for f in files:
+            try:
+                total += (Path(root) / f).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
 # ── Public Endpoints ──
 
 @router.get("/updates/latest")

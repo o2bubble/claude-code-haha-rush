@@ -5,7 +5,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from server import models, routes, updates
+from fastapi.staticfiles import StaticFiles
+from server import admin, models, routes, updates
 
 models.init_db()
 
@@ -21,6 +22,9 @@ app.add_middleware(
 
 app.include_router(routes.router)
 app.include_router(updates.router)
+# 管理后台（/api/admin/*）。auth_router 无认证依赖（登录本身），router 需 token。
+app.include_router(admin.auth_router)
+app.include_router(admin.router)
 
 # Ensure directories exist
 BASE_DIR = Path(__file__).resolve().parent
@@ -30,9 +34,55 @@ BASE_DIR = Path(__file__).resolve().parent
 (BASE_DIR / "updates-store").mkdir(exist_ok=True)
 
 
-@app.get("/admin")
-async def admin_page():
-    return FileResponse(BASE_DIR / "static" / "admin.html")
+# ── 管理后台（Vite + React SPA）──
+# 产物由 web/ 构建而来（Dockerfile 多阶段构建产出；本地开发时手动 copy 到
+# static/admin/）。目录不存在时降级到旧页面，不影响既有服务。
+SPA_DIR = BASE_DIR / "static" / "admin"
+
+# SPA 入口 HTML 必须每次向服务端验证，不能走缓存。
+#
+# 踩过的坑（2026-09-15 上线当天）：`FileResponse` 只带 last-modified/etag、
+# **不带 Cache-Control**，浏览器于是走「启发式缓存」——按
+# (现在 − last-modified) × 10% 估算可缓存时长。旧 admin.html 的修改时间很老，
+# 算出来能缓存好几天，结果发布后用户仍看到部署前的旧页面（服务端明明已是新的）。
+#
+# 这里用 no-cache（**不是** no-store）：允许缓存但每次必须回源验证 ——
+# 命中 304 时省流量，内容变了立刻生效。静态资源不用管：它们文件名带 hash，
+# 内容变则 URL 变，可安全长缓存。
+_NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
+
+@app.get("/admin-legacy")
+async def admin_legacy_page():
+    """旧版反馈管理页（单文件手写）。
+
+    新后台稳定前保留作回滚路径与应急入口 —— 它无需登录、直连公开 API，
+    在 ADMIN_PASSWORD 配错导致进不去新后台时仍可用。
+    """
+    return FileResponse(BASE_DIR / "static" / "admin.html", headers=_NO_CACHE)
+
+
+if (SPA_DIR / "index.html").exists():
+    # 静态资源单独挂载 —— 必须先于下面的 catch-all 注册（Starlette 按注册顺序匹配）
+    app.mount("/admin/assets", StaticFiles(directory=SPA_DIR / "assets"), name="admin-assets")
+
+    # SPA fallback：**只覆盖 /admin 前缀**，绝不用全局 {path:path} ——
+    # 那会吞掉 /api/*，直接打断 GUI 客户端的技能市场与自动更新。
+    @app.get("/admin")
+    @app.get("/admin/{rest:path}")
+    async def admin_page(rest: str = ""):
+        return FileResponse(SPA_DIR / "index.html", headers=_NO_CACHE)
+
+    # 公网反馈提交页：同一份 SPA 产物，路由在 /feedback（前端按路径分发）
+    @app.get("/feedback")
+    async def public_feedback_page():
+        return FileResponse(SPA_DIR / "index.html", headers=_NO_CACHE)
+
+else:
+    # 无 SPA 产物（如未构建就直接跑源码）→ /admin 退回旧页面，功能不中断
+    @app.get("/admin")
+    async def admin_page_fallback():
+        return FileResponse(BASE_DIR / "static" / "admin.html", headers=_NO_CACHE)
 
 
 @app.on_event("startup")

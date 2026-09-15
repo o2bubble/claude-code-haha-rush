@@ -7,6 +7,57 @@
 
 ---
 
+## 0.5 必须配置的环境变量（⚠️ 最容易漏）
+
+管理后台（`/admin`）靠这两个变量工作，**两侧 compose 都要配**：
+
+| 变量 | 作用 | 缺失后果 |
+|---|---|---|
+| `ADMIN_PASSWORD` | 后台登录口令 | `/api/admin/*` 一律返回 **503**，新后台登不进去 |
+| `SITE_NAME` | 顶栏显示的实例名 | 显示 `release-platform`（无法区分看的是哪台） |
+| `ADMIN_TOKEN_SECRET` | （可选）token 签名密钥 | 缺省从 `ADMIN_PASSWORD` 派生，够用 |
+
+```yaml
+environment:
+  - ADMIN_PASSWORD=<口令>          # 值见笔记『账号密码』
+  - SITE_NAME=96 内网              # 云侧写「云生产」
+```
+
+> 两侧 `registry.db` 是**两份独立库**（96 在 `/root/claude-release-data/`，
+> 云在项目目录下）→ 统计数字天然不同，靠 `SITE_NAME` 区分，不要误以为是同一份数据。
+>
+> **应急入口**：口令配错导致进不去新后台时，用 `/admin-legacy` ——
+> 旧页面无需登录、直连公开 API，可临时改反馈状态。
+
+---
+
+## 0.6 备份（改任何东西之前先做）
+
+```bash
+STAMP=$(date +%Y%m%d)
+mkdir -p /root/backup-release-platform
+# 数据库 + 反馈图片
+cd <数据目录> && tar czf /root/backup-release-platform/data-$STAMP.tar.gz \
+    registry.db registry.db-wal registry.db-shm feedback-images
+# compose
+cp docker-compose.yml /root/backup-release-platform/docker-compose.yml.bak.$STAMP
+```
+
+**回滚锚点**：把当前运行的镜像固定成一个不会被覆盖的 tag：
+
+```bash
+# 96（有私有 registry）
+docker tag <当前镜像> 192.168.186.96:5000/claude-release-platform:rollback-$STAMP
+docker push 192.168.186.96:5000/claude-release-platform:rollback-$STAMP
+# 云：compose 里用的是日期 tag，旧 tag 天然保留，无需额外操作
+```
+
+> 为什么必须做：新版本发布时会用**新日期 tag**，若直接覆盖 `:latest`
+> 就没有可回退的镜像了。数据库新增列（如 `feedback.note`）虽然向后兼容，
+> 但回滚时保留一份 db 快照总是更稳。
+
+---
+
 ## 0. 本机构建环境：WSL
 
 Windows 侧没装 Docker Desktop，用 **WSL 里的 Docker**：
@@ -56,14 +107,27 @@ export NO_PROXY=localhost,127.0.0.1
 docker build -t claude-release-platform:YYYYMMDD .
 ```
 
-**版本 tag 用日期**（如 `20260914`），便于回滚。
+**版本 tag 用日期**（如 `20260915`），便于回滚。
+
+> **Docker daemon 没在跑**时：`sudo systemctl start docker`（WSL 重启后不会自动起）。
+
+### 多阶段构建（2026-09-15 起）
+
+镜像现在是**两阶段**：阶段 1 用 `oven/bun:1` 构建管理后台前端（Vite + React），
+阶段 2 把产物 `COPY --from=web` 到 `static/admin/`。
+
+- **不需要**在本地先跑 `bun run build` —— 容器内会构建，避免"忘了构建就发旧前端"
+- 用 `oven/bun` 而非 node：仓库只有 `bun.lock`，没有 `package-lock.json`，`npm ci` 会失败
+- `web/bunfig.toml`（含国内 npm 镜像）必须与 `package.json` **同批 COPY**，否则 install 走默认源会超时
+- `static/admin/` 在 `.dockerignore` 里**被排除**：唯一来源是阶段 1，防止本机残留产物混进上下文
 
 ### 构建产物验证
 
 ```bash
-docker run --rm claude-release-platform:YYYYMMDD sh -c 'ls -la /app/'
-# 期望看到：main.py  requirements.txt  server/  static/
+docker run --rm claude-release-platform:YYYYMMDD sh -c 'ls /app/ /app/static/'
+# 期望：main.py requirements.txt server/ static/  +  static/admin/ static/admin.html
 # ⚠️ 不应有 skills-store / updates-store / registry.db（都是运行时数据，见 .dockerignore）
+# ⚠️ static/admin/ 必须存在且有 index.html + assets/ —— 缺了说明前端阶段没成功
 ```
 
 ---
@@ -152,6 +216,47 @@ services:
 ```
 
 **为什么用 `image:` 而不是 `build: .`**：`build: .` 会在**服务器上**构建 —— 那正是要避免的。
+
+---
+
+## 4.5 部署后必查：SPA 入口的缓存头
+
+**症状**：部署成功（`docker inspect` 显示新 tag、curl `/admin` 返回新 SPA），
+但浏览器里仍是**旧页面**。
+
+**根因**：`FileResponse` 默认只带 `last-modified` / `etag`，**不带 `Cache-Control`**。
+这种响应浏览器会走「启发式缓存」——按 `(现在 − last-modified) × 10%` 估算可缓存时长。
+旧 `admin.html` 的修改时间很老，算出来能缓存好几天，于是浏览器直接用缓存、
+连服务端都不问。
+
+**修复**：`main.py` 里 SPA 入口（`/admin`、`/feedback`、`/admin-legacy`）的
+`FileResponse` 统一带 `Cache-Control: no-cache, must-revalidate`
+（是 no-cache 而非 no-store：允许缓存但每次必须回源验证，命中 304 还省流量）。
+静态资源不用管，文件名带 hash、内容变则 URL 变。
+
+**验证**：
+```bash
+curl -s -D - -o /dev/null http://<host>:8765/admin | grep -i cache-control
+# 期望：cache-control: no-cache, must-revalidate
+```
+
+> ⚠️ 该头**只对新的响应生效**。已经缓存的旧响应仍按旧规则判断 ——
+> 修复上线后，用户需要**强刷一次**（Ctrl+Shift+R），之后才恢复正常。
+
+---
+
+## 4.6 workbench 调用的两个坑
+
+1. **Braille 进度条**：`workbench upload` 的输出含 U+28xx 盲文字符，
+   Windows 下 Python 以 GBK 打印会 `UnicodeEncodeError` 崩掉。
+   → 用 `re.sub(r'[^\x20-\x7e\n]', '', output)` 过滤后再打印。
+2. **默认命令超时 30 秒**：`workbench exec` 的 `--timeout` 默认仅 30s，
+   长任务（`docker load`）会中途被杀。
+   → 显式传 `--timeout 600`。
+
+**顺序纪律**：切换 compose 的 `image:` **之前**，必须先确认新镜像已在服务器上
+（`docker image inspect <tag>`）。否则 compose 指向不存在的镜像 —— 容器会保持
+原样运行（服务不挂）但状态与配置不一致，下次重启就起不来了。
 
 ---
 

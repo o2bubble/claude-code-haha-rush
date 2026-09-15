@@ -2,16 +2,17 @@
 
 import os
 import io
+import time
 import zipfile
 import shutil
 import re
 import uuid
 import yaml
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Query
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Query, Request
 from fastapi.responses import JSONResponse, FileResponse, Response
 from . import models
-from .auth import require_auth
+from .auth import client_ip, require_auth
 
 router = APIRouter(prefix="/api")
 
@@ -338,13 +339,46 @@ async def upload_package(
 
 # ── Feedback ──
 
+# 提交限流：公网反馈页开放后，这是唯一的垃圾提交闸门。
+# 纯内存计数（2 核小机上绝不能为此打盘），进程重启即清零 —— 目的是挡住高频
+# 灌水，不是精确配额。
+#
+# 阈值刻意宽松：**GUI 客户端也用这个端点**，且公司 NAT 下多个用户可能共享出口 IP。
+# 正常用户一天几条，20/小时不会误伤，但足以让脚本灌水失去意义。
+_FEEDBACK_RATE: dict[str, list] = {}
+_FEEDBACK_MAX_PER_WINDOW = 20
+_FEEDBACK_WINDOW_SECS = 3600
+
+
+def _allow_feedback(ip: str) -> bool:
+    now = time.time()
+    # 定期清理过期条目，避免长期运行下 dict 无界增长
+    if len(_FEEDBACK_RATE) > 5000:
+        for k in [k for k, v in _FEEDBACK_RATE.items() if now - v[1] > _FEEDBACK_WINDOW_SECS]:
+            _FEEDBACK_RATE.pop(k, None)
+    entry = _FEEDBACK_RATE.get(ip)
+    if not entry or now - entry[1] > _FEEDBACK_WINDOW_SECS:
+        _FEEDBACK_RATE[ip] = [1, now]
+        return True
+    if entry[0] >= _FEEDBACK_MAX_PER_WINDOW:
+        return False
+    entry[0] += 1
+    return True
+
+
 @router.post("/feedback")
 async def submit_feedback(
+    request: Request,
     type: str = Form(...),
     message: str = Form(...),
     app_version: str = Form(""),
     image: UploadFile | None = File(None),
 ):
+    if not _allow_feedback(client_ip(request)):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many submissions from this address, please try again later",
+        )
     if type not in ("bug", "suggestion"):
         raise HTTPException(status_code=400, detail="type must be 'bug' or 'suggestion'")
     if not message.strip():
