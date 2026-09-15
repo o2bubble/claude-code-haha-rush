@@ -54,11 +54,17 @@ export function deriveFirstPrompt(
 }
 
 /**
- * Creates a fork of the current conversation by copying from the transcript file.
+ * Creates a fork of a conversation by copying from its transcript file.
  * Preserves all original metadata (timestamps, gitBranch, etc.) while updating
  * sessionId and adding forkedFrom traceability.
+ *
+ * `sourceSessionId` defaults to the current session (the `/branch` command's
+ * behavior). Passing an explicit id forks THAT session instead — needed by the
+ * GUI, whose session list can fork a session the user is not currently in.
+ * When an explicit id is given we resolve its transcript path directly rather
+ * than going through getTranscriptPath(), which only knows the active session.
  */
-async function createFork(customTitle?: string): Promise<{
+async function createFork(customTitle?: string, sourceSessionId?: UUID): Promise<{
   sessionId: UUID
   title: string | undefined
   forkPath: string
@@ -66,10 +72,12 @@ async function createFork(customTitle?: string): Promise<{
   contentReplacementRecords: ContentReplacementEntry['replacements']
 }> {
   const forkSessionId = randomUUID() as UUID
-  const originalSessionId = getSessionId()
+  const originalSessionId = sourceSessionId ?? getSessionId()
   const projectDir = getProjectDir(getOriginalCwd())
   const forkSessionPath = getTranscriptPathForSession(forkSessionId)
-  const currentTranscriptPath = getTranscriptPath()
+  const currentTranscriptPath = sourceSessionId
+    ? getTranscriptPathForSession(sourceSessionId)
+    : getTranscriptPath()
 
   // Ensure project directory exists
   await mkdir(projectDir, { recursive: true, mode: 0o700 })
@@ -219,6 +227,61 @@ async function getUniqueForkName(baseName: string): Promise<string> {
   return `${baseName} (Branch ${nextNumber})`
 }
 
+/**
+ * Fork a conversation end-to-end: copy the transcript, derive/allocate a unique
+ * title, persist it, and build the LogOption a caller needs to resume into it.
+ *
+ * Extracted from the `/branch` slash command so the IDE wire handler can offer
+ * the same behavior without duplicating the title/collision/tracing logic.
+ *
+ * Does NOT resume into the fork — the caller decides (the slash command resumes
+ * in place; the GUI reports the new id and lets the user switch when ready).
+ */
+export async function forkConversation(opts?: {
+  sourceSessionId?: UUID
+  customTitle?: string
+}): Promise<{
+  sessionId: UUID
+  effectiveTitle: string
+  firstPrompt: string
+  forkLog: LogOption
+}> {
+  const { sessionId, title, forkPath, serializedMessages, contentReplacementRecords } =
+    await createFork(opts?.customTitle, opts?.sourceSessionId)
+
+  const now = new Date()
+  const firstPrompt = deriveFirstPrompt(
+    serializedMessages.find(m => m.type === 'user'),
+  )
+
+  // " (Branch)" suffix (numbered on collision) so branched sessions are
+  // distinguishable in /status and /resume.
+  const effectiveTitle = await getUniqueForkName(title ?? firstPrompt)
+  await saveCustomTitle(sessionId, effectiveTitle, forkPath)
+
+  logEvent('tengu_conversation_forked', {
+    message_count: serializedMessages.length,
+    has_custom_title: !!title,
+  })
+
+  const forkLog: LogOption = {
+    date: now.toISOString().split('T')[0]!,
+    messages: serializedMessages,
+    fullPath: forkPath,
+    value: now.getTime(),
+    created: now,
+    modified: now,
+    firstPrompt,
+    messageCount: serializedMessages.length,
+    isSidechain: false,
+    sessionId,
+    customTitle: effectiveTitle,
+    contentReplacements: contentReplacementRecords,
+  }
+
+  return { sessionId, effectiveTitle, firstPrompt, forkLog }
+}
+
 export async function call(
   onDone: LocalJSXCommandOnDone,
   context: LocalJSXCommandContext,
@@ -229,50 +292,10 @@ export async function call(
   const originalSessionId = getSessionId()
 
   try {
-    const {
-      sessionId,
-      title,
-      forkPath,
-      serializedMessages,
-      contentReplacementRecords,
-    } = await createFork(customTitle)
-
-    // Build LogOption for resume
-    const now = new Date()
-    const firstPrompt = deriveFirstPrompt(
-      serializedMessages.find(m => m.type === 'user'),
-    )
-
-    // Save custom title - use provided title or firstPrompt as default
-    // This ensures /status and /resume show the same session name
-    // Always add " (Branch)" suffix to make it clear this is a branched session
-    // Handle collisions by adding a number suffix (e.g., " (Branch 2)", " (Branch 3)")
-    const baseName = title ?? firstPrompt
-    const effectiveTitle = await getUniqueForkName(baseName)
-    await saveCustomTitle(sessionId, effectiveTitle, forkPath)
-
-    logEvent('tengu_conversation_forked', {
-      message_count: serializedMessages.length,
-      has_custom_title: !!title,
-    })
-
-    const forkLog: LogOption = {
-      date: now.toISOString().split('T')[0]!,
-      messages: serializedMessages,
-      fullPath: forkPath,
-      value: now.getTime(),
-      created: now,
-      modified: now,
-      firstPrompt,
-      messageCount: serializedMessages.length,
-      isSidechain: false,
-      sessionId,
-      customTitle: effectiveTitle,
-      contentReplacements: contentReplacementRecords,
-    }
+    const { sessionId, forkLog } = await forkConversation({ customTitle })
 
     // Resume into the fork
-    const titleInfo = title ? ` "${title}"` : ''
+    const titleInfo = customTitle ? ` "${customTitle}"` : ''
     const resumeHint = `\nTo resume the original: claude -r ${originalSessionId}`
     const successMessage = `Branched conversation${titleInfo}. You are now in the branch.${resumeHint}`
 

@@ -78,6 +78,16 @@ export function removeSession(id: string) {
 export function renameSession(id: string, title: string) {
   send("rename_session", { session_id: id, title });
 }
+/**
+ * 分叉会话：以 id 为**源**复制出一个新会话。
+ *
+ * 不切换当前会话 —— 新会话只是出现在列表里，何时切过去由用户决定
+ * （后端回 `session_forked` 而非 `session_created`，后者在 GUI 侧会切会话）。
+ * 无需在此再拉列表：后端处理完会主动推 `session_list`。
+ */
+export function forkSession(id: string) {
+  send("fork_session", { session_id: id });
+}
 export function killTask(taskId: string) {
   send("kill_task", { task_id: taskId });
 }

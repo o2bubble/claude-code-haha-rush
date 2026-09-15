@@ -98,6 +98,15 @@ export interface IDESessionNewRequest extends IDEBaseMessage {
   type: 'new_session'
 }
 
+/**
+ * Fork a session into a new one. `session_id` is the SOURCE session and may be
+ * any session, not only the active one.
+ */
+export interface IDESessionForkRequest extends IDEBaseMessage {
+  type: 'fork_session'
+  session_id: string
+}
+
 export interface IDESessionPinRequest extends IDEBaseMessage {
   type: 'pin_session'
   session_id: string
@@ -160,6 +169,7 @@ export type StdinMessage =
   | IDESessionDeleteRequest
   | IDESessionRenameRequest
   | IDESessionNewRequest
+  | IDESessionForkRequest
   | IDESessionPinRequest
   | IDETaskListRequest
   | IDEKillTaskRequest

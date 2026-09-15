@@ -48,8 +48,6 @@ import { createReadRuleSuggestion } from './PermissionUpdate.js'
 import type { PermissionUpdate } from './PermissionUpdateSchema.js'
 import { getRuleByContentsForToolName } from './permissions.js'
 
-declare const MACRO: { VERSION: string }
-
 /**
  * Dangerous files that should be protected from auto-editing.
  * These files can be used for code execution or data exfiltration.
