@@ -4,7 +4,7 @@
 // 只测纯字段。
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { registerPluginPanels, pluginIframeBase, isPluginFrameOrigin, pluginThemeValue, encodePanelParams, decodePanelParams } from "./pluginPanelBridge";
+import { registerPluginPanels, pluginIframeBase, isPluginFrameOrigin, pluginThemeValue, encodePanelParams, decodePanelParams, sanitizeChrome } from "./pluginPanelBridge";
 import { pluginPanelId, type PluginManifest } from "./pluginRegistry";
 import { getPanel, getAllPanels } from "../stores/panelRegistry";
 
@@ -145,5 +145,58 @@ describe("encodePanelParams / decodePanelParams — base64url 往返", () => {
       const b64 = encodePanelParams(c);
       expect(b64).not.toMatch(/[+/=]/);
     }
+  });
+});
+
+// ── sanitizeChrome — 跨信任边界的白名单 ──
+// payload 来自插件 iframe 的 postMessage（第三方代码）。只放行 5 个已知键的
+// 布尔值；其余键/类型一律丢弃，防任意值灌进渲染层样式。
+
+describe("sanitizeChrome — 只放行已知键的布尔值", () => {
+  it("合法布尔值原样通过", () => {
+    expect(sanitizeChrome({ titleBar: false, background: false }))
+      .toEqual({ titleBar: false, background: false });
+  });
+
+  it("全 true 也通过（显式声明传统形态）", () => {
+    expect(sanitizeChrome({ titleBar: true, resizable: true }))
+      .toEqual({ titleBar: true, resizable: true });
+  });
+
+  it("非布尔值丢弃（防字符串/数字混入）", () => {
+    expect(sanitizeChrome({ titleBar: "false", resizable: 0 })).toBeUndefined();
+  });
+
+  it("未知键丢弃（防注入任意属性）", () => {
+    const out = sanitizeChrome({
+      titleBar: false,
+      // 以下都应被丢弃
+      style: { background: "url(javascript:alert(1))" },
+      className: "evil",
+      onclick: "alert(1)",
+      __proto__: { polluted: true },
+    } as Record<string, unknown>);
+    expect(out).toEqual({ titleBar: false });
+    expect(Object.keys(out!)).toEqual(["titleBar"]);
+  });
+
+  it("混合：只保留合法的部分", () => {
+    expect(sanitizeChrome({ titleBar: false, resizable: "yes", background: true }))
+      .toEqual({ titleBar: false, background: true });
+  });
+
+  it("非对象输入 → undefined", () => {
+    for (const bad of [undefined, null, "chrome", 42, true, []]) {
+      // 数组是对象但无已知键 → undefined（走 same path）
+      expect(sanitizeChrome(bad as unknown)).toBeUndefined();
+    }
+  });
+
+  it("空对象 → undefined（无声明 = 传统浮窗）", () => {
+    expect(sanitizeChrome({})).toBeUndefined();
+  });
+
+  it("null 值不被当作 false（typeof null !== boolean）", () => {
+    expect(sanitizeChrome({ titleBar: null })).toBeUndefined();
   });
 });

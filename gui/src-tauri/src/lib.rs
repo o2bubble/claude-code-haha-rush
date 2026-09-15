@@ -387,6 +387,26 @@ pub fn run() {
             // （点击 http(s) 链接由前端委托走 open_url_window 内置窗口打开）
             .on_navigation(is_allowed_navigation);
 
+            // 调试设施：CCGUI_CDP_PORT=<port> 时给主窗口开 WebView2 远程调试（CDP），
+            // 便于用 Playwright 连进来查 DOM / 计算样式 / 驱动 UI。
+            //
+            // 为什么必须在这里注入：wry 是 `additional_browser_args.unwrap_or_else(默认)`
+            // 之后**无条件** set_additional_browser_arguments()，会覆盖
+            // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS 环境变量 —— 所以那个 env 传不进去
+            // （实测端口不监听）。另外 wry 一旦拿到自定义 args 就**不再**使用它的默认值，
+            // 故这里必须把默认参数一并带上，否则会丢「去迷你菜单 / 去 SmartScreen」。
+            // 未设该 env 时行为与之前完全一致。
+            let main_builder = match std::env::var("CCGUI_CDP_PORT") {
+                Ok(port) if !port.trim().is_empty() => {
+                    main_builder.additional_browser_args(&format!(
+                        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                         --remote-debugging-port={}",
+                        port.trim()
+                    ))
+                }
+                _ => main_builder,
+            };
+
             // Windows: 自绘标题栏（前端 TitleBar 组件），关掉系统标题栏让工具栏
             // 与标题栏合并成一条。mac 保留原生装饰 —— 红绿灯与系统整合更好，
             // 且 Tauri 在 mac 上对无装饰窗口的处理方式不同（titleBarStyle 而非

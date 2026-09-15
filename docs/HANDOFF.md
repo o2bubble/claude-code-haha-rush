@@ -1,7 +1,38 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-14（main @3390839）
+# Handoff — Claude Code GUI 开发 · 2026-09-15（main @16a41f3）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
+
+## 🆕 2026-09-15 续：插件浮窗「全透明」失效根因
+
+用户报：插件无标题栏浮层设了 `chrome.background=false`、内容也切全透明，**却显示为纯白**。
+
+**真因是 CSS 规范行为，不是 bug** —— CSS Color Adjust §2.2：
+
+> iframe 元素的 used color scheme 与内嵌文档的不一致时，UA **必须**用不透明 canvas
+> 取代原本透明的 canvas（取内嵌文档色系的 Canvas 色）。
+
+宿主 `tokens.css` 的 `[data-theme="dark"] { color-scheme: dark }`（本意让原生
+select/滚动条/checkbox 走暗色）使 iframe 元素解析为 **dark**，而插件文档没声明
+（解析为 **light**）→ 不匹配 → 强制垫一层不透明底，且取 light 的 Canvas = **纯白**。
+
+**修法**（`gui/src/tokens.css`）：`iframe { color-scheme: light; }`，与内嵌文档对齐。
+宿主自身滚动条/表单控件仍走 dark；插件无需配合；零额外退化。
+⚠️ 若将来插件文档自己要声明 `color-scheme: dark`，需同步调这条 —— **两端必须一致**。
+
+**验证**（单变量 A/B）：默认 → 取样 `(255,255,255)` 不透明；加规则 → `(0,255,0)`
+透出底下绿块。真实 WebView2（tauri dev）复验：浮窗内最多像素 `(21,22,29)`、
+空白区 `(14,14,18)`（= 宿主 `--bg-root`），**零纯白像素**。
+
+⚠️ **排查教训（重要）**：一开始我误判为「Playwright 截图把透明区填白、现象是假的」
+并据此回滚了修改 —— **那是错的**。现象一直是真实的（iframe 的不透明 canvas 属内容层，
+截图如实显示）。**反常现象优先做单变量对照实验，别先猜机制；更别拿「工具可能骗我」当
+解释**——那是无法证伪的假设，会把真因盖住。记忆 `57ee282d`（教训）+ `6587ed74`（规范）。
+
+**附带产出**：`lib.rs` 新增 `CCGUI_CDP_PORT=<port>` 门控 —— 设了才给 WebView2 开远程
+调试（不设则行为完全不变）。这补上了记忆里记着「CDP 调试已失效」的缺口：必须在 Rust 侧
+注入（wry 无条件覆盖 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`），且需把 wry 默认参数一并
+带上（否则丢「去迷你菜单 / 去 SmartScreen」）。
 
 ## 🆕 本会话后续（承接下行"上一批"内容）
 
@@ -85,10 +116,14 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 
 ## 当前状态
 
-- **分支**: `main`（`3390839`）；工作区干净；`github-clean` = `e460e10` 快照
-- **本批主题**: CF Tunnel 打通云服务入口 + 云服务器性能事故修复 + 部署规范 + **设置面板服务器地址三档切换**
-- **Windows 版本**: **两端均 `2026.09.14.5`**
-- **macOS 云端版本**: `2026.09.14.2`（新版待 CI 产物）
+- **分支**: `main`（`16a41f3`）；工作区干净；`github-clean` = `e460e10` 快照
+- **本批主题**: CF Tunnel 入口 + 云性能事故修复 + 设置面板三档切换 + **插件浮窗全透明修复**
+- **Windows 版本**: **两端均 `2026.09.15.4`**
+  —— 期间用户自行发过 `.15.2`（WebSearch 重试）/ `.15.3`（浮窗外壳+拖动+会话面板）；
+     `.15.4` 是补发的 color-scheme 修复（`.15.3` 不含该修复）
+  ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 这个孤儿版本（号比用户已发的
+     `.15.2/.15.3` 低，客户端永远拿不到），还白挤掉了 `.14.5`
+- **macOS 云端版本**: `2026.09.14.2`（新版待构建产物；**构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**）
 - **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；300 条记忆；**已加 bearer 鉴权**
 - **Memory 服务（云）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web
 - **release-platform（云）**: 镜像 **`claude-release-platform:20260914`**（compose 已从 `build: .` 改为 `image:`）
@@ -284,17 +319,22 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 ## 热数据
 
 ### Git 状态
-- branch `main`，HEAD `3390839`；工作区干净；`github-clean` = `e460e10` 快照
+- branch `main`，HEAD `16a41f3`；工作区干净；`github-clean` = `e460e10` 快照
 
 ```text
-3390839 feat(gui): 设置面板服务器地址改三档切换 — 内网 96 / 公网云 / 自定义
-d8c4689 fix(nps): 端口全部挪进安全组已放行的 50000-50010 段
-dbf8d5d feat(infra): 用 nps 取代 frp — 自带 Web 管理面板
-0d0be3f docs(HANDOFF): 补本会话后半段 — CF Tunnel 入口 + 性能事故 + 部署规范
-796429e docs(cf): 修正 workbench 超时的错误归因 + 补三域名/多服务用法
-a9f814d docs: Cloudflare Tunnel 实战手册 + 96 部署流程 + 工具配置
-0a54fe4 fix(release-platform): 生产关闭 uvicorn reload — 2核机上烧掉 93 倍 CPU
+16a41f3 fix(gui): 暗色下插件浮窗「全透明」失效 — iframe 色系需与内嵌文档对齐
+ea7c947 fix(publish-plugin): 显式声明 UA — 云市场在 Cloudflare 后面会拦 urllib 默认 UA
+6cc1d1a feat(gui): 插件 iframe 浮窗的拖动支持 — postMessage 协议 + 拖动遮罩
+41bc9d2 feat(gui): 浮窗外壳可配置 — 支持无标题栏 / 透明的浮动元素
+0e69f7a chore(mac): 发布脚本修正过时说明 + 忽略 manifest 产物
+9144526 fix(websearch): 本地兜底搜索加重试 + 区分失败原因
+da44e9d feat(session): 会话面板 — 复制名称 / 会话分叉 / 按钮折叠
+e81ba5a fix(api): thinking-only 消息被剥离后成空数组 → 400 卡死会话
 ```
+
+> 注意 `3390839` / `49ca3fe` / `7ebb516` 是 09-14 本会话上半段的提交（三档切换 +
+> HANDOFF 更新 + mac 触发方式修正），已推到 gitee；**但 GitHub 快照停在 `e460e10`**
+> —— 需要时跑 `scripts/sync-github-clean.sh` 补推。
 
 > ⚠️ `f2dbd54` 含已失效的旧上传 key（用户选择不改写历史）。key 已轮换失效，
 > 风险消除；但**不要再从该提交取脚本内容**。
@@ -323,6 +363,12 @@ a9f814d docs: Cloudflare Tunnel 实战手册 + 96 部署流程 + 工具配置
 - Rust：`cargo test --lib`（gui/src-tauri）→ 全部通过（含 `update::tests` 6 项）
 
 ### 发布版本 (dist/release)
+- **2026.09.15.4**（暗色下插件浮窗「全透明」失效修复；仅 gui，其余复用 .15.3）
+  —— ✅ **两端已上传**，9/9 组件可下载、`gui.zip` 两端字节数一致（`24,294,167`）
+  —— gui sha `8f41aef6…`；claude 与 .15.3 同 sha（`d499e8c6…`）故未重传
+- **2026.09.15.2 / .15.3**（用户自行发布：WebSearch 重试 / 浮窗外壳+拖动+会话面板）
+- **2026.09.15.1**（设置面板三档切换）—— ⚠️ **孤儿版本，已弃用**（号低于用户已发的
+  `.15.2/.15.3`，客户端永远拿不到；其内容已并入 `.15.4` 的累积 notes 链）
 - 2026.09.10.5 ~ 2026.09.10.9（含 bun/claude/extensions/git/gui/python/server/tools/updater zip + manifest）
 - **2026.09.12.5**（笔记面板 FTS5 + jieba + 两段式查重；仅 gui/server 重建，其余复用 .4）
   —— 已上传云 `123.56.66.84:8765`；**96 未上传**（内网不通）

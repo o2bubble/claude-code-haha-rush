@@ -200,6 +200,18 @@ textarea {
   background-color: var(--bg-root);
 }
 
+/* ── iframe 的色系必须与内嵌文档对齐 ── */
+/* CSS Color Adjust §2.2：iframe 元素的 used color scheme 与内嵌文档的不一致时，
+   UA **必须**用不透明的 canvas 取代原本透明的 canvas（取内嵌文档色系的 Canvas 色）。
+   暗色主题下宿主是 dark，而插件文档通常没声明 color-scheme（解析为 light）——
+   两者不匹配 → 插件的无标题栏浮层/自绘浮层被垫一层**白底**，透不出背后内容。
+
+   显式声明 light 与内嵌文档对齐即可恢复透明 canvas。注意这等于放弃「iframe 元素
+   继承宿主 dark」——若将来插件文档自己声明 color-scheme: dark，需同步调这里。 */
+iframe {
+  color-scheme: light;
+}
+
 /* ── 全局过渡 ── */
 html {
   background: var(--bg-root);

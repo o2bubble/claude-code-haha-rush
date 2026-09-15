@@ -59,3 +59,7 @@ AGENTS.md
 
 # 私有（含 API key 等敏感值，勿提交）
 .private/
+
+# mac 发布产物 —— release_mac.py make 从 gui.zip 内嵌 manifest 派生，
+# 每次发布内容不同，不是源码
+scripts/manifest.json

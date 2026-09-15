@@ -6,14 +6,18 @@
   python release_mac.py cloud     # 上传到云服务器
   python release_mac.py verify    # 验证
 
-背景（详见 docs/macos-build-playbook.md）：
+背景（详见 docs/macos-build-playbook.md §3）：
   · gui.zip 内嵌 manifest 的 version 是 "ci-build"，服务端 VERSION_RE 要求
     YYYY.MM.DD[.N] → 必须改正式号。
-  · 内嵌 gui.sha256 是 dirMetaHash(path,size)，(path,size) 相同但内容变时不敏感
-    （"size-only 漏检"，.25.5 事故）→ 用 dir_content_hash（逐文件内容 sha 聚合）
-    覆盖，保证内容变则 sha 必变。
-  · sha 对客户端只是"版本标识"（update.rs: 不做文件系统 hash，安装后把服务端
-    sha 原样写进本地 manifest），所以算法自洽即可。
+  · **sha 一律沿用内嵌 manifest 的值，绝不重算**（2026-09-14 定论）。客户端读的
+    本地 manifest 就是 .app 内嵌的那份（update.rs: local_manifest_path =
+    Contents/MacOS/manifest.json），算法是 dirMetaHash(path,size)。发布侧若改用
+    内容 hash，同一份内容两边算出不同值 → **每次检查都误报"有更新"**（实测：
+    6 个组件全亮）。"算法更敏感"必须让位给"算法与客户端一致"。
+  · 代价：放弃"内容变但 size 不变也能检测"的能力（.25.5 场景，极罕见）。真遇到
+    时用**版本号**区分即可（客户端按版本号取最新，不依赖 sha 变化触发）。
+  · size 仍修正为 zip 实际大小 —— 内嵌值是**解压后目录**大小（gui 427MB vs zip
+    144MB），客户端下载的是 zip，用错会让下载进度显示异常。size 不参与比对。
 """
 import hashlib
 import io
@@ -23,10 +27,11 @@ import subprocess
 import sys
 import zipfile
 
-VERSION = "2026.09.14.2"
-# 只上传这些组件（其余由服务端从同平台上一版自动复制）。
-# 全量发布时改成 set(COMPONENTS)。
-UPLOAD_ONLY = {"gui"}
+VERSION = "2026.09.15.1"
+# ⚠️ 本次必须**全量**：云上 macos 版本目录已被 _prune_old_versions(keep=3) 剪空
+# （Windows 连发 .14.4/.14.5/.15.1 把 mac 的 .14.1/.14.2 挤掉了），没有上一版
+# 可供服务端复制未传组件 —— 只传 gui 会让其余 5 个组件在服务端缺失。
+UPLOAD_ONLY = {"gui", "claude", "bun", "tools", "python", "extensions"}
 DL = os.path.expanduser("~/Downloads")
 ART = os.path.dirname(os.path.abspath(__file__))
 HOST = "http://localhost:8765"                 # 经 workbench 隧道
@@ -40,7 +45,7 @@ if not API_KEY:
 # 组件 → 本地 zip 文件名。改了 VERSION 后**只需改这里**（文件名带浏览器加的 " (N)"
 # 后缀没关系 —— 上传时会映射成规范 <component>.zip，见 cloud()）。
 COMPONENTS = {
-    "gui": "gui (4).zip",
+    "gui": "gui.zip",
     "claude": "claude.zip",
     "bun": "bun.zip",
     "tools": "tools.zip",
@@ -49,18 +54,31 @@ COMPONENTS = {
 }
 GUI_ZIP = os.path.join(DL, COMPONENTS["gui"])
 
-RELEASE_NOTES = """v2026.09.14.2
+RELEASE_NOTES = """v2026.09.15.1
 
-macOS 版本（arm64 / Apple Silicon）。
+macOS 版本（arm64 / Apple Silicon）。本版对齐 Windows 2026.09.15.1，
+一次补齐 mac 侧此前积压的多版 GUI 改动。
+
+### 新增
+- 会话面板支持一键复制会话名称 — 从行内 ⋯ 菜单或右键取用
+- 会话分叉 — 可从任意会话复制出一份独立的新会话继续对话，原会话不受影响；
+  分叉后不自动跳转，新会话出现在列表里，由你决定何时切过去
+- 会话行按钮折叠 — 原本每行堆 5 个按钮（收藏 / 移文件夹 / 重命名 / 删除 /
+  新窗口），现只留收藏与 ⋯，其余收进菜单；右键与 ⋯ 是同一份菜单
+- 设置面板的服务器地址改为三档切换 — 「内网 96 / 公网云 / 自定义」一键选定，
+  不再需要自己猜公网该填哪个域名
 
 ### 修复
-- 更新面板把已装的 GUI 误报「未安装」—— 路径解析少算了两级（GUI 是 .app 本身，
-  不在 Contents/MacOS 里）。同一错误也会让 GUI 自动更新写到不存在的路径。
-- 不再生成 .app 里跑不起来的三个命令（kill-claude / claude-profile / memory-setup）
-  —— 它们引用的 scripts/ 目录不打进 .app，属于死文件
+- 连续发消息偶发 400 报错卡死会话（推理模型）— 只输出思考块的消息被剥离思考
+  内容后留成空数组，遭服务端拒绝；现补占位内容，会话不再卡死
+- 「公网」服务器档改用 Cloudflare Tunnel 域名 — 云主机裸 IP 在受限网络
+  （企业网等）会被静默丢弃，选「公网」却完全连不上；已设过旧地址的自动迁移
+- 自动更新地址与技能库地址不同步 — 改服务器地址只写了技能库那个字段，
+  自动更新仍指向旧地址
+- 工作区保存范围下服务器地址会静默丢失 — 现固定按全局保存
 
-### 安装/更新
-本版改动集中在 GUI，'gui' 组件单独更新即可；其余组件与 2026.09.14.1 相同。
+### 说明
+mac 侧此前积压多版未发，本次 6 个组件全部有更新，安装全部组件即可。
 """
 
 
@@ -110,11 +128,9 @@ def make() -> int:
     print(f"gui sha: {mf['components']['gui']['sha256'][:16]}… (沿用内嵌 dirMetaHash)")
     print(f"gui size: {mf['components']['gui']['size']} (zip 实际大小)")
 
-    # 其余组件：sha 取 zip 内主文件的 sha（与 Windows 约定一致：文件内容 sha）
-    # mac 单文件组件（claude/bun）zip 内就一个文件；目录组件（tools/python/extensions）
-    # 用 zip 内所有文件的聚合（同 dir_content_hash 思路）。
-    # 其余组件同理：sha 沿用内嵌值（与客户端本地 manifest 的算法一致），
-    # 只把 size 修正成 zip 实际大小。
+    # 其余组件同理：**sha 仍沿用内嵌值**（与客户端本地 manifest 的算法一致），
+    # 只把 size 修正成 zip 实际大小。非 gui 组件的 sha 由 build.ts 在 CI 期算好，
+    # 与本次上传的 zip 同批产物，天然自洽。
     for name, fname in COMPONENTS.items():
         if name == "gui":
             continue
