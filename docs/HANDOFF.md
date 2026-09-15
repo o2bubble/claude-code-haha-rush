@@ -332,9 +332,12 @@ da44e9d feat(session): 会话面板 — 复制名称 / 会话分叉 / 按钮折�
 e81ba5a fix(api): thinking-only 消息被剥离后成空数组 → 400 卡死会话
 ```
 
-> 注意 `3390839` / `49ca3fe` / `7ebb516` 是 09-14 本会话上半段的提交（三档切换 +
-> HANDOFF 更新 + mac 触发方式修正），已推到 gitee；**但 GitHub 快照停在 `e460e10`**
-> —— 需要时跑 `scripts/sync-github-clean.sh` 补推。
+> `3390839` / `49ca3fe` / `7ebb516` 是 09-14 上半段的提交（设置面板三档切换 +
+> HANDOFF 更新 + mac 触发方式修正）。
+>
+> ⚠️ **别在文档里写死 `github-clean` 的快照 sha** —— 它每次同步都会变
+> （内容是把 main 的树重新提交一遍）。要确认现状以 `git log github-clean` 为准；
+> 落后了就 `bash scripts/sync-github-clean.sh` 补。
 
 > ⚠️ `f2dbd54` 含已失效的旧上传 key（用户选择不改写历史）。key 已轮换失效，
 > 风险消除；但**不要再从该提交取脚本内容**。
