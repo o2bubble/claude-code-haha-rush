@@ -692,7 +692,11 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
   `nps.` 三个子域指向云上其它服务。ECS `i-2ze2rouoikcqrlbseu8a` / cn-beijing；
   **运维通道 workbench**（`exec` 走 Session Manager，资源饱和时超时 → 改 `RunCommand` API）
 - **Workbench**: `C:\Program Files\workbench\workbench.exe`；config `~/.workbench/config.json`（AK 模式）；**Python subprocess 调用**
-- **GitHub**: `o2bubble/claude-code-haha-rush`（private）；push 需 `-c http.proxy= -c https.proxy=` 绕过死代理（17891）
+- **GitHub**: `o2bubble/claude-code-haha-rush`（private）。⚠️ **代理方向不稳定，别记死**：
+  两种相反状态都出现过（代理挂 → 要绕开；直连被拦 → 要走代理）。失败时先 curl 对测：
+  `curl --noproxy '*' https://github.com` vs `curl -x socks5h://127.0.0.1:17891 https://github.com`，
+  哪条通走哪条。报错也能判方向：走代理失败常见 `schannel: failed to receive handshake`，
+  绕开失败常见 `Failed to connect ... port 443`。详见记忆 `2a691c96`
 - **凭据**: 真实值见 `.private/api-keys.md`（gitignored）；⚠️ 不要把真实值写回本文件
 
 ## 相关文档索引
