@@ -1,4 +1,6 @@
+import { delimiter as pathDelimiter } from 'path'
 import { isEnvTruthy } from './envUtils.js'
+import { getSessionEnvVars } from './sessionEnvVars.js'
 
 /**
  * Env vars to strip from subprocess environments when running inside GitHub
@@ -76,6 +78,37 @@ export function registerUpstreamProxyEnvFn(
   _getUpstreamProxyEnv = fn
 }
 
+/**
+ * 把插件 runtime 目录前置进 PATH（**进程级**，供直接 spawn 的子进程继承）。
+ *
+ * 与 bash/powershell provider 的 `export PATH=...` 那条**不同路径**：
+ * 那两个只影响 shell 命令串，不改本进程 env；而 MCP stdio server / LSP 等由
+ * `StdioClientTransport` 直接 spawn，env 走 `subprocessEnv()` → 继承 `process.env`
+ * → 拿不到 shell 命令串里的前置。
+ *
+ * 后果（2026-09-15 mac 实测）：`{"command":"npx"}` 的 MCP server（playwright-mcp）
+ * spawn 失败（`env: npx: No such file or directory`），因为引擎 PATH 里只有
+ * `.../nodejs/runtime` 根、没有 `runtime/bin`。而 AI Bash 里 `npx` 正常 ——
+ * 那是 shell 命令串补的前置，容易误判为"已修好"。
+ *
+ * 存储格式：`CLAUDE_PLUGIN_PATH_PREPEND` 用 `;` 分隔**目录列表**（非 PATH 分隔符），
+ * 这里用 `pathDelimiter` 拼（POSIX ':' / Windows ';'）。
+ */
+function withPluginRuntimePath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const prepend = getSessionEnvVars().get('CLAUDE_PLUGIN_PATH_PREPEND')
+  if (!prepend) return env
+  const dirs = prepend.split(';').filter(d => d.length > 0)
+  if (dirs.length === 0) return env
+  const cur = env.PATH ?? env.Path ?? ''
+  // 幂等：所有目标目录都已在最前面就不重复叠加（同一进程多次调用很常见）。
+  // 判据用**目录段前缀**而非 startsWith(dirs[0]) —— 后者会被前缀关系误命中
+  // （`.../runtime` 是 `.../runtime/bin` 的前缀，导致每次都误判"已叠加"）。
+  const head = dirs.join(pathDelimiter) + pathDelimiter
+  if (cur.startsWith(head)) return env
+  const merged = dirs.join(pathDelimiter) + (cur ? pathDelimiter + cur : '')
+  return { ...env, PATH: merged, Path: merged }
+}
+
 export function subprocessEnv(): NodeJS.ProcessEnv {
   // CCR upstreamproxy: inject HTTPS_PROXY + CA bundle vars so curl/gh/python
   // in agent subprocesses route through the local relay. Returns {} when the
@@ -84,9 +117,10 @@ export function subprocessEnv(): NodeJS.ProcessEnv {
   const proxyEnv = _getUpstreamProxyEnv?.() ?? {}
 
   if (!isEnvTruthy(process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB)) {
-    return Object.keys(proxyEnv).length > 0
+    const base = Object.keys(proxyEnv).length > 0
       ? { ...process.env, ...proxyEnv }
-      : process.env
+      : { ...process.env }
+    return withPluginRuntimePath(base)
   }
   const env = { ...process.env, ...proxyEnv }
   for (const k of GHA_SUBPROCESS_SCRUB) {
@@ -95,5 +129,5 @@ export function subprocessEnv(): NodeJS.ProcessEnv {
     // secrets like INPUT_ANTHROPIC_API_KEY. No-op for vars that aren't action inputs.
     delete env[`INPUT_${k}`]
   }
-  return env
+  return withPluginRuntimePath(env)
 }

@@ -731,6 +731,46 @@ fn list_plugin_manifests(app: tauri::AppHandle) -> Result<serde_json::Value, Str
     Ok(serde_json::to_value(entries).map_err(|e| e.to_string())?)
 }
 
+/// 枚举所有启用插件的 runtime 目录（**含 `bin/` 子目录**），供直接 spawn 的子进程
+/// 前置进 PATH。
+///
+/// 与前端 `aggregateRuntimePaths` / `pluginRuntimePaths.ts` 那条契约同源——三处都要
+/// 注入 `bin/`，mac/Linux 的 node 在 `runtime/bin` 下（Windows 在根）。
+///
+/// 用途：mac「打开终端」/ MCP spawn 等**不经 bash provider** 的路径。那两处此前只
+/// 在 shell 命令串里 `export PATH`，不改本进程 env，导致引擎/新终端拿不到插件 runtime
+/// （2026-09-15 实测：`{"command":"npx"}` 的 MCP server spawn 失败）。
+///
+/// 失败一律返回空（无插件目录 / 读不了 → 不注入即现状），不拖垮调用方。
+fn collect_plugin_runtime_dirs(app: &tauri::AppHandle) -> Vec<String> {
+    let Ok(base) = plugins_base_dir(app) else { return Vec::new() };
+    let plugins_dir = std::path::PathBuf::from(base);
+    let Ok(read_dir) = std::fs::read_dir(&plugins_dir) else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    for entry in read_dir.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() { continue; }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') { continue; }
+        let Some(rels) = read_runtime_rel_paths(&dir) else { continue };
+        for rel in rels {
+            let abs = dir.join(rel);
+            if !abs.exists() { continue; }
+            let abs_s = abs.to_string_lossy().to_string();
+            if !out.contains(&abs_s) { out.push(abs_s.clone()); }
+            // 声明已以 /bin 结尾 → 不追加，防 bin/bin
+            if !abs_s.ends_with("/bin") && !abs_s.ends_with(r"\bin") {
+                let bin = abs.join("bin");
+                if bin.exists() {
+                    let bin_s = bin.to_string_lossy().to_string();
+                    if !out.contains(&bin_s) { out.push(bin_s); }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 插件根目录（app_data_dir()/plugins）——前端 runtime 聚合的相对路径基准
 /// （plugin-nodejs-runtime T2）。与 list_plugin_manifests 的目录约定同源。
 pub(crate) fn plugins_base_dir(app: &tauri::AppHandle) -> Result<String, String> {
@@ -3048,7 +3088,7 @@ fn open_system_terminal(terminal_type: String, work_dir: String, claude_launch: 
 
 #[cfg(not(target_os = "windows"))]
 #[tauri::command]
-fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch: Option<bool>) -> Result<(), String> {
+fn open_system_terminal(app: tauri::AppHandle, _terminal_type: String, work_dir: String, claude_launch: Option<bool>) -> Result<(), String> {
     use std::process::Command;
     let launch = claude_launch.unwrap_or(false);
     // work_dir 为空时 `cd ""` 会报 bash 错（`: string is empty`），回退到主目录。
@@ -3068,10 +3108,44 @@ fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch:
     // 单引号不参与 AppleScript 字面量，天然规避；bash 侧单引号内除 `'` 外无特殊
     // 字符，只需把路径里的 `'` 按 `'\''` 转义（与 update.rs 的 osascript 提权同思路）。
     let work = target_dir.replace('\'', "'\\''");
-    let body = if launch {
-        format!("cd '{}' && CLAUDE_CODE_SKIP_PROMPT_HISTORY=true claude", work)
+    let cd = format!("cd '{}'", work);
+
+    // ⚠️ macOS 新开的 Terminal 是**登录 shell**，只读 ~/.zprofile / ~/.zshrc ——
+    // **读不到本进程的 env**。所以插件 runtime（node/npm/npx）与安装目录都不在
+    // 它的 PATH 里（Windows 分支靠 `.env("PATH", child_path)` 显式传入，mac 无此机制）。
+    // 代价：新终端里 `node`/`npx` 不可用，`claude` 也可能找不到。
+    // 修法：把目录拼进 bash 命令串（登录 shell 启动**之后**才 export，才能覆盖）。
+    let mut prepend: Vec<String> = Vec::new();
+    // 安装目录（claude 二进制所在）= Contents/MacOS
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            prepend.push(dir.to_string_lossy().to_string());
+        }
+    }
+    // 插件 runtime（含 bin/）—— 与 aggregateRuntimePaths / pluginRuntimePaths.ts 同源
+    prepend.extend(collect_plugin_runtime_dirs(&app));
+
+    let path_export = if prepend.is_empty() {
+        String::new()
     } else {
-        format!("cd '{}'", work)
+        let dirs = prepend
+            .iter()
+            .map(|d| format!("'{}'", d.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(":");
+        // ⚠️ bash 侧需要 "$PATH" 的双引号（目录含空格时必须靠它整体展开），但它会被
+        // **外层 AppleScript 字面量的 `"` 提前闭合** —— 与「打开终端」那个 -2741 老坑
+        // 同源。故这里必须写成 `\"$PATH\"`：AppleScript 先把 `\"` 还原成 `"`，bash
+        // 再收到 `"$PATH"`。
+        // （已用词法模拟验证：`"` 不转义时 AppleScript 提前闭合；转义后正确，
+        //   含空格路径与含单引号路径都通过。）
+        format!("export PATH={}:\\\"$PATH\\\"; ", dirs)
+    };
+
+    let body = if launch {
+        format!("{}{} && CLAUDE_CODE_SKIP_PROMPT_HISTORY=true claude", path_export, cd)
+    } else {
+        format!("{}{}", path_export, cd)
     };
     let script = format!(
         "tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{}\"",
