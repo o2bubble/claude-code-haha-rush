@@ -187,17 +187,66 @@ async def download_component(version: str, component: str, platform: str = "wind
 
 # ── Upload (API key required) ──
 
+def _remove_platform_version(version: str, platform: str) -> None:
+    """删掉某版本的**单个平台**内容，保留另一平台。
+
+    ⚠️ windows 的内容（manifest.json + *.zip）就在版本目录**顶层**，与 macos/
+    子目录同级 —— 所以只能逐个删文件，不能 rmtree 整个目录（那会连 macos 一起删，
+    正是本函数存在的原因）。
+    """
+    pdir = _platform_dir(version, platform)
+    if not pdir.exists():
+        return
+    if platform != "windows":
+        # macos 独占 {version}/macos/ 子目录，整目录删安全
+        shutil.rmtree(pdir, ignore_errors=True)
+        return
+    for f in pdir.iterdir():
+        if f.is_file() and (f.name == "manifest.json" or f.suffix == ".zip"):
+            f.unlink(missing_ok=True)
+
+
 def _prune_old_versions(current: str, keep: int = 3) -> None:
-    """上传成功后保留最近 keep 个版本目录，删除更旧的（含该版本下 windows/macos 子目录），
-    防止 updates-store 无限累积把磁盘撑满（发布平台早期缺陷：每版留一个副本）。"""
+    """上传成功后按**平台各自**保留最近 keep 个版本，清掉更旧的。
+
+    防止 updates-store 无限累积把磁盘撑满（2 核小盘）；同时避免「按版本号整体删」
+    把另一平台的版本误伤。
+
+    ⚠️ 为什么必须按平台分开算（2026-09-15 修复）：
+    版本目录由两平台共享 —— windows 用 {version}/、macos 用 {version}/macos/。
+    旧实现对超额版本直接 `rmtree(UPDATES_STORE / v)`，会把**另一个平台**的内容
+    一并删除。而 mac 发版频率天然低于 windows、版本号永远更旧，于是每次 windows
+    发布都把它挤出保留窗口 → 「程序更新」页 mac 列表最终全空，
+    `/api/updates/latest?platform=macos` 返回 404（mac 客户端检查更新直接失效）。
+
+    现在各平台独立算保留集，只删该平台自己的内容；某版本两平台都清空了才删目录。
+
+    `current` 是刚落盘的版本：它在自己的平台上必然是最新，但**可能比该平台其它
+    已有版本号更旧**（重传旧版本号的场景）—— 那种情况下它也会落进淘汰区，故仍需
+    显式放行，不能顺手清掉调用方刚上传的东西。
+    """
     try:
-        vers = [d.name for d in UPDATES_STORE.iterdir()
-                if d.is_dir() and VERSION_RE.match(d.name)]
-        vers = sorted(vers, key=_version_key, reverse=True)
-        for v in vers[keep:]:
-            if v == current:
-                continue
-            shutil.rmtree(UPDATES_STORE / v, ignore_errors=True)
+        vers = sorted(
+            (d.name for d in UPDATES_STORE.iterdir()
+             if d.is_dir() and VERSION_RE.match(d.name)),
+            key=_version_key,
+            reverse=True,
+        )
+
+        for platform in sorted(PLATFORMS):
+            have = [v for v in vers if _read_manifest(v, platform)]
+            for v in have[keep:]:
+                if v == current:
+                    continue
+                _remove_platform_version(v, platform)
+
+        # 两个平台都已清空的版本目录 → 整个删掉，不留空壳
+        for v in vers:
+            vdir = UPDATES_STORE / v
+            if vdir.exists() and not any(
+                (_platform_dir(v, p) / "manifest.json").exists() for p in PLATFORMS
+            ):
+                shutil.rmtree(vdir, ignore_errors=True)
     except Exception:
         pass
 
