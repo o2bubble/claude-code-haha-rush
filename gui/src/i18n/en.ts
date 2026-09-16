@@ -212,6 +212,7 @@ const en: Locale = {
       layout: "Layout",
       notes: "Notes",
       files: "Files",
+      plugins: "Plugins",
     },
     item: {
       paletteOpen: "Open Command Palette",
@@ -230,6 +231,9 @@ const en: Locale = {
     conflictWarning: "{count} key conflict(s) — earlier entries in the list win",
     notBindable: "\"{keys}\" is a local interaction key (Enter/Esc/arrows), which cannot be a shortcut",
     contextualBadge: "(context-dependent)",
+    osConflict: "Registration failed (likely taken by another app)",
+    osBadge: "(global, works while the window is unfocused)",
+    osNeedsModifier: "\"{keys}\" can't be a global hotkey — it needs Ctrl / Alt / Cmd or a function key, otherwise it steals normal typing in other apps",
     hint: "Click a key then press a new combination to rebind. Entries marked \"context-dependent\" only work in specific panels, so they can't be changed.",
   },
 
@@ -999,6 +1003,9 @@ const en: Locale = {
     fixEnvVars: "Fix env & Profile",
     restartHint: "Env/Profile fixed. If the GUI or IDE is already open, restart it (or use Restart IDE backend below) for changes to take effect.",
     envFixElevationDenied: "System-level env writes require elevation, but the authorization was cancelled/denied (UAC). Please retry and allow it.",
+    fixExecBits: "Fix",
+    execBitsRestartHint: "Executable permissions restored. Restart the GUI to take effect.",
+    execBitsDenied: "Fixing requires administrator privileges, but authorization was cancelled. Please retry and allow it.",
     fixing: "Working...",
     cloudSwitched: "Switched to cloud server, re-probing",
     cloudSwitchFailed: "Failed to switch to cloud server",

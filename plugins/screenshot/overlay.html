@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>选择截图区域</title>
+<style>
+  /* 铺满显示器：窗口本身是无边框置顶的，这里只要把内容撑满 */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  body { cursor: crosshair; user-select: none; -webkit-user-select: none; }
+
+  /* 冻结图：铺满整个窗口。
+     窗口由宿主按**物理像素**定位/定尺寸，浏览器按 devicePixelRatio 折算成 CSS 尺寸，
+     所以 width/height:100% 恰好是 1:1 的物理映射 —— 用户点哪，图上的哪个像素就是哪个。 */
+  #shot { position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+          image-rendering: pixelated; }
+
+  /* 选框外区域压暗（box-shadow 挖洞，比四个遮罩块简单且不闪） */
+  #sel {
+    position: absolute; display: none; pointer-events: none;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, .55);
+    border: 1px solid rgba(255, 255, 255, .9);
+    outline: 1px solid rgba(0, 0, 0, .5);
+  }
+  #size {
+    position: absolute; display: none; pointer-events: none;
+    background: rgba(20, 22, 28, .92); color: #fff; padding: 3px 8px;
+    border-radius: 4px; font: 12px/1.4 ui-monospace, Consolas, monospace;
+    white-space: nowrap;
+  }
+  #hint {
+    position: absolute; left: 50%; top: 18px; transform: translateX(-50%);
+    background: rgba(20, 22, 28, .92); color: #e8e8ee; padding: 7px 16px;
+    border-radius: 8px; font: 13px/1.5 system-ui, sans-serif; pointer-events: none;
+    box-shadow: 0 6px 24px rgba(0,0,0,.5);
+  }
+  kbd { background: #3a3d46; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+  #err { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+         color: #fff; font: 14px system-ui; background: #16181d; text-align: center; padding: 20px; }
+</style>
+</head>
+<body>
+<img id="shot" alt="">
+<div id="sel"></div>
+<div id="size"></div>
+<div id="hint">拖动选择区域 · <kbd>Esc</kbd> 取消 · <kbd>Enter</kbd> 用整屏</div>
+<div id="err"></div>
+
+<script>
+// ── 与插件进程通信 ──
+// 本页在**宿主开出的 overlay 窗口**里（经 plugins:// 协议加载），与后台进程
+// (127.0.0.1:port) 不同源 —— 所以进程必须返回 CORS 头（它已返回）。
+const q = new URLSearchParams(location.search);
+const PORT = Number(q.get("port") || 0);
+const TOKEN = q.get("token") || "";
+const API = `http://127.0.0.1:${PORT}`;
+const PLUGIN = "screenshot";
+const SOURCE = `plugin:viewer:${PLUGIN}`;
+
+const shot = document.getElementById("shot");
+const sel = document.getElementById("sel");
+const sizeTag = document.getElementById("size");
+const errBox = document.getElementById("err");
+
+function fail(msg) {
+  errBox.style.display = "flex";
+  errBox.textContent = msg;
+}
+if (!PORT || !TOKEN) fail("缺少 port / token —— overlay 参数不完整");
+
+// 冻结图：直接由插件进程提供。`<img>` 不受同源限制，无需 CORS。
+shot.src = `${API}/frozen?token=${encodeURIComponent(TOKEN)}`;
+shot.onerror = () => fail("无法加载截图 —— 插件进程可能已退出");
+
+/** 上报给宿主：overlay 窗口的父级是宿主页面，postMessage 直接可达。
+ *  （宿主再把它转成 Tauri 事件发回主窗 —— 见 PluginOverlayApp。） */
+function toHost(kind, payload) {
+  try { parent.postMessage({ source: SOURCE, kind, payload }, "*"); } catch (e) {}
+}
+
+// ── 框选交互 ──
+let sx = 0, sy = 0, dragging = false, rect = null;
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(v, hi)); }
+
+function paint(x, y, w, h) {
+  sel.style.display = "block";
+  sel.style.left = x + "px"; sel.style.top = y + "px";
+  sel.style.width = w + "px"; sel.style.height = h + "px";
+  // 尺寸标签：显示**物理像素**（用户实际截到的大小），不是 CSS px
+  const dpr = window.devicePixelRatio || 1;
+  sizeTag.style.display = "block";
+  sizeTag.textContent = `${Math.round(w * dpr)} × ${Math.round(h * dpr)}`;
+  sizeTag.style.left = x + "px";
+  sizeTag.style.top = Math.max(0, y - 28) + "px";
+}
+
+document.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  dragging = true;
+  sx = e.clientX; sy = e.clientY;
+  rect = null;
+  paint(sx, sy, 0, 0);
+});
+
+document.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  const x = Math.min(sx, e.clientX), y = Math.min(sy, e.clientY);
+  const w = Math.abs(e.clientX - sx), h = Math.abs(e.clientY - sy);
+  rect = { x, y, w, h };
+  paint(x, y, w, h);
+});
+
+document.addEventListener("mouseup", async (e) => {
+  if (!dragging) return;
+  dragging = false;
+  const x = Math.min(sx, e.clientX), y = Math.min(sy, e.clientY);
+  const w = Math.abs(e.clientX - sx), h = Math.abs(e.clientY - sy);
+  // 误触（点一下没拖）→ 当成取消，不要截一个 1×1 的图
+  if (w < 4 || h < 4) { await cancel(); return; }
+  await commit({ x, y, w, h });
+});
+
+async function commit(cssRect) {
+  // CSS px → 物理 px：overlay 铺满一块显示器，devicePixelRatio 就是它的缩放比
+  const dpr = window.devicePixelRatio || 1;
+  const body = {
+    token: TOKEN,
+    x: Math.round(cssRect.x * dpr),
+    y: Math.round(cssRect.y * dpr),
+    w: Math.round(cssRect.w * dpr),
+    h: Math.round(cssRect.h * dpr),
+  };
+  try {
+    const res = await fetch(`${API}/crop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "裁剪失败");
+    // 进程给的投递指令（送聊天 / 送超桌）—— 由**宿主**执行（本页没有那些能力）
+    for (const h of (data.host || [])) toHost(h.kind, h.payload);
+  } catch (e) {
+    fail("裁剪失败：" + (e && e.message || e));
+    return;
+  }
+  // 关掉 overlay。放在最后：先投递再关闭，视觉上不突兀。
+  toHost("close-overlay");
+}
+
+async function cancel() {
+  try {
+    await fetch(`${API}/cancel`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: TOKEN }),
+    });
+  } catch (e) { /* 取消失败无所谓，会话会超时自清 */ }
+  toHost("close-overlay");
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); void cancel(); }
+  if (e.key === "Enter") {
+    e.preventDefault();
+    // 回车 = 用整个显示器
+    const w = window.innerWidth, h = window.innerHeight;
+    void commit({ x: 0, y: 0, w, h });
+  }
+});
+
+// 右键取消（框选类 UI 的通用约定）
+document.addEventListener("contextmenu", (e) => { e.preventDefault(); void cancel(); });
+</script>
+</body>
+</html>

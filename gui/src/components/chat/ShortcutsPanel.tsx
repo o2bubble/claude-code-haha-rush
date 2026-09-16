@@ -2,22 +2,35 @@
 //
 // 快捷键的管理界面：查看 / 改键 / 冲突提示 / 恢复默认。
 //
-// **三种条目**（决定可改性）：
-//   · 全局 / 命令型 —— 可改键
+// **条目来源**：内置表（`DEFAULT_SHORTCUTS`）+ **插件命令**（`plugin.json` 的
+// `commands[].hotkey`，运行时收集）。插件条目没有 i18n 键，靠条目自带的 `label`
+// 显示（`label ?? t(labelKey)`）—— 直接 `t("")` 会把空键名印在界面上。
+//
+// **可改性**（决定只读与否）：
+//   · 全局 / 命令型 / 插件条目 —— 可改键
 //   · 上下文型（`contextual: true`）—— **只读展示**。它们有额外生效条件
 //     （笔记面板聚焦、文件树有选中项…），改了键也可能不生效，让用户改是误导。
+//   · `scope: "os"`（全局热键）—— 可改，但录制时用更严的校验
+//     （见下方 `isGlobalHotkeyBindable`）。
 //
 // **软冲突**：允许绑到同一个键，但列表里用警示色标出 + 顶部汇总提示。
 // 运行时按注册表顺序（靠前者优先），与注册时机解耦。
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, RotateCcw, X } from "lucide-react";
 import { t } from "../../i18n";
 import {
   DEFAULT_SHORTCUTS, resolveBindings, findConflicts, displayKeys, normalizeKeys,
-  formatKeys, isBindableKeys, BARE_MODIFIER_KEYS,
+  formatKeys, isBindableKeys, isGlobalHotkeyBindable, buildPluginShortcutEntries,
+  BARE_MODIFIER_KEYS,
   type ShortcutEntry,
 } from "../../services/shortcuts";
+import { getActiveManifests, collectPluginHotkeys } from "../../services/pluginRegistry";
+import {
+  getGlobalHotkeyStatus, subscribeGlobalHotkeyStatus, type HotkeyStatus,
+} from "../../services/globalShortcutService";
+import { useEventHandler } from "../../services/useService";
+import { Events } from "../../services/events";
 import { S } from "./settingsStyles";
 import { isMacPlatform } from "../../services/shortcutDispatcher";
 
@@ -27,6 +40,7 @@ const GROUP_ORDER: Array<{ id: string; labelKey: string }> = [
   { id: "layout", labelKey: "shortcuts.group.layout" },
   { id: "notes", labelKey: "shortcuts.group.notes" },
   { id: "files", labelKey: "shortcuts.group.files" },
+  { id: "plugins", labelKey: "shortcuts.group.plugins" },
 ];
 
 export default function ShortcutsPanel({
@@ -41,8 +55,30 @@ export default function ShortcutsPanel({
   const [recording, setRecording] = useState<string | null>(null);
   /** 录制时按了不可绑的键 → 显示提示（不静默吞掉） */
   const [rejected, setRejected] = useState<string | null>(null);
+  /** 插件重扫时刷新（装/卸插件后条目要跟着变） */
+  const [pluginTick, setPluginTick] = useState(0);
+  /** 全局热键的注册结果（id → 该键是否真的注册上了） */
+  const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus[]>(getGlobalHotkeyStatus);
 
-  const entries = useMemo(() => resolveBindings(DEFAULT_SHORTCUTS, overrides), [overrides]);
+  useEventHandler(Events.PANEL_REGISTRY_CHANGED, () => setPluginTick((v) => v + 1));
+  useEffect(() => subscribeGlobalHotkeyStatus(setHotkeyStatus), []);
+  const hotkeyById = useMemo(
+    () => new Map(hotkeyStatus.map((s) => [s.id, s])),
+    [hotkeyStatus],
+  );
+
+  const entries = useMemo(() => {
+    const pluginEntries = buildPluginShortcutEntries(
+      collectPluginHotkeys(getActiveManifests()),
+    );
+    // 顺序 = 内置在前、插件在后（与分发器一致，避免面板显示的顺序与实际优先级不符）
+    return [
+      ...resolveBindings(DEFAULT_SHORTCUTS, overrides),
+      ...resolveBindings(pluginEntries, overrides),
+    ];
+    // pluginTick 刻意进依赖：插件变更是命令式事件，没有其它可观察的依赖源
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overrides, pluginTick]);
   const conflicts = useMemo(() => findConflicts(entries), [entries]);
   const conflictedIds = useMemo(
     () => new Set(conflicts.flatMap((c) => c.ids)),
@@ -149,7 +185,8 @@ export default function ShortcutsPanel({
                     color: "var(--fg-primary)",
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                   }}>
-                    {t(e.labelKey)}
+                    {/* 插件条目没有 i18n 键 → 用自带的 label 显示（否则 t("") 出空名） */}
+                    {e.label ?? t(e.labelKey)}
                     {e.contextual && (
                       <span style={{
                         marginLeft: 6, fontSize: "calc(var(--font-scale, 1) * 10px)",
@@ -158,10 +195,33 @@ export default function ShortcutsPanel({
                         {t("shortcuts.contextualBadge")}
                       </span>
                     )}
+                    {e.scope === "os" && (
+                      <span style={{
+                        marginLeft: 6, fontSize: "calc(var(--font-scale, 1) * 10px)",
+                        color: "var(--fg-muted)",
+                      }}>
+                        {t("shortcuts.osBadge")}
+                      </span>
+                    )}
                   </span>
 
-                  {/* 键位 —— 点击录制（上下文型不可改） */}
-                  {e.contextual || e.scope === "os" ? (
+                  {/* 全局热键的注册结果 —— 注册失败是静默的（键被别的软件占用时
+                      没有任何其它反馈），不显示的话用户只会觉得"时灵时不灵" */}
+                  {e.scope === "os" && hotkeyById.get(e.id) && !hotkeyById.get(e.id)!.registered && (
+                    <span
+                      title={hotkeyById.get(e.id)!.error ?? ""}
+                      style={{
+                        fontSize: "calc(var(--font-scale, 1) * 10px)",
+                        color: "var(--semantic-error, #d32f2f)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {t("shortcuts.osConflict")}
+                    </span>
+                  )}
+
+                  {/* 键位 —— 点击录制（仅上下文型不可改：它的生效条件不可控） */}
+                  {e.contextual ? (
                     <ReadonlyKeys keys={e.keys} isMac={isMac} />
                   ) : (
                     <button
@@ -188,6 +248,12 @@ export default function ShortcutsPanel({
                         // 给明确反馈，不静默吞掉
                         if (!isBindableKeys(candidate)) {
                           setRejected(t("shortcuts.notBindable", { keys: displayKeys(candidate, isMac) }));
+                          return;
+                        }
+                        // 全局热键额外要求真正的修饰键（或功能键）：它从**所有应用**
+                        // 手里抢键，只按 Shift 的组合会吃掉别处的正常输入
+                        if (e.scope === "os" && !isGlobalHotkeyBindable(candidate)) {
+                          setRejected(t("shortcuts.osNeedsModifier", { keys: displayKeys(candidate, isMac) }));
                           return;
                         }
 

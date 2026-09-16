@@ -321,6 +321,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        // OS 级全局热键（GUI 失焦也生效）。**注册由前端发起**（见
+        // services/globalShortcutService.ts）：快捷键表的唯一真相源在前端
+        // （shortcuts.ts + settings.shortcuts），在 Rust 再建一份"键位→动作"映射
+        // 会立刻产生两份会漂移的真相。
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // GV-T1: 插件面板 iframe 内容源 —— plugins://<pluginName>/<src> 从
         // app_data_dir()/plugins/<pluginName>/ 读静态文件。插件 HTML 与 GUI
         // 同源（allow-same-origin 沙箱下可 fetch GUI / 本地接口）；路径穿越
@@ -387,25 +392,8 @@ pub fn run() {
             // （点击 http(s) 链接由前端委托走 open_url_window 内置窗口打开）
             .on_navigation(is_allowed_navigation);
 
-            // 调试设施：CCGUI_CDP_PORT=<port> 时给主窗口开 WebView2 远程调试（CDP），
-            // 便于用 Playwright 连进来查 DOM / 计算样式 / 驱动 UI。
-            //
-            // 为什么必须在这里注入：wry 是 `additional_browser_args.unwrap_or_else(默认)`
-            // 之后**无条件** set_additional_browser_arguments()，会覆盖
-            // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS 环境变量 —— 所以那个 env 传不进去
-            // （实测端口不监听）。另外 wry 一旦拿到自定义 args 就**不再**使用它的默认值，
-            // 故这里必须把默认参数一并带上，否则会丢「去迷你菜单 / 去 SmartScreen」。
-            // 未设该 env 时行为与之前完全一致。
-            let main_builder = match std::env::var("CCGUI_CDP_PORT") {
-                Ok(port) if !port.trim().is_empty() => {
-                    main_builder.additional_browser_args(&format!(
-                        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                         --remote-debugging-port={}",
-                        port.trim()
-                    ))
-                }
-                _ => main_builder,
-            };
+            // 调试：CCGUI_CDP_PORT=<port> 开 WebView2 远程调试。**所有窗口统一走这个函数**。
+            let main_builder = with_debug_args(main_builder);
 
             // Windows: 自绘标题栏（前端 TitleBar 组件），关掉系统标题栏让工具栏
             // 与标题栏合并成一条。mac 保留原生装饰 —— 红绿灯与系统整合更好，
@@ -562,6 +550,8 @@ pub fn run() {
             diagnostics::run_workspace_diagnostics,
             diagnostics::fix_environment_vars,
             diagnostics::fix_profiles,
+            #[cfg(target_os = "macos")]
+            diagnostics::fix_mac_exec_bits,
             save_permission_mode,
             save_window_state,
             get_default_work_dir,
@@ -576,6 +566,8 @@ pub fn run() {
             open_system_terminal,
             spawn_gui_instance,
             create_floating_window,
+            open_plugin_overlay,
+            close_plugin_overlay,
             open_url_window,
             open_in_explorer,
             guard::guard_event,
@@ -727,6 +719,46 @@ fn list_plugin_manifests(app: tauri::AppHandle) -> Result<serde_json::Value, Str
         entries.push(serde_json::json!({ "name": name, "manifestJson": contents, "readme": readme, "aiNotes": ai_notes }));
     }
     Ok(serde_json::to_value(entries).map_err(|e| e.to_string())?)
+}
+
+/// 枚举所有启用插件的 runtime 目录（**含 `bin/` 子目录**），供直接 spawn 的子进程
+/// 前置进 PATH。
+///
+/// 与前端 `aggregateRuntimePaths` / `pluginRuntimePaths.ts` 那条契约同源——三处都要
+/// 注入 `bin/`，mac/Linux 的 node 在 `runtime/bin` 下（Windows 在根）。
+///
+/// 用途：mac「打开终端」/ MCP spawn 等**不经 bash provider** 的路径。那两处此前只
+/// 在 shell 命令串里 `export PATH`，不改本进程 env，导致引擎/新终端拿不到插件 runtime
+/// （2026-09-15 实测：`{"command":"npx"}` 的 MCP server spawn 失败）。
+///
+/// 失败一律返回空（无插件目录 / 读不了 → 不注入即现状），不拖垮调用方。
+fn collect_plugin_runtime_dirs(app: &tauri::AppHandle) -> Vec<String> {
+    let Ok(base) = plugins_base_dir(app) else { return Vec::new() };
+    let plugins_dir = std::path::PathBuf::from(base);
+    let Ok(read_dir) = std::fs::read_dir(&plugins_dir) else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    for entry in read_dir.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() { continue; }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') { continue; }
+        let Some(rels) = read_runtime_rel_paths(&dir) else { continue };
+        for rel in rels {
+            let abs = dir.join(rel);
+            if !abs.exists() { continue; }
+            let abs_s = abs.to_string_lossy().to_string();
+            if !out.contains(&abs_s) { out.push(abs_s.clone()); }
+            // 声明已以 /bin 结尾 → 不追加，防 bin/bin
+            if !abs_s.ends_with("/bin") && !abs_s.ends_with(r"\bin") {
+                let bin = abs.join("bin");
+                if bin.exists() {
+                    let bin_s = bin.to_string_lossy().to_string();
+                    if !out.contains(&bin_s) { out.push(bin_s); }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 插件根目录（app_data_dir()/plugins）——前端 runtime 聚合的相对路径基准
@@ -2053,6 +2085,40 @@ fn set_default_profile(profile_name: String) -> Result<(), String> {
 /// process per data folder — two instances share the default folder make
 /// the second one's webview fail with HRESULT 0x8007139F. Keying by PID keeps
 /// every concurrently-running instance isolated.
+/// CDP 调试参数（`CCGUI_CDP_PORT=<port>`）—— **必须应用到每一个窗口**。
+///
+/// ⚠️ 这不是"给某个窗口多加一个参数"那么局部的事：`additional_browser_args` 是
+/// **WebView2 environment 级**的选项（wry 在 `create_environment` 里调
+/// `set_additional_browser_arguments`，见 wry webview2/mod.rs），而**同一个 user data
+/// folder 只允许存在一个 environment**。若只给主窗加、其它窗口不加，第二个窗口建
+/// webview 时 environment 参数不一致 → `HRESULT 0x8007139F`（ERROR_INVALID_STATE）
+/// → **所有次级窗口全部建不出来**（浮窗 / overlay / 外链窗）。
+///
+/// 这个坑真的踩过：2026-09-16 排查 overlay 窗口建不出来时，最初误判为 overlay 实现
+/// 有问题，实际是当时只给主窗加了 CDP 参数 —— 对照实验里连**已发布的**
+/// `create_floating_window` 都以同一 HRESULT 失败，才定位到根因。
+///
+/// 另外两条约束（同一处代码）：
+/// ① wry 是 `additional_browser_args.unwrap_or_else(默认)` 之后**无条件**
+///    `set_additional_browser_arguments()`，会覆盖 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
+///    环境变量 —— 所以那个 env 传不进去（实测端口不监听）。
+/// ② wry 一旦拿到自定义 args 就**不再使用它的默认值**，故必须把默认参数一并带上，
+///    否则会丢「去迷你菜单 / 去 SmartScreen」。
+///
+/// 未设该 env 时返回原 builder，行为与加此功能前完全一致。
+fn with_debug_args<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: tauri::WebviewWindowBuilder<'a, R, M>,
+) -> tauri::WebviewWindowBuilder<'a, R, M> {
+    match std::env::var("CCGUI_CDP_PORT") {
+        Ok(port) if !port.trim().is_empty() => builder.additional_browser_args(&format!(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+             --remote-debugging-port={}",
+            port.trim()
+        )),
+        _ => builder,
+    }
+}
+
 fn webview_data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
     let base = app
         .path()
@@ -2148,11 +2214,11 @@ fn create_floating_window(
     let title_clone = title.clone();
     let label_clone = label.clone();
     std::thread::spawn(move || {
-        match tauri::WebviewWindowBuilder::new(
+        match with_debug_args(tauri::WebviewWindowBuilder::new(
             &app,
             &label,
             tauri::WebviewUrl::App(path.into()),
-        )
+        ))
         // Window titles may be any string (only LABELS are charset-restricted).
         .title(&title_clone)
         .inner_size(width, height)
@@ -2179,11 +2245,149 @@ fn create_floating_window(
     Ok(())
 }
 
+/// overlay 窗口 label 前缀 —— open / close 共用同一份，保证两边对得上。
+/// Tauri 的 label 只允许 `[A-Za-z0-9-/:_.]`，而插件名是自由字符串，故净化一次。
+fn overlay_label_prefix(plugin: &str) -> String {
+    let slug: String = plugin
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    format!("overlay-{slug}-")
+}
+
+/// 插件请求开「全屏 overlay」窗口 —— **通用能力**，非某个插件专属。
+///
+/// 用途：需要铺满显示器、置顶、无边框的全屏交互 UI（区域框选、浮层标注、取色器…）。
+/// 插件侧 HTML 由 `src` 指定（插件目录内相对路径，经 `plugins://` 协议加载），
+/// 窗口内的 postMessage 上行复用插件面板那套协议（同一 origin 校验，见 pluginPanelBridge）。
+///
+/// `monitor`: `Some(i)` 只开第 i 块显示器；`None` = 每块显示器各开一个。
+/// 返回实际打开的显示器索引。
+///
+/// ⚠️ **敏感能力**：插件借此可覆盖用户整个屏幕。本轮不做权限门控（见实现计划）。
+/// 边界仅两条：① `src` 受 `plugins://` 协议的既有路径校验（只能读插件自己目录）；
+/// ② 窗口 label 前缀 `overlay-*` 加进 capability —— 只是为了允许 postMessage，
+///    并不额外放权（overlay 窗口拿不到比主窗更多的 IPC 能力）。
+#[tauri::command]
+fn open_plugin_overlay(
+    app: tauri::AppHandle,
+    plugin: String,
+    src: String,
+    monitor: Option<usize>,
+    // 不透明透传参数（宿主不解释，只拼进 iframe URL 的 query）—— 插件常用它把
+    // 后台进程端口带进 overlay。形如 `key=value&key2=value2`。
+    params: Option<String>,
+) -> Result<Vec<usize>, String> {
+    let monitors = app.available_monitors().map_err(|e| format!("枚举显示器失败: {e}"))?;
+    if monitors.is_empty() {
+        return Err("没有可用显示器".into());
+    }
+    let indices: Vec<usize> = match monitor {
+        Some(i) if i < monitors.len() => vec![i],
+        Some(i) => return Err(format!("显示器索引 {i} 越界（共 {} 块）", monitors.len())),
+        None => (0..monitors.len()).collect(),
+    };
+
+    let prefix = overlay_label_prefix(&plugin);
+    // 分隔符用 `|`（`/` 会与 src 内的目录分隔冲突）。两侧都要转义 `|` 本身，
+    // 否则插件名或路径里含 `|` 会把 hash 解析切错段（TS 侧 parseOverlayHash 对齐）。
+    let mut path = format!("index.html#overlay/{}|{}", hash_enc(&plugin), hash_enc(&src));
+    if let Some(p) = params.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        path.push('|');
+        path.push_str(&hash_enc(p));
+    }
+    log::info!("[Rust] open_plugin_overlay: plugin={plugin} src={src} monitors={indices:?}");
+
+    let mut opened = Vec::new();
+    for &idx in &indices {
+        let m = &monitors[idx];
+        let pos = m.position(); // PhysicalPosition<i32>
+        let size = m.size(); // PhysicalSize<u32>
+        let (px, py, sw, sh) = (pos.x, pos.y, size.width, size.height);
+        let label = format!("{prefix}{idx}");
+
+        // 幂等：同名 overlay 已存在则先关掉（可能换了 src / 尺寸变了）
+        if let Some(w) = app.get_webview_window(&label) {
+            let _ = w.close();
+        }
+
+        let label2 = label.clone();
+        let path2 = path.clone();
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            // ⚠️ 混合 DPI 的关键：builder 的 `position`/`inner_size` 只吃**逻辑**像素，
+            // 而每块显示器缩放可能不同 → 直接喂物理值会错位。
+            // 故先以隐藏状态建窗，再用**物理**坐标 set_position/set_size 精确贴合，
+            // 最后才 show()（避免默认位置闪一下）。
+            let built = with_debug_args(tauri::WebviewWindowBuilder::new(
+                &app2,
+                &label2,
+                tauri::WebviewUrl::App(path2.into()),
+            ))
+            .title("Overlay")
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .shadow(false)
+            .visible(false)
+            .data_directory(webview_data_dir(&app2))
+            .build();
+
+            match built {
+                Ok(win) => {
+                    if let Err(e) = win.set_position(tauri::PhysicalPosition::new(px, py)) {
+                        log::error!("[Rust] overlay set_position failed: {e}");
+                    }
+                    if let Err(e) = win.set_size(tauri::PhysicalSize::new(sw, sh)) {
+                        log::error!("[Rust] overlay set_size failed: {e}");
+                    }
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                    let emit_label = win.label().to_string();
+                    let app_ev = app2.clone();
+                    // 窗口被外部销毁（Alt+F4 / 杀进程）时通知前端，便于清理会话
+                    win.on_window_event(move |event| {
+                        if matches!(event, tauri::WindowEvent::Destroyed) {
+                            let _ = app_ev.emit("plugin-overlay-closed", emit_label.as_str());
+                        }
+                    });
+                    log::info!("[Rust] overlay built: {label2} @({px},{py}) {sw}x{sh}");
+                }
+                Err(e) => log::error!("[Rust] overlay build FAILED: {e}"),
+            }
+        });
+        opened.push(idx);
+    }
+    Ok(opened)
+}
+
+/// 关闭某插件的全部 overlay 窗口（插件主动收起 / 禁用 / 退出时清理）。
+#[tauri::command]
+fn close_plugin_overlay(app: tauri::AppHandle, plugin: String) -> Result<usize, String> {
+    let prefix = overlay_label_prefix(&plugin);
+    let mut closed = 0usize;
+    for w in app.webview_windows().values() {
+        if w.label().starts_with(&prefix) {
+            let _ = w.close();
+            closed += 1;
+        }
+    }
+    log::info!("[Rust] close_plugin_overlay: {plugin} -> closed {closed}");
+    Ok(closed)
+}
+
 fn urlencoding(s: &str) -> String {
     s.replace('%', "%25")
         .replace('#', "%23")
         .replace('&', "%26")
         .replace('+', "%2B")
+}
+
+/// overlay hash 段编码：在 `urlencoding` 基础上额外转义 `|`（分段符本身）
+/// 与 `/`（避免与片段语义混淆）。TS 侧 `decodeURIComponent` 能还原。
+fn hash_enc(s: &str) -> String {
+    urlencoding(s).replace('|', "%7C").replace('/', "%2F")
 }
 
 // ── 外部链接窗口 ──
@@ -2239,11 +2443,11 @@ fn open_url_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let title_clone = host.clone();
     let app_for_spawn = app.clone();
     std::thread::spawn(move || {
-        match tauri::WebviewWindowBuilder::new(
+        match with_debug_args(tauri::WebviewWindowBuilder::new(
             &app_for_spawn,
             &label,
             tauri::WebviewUrl::External(parsed),
-        )
+        ))
         .title(&title_clone)
         .inner_size(1000.0, 720.0)
         .min_inner_size(480.0, 360.0)
@@ -3046,7 +3250,7 @@ fn open_system_terminal(terminal_type: String, work_dir: String, claude_launch: 
 
 #[cfg(not(target_os = "windows"))]
 #[tauri::command]
-fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch: Option<bool>) -> Result<(), String> {
+fn open_system_terminal(app: tauri::AppHandle, _terminal_type: String, work_dir: String, claude_launch: Option<bool>) -> Result<(), String> {
     use std::process::Command;
     let launch = claude_launch.unwrap_or(false);
     // work_dir 为空时 `cd ""` 会报 bash 错（`: string is empty`），回退到主目录。
@@ -3066,10 +3270,44 @@ fn open_system_terminal(_terminal_type: String, work_dir: String, claude_launch:
     // 单引号不参与 AppleScript 字面量，天然规避；bash 侧单引号内除 `'` 外无特殊
     // 字符，只需把路径里的 `'` 按 `'\''` 转义（与 update.rs 的 osascript 提权同思路）。
     let work = target_dir.replace('\'', "'\\''");
-    let body = if launch {
-        format!("cd '{}' && CLAUDE_CODE_SKIP_PROMPT_HISTORY=true claude", work)
+    let cd = format!("cd '{}'", work);
+
+    // ⚠️ macOS 新开的 Terminal 是**登录 shell**，只读 ~/.zprofile / ~/.zshrc ——
+    // **读不到本进程的 env**。所以插件 runtime（node/npm/npx）与安装目录都不在
+    // 它的 PATH 里（Windows 分支靠 `.env("PATH", child_path)` 显式传入，mac 无此机制）。
+    // 代价：新终端里 `node`/`npx` 不可用，`claude` 也可能找不到。
+    // 修法：把目录拼进 bash 命令串（登录 shell 启动**之后**才 export，才能覆盖）。
+    let mut prepend: Vec<String> = Vec::new();
+    // 安装目录（claude 二进制所在）= Contents/MacOS
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            prepend.push(dir.to_string_lossy().to_string());
+        }
+    }
+    // 插件 runtime（含 bin/）—— 与 aggregateRuntimePaths / pluginRuntimePaths.ts 同源
+    prepend.extend(collect_plugin_runtime_dirs(&app));
+
+    let path_export = if prepend.is_empty() {
+        String::new()
     } else {
-        format!("cd '{}'", work)
+        let dirs = prepend
+            .iter()
+            .map(|d| format!("'{}'", d.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(":");
+        // ⚠️ bash 侧需要 "$PATH" 的双引号（目录含空格时必须靠它整体展开），但它会被
+        // **外层 AppleScript 字面量的 `"` 提前闭合** —— 与「打开终端」那个 -2741 老坑
+        // 同源。故这里必须写成 `\"$PATH\"`：AppleScript 先把 `\"` 还原成 `"`，bash
+        // 再收到 `"$PATH"`。
+        // （已用词法模拟验证：`"` 不转义时 AppleScript 提前闭合；转义后正确，
+        //   含空格路径与含单引号路径都通过。）
+        format!("export PATH={}:\\\"$PATH\\\"; ", dirs)
+    };
+
+    let body = if launch {
+        format!("{}{} && CLAUDE_CODE_SKIP_PROMPT_HISTORY=true claude", path_export, cd)
+    } else {
+        format!("{}{}", path_export, cd)
     };
     let script = format!(
         "tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{}\"",
@@ -3763,6 +4001,20 @@ pub(crate) fn download_and_extract(url: &str, temp_dir: &std::path::Path, on_pro
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| format!("Cannot read zip: {}", e))?;
 
+    extract_zip_entries(&mut archive, temp_dir)?;
+
+    std::fs::remove_file(&zip_path).ok();
+    Ok(())
+}
+
+/// 把 zip 的所有条目解到 `dest`（跳过目录条目 → 由文件的父目录按需创建）。
+///
+/// 从 `download_and_extract` 抽出来**以便单测**（原实现内联且依赖网络下载，
+/// 导致权限回归无法被测试覆盖 —— 而该 bug 正是"编译能过、运行必挂"那类）。
+fn extract_zip_entries<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    dest: &std::path::Path,
+) -> Result<(), String> {
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)
             .map_err(|e| format!("Zip entry {} error: {}", i, e))?;
@@ -3773,7 +4025,7 @@ pub(crate) fn download_and_extract(url: &str, temp_dir: &std::path::Path, on_pro
         if entry.is_dir() {
             continue;
         }
-        let out_path = temp_dir.join(&name);
+        let out_path = dest.join(&name);
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Cannot create dir: {}", e))?;
@@ -3782,9 +4034,29 @@ pub(crate) fn download_and_extract(url: &str, temp_dir: &std::path::Path, on_pro
             .map_err(|e| format!("Cannot create file: {}", e))?;
         std::io::copy(&mut entry, &mut out_file)
             .map_err(|e| format!("Cannot write extracted file: {}", e))?;
-    }
+        drop(out_file);
 
-    std::fs::remove_file(&zip_path).ok();
+        // ⚠️ **必须恢复 zip 条目记录的可执行位** —— `File::create` 用默认 0o644
+        // 建文件，不还原 unix mode。丢了 +x 的后果（mac GUI 自动更新实测）：
+        //   `claude` 解出后不可执行 → 后续 osascript 提权 `ditto` 进 .app
+        //   → `claude-ide: ... claude: Permission denied` → 引擎起不来、
+        //     "IDE backend did not announce port within timeout"。
+        // ZIP 把 unix 权限存在 `external_attributes >> 16` 的高 16 位。
+        // 只处理 unix 平台（Windows 用 ACL，无 mode 概念，设了也无意义）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = entry.unix_mode().unwrap_or(0o644);
+            // 源 zip 若来自 Windows（无 mode 位，unix_mode 返回 0 或 None），
+            // 不要把它设成 0o000（不可读）—— 只在与 0 不同才应用。
+            if mode != 0 {
+                let _ = std::fs::set_permissions(
+                    &out_path,
+                    std::fs::Permissions::from_mode(mode),
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -4011,6 +4283,56 @@ mod tests {
     // ── prepend_tool_dirs: 安装目录子目录必须用相对后缀（Windows join 语义）──
 
     /// 回归：suffix 带前导反斜杠时 Path::join 会解析成盘根（C:\bin）而非
+    /// 回归：解压必须**保留 zip 条目的可执行位**。
+    ///
+    /// 早期用 `File::create` 解压 → 一律 0o644，丢掉 `claude` 的 +x。
+    /// mac GUI 自动更新实测后果：解压出的 `claude` 不可执行 → osascript 提权
+    /// `ditto` 进 .app 后仍不可执行 → `claude-ide: ... claude: Permission denied`
+    /// → 引擎起不来（"IDE backend did not announce port within timeout"）。
+    ///
+    /// 服务端 zip 里 `claude`/`claude-gui-server`/`claude-code-gui` 均为 0o755
+    /// （已实测确认），所以丢失 100% 发生在解压这一步。
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_preserves_unix_exec_bit() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // 造一个含 0o755 条目的 zip（模拟 build.ts 用 ditto 打的包）
+        let zip_path = std::env::temp_dir()
+            .join(format!("extract_perm_{}.zip", std::process::id()));
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            // zip 0.6 的 API 是 `FileOptions`（不是 1.x/2.x 的 SimpleFileOptions）
+            let opts = zip::write::FileOptions::default().unix_permissions(0o755);
+            zw.start_file("Claude Code.app/Contents/MacOS/claude", opts).unwrap();
+            zw.write_all(b"#!/bin/sh\necho hi\n").unwrap();
+            zw.finish().unwrap();
+        }
+
+        let dest = std::env::temp_dir()
+            .join(format!("extract_perm_out_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let f = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(f).unwrap();
+        extract_zip_entries(&mut archive, &dest).unwrap();
+
+        let out = dest.join("Claude Code.app/Contents/MacOS/claude");
+        assert!(out.is_file(), "解压后文件应存在（含空格路径的嵌套目录）");
+        let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+        assert!(
+            mode & 0o111 != 0,
+            "可执行位必须保留，实际 mode=0o{:o}（丢了就是 mac 更新后引擎起不来的根因）",
+            mode & 0o7777
+        );
+
+        let _ = std::fs::remove_file(&zip_path);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
     /// install_dir\bin → bin/python 永远进不了 PATH（fd/jq/yq 找不到）。
     /// 本测试用真实临时目录验证子目录被正确前置。
     #[test]

@@ -172,7 +172,14 @@ function PluginIframePanel({ manifest, panel }: { manifest: PluginManifest; pane
         ).catch(() => {});
         return;
       }
-      void sendPluginViewerChip(d).catch(() => {});
+      // 能力类上行（on-overlay / chat-reference / desktop-image / …）走统一分派，
+      // **必须在兜底之前** —— 兜底接的是"任意未识别 kind"，插件发个
+      // {kind:"随便", payload:{head:"..."}} 就能往用户输入框塞文本。
+      void dispatchPluginUplink(manifest.pluginName, d.kind, d.payload).then((handled) => {
+        if (handled) return;
+        // 面板入口独有：未识别的 kind 落到 git-viewer 那套 chip 兜底
+        void sendPluginViewerChip(d).catch(() => {});
+      }).catch(() => {});
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -231,6 +238,203 @@ async function sendPluginViewerChip(d: { kind: string; payload?: { file?: string
     reference: { type: "paste", path, label: `git ${isDiff ? "diff" : "commit"}: ${labelText}` },
   });
 }
+
+// ── 插件上行「能力」消息 ──────────────────────────────────────────────
+//
+// ⚠️ payload 一律来自**第三方插件**（跨信任边界），每个都得过白名单校验，
+//    照 sanitizeChrome 的写法：只认已知键 + 已知类型，其余丢弃；校验失败即静默忽略。
+//
+// ⚠️ 这些分支**必须加在 `sendPluginViewerChip` 兜底之前** —— 那个兜底接的是
+//    "任意未识别 kind"，插件发个 {kind:"随便", payload:{head:"..."}} 就能往用户
+//    输入框塞文本。
+
+/** overlay 请求校验：src 的路径规则与面板 `content.src` 一致（禁绝对路径 /
+ *  盘符 / 反斜杠 / `..` 穿越），monitor 必须是非负整数。
+ *  `params` 是不透明查询串（宿主不解释，只透传）—— 长度设上限防滥用。 */
+export function sanitizeOverlayRequest(
+  raw: unknown,
+): { src: string; monitor?: number; params?: string } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const src = typeof r.src === "string" ? r.src.trim() : "";
+  if (!src) return null;
+  if (src.startsWith("/") || src.includes("\\") || src.includes("..")) return null;
+  if (/^[a-zA-Z]:/.test(src)) return null;
+  const out: { src: string; monitor?: number; params?: string } = { src };
+  if (typeof r.monitor === "number" && Number.isInteger(r.monitor) && r.monitor >= 0) {
+    out.monitor = r.monitor;
+  }
+  if (typeof r.params === "string" && r.params.trim()) {
+    out.params = r.params.trim().slice(0, 2048);
+  }
+  return out;
+}
+
+/** 聊天引用校验：只允许 `file` 类型（插件不该能塞 `paste` 那种"内容即路径"的语义），
+ *  path 必须非空且看起来是绝对文件路径。 */
+export function sanitizeChatReference(raw: unknown): { path: string; label?: string } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const path = typeof r.path === "string" ? r.path.trim() : "";
+  if (!path) return null;
+  const out: { path: string; label?: string } = { path };
+  if (typeof r.label === "string" && r.label.trim()) {
+    // label 会进 `@ref{...|<label>}` —— `|` 会把分段切错，`}` 会提前闭合。
+    out.label = r.label.trim().replace(/[|}\n\r]/g, "-").slice(0, 120);
+  }
+  return out;
+}
+
+/** 插件请求开全屏 overlay（通用能力；overlay HTML 由插件提供）。
+ *  ⚠️ 敏感：插件借此可覆盖用户整个屏幕。 */
+async function openPluginOverlay(pluginName: string, raw: unknown): Promise<void> {
+  const req = sanitizeOverlayRequest(raw);
+  if (!req) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("open_plugin_overlay", {
+    plugin: pluginName,
+    src: req.src,
+    monitor: req.monitor ?? null,
+    params: req.params ?? null,
+  });
+}
+
+/** 插件请求关掉自己的全部 overlay 窗口。 */
+async function closePluginOverlay(pluginName: string): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("close_plugin_overlay", { plugin: pluginName });
+}
+
+/** 插件 → 聊天输入框：以 `file` 引用插入（图片走这条，chip 图标 📄，
+ *  点击用编辑器/预览面板打开）。 */
+async function sendPluginChatReference(raw: unknown): Promise<void> {
+  const ref = sanitizeChatReference(raw);
+  if (!ref) return;
+  const { Events } = await import("./events");
+  const { windowBus } = await import("./windowBus");
+  const label = ref.label ?? ref.path.split(/[/\\]/).pop() ?? ref.path;
+  windowBus.emit(Events.CHAT_ADD_REFERENCE, {
+    reference: { type: "file", path: ref.path, label },
+  });
+}
+
+/** 插件 → 超级桌面：新增一个图片块。
+ *  ⚠️ `addItem` 在 desktopId 不存在时**静默失败**（返回一个看起来正常但没进 store
+ *  的对象）—— 必须先 loadDesktops()，并在无桌面时兜底建一个。 */
+async function sendPluginDesktopImage(raw: unknown): Promise<void> {
+  const ref = sanitizeChatReference(raw); // 同样的 shape：path(+label)
+  if (!ref) return;
+  const store = await import("../stores/desktopStore");
+  await store.loadDesktops();
+  let desktop = store.getActiveDesktop();
+  if (!desktop) desktop = store.createDesktop("Screenshots");
+  const label = ref.label ?? ref.path.split(/[/\\]/).pop() ?? "image";
+  const W = 400;
+  const H = 300;
+  const pos = store.findSmartPlace(desktop, W, H);
+  store.addItem(desktop.id, {
+    x: pos.x,
+    y: pos.y,
+    width: W,
+    height: H,
+    content: { type: "image", path: ref.path } as never,
+    label,
+  });
+}
+
+/** 插件 → 工作区文件：落盘到当前工作区内。
+ *  ⚠️ **必须限制在 workDir 之内** —— 这是插件唯一能触达文件系统的宿主通道，
+ *  不限制就是任意路径写入（`save_bytes` 本身不做沙箱）。 */
+async function writeWorkspaceFile(raw: unknown): Promise<void> {
+  if (!raw || typeof raw !== "object") return;
+  const r = raw as Record<string, unknown>;
+  const rel = typeof r.path === "string" ? r.path.trim().replace(/\\/g, "/") : "";
+  const base64 = typeof r.base64 === "string" ? r.base64 : "";
+  if (!rel || !base64) return;
+  // 拒绝绝对路径与任何形式的目录穿越
+  if (rel.startsWith("/") || /^[a-zA-Z]:/.test(rel) || rel.split("/").includes("..")) return;
+  const { getSettings } = await import("../stores/settingsStore");
+  const workDir = getSettings().workDir;
+  if (!workDir) return;
+  const abs = `${workDir.replace(/[\\/]+$/, "")}/${rel}`;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("save_bytes", { path: abs, base64Data: base64 });
+}
+
+/**
+ * 插件上行消息的**统一分派**（面板 iframe 与 overlay 窗口的 iframe 共用）。
+ *
+ * 两个入口的差别只在"消息怎么到达主窗"：
+ *   · 面板 iframe → 直接 `postMessage` 到主窗（`pluginPanelBridge` 的 onMessage）
+ *   · overlay 窗口的 iframe → postMessage 只能到 overlay 窗（跨窗口），由
+ *     `PluginOverlayApp` 转成 Tauri 事件，主窗再监听后调本函数
+ * 分派逻辑本身必须只有一份，否则两条路径会逐渐跑偏。
+ *
+ * 返回 true 表示已处理（调用方不必再走兜底）。
+ * ⚠️ 未识别的 kind 返回 false —— 面板入口据此走 `sendPluginViewerChip` 兜底
+ * （overlay 入口没有那个兜底，未识别即忽略）。
+ */
+export async function dispatchPluginUplink(
+  pluginName: string,
+  kind: unknown,
+  payload: unknown,
+): Promise<boolean> {
+  if (typeof kind !== "string") return false;
+  switch (kind) {
+    case "open-overlay":
+      await openPluginOverlay(pluginName, payload);
+      return true;
+    case "close-overlay":
+      await closePluginOverlay(pluginName);
+      return true;
+    case "chat-reference":
+      await sendPluginChatReference(payload);
+      return true;
+    case "desktop-image":
+      await sendPluginDesktopImage(payload);
+      return true;
+    case "write-workspace-file":
+      await writeWorkspaceFile(payload);
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** 主窗监听 overlay 窗口转上来的消息（见 `dispatchPluginUplink` 注释）。
+ *  在 App 启动时订阅一次。 */
+export function startOverlayUplinkListener(): () => void {
+  // ⚠️ **单例保护**：重复注册会让同一个 overlay 上行被执行多次 —— 表现是
+  // 「拖一次框，往输入框插了 3 个同样的引用」。React StrictMode 的双调用、
+  // HMR 重载都会造成多份监听，而且这种重复**不会报错**，只体现为重复插入。
+  if (_overlayUplinkStop) return _overlayUplinkStop;
+
+  let un: (() => void) | null = null;
+  let stopped = false;
+  void import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<{ plugin: string; kind: string; payload: unknown }>(
+      "plugin-overlay-uplink",
+      (e) => {
+        const p = e.payload;
+        if (!p || typeof p.plugin !== "string") return;
+        void dispatchPluginUplink(p.plugin, p.kind, p.payload).catch(() => {});
+      },
+    ).then((fn) => {
+      if (stopped) fn();
+      else un = fn;
+    }),
+  ).catch(() => {});
+
+  const stop = () => {
+    stopped = true;
+    un?.();
+    _overlayUplinkStop = null;
+  };
+  _overlayUplinkStop = stop;
+  return stop;
+}
+
+let _overlayUplinkStop: (() => void) | null = null;
 
 // ── 通用: 插件面板打开 + 参数传递（平台机制, 渲染归插件）──
 // 插件 iframe 上行 { kind: "open-panel", payload: { panelId, params, title, width, height } }

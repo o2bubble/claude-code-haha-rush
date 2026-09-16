@@ -4,6 +4,7 @@ import { EmptyState } from "../SharedStates";
 import { diagnosticsService, type CheckStatus, type DiagnosticCheck, type DiagnosticCategory, type DiagnosticsReport } from "../../services/diagnosticsService";
 import { deriveServerProfile, serverProfileUrls } from "../../utils/serverProfile";
 import { getSettings, saveSettings } from "../../stores/settingsStore";
+import { isMacPlatform } from "../../utils/platform";
 import { addStatusMessage } from "../../stores/statusMsgStore";
 import { BackendService } from "../../services/backendService";
 import { getWsDiag } from "../../services/wsDiag";
@@ -246,6 +247,37 @@ export const DiagnosticPanel: React.FC = memo(function DiagnosticPanel() {
     }
   }, []);
 
+  /**
+   * macOS 专用：修复 `.app` 内关键二进制的可执行位。
+   *
+   * 场景：自动更新解压时丢了 +x → `claude` 不可执行 → 引擎起不来。报错只显示
+   * "Permission denied" 而不说是哪个文件，用户很难自查，所以给一键修复。
+   * 系统级安装（属主 root）会弹一次管理员密码框。
+   */
+  const fixExecBits = useCallback(async () => {
+    setFixing("mac_exec_bits");
+    try {
+      const fixes = await diagnosticsService.fixMacExecBits();
+      for (const f of fixes) {
+        addStatusMessage(`${f.name}: ${f.action}`, "success");
+      }
+      if (fixes.some((f) => f.action.startsWith("已修"))) {
+        addStatusMessage(t("diagnostics.execBitsRestartHint"), "info");
+      }
+      await runEnv();
+    } catch (e) {
+      const msg = String(e);
+      addStatusMessage(
+        /授权被取消|canceled|cancelled|User canceled/i.test(msg)
+          ? t("diagnostics.execBitsDenied")
+          : msg,
+        "error",
+      );
+    } finally {
+      setFixing(null);
+    }
+  }, [runEnv]);
+
   const fixEnv = useCallback(async () => {
     setFixing("env");
     try {
@@ -334,6 +366,17 @@ export const DiagnosticPanel: React.FC = memo(function DiagnosticPanel() {
                       <div style={S.checkTitle}>{checkTitle(c)}</div>
                       <div style={S.checkDetail}>{c.detail}</div>
                     </div>
+                    {/* 权限缺失给行内「修复」——它不是环境变量问题，不归 fixEnv 管 */}
+                    {c.id === "mac_exec_bits" && c.status === "fail" && isMacPlatform() && (
+                      <button
+                        type="button"
+                        style={{ ...S.btn(true), padding: "2px 9px", fontSize: "calc(var(--font-scale, 1) * 10.5px)", flexShrink: 0 }}
+                        onClick={fixExecBits}
+                        disabled={fixing !== null}
+                      >
+                        {fixing === "mac_exec_bits" ? t("diagnostics.fixing") : t("diagnostics.fixExecBits")}
+                      </button>
+                    )}
                   </div>
                 </React.Fragment>
               );

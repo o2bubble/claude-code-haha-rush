@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>截屏</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg-root, #0e0e12); color: var(--fg-primary, #cdd1da);
+    font: 13px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; height: 100vh; box-sizing: border-box;
+  }
+  header {
+    padding: 10px 12px; border-bottom: 1px solid var(--border-light, #242533);
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0;
+  }
+  button {
+    font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border-medium, #3a3b4c);
+    background: var(--bg-hover, #1d1e28); color: inherit;
+  }
+  button:hover { filter: brightness(1.25); }
+  button.primary {
+    background: var(--accent, #58c4e8); color: var(--bg-root, #0e0e12);
+    border-color: transparent; font-weight: 600;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  select {
+    font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 6px;
+    background: var(--bg-hover, #1d1e28); color: inherit;
+    border: 1px solid var(--border-medium, #3a3b4c);
+  }
+  .spacer { flex: 1; }
+  .muted { color: var(--fg-muted, #5c6272); font-size: 11px; }
+
+  #body { flex: 1; overflow: auto; padding: 10px 12px; }
+  #grid {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+  .card {
+    border: 1px solid var(--border-light, #242533); border-radius: 8px; overflow: hidden;
+    background: var(--bg-surface, #15161d); cursor: pointer; position: relative;
+  }
+  .card:hover { border-color: var(--accent, #58c4e8); }
+  .card img { display: block; width: 100%; height: 96px; object-fit: cover; background: #000; }
+  .card .meta { padding: 5px 7px; font-size: 10px; color: var(--fg-muted, #5c6272); }
+  .card .name { color: var(--fg-secondary, #8f94a1); overflow: hidden;
+                text-overflow: ellipsis; white-space: nowrap; }
+  .card .acts { display: none; position: absolute; inset: auto 0 0 0; padding: 5px;
+                gap: 4px; background: linear-gradient(transparent, rgba(0,0,0,.85)); }
+  .card:hover .acts { display: flex; }
+  .card .acts button { font-size: 10px; padding: 3px 7px; }
+  .empty { color: var(--fg-muted, #5c6272); text-align: center; padding: 40px 12px; }
+  #status { padding: 6px 12px; font-size: 11px; color: var(--fg-muted, #5c6272);
+            border-top: 1px solid var(--border-light, #242533); flex-shrink: 0; min-height: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <button id="region" class="primary">区域</button>
+  <button id="fullscreen">全屏</button>
+  <button id="window">窗口</button>
+  <select id="dest" title="截完直接送到哪里">
+    <option value="chat">→ 聊天输入框</option>
+    <option value="desktop">→ 超级桌面</option>
+    <option value="file">→ 仅保存</option>
+  </select>
+  <span class="spacer"></span>
+  <span class="muted" id="dir"></span>
+  <button id="refresh" title="重新扫描截图目录">刷新</button>
+</header>
+
+<div id="body">
+  <div id="grid"></div>
+  <div class="empty" id="empty" style="display:none">还没有截图。按「区域」试一下，或到设置里给截屏配个快捷键。</div>
+</div>
+<div id="status"></div>
+
+<script>
+const SOURCE = "plugin:viewer:screenshot";   // 上行 source 必须与宿主校验的一致
+const q = new URLSearchParams(location.search);
+const PORT = Number(q.get("port") || 0);
+const API = `http://127.0.0.1:${PORT}`;
+
+const grid = document.getElementById("grid");
+const empty = document.getElementById("empty");
+const statusEl = document.getElementById("status");
+const destSel = document.getElementById("dest");
+const dirEl = document.getElementById("dir");
+
+let busy = false;
+
+function say(msg) { statusEl.textContent = msg; }
+
+/** 上行给宿主（宿主是父窗口）。投递能力在宿主手上，本页只负责请求。 */
+function toHost(kind, payload) {
+  try { parent.postMessage({ source: SOURCE, kind, payload }, "*"); } catch (e) {}
+}
+
+function fmtTime(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// ── 截图 ──
+async function capture(mode) {
+  if (busy) return;
+  if (!PORT) { say("插件进程未就绪"); return; }
+  busy = true;
+  setButtons(false);
+  say(`正在${mode === "region" ? "框选" : "截图"}…`);
+  try {
+    const res = await fetch(`${API}/capture`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "失败");
+
+    // 区域模式：进程请宿主开 overlay 框选（overlay 自己完成裁剪与投递）
+    if (data.host && data.host.length) {
+      for (const h of data.host) toHost(h.kind, h.payload);
+      say("已弹出框选窗口");
+      return;
+    }
+    if (data.cancelled) { say("已取消"); return; }
+
+    // 面板触发的截图：去向由本页的选择器决定（用户看得见）
+    const shot = data.shot;
+    const dest = destSel.value;
+    if (dest === "chat") toHost("chat-reference", { path: shot.path, label: shot.name });
+    else if (dest === "desktop") toHost("desktop-image", { path: shot.path, label: shot.name });
+    say(`已保存 ${shot.name}（${shot.width}×${shot.height}）${dest === "file" ? "" : "并已投递"}`);
+    void load();
+  } catch (e) {
+    say("失败：" + (e && e.message || e));
+  } finally {
+    busy = false;
+    setButtons(true);
+  }
+}
+
+function setButtons(on) {
+  for (const id of ["region", "fullscreen", "window"]) {
+    document.getElementById(id).disabled = !on;
+  }
+}
+
+// ── 历史 ──
+async function load() {
+  if (!PORT) { say("插件进程未就绪"); return; }
+  try {
+    const res = await fetch(`${API}/history`);
+    const data = await res.json();
+    dirEl.textContent = data.dir || "";
+    const items = data.items || [];
+    grid.textContent = "";
+    empty.style.display = items.length ? "none" : "block";
+    for (const it of items) {
+      const card = document.createElement("div");
+      card.className = "card";
+
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      img.src = `${API}/file?path=${encodeURIComponent(it.path)}`;
+      img.alt = it.name;
+      card.appendChild(img);
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const nm = document.createElement("div");
+      nm.className = "name";
+      nm.textContent = it.name;
+      const dim = document.createElement("div");
+      dim.textContent = `${it.width}×${it.height} · ${fmtTime(it.mtime)}`;
+      meta.appendChild(nm); meta.appendChild(dim);
+      card.appendChild(meta);
+
+      const acts = document.createElement("div");
+      acts.className = "acts";
+      const mk = (label, fn) => {
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.onclick = (e) => { e.stopPropagation(); fn(); };
+        return b;
+      };
+      acts.appendChild(mk("→ 聊天", () =>
+        toHost("chat-reference", { path: it.path, label: it.name })));
+      acts.appendChild(mk("→ 桌面", () =>
+        toHost("desktop-image", { path: it.path, label: it.name })));
+      acts.appendChild(mk("预览", () => window.open(img.src, "_blank")));
+      card.appendChild(acts);
+
+      card.onclick = () => toHost("chat-reference", { path: it.path, label: it.name });
+      grid.appendChild(card);
+    }
+    say(`共 ${items.length} 张`);
+  } catch (e) {
+    say("读取历史失败：" + (e && e.message || e));
+  }
+}
+
+document.getElementById("region").onclick = () => capture("region");
+document.getElementById("fullscreen").onclick = () => capture("fullscreen");
+document.getElementById("window").onclick = () => capture("window");
+document.getElementById("refresh").onclick = () => load();
+
+// 宿主推送主题（与其它插件面板同一套协议）
+window.addEventListener("message", (ev) => {
+  const d = ev.data;
+  if (!d || d.source !== "plugin:host") return;
+  if (d.kind === "theme" && d.payload && d.payload.theme) {
+    document.documentElement.dataset.theme = d.payload.theme;
+  }
+});
+
+setButtons(false);
+say(PORT ? "就绪" : "插件进程未就绪（未绑定工作区时不会启动）");
+void load().then(() => setButtons(true));
+</script>
+</body>
+</html>

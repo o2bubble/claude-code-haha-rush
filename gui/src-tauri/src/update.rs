@@ -509,17 +509,26 @@ fn component_priority(name: &str) -> u32 {
     }
 }
 
-/// Find a file by name walking a directory tree.
+/// Find a file **or directory** by name, walking a directory tree.
+///
+/// ⚠️ 早期实现只在 `else`（非目录）分支比对名字 —— **目录永不参与匹配**。mac 的
+/// `.app` 目标因此恒找不到：`Claude Code.app` 是目录，只会被递归**进入**，从不命中
+/// → `prepare_gui_update_mac` 报 "New Claude Code.app not found in downloaded zip"。
+/// **mac GUI 自动更新因此 100% 必然失败**，且与包内容无关（服务端 zip 顶层就是
+/// `Claude Code.app/`，已实测确认）。
+///
+/// 修法：**先比对自身名字（文件/目录都算）**，命中即返回；未命中且是目录才递归。
 fn walkdir_find(dir: &std::path::Path, filename: &str) -> Option<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            if path.file_name().map(|n| n == filename).unwrap_or(false) {
+                return Some(path);
+            }
             if path.is_dir() {
                 if let Some(found) = walkdir_find(&path, filename) {
                     return Some(found);
                 }
-            } else if path.file_name().map(|n| n == filename).unwrap_or(false) {
-                return Some(path);
             }
         }
     }
@@ -1012,6 +1021,51 @@ mod tests {
 
     fn artifact(platform: &str, name: &str) -> Option<PathBuf> {
         component_artifact_path(Path::new("/opt/claude"), name, platform)
+    }
+
+    /// 回归：`walkdir_find` 必须能匹配**目录**，不只是文件。
+    ///
+    /// 早期实现只在非目录分支比对名字 → `Claude Code.app`（目录）永远找不到 →
+    /// mac GUI 自动更新报 "New Claude Code.app not found in downloaded zip"，
+    /// 且与包内容无关（服务端 zip 顶层就是 `Claude Code.app/`）。
+    #[test]
+    fn walkdir_find_matches_directories_not_just_files() {
+        let base = std::env::temp_dir().join(format!("wd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // 模拟解压后的布局：<tmp>/Claude Code.app/Contents/MacOS/<file>
+        let macos = base.join("Claude Code.app").join("Contents").join("MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::write(macos.join("claude-code-gui"), b"x").unwrap();
+
+        // 目录：这是本 bug 的核心（修前返回 None）
+        assert_eq!(
+            walkdir_find(&base, "Claude Code.app"),
+            Some(base.join("Claude Code.app"))
+        );
+        // 文件：行为不变（另一个调用点依赖它）
+        assert_eq!(
+            walkdir_find(&base, "claude-code-gui"),
+            Some(macos.join("claude-code-gui"))
+        );
+        // 不存在的名字仍返回 None
+        assert_eq!(walkdir_find(&base, "nope.app"), None);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 嵌套场景：`.app` 不在顶层也能找到（递归进入父目录后匹配目录名）
+    #[test]
+    fn walkdir_find_finds_nested_directory() {
+        let base = std::env::temp_dir().join(format!("wd-nest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let deep = base.join("dist").join("Claude Code.app").join("Contents");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        assert_eq!(
+            walkdir_find(&base, "Claude Code.app"),
+            Some(base.join("dist").join("Claude Code.app"))
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 远程 manifest 的组件 JSON 能解析成 ComponentInfo struct（含/不含 post_install）。

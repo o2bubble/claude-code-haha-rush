@@ -1,4 +1,4 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-15（main @99d3c0e）
+# Handoff — Claude Code GUI 开发 · 2026-09-16（main @44ed947）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
@@ -181,13 +181,15 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 
 - **分支**: `main`（`99d3c0e`）；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
 - **本批主题**: CF Tunnel 入口 + 云性能事故修复 + 设置面板三档切换 + **插件浮窗全透明修复**
-- **Windows 版本**: **两端均 `2026.09.15.4`**
+- **Windows 版本**: **两端均 `2026.09.16.1`**
+  —— 内容 = MCP 子进程 PATH 注入 + 插件 runtime 补齐 `bin/`（重建 gui + claude）
+  —— 先发 96、后补云；**补发云时顺带验证了跨平台删除修复**（见下）
   —— 期间用户自行发过 `.15.2`（WebSearch 重试）/ `.15.3`（浮窗外壳+拖动+会话面板）；
      `.15.4` 是补发的 color-scheme 修复（`.15.3` 不含该修复）
   ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 这个孤儿版本（号比用户已发的
      `.15.2/.15.3` 低，客户端永远拿不到），还白挤掉了 `.14.5`
-- **macOS 云端版本**: **`2026.09.15.1`**（已恢复，6 组件齐全）
-  —— 之前被误删致 macos 404，见「续②」；**构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**
+- **macOS 云端版本**: **`2026.09.15.6`**（6 组件齐全；含 `.15.5` 的更新 bug 修复 + `.15.6` 的 MCP/终端 PATH 注入）
+  —— 更早的 `.15.1` 曾被误删致 macos 404，见「续②」；**构建：GitHub Actions（免费，push 自动触发）或 Codemagic（快，付费）**
 - **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；300 条记忆；**已加 bearer 鉴权**
 - **Memory 服务（云）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web
 - **release-platform（云）**: 镜像 **`claude-release-platform:20260914`**（compose 已从 `build: .` 改为 `image:`）
@@ -429,10 +431,18 @@ e81ba5a fix(api): thinking-only 消息被剥离后成空数组 → 400 卡死会
 
 ### 测试基线
 - Memory MCP：`cd extensions/memory && python -m unittest discover -s tests` → **43 passed**
-- GUI 前端：`cd gui && bun run test` → **723 通过**（59 文件）· `bun run build`（含 `tsc`）干净
+- GUI 前端：`cd gui && bun run test` → **752 通过**（61 文件）· `bun run build`（含 `tsc`）干净
+- 引擎侧：`bun test <file>`（根目录，如 `src/utils/*.test.ts`）—— 注意**与 gui/ 的 vitest 是两套**，
+  改 `src/` 下的东西只跑 gui/ 会漏（2026-09-15 PATH 注入修复就因此漏测另一半）
 - Rust：`cargo test --lib`（gui/src-tauri）→ 全部通过（含 `update::tests` 6 项）
 
 ### 发布版本 (dist/release)
+- **2026.09.16.1**（MCP 子进程 PATH 注入 + 插件 runtime 补 `bin/`；仅 gui+claude）
+  —— ✅ **两端都已上传**，9/9 组件可下载、`gui.zip` 两端字节数一致（`24,296,264`）
+  —— gui sha `413e0cd7…`；claude sha `02c33cb3…`；其余 7 组件从 `.15.4` 按 sha 复用
+  —— 🎯 **补发云时顺带验证了跨平台删除修复**：云上 `.15.1` 是 **macos 独占**且为 mac 侧
+     第 3 个版本，上传 windows `.16.1` 触发 prune 后 —— 旧代码会 rmtree 掉整个 `.15.1`
+     （正是 09-15 事故的重演），实测**保住了**，被删的是 windows 侧超额的第 4 个 `.15.2`
 - **2026.09.15.4**（暗色下插件浮窗「全透明」失效修复；仅 gui，其余复用 .15.3）
   —— ✅ **两端已上传**，9/9 组件可下载、`gui.zip` 两端字节数一致（`24,294,167`）
   —— gui sha `8f41aef6…`；claude 与 .15.3 同 sha（`d499e8c6…`）故未重传
@@ -481,9 +491,13 @@ e81ba5a fix(api): thinking-only 消息被剥离后成空数组 → 400 卡死会
 | **2026.09.14.2** | GUI 组件路径修复（更新面板误判「未安装」）+ 移除三个死 launcher；发布 sha 改为沿用内嵌 manifest（修全量误报） | 仅 gui 变动，其余由服务端从 `.14.1` 复用 |
 | **2026.09.14.4 / `.14.5`**（待发） | 对齐 Windows：`.14.4` = GUI「公网」档改 CF 域名 + 旧地址迁移；`.14.5` = 设置面板服务器地址三档切换 | ⏳ **等 mac 构建产物** —— 代码已推（`3390839`）<br>产物出来后跑 `scripts/release_mac.py`（改 `VERSION`/`RELEASE_NOTES` → `make` → `cloud` → `verify`）<br>可一次发到 `.14.5`、跳过 `.14.4` |
 
-> ⚠️ **mac 构建走 Codemagic 平台，GitHub Actions 已停用**（2026-09-14 用户确认：
-> `.github/workflows/macos-build.yml` 已禁用、**推代码不会触发任何构建**）。
-> 需要 mac 产物时**由用户去 Codemagic 平台触发**，不要以为推完 GitHub 就自动有了。
+> **mac 构建两条路**（2026-09-16 起 GitHub Actions 重新启用）：
+> - **GitHub Actions**（默认）—— 本仓库 public，macOS runner **免费不限分钟**。
+>   **push 到 GitHub 快照即自动触发**，无需手动。缺点：无缓存、约 15-25 分钟。
+> - **Codemagic** —— 快（约 13 分钟，有缓存）但按 $0.095/分钟计费（约 ¥9/次）
+>   且只收实体卡。需要快时用，由用户在平台侧触发。
+>
+> 两条路的产物**都由 build.ts 生成、内容等价**（命令完全相同）。见 playbook §1。
 >
 > ⚠️ **CI 只出 artifact，不自动发布** —— 版本号固定为 `ci-build`，需下载产物后由
 > `release_mac.py` 改成正式号并上传。别以为构建完就完事了。
@@ -738,10 +752,10 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
       本机 `~/.claude.json` 已同步加 `headers.Authorization`（**需重启会话生效**）。见部署手册 §8
 - [ ] **Web UI 复核** —— 96 `http://192.168.186.96:40021/`（登录框填 token）/
       云 `https://mem.17lumen.cloud`；搜索走新 FTS5 + jieba
-- [ ] **复核 GUI 更新面板** —— 96 + 云均已发 `.15.4`；客户端点「检查更新」应提示更新到该版
+- [ ] **复核 GUI 更新面板** —— 96 已到 `.16.1`；客户端点「检查更新」应提示更新到该版
 - [x] **mac 通道恢复** —— 2026-09-15 完成：两处删除点修好并部署后，用 `~/Downloads`
       的既有产物重发 `2026.09.15.1`，云端 6 组件齐全。见「续②」节
-      （⚠️ **构建走 Codemagic 平台、GitHub Actions 已停用，推代码不触发**）
+      （构建：GitHub Actions 免费自动触发 / Codemagic 快但付费）
 - [x] **云上跟进** —— 2026-09-12 完成（本地构建镜像 → workbench 上传 → 云端切换，见部署手册）
 - [x] **云 server root 密码轮换** —— 已完成（新值在内部凭据笔记；96 内网密码无需轮换）
 - [ ] （可选）**向量路** —— SPEC §10 预留：加 OpenAI 兼容 embedding 客户端 + 第三路进 `rrf_merge`，约 150 行

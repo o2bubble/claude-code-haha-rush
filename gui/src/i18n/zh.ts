@@ -211,6 +211,7 @@ const zh = {
       layout: "布局",
       notes: "笔记",
       files: "文件",
+      plugins: "插件",
     },
     item: {
       paletteOpen: "打开命令面板",
@@ -229,6 +230,9 @@ const zh = {
     conflictWarning: "有 {count} 组键位冲突（按列表顺序，靠前者优先）",
     notBindable: "「{keys}」是局部交互键（如回车/取消/方向键），不能设为快捷键",
     contextualBadge: "（有上下文条件）",
+    osConflict: "注册失败（可能被其它软件占用）",
+    osBadge: "（全局，窗口不在前台也生效）",
+    osNeedsModifier: "「{keys}」不能作全局热键：它需要 Ctrl / Alt / Cmd 或功能键，否则会抢走其它软件里的正常输入",
     hint: "点击键位后按下新组合即可修改；带「有上下文条件」的快捷键只在特定面板生效，故不可修改。",
   },
 
@@ -998,6 +1002,9 @@ const zh = {
     fixEnvVars: "修复环境与 Profile",
     restartHint: "环境/Profile 已修复。若 GUI 或 IDE 已开启，请重启它们（或点下方「重启 IDE 后台」）使新环境生效。",
     envFixElevationDenied: "需系统级权限写入环境变量，但授权被取消或拒绝(UAC)。请重试并允许授权。",
+    fixExecBits: "修复",
+    execBitsRestartHint: "已补上可执行权限。请重启 GUI 使其生效。",
+    execBitsDenied: "修复需要管理员权限，但授权被取消。请重试并允许授权。",
     fixing: "处理中...",
     cloudSwitched: "已切换到云服务器，正在重新探测",
     cloudSwitchFailed: "切换云服务器失败",

@@ -1,0 +1,79 @@
+{
+  "pluginName": "screenshot",
+  "displayName": "截屏",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "description": "截屏工具：支持全屏 / 区域 / 窗口三种模式，可设快捷键（含全局热键，窗口不在前台也生效）。截完可直接插入聊天输入框、发送到超级桌面，或保存到当前工作区。",
+  "icon": "desktopItemView",
+  "category": "tool",
+  "installType": "standard",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "截屏",
+        "panelKind": "in-main",
+        "userManaged": true,
+        "content": { "type": "html", "src": "panel.html" },
+        "process": "screenshot-server"
+      }
+    ],
+    "commands": [
+      {
+        "id": "region",
+        "title": "截屏：区域",
+        "onInvoke": "region",
+        "hotkey": "Mod+Shift+X",
+        "scope": "os"
+      },
+      {
+        "id": "fullscreen",
+        "title": "截屏：全屏",
+        "onInvoke": "fullscreen"
+      },
+      {
+        "id": "window",
+        "title": "截屏：窗口",
+        "onInvoke": "window"
+      }
+    ],
+    "events": []
+  },
+  "processes": [
+    {
+      "id": "screenshot-server",
+      "command": "node",
+      "args": ["server.cjs"],
+      "env": {
+        "CLAUDE_PLUGIN_WORKSPACE": "${workspace}"
+      },
+      "startOn": "workspace_bound"
+    }
+  ],
+  "settings": {
+    "saveDir": {
+      "type": "string",
+      "title": "保存目录",
+      "description": "留空 = 当前工作区的 .claude/screenshots/；填绝对路径则固定存到那里",
+      "default": ""
+    },
+    "defaultDest": {
+      "type": "select",
+      "title": "默认去向",
+      "description": "截完图直接送到哪里（之后可在面板里改投）",
+      "default": "chat",
+      "options": [
+        { "value": "chat", "label": "插入聊天输入框" },
+        { "value": "desktop", "label": "发送到超级桌面" },
+        { "value": "file", "label": "仅保存到文件" }
+      ]
+    },
+    "copyToClipboard": {
+      "type": "boolean",
+      "title": "同时复制到剪贴板",
+      "description": "每次截图后把图片写入系统剪贴板，方便直接粘到别处",
+      "default": true
+    }
+  },
+  "platforms": ["windows", "macos", "linux"]
+}

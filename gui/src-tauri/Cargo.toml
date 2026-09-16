@@ -33,6 +33,7 @@ rand_core = { version = "0.6", features = ["std"] }
 jsonrpsee = { version = "0.24", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 claude-gui-shared = { path = "shared" }
+tauri-plugin-global-shortcut = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

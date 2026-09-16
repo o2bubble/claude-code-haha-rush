@@ -6,6 +6,9 @@
 // ⚠️ 本模块不 import node fs —— webview 运行时无 fs。目录读取由 Tauri(Rust/plugin-fs)
 // 完成，把「插件名 → plugin.json 内容」的条目列表传给 scanPlugins(纯逻辑, 可测)。
 
+// 类型专用导入（shortcuts 不反向依赖本模块，无环）
+import type { PluginHotkeyDecl } from "./shortcuts";
+
 // ─── 类型（PRD §5 plugin.json）───
 
 export type PanelKind = "in-main" | "floating";
@@ -41,6 +44,12 @@ export interface PluginCommand {
   id: string;
   title: string;
   onInvoke?: string;
+  /** 建议的默认键位（未归一化，如 `"mod+shift+a"`）。只是默认值，用户可改/可解绑。 */
+  hotkey?: string;
+  /** 键位作用域：`app`（默认，GUI 有焦点才生效）| `os`（全局热键，失焦也生效） */
+  scope?: "app" | "os";
+  /** 平台限定（`os` 作用域下可选）：只在该平台注册 */
+  os?: "win" | "mac";
 }
 
 export interface PluginProcess {
@@ -309,12 +318,34 @@ function parseCommands(raw: unknown): PluginCommand[] {
   return (raw as unknown[]).filter(isRecord).flatMap((c) => {
     const id = asString(c.id);
     if (!id) return []; // 缺 id 的坏 command 跳过（可选贡献，不拖垮 manifest）
+    const scope = c.scope === "os" ? "os" : c.scope === "app" ? "app" : undefined;
+    const os = c.os === "win" || c.os === "mac" ? c.os : undefined;
     return [{
       id,
       title: String(c.title ?? ""),
       onInvoke: asString(c.onInvoke),
+      hotkey: asString(c.hotkey),
+      scope,
+      os,
     }];
   });
+}
+
+/** 收集活动插件声明的快捷键（供 `buildPluginShortcutEntries` 转成条目）。
+ *  独立成函数是因为它被两处消费：快捷键分发器（运行时）与设置面板（展示）。 */
+export function collectPluginHotkeys(manifests: PluginManifest[]): PluginHotkeyDecl[] {
+  return manifests.flatMap((m) =>
+    (m.contributes?.commands ?? [])
+      .filter((c) => c.hotkey?.trim())
+      .map((c) => ({
+        pluginName: m.pluginName,
+        commandId: c.id,
+        title: c.title || c.id,
+        hotkey: c.hotkey!,
+        scope: c.scope,
+        os: c.os,
+      })),
+  );
 }
 
 // ─── scanPlugins — 处理插件目录条目（纯逻辑，容错）───
@@ -567,9 +598,14 @@ export async function reloadPlugins(): Promise<void> {
     }
     const { registerPluginPanels } = await import("./pluginPanelBridge");
     registerPluginPanels(manifests);
-    const { stopPluginEventForwarding, startPluginEventForwarding } = await import("./pluginCommandBridge");
+    const {
+      stopPluginEventForwarding, startPluginEventForwarding, registerPluginCommands,
+    } = await import("./pluginCommandBridge");
     stopPluginEventForwarding();
     startPluginEventForwarding();
+    // 命令注册必须跟着重扫走：否则卸载/禁用的插件会留下幽灵命令（快捷键仍能触发
+    // 一个已不存在的插件），而新装的插件命令绑了键也点不动。
+    registerPluginCommands();
     const { refreshPluginProcesses, syncPluginProcesses, stopPluginProcessesFor } = await import("./pluginProcessBridge");
     await refreshPluginProcesses();
     // 消失(卸载/禁用)的插件: 其后台进程要停——它们在活动清单里已不存在, 不处理会

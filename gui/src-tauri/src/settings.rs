@@ -140,6 +140,15 @@ pub struct AppSettings {
     pub compact_extract_script: Option<String>,
     #[serde(rename = "streamStallWakePrompt", default)]
     pub stream_stall_wake_prompt: Option<String>,
+    /// 快捷键用户覆盖：功能 id → 规范化键位串（如 `"mod+shift+p"`），空串 = 显式解绑。
+    ///
+    /// ⚠️ 这个字段曾长期缺失（前端 `settingsStore.ts` 有、Rust 侧没有），而读取走
+    /// `gui_to_app_settings` = `serde_json::from_value` —— 未建模的字段会被**静默丢弃**，
+    /// 后果是**用户改的快捷键当场生效、重启后全部回退默认**。补上此字段即修复。
+    ///
+    /// 保持"全局"语义：**不进** `merge_workspace_overrides`（快捷键不按工作区分）。
+    #[serde(rename = "shortcuts", default)]
+    pub shortcuts: Option<std::collections::HashMap<String, String>>,
 }
 
 pub fn default_work_dir() -> String {
@@ -200,6 +209,7 @@ impl Default for AppSettings {
             custom_compact_prompt: None,
             compact_extract_script: None,
             stream_stall_wake_prompt: None,
+            shortcuts: None,
         }
     }
 }

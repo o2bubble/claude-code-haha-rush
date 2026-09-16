@@ -8,17 +8,67 @@
 - **不签名/不公证**（熟人分发，不买 Developer ID $99/年）→ 用户首次右键打开 / `xattr -cr` 绕过 Gatekeeper
 - mac 组件集：`{gui, claude, bun, tools, python, extensions}`（无 git=系统自带、无 updater=osascript 提权替代）
 - mac 无更新 stager：gui→osascript 提权 ditto 替换 .app；其他组件→osascript 提权复制
+- **`gui.zip` 内嵌全部组件**（见下方「已知取舍」）—— 首次安装开箱即用，代价是改 GUI 要下整包
+
+### ⚠️ 已知取舍：改 GUI 要下整包 137MB（比 Windows 体验差）
+
+**现象**：mac 上任何 Rust 侧改动（`update.rs` / `lib.rs` / `diagnostics.rs` …）都要重下
+**整个 `gui.zip`（137.5MB）**；而 Windows 改 GUI 只下 `gui.zip`（24MB，因为 `.exe` 是独立文件）。
+
+**实测构成**（`gui.zip` 压缩后，2026-09-15 量）：
+
+| 内容 | 大小 | 改 GUI 时真需要吗 |
+|---|---|---|
+| **`claude-code-gui`**（GUI 二进制本体） | **23.2 MB** | ✅ **只有它变** |
+| python | 38.5 MB | ❌ |
+| claude | 29.0 MB | ❌ |
+| bun | 19.1 MB | ❌ |
+| bin (rg/fd/jq/yq/shellcheck) | 17.5 MB | ❌ |
+| claude-gui-server | 5.1 MB | ❌ |
+| extensions | 3.7 MB | ❌ |
+
+**浪费 ≈ 114MB / 137MB（83%）。**
+
+**根因**：macOS 的 `.app` 是目录 bundle，**更新走 `ditto` 整目录替换**（`update.rs`
+的 `prepare_gui_update_mac`：`rm -rf <dst>; ditto <new> <dst>`），所以必须整包下发。
+组件内嵌进 `.app/Contents/MacOS/` 是为了**首次安装开箱即用**（不必逐个下载拼装）。
+
+**注意**：更新面板**不会**因此全量下载 —— 它逐组件比 sha，**只下变化的组件**。
+`gui.zip` 那个 137MB 只在「gui 组件变了」或「全新安装」时下。所以本取舍的实际
+影响是「改 GUI 时流量大」，不是「每次更新都全下」。
+
+**三条改进路（都未做，2026-09-15 决定暂缓）**：
+
+| | 做法 | 代价 |
+|---|---|---|
+| **A** | `.app` 只含 GUI 本体，组件独立装到 `Contents/MacOS/` 子目录，更新时只换 GUI 二进制 | 省 83%，但**要重做 mac 更新逻辑**（不能再用 ditto 整目录替换），风险大 |
+| **B** | 接受现状，更新面板显示真实下载量 | 零成本，只改善预期 |
+| **C** | 改 GUI 时发一个只含 `claude-code-gui` 的差分包，用 ditto 单独替换那个文件 | 不动结构，风险小于 A；**需先实测**替换 `.app` 内单文件是否被 macOS 缓存/签名机制干扰（本包未签名，理论可行但未验） |
+
+**倾向 C**（改动小、收益大）。做之前先验证：替换单个文件后 `.app` 能正常启动、
+`codesign -v` 的表现与整包替换一致。
 
 ## 1. 构建流程（触发构建）
 
-> ⚠️ **现状（2026-09-14 用户确认）**：GitHub Actions 侧的 mac 构建**已停用** ——
-> 推代码**不会**触发任何构建。mac 构建改由**用户在 Codemagic 平台侧触发**。
-> 需要 mac 产物时找用户要，**不要**以为推完 GitHub 就有了。
->
-> 下面这段「推 GitHub → Codemagic 自动构建」是**历史流程**，保留供参考；
-> 其中第 3 步的自动触发已失效。
+**两条路，按需选**（2026-09-16 起 GitHub Actions 已启用）：
 
-Codemagic（免费 mac_mini_m2）监听 GitHub 镜像仓库 push。改代码后：
+| | GitHub Actions | Codemagic |
+|---|---|---|
+| 触发 | **push 到 GitHub 快照即自动跑**，或 Actions 页手动 Run workflow | 用户在 Codemagic 平台侧触发 |
+| 费用 | **免费**（本仓库 public，macOS runner 不限分钟） | $0.095/分钟（约 ¥9/次），且只收实体卡 |
+| 速度 | 较慢（无缓存，Tauri CLI 每次源码编译 → 全程 15-25 分钟） | 较快（有缓存，约 13 分钟） |
+| 并发 | 已配 `concurrency`：连推自动取消旧 run | 免费档并发 1（会排队） |
+
+**日常用 GitHub Actions**（免费）；**要快时用 Codemagic**。
+
+**GitHub Actions 的两个硬约束**（都写进了 `.github/workflows/macos-build.yml`）：
+- **必须 arm64 runner**（用 `macos-14`，**不要改 `macos-13`/`macos-latest`**）——
+  build.ts 全链路硬编码 aarch64，落到 x86_64 runner 会编出 x86_64 的 `.app`。
+  workflow 里有「Verify arm64 runner」自检步兜底。
+- 本仓库是 **public** → Actions **日志与 artifact 对所有人可见/可下载**。
+  构建只用公开 URL、无凭据，但**产物（含完整 .app）会公开**。
+
+改代码后（GitHub Actions 路径）：
 
 ```bash
 # 1. 提交到本地 main
@@ -27,9 +77,10 @@ git add <files> && git commit -m "..."
 # 2. push gitee main（主仓库）
 git push origin main
 
-# 3. sync 到 GitHub（历史上这步会触发 Codemagic 构建 —— 现已不自动触发）
+# 3. sync 到 GitHub —— 这一步会触发 GitHub Actions 构建
 bash scripts/sync-github-clean.sh
 # → 推 GitHub main + gitee github-clean
+# 产物：GitHub 仓库 Actions 页 → 对应 run → 底部 artifact「claude-code-macos」
 ```
 
 **⚠️ 代理坑（2026-09-04）**：本机 git global http.proxy = `socks5h://127.0.0.1:17891`，代理进程死了会 `Failed to connect to 127.0.0.1 port 17891`。绕过法（不动全局配置）：
@@ -42,11 +93,15 @@ git -c http.proxy= -c https.proxy= push https://github.com/o2bubble/claude-code-
 
 **CI 产物**：`build.ts --platform macos --release ci-build` 生成 6 组件 zip + `dist/release/ci-build/manifest.json`（version=ci-build）。
 
-**构建耗时**：~8 分钟（Full build ~4min）。构建页 Codemagic UI 看结果。
+**构建耗时**：Codemagic 实测 11m50s~14m40s；GitHub Actions 更久（无缓存，Tauri CLI 每次现编）。
 
 ## 2. 产物下载与验证
 
-从 Codemagic 构建页下载 artifacts。**必须下载 build.ts 打的 zip**（`gui.zip` 等），**不要用 Codemagic 自动打的 `Claude_Code.app.zip`**（symlink 全丢，见踩坑）。
+从构建页下载 artifacts —— **Codemagic**：构建页 artifacts 区；**GitHub Actions**：仓库
+Actions 页 → 对应 run → 底部 artifact「claude-code-macos」（zip 内含全部组件）。
+
+**必须用 build.ts 打的 zip**（`gui.zip` 等），**不要用平台自动打的 `Claude_Code.app.zip`**
+或 `dist/Claude Code.app` 那棵树（自动打包不保留 symlink，装完起不来，见踩坑）。
 
 ```bash
 # 下载到 ~/Downloads 后，验证 zip 结构（python）：
@@ -270,17 +325,26 @@ zip 137MB）。客户端下载的是 zip，用错会让**下载进度显示异�
 | 2026.08.25.3 | ditto 打包修复版（symlink + 顶层目录正确）| 96+云已验证 |
 | **2026.08.26.4** | **DeepSeek/effort 切换 + profile 能力迁移 + 压缩修复（dir_content_hash 引入）** | 已被取代 |
 | **2026.09.14.1** | **对齐 Windows .13.8（插件 PATH 修复 / 笔记宽度）+ mac 专属修复（python 自包含、server 内嵌、打开终端、新建笔记、CDP 移除、菜单中文化）** | 已被取代 |
-| **2026.09.14.2** | **GUI 组件路径修复（更新面板误判「未安装」）+ 移除三个死 launcher；发布 sha 改为沿用内嵌 manifest（修全量误报）** | **当前 mac 最新** |
+| **2026.09.14.2** | **GUI 组件路径修复（更新面板误判「未安装」）+ 移除三个死 launcher；发布 sha 改为沿用内嵌 manifest（修全量误报）** | 已被取代 |
+| **2026.09.15.5** | 自动更新两个必现 bug（`walkdir_find` 匹配不了目录 / 解压丢可执行位）+ 诊断面板「可执行权限」检测与一键修复 | 已被取代 |
+| **2026.09.15.6** | MCP 子进程 spawn 与 mac 新终端拿不到插件 runtime PATH（`subprocessEnv` 注入 + `collect_plugin_runtime_dirs`） | **当前 mac 最新** |
+
+> 注：`.14.2` 发布后 mac 通道曾被服务器 prune 误删（根因＝版本目录两平台共享 +
+> 整目录 rmtree；已修，见 HANDOFF「续②」）。恢复时用 `~/Downloads` 既有产物重发为
+> `.15.1`，故版本号有跳跃。
 
 ## 7. 待办 / 未验证
 
 - [x] 真机 Mac 打开 .app → GUI 启动 → 后端 spawn（2026-09-13 用户实测，点出 6 个问题，均已修）
 - [x] ~~python framework 在 mac 真机 import 正常~~ → 已改为 python-build-standalone（真自包含），不再依赖系统框架
 - [x] ~~mac 2026.09.04.x 发布~~ → 2026-09-14 发布 `2026.09.14.1` 到云
-- [ ] **`2026.09.14.2` 真机验证**：装后验 node/npm/npx 可用（PATH 修复）、
-      诊断面板 GUI SERVER 运行中、打开终端、新建笔记、菜单中文、
-      **更新面板不再全量报"有更新"**（sha 一致性修复的验收点）
-- [x] ~~从旧版升级到新版的更新链路~~ → 待 `.14.2` 装机后实测（含 osascript 提权替换）
-- [ ] **从 .13.9 之前版本升级到 `2026.09.14.1` 的更新链路**（客户端 check_for_updates
-      → 下载 → osascript 提权替换）尚未真机验证 —— 这是"云端有 mac 版"后的第一要务
+- [x] ~~更新链路~~ → 发现两处必现 bug（`walkdir_find` 找不到 .app / 解压丢可执行位），
+      已于 `.15.5` 修复；**修复只能靠更新送达，而旧版更新必挂** → mac 上须**手动装一次**
+- [ ] **`2026.09.15.6` 真机验证**（当前最新，装机后验这三条）：
+      ① **MCP spawn**：`claude mcp list` → playwright 应 ✓ Connected（`subprocessEnv` 注入 PATH 的验收点）
+      ② **mac 新终端**：工具栏「打开终端」→ 里面 `node --version && npx --version` 可用
+      ③ **AI Bash 回归**：`node/npm` 仍可用（改了 `subprocessEnv`，别弄坏原来好的）
+      另：诊断面板应出现「可执行权限」检查项且通过；更新面板不再全量报"有更新"
+- [ ] **从旧版自动更新到 `.15.5+` 的链路**尚未真机验证 —— 这是"两个更新 bug 已修"的验收点
 - [ ] python.zip 体积优化（现 41MB zip / 146MB 解压；standalone 已比原 framework 小 4 倍）
+- [ ] （暂缓）改 GUI 只下增量的分发结构 —— 见 §0「已知取舍」的 A/B/C 三方案

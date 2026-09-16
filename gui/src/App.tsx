@@ -8,7 +8,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { WorkspaceSelector } from "./components/chat/WorkspaceSelector";
 import { WelcomeWizard, type WizardSettings } from "./components/chat/WelcomeWizard";
 import { registerPanel } from "./stores/panelRegistry";
-import { reloadPlugins } from "./services/pluginRegistry";
+import { reloadPlugins, getActiveManifests, collectPluginHotkeys } from "./services/pluginRegistry";
 import { startPluginProcessListener } from "./services/pluginProcessBridge";
 import { ALL_PANEL_DEFS } from "./services/panelDefs";
 import { getSettings, loadSettings, reloadSettings, saveSettings, updateSettings } from "./stores/settingsStore";
@@ -23,6 +23,9 @@ import { BackendService } from "./services/backendService";
 import { startSessionStatusSync } from "./services/sessionStatusSync";
 import { commandRegistry } from "./services/windowBus";
 import { startShortcutDispatcher } from "./services/shortcutDispatcher";
+import { buildPluginShortcutEntries } from "./services/shortcuts";
+import { startGlobalShortcuts } from "./services/globalShortcutService";
+import { startOverlayUplinkListener } from "./services/pluginPanelBridge";
 import { Commands } from "./services/commands";
 import { toggleGroupHidden, restoreLayout, serializeLayout, getSkipSave, refreshAllTitles, activatePanel } from "./stores/layoutStore";
 import { openSettingsFloat, openHelpFloat, openDiagnosticsFloat } from "./components/Toolbar";
@@ -531,10 +534,28 @@ export default function App() {
   // 快捷键分发器 —— 统一处理应用级快捷键（唯一真相源见 services/shortcuts.ts），
   // 取代原先散落在 useCommandPalette 等处的 window keydown 监听。
   // 用户覆盖配置从设置实时读取，改键后无需重启。
+  //
+  // 第二参传**插件条目**（动态）：插件装/卸/改键都要立即反映，故每次按键重读
+  // （内部按内容缓存，代价可忽略）。插件条目里的 `scope: "os"` 会被分发器过滤掉，
+  // 交给 globalShortcutService 走 OS 级注册。
   useEffect(() => {
-    const handle = startShortcutDispatcher(() => getSettings().shortcuts);
+    const handle = startShortcutDispatcher(
+      () => getSettings().shortcuts,
+      () => buildPluginShortcutEntries(collectPluginHotkeys(getActiveManifests())),
+    );
     return () => handle.dispose();
   }, []);
+
+  // 全局热键（OS 级，GUI 失焦也生效）—— 只管 `scope: "os"` 的条目。
+  // 与上面的应用内分发器**互斥**：分发器会过滤掉 os 条目，避免同一次按键触发两次。
+  useEffect(() => {
+    const handle = startGlobalShortcuts();
+    return () => handle.dispose();
+  }, []);
+
+  // overlay 窗口里的插件 iframe 上行（投递到聊天/超桌/写文件…）—— 那些 iframe 的
+  // postMessage 到不了主窗，由 PluginOverlayApp 转成 Tauri 事件，这里接回同一套分派。
+  useEffect(() => startOverlayUplinkListener(), []);
 
   // ── Layout persistence: debounced save on layout changes ──
   useEffect(() => {
