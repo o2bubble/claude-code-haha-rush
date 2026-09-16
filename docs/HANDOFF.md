@@ -1,7 +1,83 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-16（main @44ed947）
+# Handoff — Claude Code GUI 开发 · 2026-09-16（main @ec65bd9）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
+
+## 🆕 2026-09-16 续③：插件系统能力扩展 + 首个自研插件（截屏）
+
+用户要一个**截屏工具**并明确要求**做成真插件**（可独立更新/禁用/上架），接受改造宿主。
+
+### 关键判断：哪些能力必须由宿主提供
+
+截屏是 OS 能力，而插件系统原本**四个硬阻塞**（都卡在宿主侧）：
+
+| 阻塞 | 说明 |
+|---|---|
+| 插件命令绑不了快捷键 | 快捷键表是静态数组，插件命令也从没注册进 `commandRegistry` |
+| 没有全局热键 | 只有 `window.addEventListener("keydown")`（有焦点才生效） |
+| 命令到不了插件 | 只广播给**已挂载的面板 iframe**，面板没开就静默丢弃 |
+| 插件 iframe 上行只有 3 种 | `open-panel`/`float-drag-start`/diff·chip，没有投递能力 |
+
+而**抓屏本身归插件** —— 插件 Node 进程 `Command::new` spawn、**无沙箱无白名单**，
+可自由跑 `powershell.exe` / `screencapture`。
+
+### 宿主新增的 5 项通用能力（非截屏专属）
+
+1. **`open/close_plugin_overlay`** —— 插件可开**铺满某显示器、置顶、无边框**的窗口。
+   ⚠️ 混合 DPI 的关键：builder 的 `position`/`inner_size` 只吃**逻辑**像素，故先隐藏建窗、
+   再用**物理**坐标 `set_position/set_size` 贴合，最后 `show()`。
+2. **插件命令可绑快捷键** —— `commands[]` 加 `hotkey`/`scope`/`os`；补上
+   `registerPluginCommands()`（原来插件命令**从不注册**，`commandRegistry.execute` 是 no-op）。
+3. **全局热键**（`tauri-plugin-global-shortcut`）—— 差集增量更新、失败上报 UI、
+   `reconcile` 串行化（重叠会误报"已被占用"）。
+4. **插件上行投递**：`chat-reference` / `desktop-image` / `write-workspace-file`，
+   全部白名单校验，分支**加在 chip 兜底之前**。
+5. **命令直达插件进程**（`POST /__command`）—— 面板没开时唯一的通路；进程可返回
+   `{host:[动作]}` 请宿主代执行。
+
+### 🔴 排查中发现的三个 bug（都已修）
+
+| bug | 影响 |
+|---|---|
+| **CDP 调试参数破坏所有次级窗口** | `additional_browser_args` 是 **WebView2 environment 级**选项，而一个 user data folder 只允许一个 environment。早先只给主窗加了 `--remote-debugging-port` → 其它窗口 environment 不一致 → **浮窗/overlay/外链窗全部建不出来**（`HRESULT 0x8007139F`）。**只要带 `CCGUI_CDP_PORT` 启动，浮窗就是坏的**。修法 = 抽 `with_debug_args()` 应用到全部 4 个窗口创建点 |
+| 命令送进程时按错前缀匹配 | `PluginProcessInfo.processId` 是**裸 id**，不带 `plugin:<name>:` 前缀 → 静默不匹配、命令永远送不到 |
+| overlay 上行监听重复注册 | 一次拖框往输入框插 **3 个**相同引用（StrictMode/HMR 都会重复注册，且不报错） |
+
+### 截屏插件（`plugins/screenshot/`，v0.1.0，已上架 96 + 云）
+
+- 三种模式：全屏 / 区域 / 窗口。默认 `Ctrl+Shift+X` 区域截图（**全局热键**）
+- 三个去向：插入聊天框 / 发超桌 / 存文件；默认存 `<工作区>/.claude/screenshots/`
+- **区域框选用"冻结位图"**：先抓屏 → 铺满屏幕让用户框选 → 从这张图上裁。
+  好处：所见即所截 + **不需要透明窗口**（避开 transparent + always_on_top + 点击穿透）
+- **分平台不对称是刻意的**：macOS 三种模式全交给系统 `screencapture`（原生体验、零依赖）；
+  Windows 只有全屏走 PowerShell+.NET，区域自绘（系统那条新协议要求 MSIX 打包应用，我们用不了）
+- **只抓光标所在那块显示器** —— 冻结图要显示在只覆盖一块屏的 overlay 里，抓整个虚拟桌面
+  会让多屏坐标错位（静默截错区域）。overlay 也开在同一块屏上
+
+**实测**（真实 WebView2）：全屏 → 投递聊天框 ✅；区域 → 开 overlay → 拖框 500×300 →
+裁剪落盘**精确 500×300** → 投递 → 窗口自关 ✅；裁剪坐标**逐像素正确**；
+全局热键**失焦时触发**成功 ✅
+
+### 顺带修的桌面 bug：切换标签后自己跳回第一张
+
+用户报「点桌面 2 自动切回桌面 1，**我感觉还是同步的问题**」—— 判断准确。
+实测抓到调用栈：`notifyDesktopChanged ← fetchDesktops ← reloadDesktops`。
+
+根因两处，都是**把本地交互态当服务端数据**：
+
+1. `fetchDesktops` 无条件 `activeDesktopId = desktops[0].id`。同函数里作者**已经**为
+   pan/zoom 做了保留（注释明说"无条件重建会让缩放/平移闪回"）—— **只是漏了选中态**。
+2. `setActiveDesktop` 会触发一次**无意义写盘**：`desktopToRecord` 里根本没有选中态字段、
+   DB 也没这一列 → 存不下任何东西，却产生 db_changed 广播，**害得别的实例白刷一次**。
+   多开窗口时这就是"我这儿切标签，那边抖"。已拆出 `notifyDesktopViewChanged()`（只广播不落盘）。
+
+⚠️ **触发条件是开着多个 GUI 实例** —— 自回声过滤本身是对的
+（`server_client.rs`: `change.origin == client_id → continue`），是**另一个实例**的改动引发 refetch。
+
+### 本版发布
+
+**2026.09.16.2** 已上传 96 + 云（只重建 gui；`gui.zip` 两端字节数一致）。
+截屏插件 `screenshot@0.1.0` 已上架两端市场（已签名）。
 
 ## 🆕 2026-09-15 续②：mac 发版被误删（**两个删除点**，已修复 + 通道已恢复）
 
@@ -179,15 +255,13 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 
 ## 当前状态
 
-- **分支**: `main`（`99d3c0e`）；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
-- **本批主题**: CF Tunnel 入口 + 云性能事故修复 + 设置面板三档切换 + **插件浮窗全透明修复**
-- **Windows 版本**: **两端均 `2026.09.16.1`**
-  —— 内容 = MCP 子进程 PATH 注入 + 插件 runtime 补齐 `bin/`（重建 gui + claude）
-  —— 先发 96、后补云；**补发云时顺带验证了跨平台删除修复**（见下）
-  —— 期间用户自行发过 `.15.2`（WebSearch 重试）/ `.15.3`（浮窗外壳+拖动+会话面板）；
-     `.15.4` 是补发的 color-scheme 修复（`.15.3` 不含该修复）
-  ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 这个孤儿版本（号比用户已发的
-     `.15.2/.15.3` 低，客户端永远拿不到），还白挤掉了 `.14.5`
+- **分支**: `main`（`ec65bd9`）；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
+- **本批主题**: **插件系统能力扩展（overlay/快捷键/全局热键/投递）+ 首个自研插件「截屏」** + 桌面切换回弹修复
+- **Windows 版本**: **两端均 `2026.09.16.2`**
+  —— 内容 = 插件系统 5 项通用能力 + 截屏插件 + 桌面切换回弹修复（只重建 gui）
+  —— 截屏插件需本版 GUI 才能跑（宿主缺那些能力时插件起不来）
+  ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 孤儿版本（号比用户已发的低，
+     客户端永远拿不到），还白挤掉了 `.14.5`
 - **macOS 云端版本**: **`2026.09.15.6`**（6 组件齐全；含 `.15.5` 的更新 bug 修复 + `.15.6` 的 MCP/终端 PATH 注入）
   —— 更早的 `.15.1` 曾被误删致 macos 404，见「续②」；**构建：GitHub Actions（免费，push 自动触发）或 Codemagic（快，付费）**
 - **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；300 条记忆；**已加 bearer 鉴权**
@@ -385,15 +459,15 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 ## 热数据
 
 ### Git 状态
-- branch `main`，HEAD `99d3c0e`；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
+- branch `main`，HEAD `ec65bd9`；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
 
 ```text
-99d3c0e fix(mac): release_mac.py 的 verify 必崩 — 非 ASCII 撞 GBK 控制台
-8b2b9a6 fix(release-platform): 覆盖重传不再跨平台 rmtree — mac 被删的直接元凶
-ef43d1d fix(release-platform): 版本清理按平台各算 — mac 版本不再被 windows 发布挤掉
-16a41f3 fix(gui): 暗色下插件浮窗「全透明」失效 — iframe 色系需与内嵌文档对齐
-ea7c947 fix(publish-plugin): 显式声明 UA — 云市场在 Cloudflare 后面会拦 urllib 默认 UA
-6cc1d1a feat(gui): 插件 iframe 浮窗的拖动支持 — postMessage 协议 + 拖动遮罩
+ec65bd9 fix(desktop): 切换桌面后自己跳回第一张 — refetch 无条件重置选中态
+16fa863 feat(plugin): 截屏插件 — 三种模式 + 快捷键 + 三个去向
+23787a1 feat(plugin): overlay 窗口的插件上行能投递到主窗 + 统一上行分派
+26ca8d2 feat(plugin): 全局热键（OS 级）—— 插件快捷键在窗口失焦时也生效
+01d7797 feat(plugin): 插件命令可绑快捷键（含全局热键的注册链路）
+944a4dd feat(plugin): 插件全屏 overlay 窗口能力 + 修快捷键持久化 bug
 41bc9d2 feat(gui): 浮窗外壳可配置 — 支持无标题栏 / 透明的浮动元素
 0e69f7a chore(mac): 发布脚本修正过时说明 + 忽略 manifest 产物
 9144526 fix(websearch): 本地兜底搜索加重试 + 区分失败原因
@@ -431,12 +505,15 @@ e81ba5a fix(api): thinking-only 消息被剥离后成空数组 → 400 卡死会
 
 ### 测试基线
 - Memory MCP：`cd extensions/memory && python -m unittest discover -s tests` → **43 passed**
-- GUI 前端：`cd gui && bun run test` → **752 通过**（61 文件）· `bun run build`（含 `tsc`）干净
+- GUI 前端：`cd gui && bun run test` → **794 通过**（62 文件）· `bun run build`（含 `tsc`）干净
 - 引擎侧：`bun test <file>`（根目录，如 `src/utils/*.test.ts`）—— 注意**与 gui/ 的 vitest 是两套**，
   改 `src/` 下的东西只跑 gui/ 会漏（2026-09-15 PATH 注入修复就因此漏测另一半）
 - Rust：`cargo test --lib`（gui/src-tauri）→ 全部通过（含 `update::tests` 6 项）
 
 ### 发布版本 (dist/release)
+- **2026.09.16.2**（插件系统能力扩展 + 截屏插件 + 桌面切换修复；仅 gui）
+  —— ✅ **两端已上传**，9/9 组件可下载、`gui.zip` 两端一致（`24,360,139`）
+  —— 附带：截屏插件 `screenshot@0.1.0` 上架两端市场（已签名）
 - **2026.09.16.1**（MCP 子进程 PATH 注入 + 插件 runtime 补 `bin/`；仅 gui+claude）
   —— ✅ **两端都已上传**，9/9 组件可下载、`gui.zip` 两端字节数一致（`24,296,264`）
   —— gui sha `413e0cd7…`；claude sha `02c33cb3…`；其余 7 组件从 `.15.4` 按 sha 复用
