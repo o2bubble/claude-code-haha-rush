@@ -1,7 +1,8 @@
 # AI_NOTES — screenshot（截屏插件）
 
-截屏工具。贡献：1 个面板（截屏历史 + 手动触发）、3 条命令（区域/全屏/窗口，区域那条带全局热键）、
-1 个后台进程 `screenshot-server`（Node，负责抓屏/裁剪/落盘）。**不产生其它进程。**
+截屏工具。贡献：2 个面板（`main` 截屏历史 + 手动触发；`preview` 独立预览浮窗）、
+3 条命令（区域/全屏/窗口，区域那条带全局热键）、1 个后台进程 `screenshot-server`
+（Node，负责抓屏/裁剪/落盘）。**不产生其它进程。**
 
 ## 平台检测（先做）
 
@@ -74,7 +75,101 @@
 - **多显示器**：overlay 只开在**光标所在那块**显示器（进程用 `Screen::FromPoint(cursor)` 定），
   冻结图也**只抓那一块** —— 所以坐标天然对齐。**不要**把抓屏改成抓整个虚拟桌面，那会让多屏错位。
 
-### 5. 截完没送进聊天框
+### 5. 框选时选框**不跟鼠标**（松手才跟一下，然后窗口就关了、什么都没截到）
+**这是 `<img>` 原生拖拽造成的，2026-09-16 实际踩过（v0.1.0 的 bug，v0.1.1 修复）。**
+
+现象（用户的原话描述，非常有辨识度）：「点击进入拖动后，拖动鼠标框选不跟鼠标，
+然后松开鼠标后这时候才跟，然后再点一下鼠标就结束了」。
+
+**机理**：overlay 里那张铺满屏幕的冻结图是 `<img>`，而 `<img>` **默认 `draggable=true`**。
+在图上按下左键拖动 → 浏览器把它当成**"拖拽图片"**：
+- 拖拽期间浏览器**不再派发 `mousemove`**（只发 `drag` 系列事件）→ 选框纹丝不动
+- 松手那一刻拖拽结束，坐标才更新一次 → 于是"松开后才跟"
+- mouseup 时算出的宽高≈0 → 命中代码里的**误触保护** `if (w < 4 || h < 4)` → 走 `cancel()`
+- 结果：冻结图被删、overlay 关闭、**没有任何裁剪文件产生**
+
+**修法**（三处缺一不可，见 overlay.html）：
+```css
+#shot { pointer-events: none; -webkit-user-drag: none; user-select: none; }
+```
+```html
+<img id="shot" alt="" draggable="false">
+```
+```js
+document.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  e.preventDefault();   // 阻止原生拖拽 / 文本选择
+  ...
+});
+```
+`pointer-events: none` 让 `mousedown`/`mousemove` 冒泡到 `document`（框选逻辑本来就在
+document 上，**不用改**）；`draggable="false"` + `-webkit-user-drag: none` 是双保险。
+
+**怎么确认是这个 bug**（而不是别的问题）：
+1. 操作一次后看系统临时目录有没有**残留** `snipfrozen-*.png`
+   —— 冻结图**消失**说明走了 crop 或 cancel；**没有裁剪文件产生** → 一定是 cancel
+2. 用真实鼠标输入拖框（**合成事件测不出来**，因为合成事件不触发浏览器原生拖拽），
+   读 `#sel` 的 `style.width/height`：若拖了 260px 却只有 12px，就是这个 bug
+
+### 6. 窗口模式：列表为空 / 点了没反应 / 截出来是黑图
+窗口模式（Windows）的链路：**枚举窗口 → 冻结抓屏 → overlay 悬停高亮 → 点击 → `PrintWindow` 直抓**。
+列表在**建 overlay 之前**就枚举好（否则 overlay 自己会混进列表、还占着 Z-order 最上层）。
+
+- **列表为空** → `enumWindows()` 的 PowerShell 失败了（失败会打 stderr 日志）。
+  ⚠️ 该脚本**必须纯 ASCII**：PowerShell 5.1 按系统代码页（GBK）读脚本，中文注释会让
+  内嵌的 C# 编译失败，报错极具误导性（"名称不存在"、行号还指向无关的空行）。**这个坑踩过两次。**
+- **点了没反应** → 命中测试用**物理像素**（`clientX * devicePixelRatio`）与窗口 rect 比对。
+  DPI 缩放 ≠ 100% 时先确认 dpr 取对；用 `GET /windows?token=` 看列表坐标是否合理。
+- **截出来是黑图** → `PrintWindow` 对部分 GPU 加速窗口（Chromium 内核 / 部分 UWP）返回全黑
+  且**不报错**。代码已防护：采样像素检测全黑 → 上层回退为"从冻结图裁那块区域"
+  （画面可能被遮挡物盖着，但能出图）。用户若反馈"窗口模式截到的是别的窗口"，就是回退生效了，
+  属**已知限制而非 bug**。
+- **验证 PrintWindow 真的生效**（而不是在回退）：把目标窗口**完全盖住**再截，
+  看结果是不是目标窗口自己的内容。这是最可靠的判别方式。
+
+### 7. 删不掉 / 点了「删除」没反应
+- **只删截图目录内**的文件（`resolveInTargetDir` 一处校验，读与删共用）。目录外的
+  一律拒绝并在 `failed` 里返回原因 —— 这是**设计**，不是 bug。
+- **要点两次**才真删（第一次变「确认删除?」，3 秒不点自动收回）。
+  ⚠️ 之所以不用原生 `confirm()`：插件面板的 iframe sandbox **没有 `allow-modals`**，
+  原生弹窗会被浏览器**静默拦掉**（返回 false 且不报错）→ 表现为"点了没反应"。
+  同理 **`window.open` / `alert` 也不可用**（sandbox 没有 `allow-popups`）——
+  这就是「预览」必须走浮窗面板、不能在面板内开新窗口的原因。
+- **某一张删不掉**：被别的程序占用（预览浮窗还开着那张图、或图片查看器开着）。
+  进程会跳过它并返回 `failed`，其余照删。
+
+### 8. AI 调用截屏工具失败
+工具名是 `plugin_screenshot_fullscreen` / `plugin_screenshot_region`（宿主加命名空间
+前缀；插件自己声明的只是短名 `fullscreen` / `region`）。
+
+排查顺序：
+
+1. **AI 看得到工具吗** —— 工具表在**会话加载时**刷新（`ideMode.ts` 的 `handleLoadSession`
+   → `refreshMcpTools`）。装完/启用插件后**必须重开会话**，或让 AI 跑 `/mcp-refresh`。
+   没重开 → AI 压根不知道有这两个工具（是刷新时机，不是故障）。
+2. **进程在跑吗** —— 与快捷键那节同因：`startOn: workspace_bound`，**未绑工作区时进程
+   不启动**。此时工具会报「插件「screenshot」的后台进程未运行」。
+3. **平台** —— 清单 `platforms: ["windows","macos"]`。Linux 上宿主**不会暴露**这两个工具
+   （聚合时按平台过滤），AI 看不到是正常的。
+4. **直接打端点**（绕开宿主，判断是插件侧还是宿主侧）：
+   ```bash
+   curl -X POST http://127.0.0.1:<port>/__mcp -H "Content-Type: application/json" \
+     -d '{"tool":"fullscreen"}'
+   curl -X POST http://127.0.0.1:<port>/__mcp -H "Content-Type: application/json" \
+     -d '{"tool":"region","args":{"region":{"x":100,"y":100,"w":320,"h":240}}}'
+   ```
+   返回 `{ok:true, path, image:{data,mimeType}, meta:{...}}` 说明插件侧全好。
+
+**坐标约定**：`region` 是**物理像素、相对目标显示器左上角**（不是虚拟桌面绝对坐标）。
+返回值里 `meta.monitorOrigin` 是这张图在虚拟桌面中的绝对原点，需要换算时用。
+`meta.width/height` 是截图的实际像素尺寸 —— AI 若先截全屏再据此估区域，注意客户端可能
+把大图 downsample（超 2000px 会缩），**别拿看到的图像尺寸当物理像素用**。
+
+**返回值为什么分两块**：图片走 MCP image content（模型能直看），元数据走 text 块。
+**base64 绝不能同时出现在 text 里** —— 1920×1080 的 PNG base64 约 30 万字符 ≈ 数十万
+token，会瞬间撑爆上下文。宿主 `buildToolContent` 负责剥离，有单测锁住。
+
+### 9. 截完没送进聊天框
 进程返回 `host:[{kind:"chat-reference",...}]`，宿主执行时调 `windowBus.emit(CHAT_ADD_REFERENCE)`。
 - 该事件**不是 sticky**：若聊天输入框面板此刻没挂载，事件无人接收 → 静默丢失。
 - **这是已知边界**，不是故障。图**一定已经落盘**了（去 `.claude/screenshots/` 找），
@@ -105,4 +200,4 @@
 - **收不到更新检查提示**：插件版本变化不影响 GUI 版本，是两条独立的线。
 - **注册失败标红**：见上面 1.3，是键被占了，不是插件坏了。
 - **面板里写着"插件进程未就绪"**：多半是没绑定工作区（进程按设计不启动）。
-- **截图没进聊天框但文件在**：见上面 5，输入框面板当时没挂载。
+- **截图没进聊天框但文件在**：见上面 9，输入框面板当时没挂载。

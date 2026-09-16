@@ -13,7 +13,7 @@
  * 安全边界：iframe 用与面板相同的 sandbox 与 origin 校验；overlay 窗口本身
  * 在 capabilities 里只多了「存在于 windows 列表」这一点，不额外放权。
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { pluginIframeBase, isPluginFrameOrigin } from "../../services/pluginPanelBridge";
 import { getGuiPlatform, type GuiPlatform } from "../../services/pluginRegistry";
 
@@ -47,10 +47,24 @@ export function parseOverlayHash(hash: string): OverlayTarget | null {
 export default function PluginOverlayApp() {
   const [target] = useState(() => parseOverlayHash(window.location.hash));
   const [platform, setPlatform] = useState<GuiPlatform | null>(null);
+  const revealedRef = useRef(false);
 
   useEffect(() => {
     void getGuiPlatform().then(setPlatform);
   }, []);
+
+  // 请求宿主把本窗口**显示出来**。
+  //
+  // `open_plugin_overlay` 建窗时刻意不 show：窗口一显示，WebView2 就用默认**白底**
+  // 画尚未加载完的内容，而本窗口铺满整块屏幕 → 用户看到"整屏白闪一下"。
+  // 故等这里的 iframe 与冻结图都就绪了再亮出来（详见 Rust `show_plugin_overlay`）。
+  const reveal = useCallback(() => {
+    if (!target || revealedRef.current) return;
+    revealedRef.current = true;
+    void import("@tauri-apps/api/core").then(({ invoke }) =>
+      invoke("show_plugin_overlay", { plugin: target.plugin }).catch(() => {}),
+    );
+  }, [target]);
 
   // overlay 是独立窗口：禁用右键菜单与文本选择，避免干扰框选类交互。
   // （插件可自行覆盖——它拿不到宿主 DOM，所以只能通过自己 iframe 内的样式。）
@@ -75,6 +89,12 @@ export default function PluginOverlayApp() {
       if (!d || typeof d !== "object") return;
       if (d.source !== `plugin:viewer:${target.plugin}`) return;
       if (!isPluginFrameOrigin(e.origin)) return;
+      // 插件自报"画面已就绪"（冻结图/首屏加载完）→ 亮出窗口，不往上转发
+      // （这是 overlay 自身的显示时机信号，主窗没有对应语义）。
+      if (d.kind === "ready") {
+        reveal();
+        return;
+      }
       void import("@tauri-apps/api/event").then(({ emit }) =>
         emit("plugin-overlay-uplink", {
           plugin: target.plugin, kind: d.kind, payload: d.payload,
@@ -83,7 +103,7 @@ export default function PluginOverlayApp() {
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [target]);
+  }, [target, reveal]);
 
   if (!target) {
     return (
@@ -105,6 +125,10 @@ export default function PluginOverlayApp() {
       src={src}
       sandbox="allow-scripts allow-same-origin"
       style={S.frame}
+      // 兜底显示：插件未必上报"就绪"（第三方 HTML 不受我们约束），
+      // iframe 文档加载完再给一点时间就亮出来。Rust 侧还有一层更长的超时兜底，
+      // 三层加起来保证窗口不会永远不显示（见 show_plugin_overlay）。
+      onLoad={() => window.setTimeout(reveal, 400)}
     />
   );
 }

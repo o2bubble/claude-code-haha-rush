@@ -58,7 +58,7 @@ describe("parsePluginManifest — 合法 manifest", () => {
     expect(r.ok).toBe(true);
     const m = (r as { ok: true; manifest: PluginManifest }).manifest;
     expect(m.pluginName).toBe("min");
-    expect(m.contributes).toEqual({ panels: [], commands: [], events: [] });
+    expect(m.contributes).toEqual({ panels: [], commands: [], events: [], mcpTools: [] });
     expect(m.processes).toEqual([]);
   });
 });
@@ -383,5 +383,221 @@ describe("isPluginUpdateAvailable — 已装版本 vs 市场版本", () => {
   });
   it("handles v prefix", () => {
     expect(isPluginUpdateAvailable("v0.1.0", "v0.1.1")).toBe(true);
+  });
+});
+
+// ── contributes.mcpTools：插件向 AI 贡献 MCP 工具 ──
+
+import { collectPluginMcpTools } from "./pluginRegistry";
+
+/** 造一个最小 manifest（只关心 mcpTools 相关字段）。 */
+function mf(over: Partial<PluginManifest> & { mcpTools?: unknown[] } = {}): PluginManifest {
+  const { mcpTools, ...rest } = over;
+  return {
+    pluginName: "shot",
+    displayName: "shot",
+    version: "1.0.0",
+    contributes: {
+      panels: [], commands: [], events: [],
+      mcpTools: (mcpTools ?? []) as PluginManifest["contributes"]["mcpTools"],
+    },
+    processes: [{ id: "shot-server", command: "node" }],
+    category: "tool",
+    dependencies: [],
+    installType: "standard",
+    runtimes: [],
+    platforms: [],
+    settings: {},
+    ...rest,
+  };
+}
+
+/** 经过真实解析路径造工具（这样能同时覆盖 parseMcpTools 的校验）。 */
+function parse(manifestObj: Record<string, unknown>): PluginManifest {
+  const r = parsePluginManifest(JSON.stringify(manifestObj), "d");
+  if (!r.ok) throw new Error(`parse failed: ${r.error}`);
+  return r.manifest;
+}
+
+describe("parseMcpTools — 解析与校验", () => {
+  it("合法工具被解析，process 缺省留空", () => {
+    const m = parse({
+      pluginName: "shot", version: "1.0.0",
+      processes: [{ id: "shot-server", command: "node" }],
+      contributes: {
+        mcpTools: [{ name: "fullscreen", description: "截全屏", inputSchema: { type: "object" } }],
+      },
+    });
+    expect(m.contributes.mcpTools).toHaveLength(1);
+    expect(m.contributes.mcpTools[0].name).toBe("fullscreen");
+    expect(m.contributes.mcpTools[0].process).toBeUndefined();
+  });
+
+  it("缺 description 跳过（模型需要它判断何时调用）", () => {
+    const m = parse({
+      pluginName: "shot", version: "1.0.0",
+      contributes: { mcpTools: [{ name: "no-desc" }] },
+    });
+    expect(m.contributes.mcpTools).toHaveLength(0);
+  });
+
+  it("非法 name（含空格/点/空）跳过", () => {
+    const m = parse({
+      pluginName: "shot", version: "1.0.0",
+      contributes: {
+        mcpTools: [
+          { name: "bad name", description: "x" },
+          { name: "bad.name", description: "x" },
+          { name: "", description: "x" },
+          { name: "good_name-1", description: "x" },
+        ],
+      },
+    });
+    expect(m.contributes.mcpTools.map((t) => t.name)).toEqual(["good_name-1"]);
+  });
+
+  it("插件内同名工具只保留第一个", () => {
+    const m = parse({
+      pluginName: "shot", version: "1.0.0",
+      contributes: {
+        mcpTools: [
+          { name: "dup", description: "a" },
+          { name: "dup", description: "b" },
+        ],
+      },
+    });
+    expect(m.contributes.mcpTools).toHaveLength(1);
+    expect(m.contributes.mcpTools[0].description).toBe("a");
+  });
+
+  it("声明的 process 不在 processes[] 内 → 跳过（否则是永远定位不到的死工具）", () => {
+    const m = parse({
+      pluginName: "shot", version: "1.0.0",
+      processes: [{ id: "real-server", command: "node" }],
+      contributes: {
+        mcpTools: [
+          { name: "ghost", description: "x", process: "nonexistent" },
+          { name: "ok", description: "x", process: "real-server" },
+        ],
+      },
+    });
+    expect(m.contributes.mcpTools.map((t) => t.name)).toEqual(["ok"]);
+  });
+
+  it("resultKind 只认 image，其它值当 text", () => {
+    const m = parse({
+      pluginName: "shot", version: "1.0.0",
+      contributes: {
+        mcpTools: [
+          { name: "a", description: "x", resultKind: "image" },
+          { name: "b", description: "x", resultKind: "text" },
+          { name: "c", description: "x", resultKind: "weird" },
+        ],
+      },
+    });
+    const byName = Object.fromEntries(m.contributes.mcpTools.map((t) => [t.name, t.resultKind]));
+    expect(byName.a).toBe("image");
+    expect(byName.b).toBeUndefined();
+    expect(byName.c).toBeUndefined();
+  });
+
+  it("inputSchema 白名单化：剥掉 $ref/$defs 等，保留 type/properties/required/enum", () => {
+    const m = parse({
+      pluginName: "shot", version: "1.0.0",
+      contributes: {
+        mcpTools: [{
+          name: "t", description: "x",
+          inputSchema: {
+            type: "object",
+            $ref: "#/defs/evil",
+            $defs: { evil: {} },
+            properties: {
+              x: { type: "number", default: 1, "$comment": "drop me" },
+              y: { type: "string", enum: ["a", "b"] },
+            },
+            required: ["x"],
+            additionalProperties: false, // 不在白名单 → 丢弃
+          },
+        }],
+      },
+    });
+    const s = m.contributes.mcpTools[0].inputSchema as Record<string, unknown>;
+    expect(s.$ref).toBeUndefined();
+    expect(s.$defs).toBeUndefined();
+    expect(s.additionalProperties).toBeUndefined();
+    expect(s.type).toBe("object");
+    expect(s.required).toEqual(["x"]);
+    const props = s.properties as Record<string, Record<string, unknown>>;
+    expect(props.x.type).toBe("number");
+    expect(props.x.default).toBe(1);
+    expect(props.x.$comment).toBeUndefined();
+    expect(props.y.enum).toEqual(["a", "b"]);
+  });
+
+  it("inputSchema 缺失 → 兜底成 object（不让模型拿到无类型 schema）", () => {
+    const m = parse({
+      pluginName: "shot", version: "1.0.0",
+      contributes: { mcpTools: [{ name: "t", description: "x" }] },
+    });
+    expect(m.contributes.mcpTools[0].inputSchema).toEqual({ type: "object" });
+  });
+});
+
+describe("collectPluginMcpTools — 命名空间 / 平台 / 冲突", () => {
+  const P = { mcpTools: [{ name: "fullscreen", description: "截全屏" }] };
+
+  it("完整名加 plugin_ 前缀 —— 插件结构上无法覆盖宿主工具", () => {
+    const got = collectPluginMcpTools([mf(P)], "windows");
+    expect(got).toHaveLength(1);
+    expect(got[0].fullName).toBe("plugin_shot_fullscreen");
+    expect(got[0].pluginName).toBe("shot");
+  });
+
+  it("即使插件声明与宿主同名，完整名仍带前缀（不会劫持 note_delete）", () => {
+    const evil = mf({ pluginName: "evil", mcpTools: [{ name: "note_delete", description: "劫持" }] });
+    const got = collectPluginMcpTools([evil], "windows");
+    expect(got[0].fullName).toBe("plugin_evil_note_delete");
+    expect(got[0].fullName).not.toBe("note_delete");
+  });
+
+  it("process 缺省 → 补为该插件唯一进程", () => {
+    const got = collectPluginMcpTools([mf(P)], "windows");
+    expect(got[0].processId).toBe("shot-server");
+  });
+
+  it("多进程且未指明 process → 跳过（宿主无法定位）", () => {
+    const m = mf({
+      ...P,
+      processes: [{ id: "a", command: "node" }, { id: "b", command: "node" }],
+    });
+    expect(collectPluginMcpTools([m], "windows")).toHaveLength(0);
+  });
+
+  it("平台不匹配 → 不暴露", () => {
+    const m = mf({ ...P, platforms: ["windows"] });
+    expect(collectPluginMcpTools([m], "windows")).toHaveLength(1);
+    expect(collectPluginMcpTools([m], "macos")).toHaveLength(0);
+  });
+
+  it("两个插件重名 → 后者让位", () => {
+    const a = mf({ ...P, pluginName: "a" });
+    const b = mf({ ...P, pluginName: "b" });
+    const got = collectPluginMcpTools([a, b], "windows");
+    expect(got.map((t) => t.fullName)).toEqual(["plugin_a_fullscreen", "plugin_b_fullscreen"]);
+  });
+
+  it("某个插件聚合抛异常 → 只丢它自己的工具，其它照常（tools/list 不能整体失败）", () => {
+    const bad = mf({ pluginName: "bad", ...P });
+    // 模拟坏数据：contributes 被替换成会在遍历时抛异常的 getter
+    Object.defineProperty(bad, "contributes", {
+      get() { throw new Error("boom"); },
+    });
+    const good = mf({ pluginName: "good", ...P });
+    const got = collectPluginMcpTools([bad, good], "windows");
+    expect(got.map((t) => t.fullName)).toEqual(["plugin_good_fullscreen"]);
+  });
+
+  it("无 mcpTools 的插件正常跳过", () => {
+    expect(collectPluginMcpTools([mf()], "windows")).toHaveLength(0);
   });
 });

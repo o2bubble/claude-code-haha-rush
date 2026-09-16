@@ -48,19 +48,36 @@
   .card .name { color: var(--fg-secondary, #8f94a1); overflow: hidden;
                 text-overflow: ellipsis; white-space: nowrap; }
   .card .acts { display: none; position: absolute; inset: auto 0 0 0; padding: 5px;
-                gap: 4px; background: linear-gradient(transparent, rgba(0,0,0,.85)); }
-  .card:hover .acts { display: flex; }
-  .card .acts button { font-size: 10px; padding: 3px 7px; }
+                gap: 3px; background: linear-gradient(transparent, rgba(0,0,0,.85)); }
+  /* 2×2 而非单行 flex：卡片最窄只有 150px，4 个按钮单行放不下会各自换行成
+     一列（很难看），网格则始终整齐。 */
+  .card:hover .acts { display: grid; grid-template-columns: 1fr 1fr; }
+  .card .acts button { font-size: 10px; padding: 3px 4px; min-width: 0;
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* 多选删除 */
+  .card .check { position: absolute; top: 6px; left: 6px; width: 18px; height: 18px;
+                 border-radius: 4px; border: 1.5px solid rgba(255,255,255,.85);
+                 background: rgba(0,0,0,.55); color: #fff; font-size: 12px; line-height: 1;
+                 display: none; align-items: center; justify-content: center; }
+  body.select-mode .card .check { display: flex; }
+  .card.sel { border-color: var(--accent, #58c4e8);
+              box-shadow: 0 0 0 2px var(--accent, #58c4e8) inset; }
+  .card.sel .check { background: var(--accent, #58c4e8); border-color: var(--accent, #58c4e8);
+                     color: var(--bg-root, #0e0e12); }
+  button.danger { background: #b3382f; border-color: #b3382f; color: #fff; }
+  button.danger:hover { filter: brightness(1.2); }
   .empty { color: var(--fg-muted, #5c6272); text-align: center; padding: 40px 12px; }
   #status { padding: 6px 12px; font-size: 11px; color: var(--fg-muted, #5c6272);
             border-top: 1px solid var(--border-light, #242533); flex-shrink: 0; min-height: 16px; }
+
 </style>
 </head>
 <body>
-<header>
+<header id="mainbar">
   <button id="region" class="primary">区域</button>
   <button id="fullscreen">全屏</button>
-  <button id="window">窗口</button>
+  <button id="window" title="移动鼠标到目标窗口上，点击截取">窗口</button>
   <select id="dest" title="截完直接送到哪里">
     <option value="chat">→ 聊天输入框</option>
     <option value="desktop">→ 超级桌面</option>
@@ -68,7 +85,17 @@
   </select>
   <span class="spacer"></span>
   <span class="muted" id="dir"></span>
+  <button id="select" title="多选后批量删除">选择</button>
   <button id="refresh" title="重新扫描截图目录">刷新</button>
+</header>
+
+<!-- 多选模式的工具条（与上面那条互斥显示） -->
+<header id="selbar" style="display:none">
+  <span id="selcount" class="muted">已选 0 张</span>
+  <span class="spacer"></span>
+  <button id="selall">全选</button>
+  <button id="delsel" class="danger">删除选中</button>
+  <button id="selcancel">取消</button>
 </header>
 
 <div id="body">
@@ -90,6 +117,15 @@ const destSel = document.getElementById("dest");
 const dirEl = document.getElementById("dir");
 
 let busy = false;
+
+// ── 删除 / 多选 ──
+//
+// ⚠️ 本页在 `sandbox` iframe 里，而宿主给面板的 sandbox **不含 `allow-modals`**
+// —— 原生 `confirm()` / `alert()` 会被浏览器**静默忽略**（返回 false 且不报错），
+// 拿它做删除确认会变成"点了没反应"。所以确认一律自绘：按钮**二次点击**才执行
+// （第一次变成"确认删除?"，3 秒不点自动收回），既不用弹层也不误删。
+let selectMode = false;
+const selected = new Set();   // 选中的截图 path
 
 function say(msg) { statusEl.textContent = msg; }
 
@@ -119,10 +155,17 @@ async function capture(mode) {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || "失败");
 
-    // 区域模式：进程请宿主开 overlay 框选（overlay 自己完成裁剪与投递）
+    // 区域/窗口模式：进程请宿主开 overlay 交互。投递由 overlay 侧按**插件设置**的
+    // 默认去向完成 —— 那时面板的选择器已经插不上手了，所以先把当前选择同步给进程，
+    // 让这一单跟着面板走（否则用户在面板选了"→ 桌面"却被送进聊天框，
+    // 属于静默违背操作意图）。
     if (data.host && data.host.length) {
+      await fetch(`${API}/settings`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings: { defaultDest: destSel.value } }),
+      }).catch(() => {});
       for (const h of data.host) toHost(h.kind, h.payload);
-      say("已弹出框选窗口");
+      say(mode === "window" ? "已弹出窗口选择" : "已弹出框选窗口");
       return;
     }
     if (data.cancelled) { say("已取消"); return; }
@@ -160,7 +203,13 @@ async function load() {
     empty.style.display = items.length ? "none" : "block";
     for (const it of items) {
       const card = document.createElement("div");
-      card.className = "card";
+      card.className = "card" + (selected.has(it.path) ? " sel" : "");
+      card.dataset.path = it.path;
+
+      const check = document.createElement("div");
+      check.className = "check";
+      check.textContent = "✓";
+      card.appendChild(check);
 
       const img = document.createElement("img");
       img.loading = "lazy";
@@ -180,25 +229,133 @@ async function load() {
 
       const acts = document.createElement("div");
       acts.className = "acts";
-      const mk = (label, fn) => {
-        const b = document.createElement("button");
-        b.textContent = label;
-        b.onclick = (e) => { e.stopPropagation(); fn(); };
-        return b;
-      };
-      acts.appendChild(mk("→ 聊天", () =>
+      acts.appendChild(mkBtn("→ 聊天", () =>
         toHost("chat-reference", { path: it.path, label: it.name })));
-      acts.appendChild(mk("→ 桌面", () =>
+      acts.appendChild(mkBtn("→ 桌面", () =>
         toHost("desktop-image", { path: it.path, label: it.name })));
-      acts.appendChild(mk("预览", () => window.open(img.src, "_blank")));
+      acts.appendChild(mkBtn("预览", () => openPreview(it)));
+      acts.appendChild(mkConfirmBtn("删除", "确认删除?", () => void del([it.path])));
       card.appendChild(acts);
 
-      card.onclick = () => toHost("chat-reference", { path: it.path, label: it.name });
+      card.onclick = () => {
+        if (selectMode) { toggleSel(it.path); return; }
+        toHost("chat-reference", { path: it.path, label: it.name });
+      };
       grid.appendChild(card);
     }
+    // 选中集合里可能残留已被删掉/移走的文件 —— 清掉，免得"已选 N 张"对不上
+    const alive = new Set(items.map((i) => i.path));
+    for (const p of [...selected]) if (!alive.has(p)) selected.delete(p);
+    refreshSelBar();
     say(`共 ${items.length} 张`);
   } catch (e) {
     say("读取历史失败：" + (e && e.message || e));
+  }
+}
+
+// ── 卡片操作按钮 ──
+
+/** 普通按钮。`stopPropagation` 是必需的：卡片自身有 onclick（送聊天/多选）。 */
+function mkBtn(label, fn) {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.onclick = (e) => { e.stopPropagation(); fn(); };
+  return b;
+}
+
+/** 二次点击确认的按钮（见上方「删除 / 多选」注释：sandbox 里没有原生 confirm）。 */
+function mkConfirmBtn(label, confirmLabel, fn) {
+  const b = document.createElement("button");
+  b.className = "danger";
+  b.textContent = label;
+  let armed = false;
+  let timer = null;
+  b.onclick = (e) => {
+    e.stopPropagation();
+    if (!armed) {
+      armed = true;
+      b.textContent = confirmLabel;
+      timer = setTimeout(() => { armed = false; b.textContent = label; }, 3000);
+      return;
+    }
+    clearTimeout(timer);
+    armed = false;
+    fn();
+  };
+  return b;
+}
+
+/**
+ * 打开独立**预览浮窗**看大图。
+ *
+ * 为什么不用面板内覆盖层：面板本身多宽，覆盖层就多宽 —— 缩略图看不清的细节
+ * 放到覆盖层里还是看不清。浮窗能拉大、能摆到旁边与主界面并排看，这才是"预览"。
+ * （走的是插件的通用「打开本插件面板」机制，与 git-viewer 的 diff 浮窗同一套。）
+ *
+ * ⚠️ 也不能用 `window.open`：面板 iframe 的 sandbox 没有 `allow-popups`，
+ * 会被浏览器**静默拦截**（点了没反应、也不报错）。
+ */
+function openPreview(it) {
+  toHost("open-panel", {
+    panelId: "preview",
+    title: "截图预览",
+    width: 900,
+    height: 660,
+    params: { path: it.path, name: it.name },
+  });
+}
+
+// ── 选择模式 / 删除 ──
+
+function toggleSel(p) {
+  if (selected.has(p)) selected.delete(p); else selected.add(p);
+  // 直接改 DOM（不整页重渲染）：截图多时重渲染会闪，且 <img> 会重新加载
+  for (const c of grid.children) {
+    if (c.dataset.path === p) c.classList.toggle("sel", selected.has(p));
+  }
+  refreshSelBar();
+}
+
+function refreshSelBar() {
+  const n = selected.size;
+  document.getElementById("selcount").textContent = `已选 ${n} 张`;
+  const btn = document.getElementById("delsel");
+  btn.disabled = n === 0;
+  btn.textContent = `删除选中${n ? ` (${n})` : ""}`;
+  const all = grid.children.length;
+  document.getElementById("selall").textContent =
+    (all > 0 && n === all) ? "取消全选" : "全选";
+}
+
+function setSelectMode(on) {
+  selectMode = on;
+  if (!on) selected.clear();
+  document.body.classList.toggle("select-mode", on);
+  document.getElementById("mainbar").style.display = on ? "none" : "flex";
+  document.getElementById("selbar").style.display = on ? "flex" : "none";
+  for (const c of grid.children) c.classList.toggle("sel", selected.has(c.dataset.path));
+  refreshSelBar();
+}
+
+/** 删除若干张。逐张由进程确认结果 —— 某张被占用不该让整批失败。 */
+async function del(paths) {
+  if (!paths.length) return;
+  try {
+    const res = await fetch(`${API}/delete`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths }),
+    });
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || "删除失败");
+    for (const p of paths) selected.delete(p);
+    if (d.failed && d.failed.length) {
+      say(`已删除 ${d.deleted.length} 张，${d.failed.length} 张失败（${d.failed[0].error}）`);
+    } else {
+      say(`已删除 ${d.deleted.length} 张`);
+    }
+    void load();
+  } catch (e) {
+    say("删除失败：" + (e && e.message || e));
   }
 }
 
@@ -206,6 +363,39 @@ document.getElementById("region").onclick = () => capture("region");
 document.getElementById("fullscreen").onclick = () => capture("fullscreen");
 document.getElementById("window").onclick = () => capture("window");
 document.getElementById("refresh").onclick = () => load();
+
+document.getElementById("select").onclick = () => setSelectMode(true);
+document.getElementById("selcancel").onclick = () => setSelectMode(false);
+
+document.getElementById("selall").onclick = () => {
+  const all = [...grid.children].map((c) => c.dataset.path);
+  const everySel = all.length > 0 && all.every((p) => selected.has(p));
+  selected.clear();
+  if (!everySel) for (const p of all) selected.add(p);
+  for (const c of grid.children) c.classList.toggle("sel", selected.has(c.dataset.path));
+  refreshSelBar();
+};
+
+document.getElementById("delsel").onclick = () => {
+  const btn = document.getElementById("delsel");
+  const n = selected.size;
+  if (!n) return;
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = "1";
+    btn.textContent = `确认删除 ${n} 张?`;
+    setTimeout(() => {
+      if (btn.dataset.armed) { delete btn.dataset.armed; refreshSelBar(); }
+    }, 3000);
+    return;
+  }
+  delete btn.dataset.armed;
+  void del([...selected]);
+};
+
+// Esc 退出选择模式（与其它面板一致的习惯）
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && selectMode) setSelectMode(false);
+});
 
 // 宿主推送主题（与其它插件面板同一套协议）
 window.addEventListener("message", (ev) => {

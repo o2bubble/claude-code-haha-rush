@@ -567,6 +567,7 @@ pub fn run() {
             spawn_gui_instance,
             create_floating_window,
             open_plugin_overlay,
+            show_plugin_overlay,
             close_plugin_overlay,
             open_url_window,
             open_in_explorer,
@@ -2245,6 +2246,13 @@ fn create_floating_window(
     Ok(())
 }
 
+/// overlay 窗口的**显示兜底**超时（毫秒）。
+///
+/// 窗口建好后是**隐藏**的（避免 WebView2 白底闪屏，见 `show_plugin_overlay`），
+/// 由前端在内容就绪后请求显示。但插件是任意第三方 HTML，不保证上报就绪信号 ——
+/// 故到点仍没显示就强制显示：宁可闪一下，也不能让窗口永远不出来。
+const OVERLAY_SHOW_FALLBACK_MS: u64 = 1200;
+
 /// overlay 窗口 label 前缀 —— open / close 共用同一份，保证两边对得上。
 /// Tauri 的 label 只允许 `[A-Za-z0-9-/:_.]`，而插件名是自由字符串，故净化一次。
 fn overlay_label_prefix(plugin: &str) -> String {
@@ -2342,8 +2350,12 @@ fn open_plugin_overlay(
                     if let Err(e) = win.set_size(tauri::PhysicalSize::new(sw, sh)) {
                         log::error!("[Rust] overlay set_size failed: {e}");
                     }
-                    let _ = win.show();
-                    let _ = win.set_focus();
+                    // ⚠️ **这里刻意不 show()** —— 见 `show_plugin_overlay` 的注释：
+                    // 窗口一显示，WebView2 就用**默认白底**渲染尚未加载完的内容，
+                    // 而 overlay 铺满整块屏幕 → 用户看到"整个屏幕白闪一下"。
+                    // 改由前端在内容就绪（iframe + 冻结图加载完）后调
+                    // `show_plugin_overlay`；下面还有一个超时兜底，保证任何情况下
+                    // 窗口都不会永远不显示。
                     let emit_label = win.label().to_string();
                     let app_ev = app2.clone();
                     // 窗口被外部销毁（Alt+F4 / 杀进程）时通知前端，便于清理会话
@@ -2352,7 +2364,24 @@ fn open_plugin_overlay(
                             let _ = app_ev.emit("plugin-overlay-closed", emit_label.as_str());
                         }
                     });
-                    log::info!("[Rust] overlay built: {label2} @({px},{py}) {sw}x{sh}");
+
+                    // 兜底：前端若因任何原因没来调 show（插件走的是插件自己的 HTML，
+                    // 未必上报就绪），到点强制显示 —— 退回"会白闪但能用"的旧行为，
+                    // 而不是"窗口永远不出来"。
+                    let win_t = win.clone();
+                    let label_t = label2.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            OVERLAY_SHOW_FALLBACK_MS,
+                        ));
+                        if !win_t.is_visible().unwrap_or(true) {
+                            log::info!("[Rust] overlay show fallback fired: {label_t}");
+                            let _ = win_t.show();
+                            let _ = win_t.set_focus();
+                        }
+                    });
+
+                    log::info!("[Rust] overlay built (hidden): {label2} @({px},{py}) {sw}x{sh}");
                 }
                 Err(e) => log::error!("[Rust] overlay build FAILED: {e}"),
             }
@@ -2375,6 +2404,32 @@ fn close_plugin_overlay(app: tauri::AppHandle, plugin: String) -> Result<usize, 
     }
     log::info!("[Rust] close_plugin_overlay: {plugin} -> closed {closed}");
     Ok(closed)
+}
+
+/// 显示某插件的 overlay 窗口（内容已就绪，可以亮出来了）。
+///
+/// **为什么要有这条命令**：`open_plugin_overlay` 建窗时刻意**不 show**。窗口一显示，
+/// WebView2 就用它自己的**默认白底**绘制尚未加载完的内容，而 overlay 是铺满整块
+/// 屏幕的窗口 —— 于是用户看到"整个屏幕白闪一下"，观感上很廉价（原生截图工具没有
+/// 这一下，因为它们不经过 WebView 启动）。改成：窗口先隐藏建好、摆好位置，
+/// 由前端在 iframe 与冻结图都加载完之后调本命令亮出来 —— 用户直接看到成品画面。
+///
+/// 幂等：重复调用只是再 show 一次（无害）。
+#[tauri::command]
+fn show_plugin_overlay(app: tauri::AppHandle, plugin: String) -> Result<(), String> {
+    let prefix = overlay_label_prefix(&plugin);
+    let mut shown = 0usize;
+    for w in app.webview_windows().values() {
+        if w.label().starts_with(&prefix) {
+            let _ = w.show();
+            let _ = w.set_focus();
+            shown += 1;
+        }
+    }
+    if shown > 0 {
+        log::info!("[Rust] show_plugin_overlay: {plugin} -> shown {shown}");
+    }
+    Ok(())
 }
 
 fn urlencoding(s: &str) -> String {

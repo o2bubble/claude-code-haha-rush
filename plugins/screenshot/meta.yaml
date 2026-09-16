@@ -1,5 +1,5 @@
 name: "screenshot"
 author: "官方"
-version: "0.1.0"
+version: "0.2.0"
 description: "截屏工具 — 全屏/区域/窗口三种模式，可设快捷键（含全局热键，窗口不在前台也生效），截完直接插入聊天框、发送到超级桌面或存到工作区"
 tags: ["screenshot", "capture", "hotkey", "plugin"]

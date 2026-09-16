@@ -1,7 +1,7 @@
 {
   "pluginName": "screenshot",
   "displayName": "截屏",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "apiVersion": "1.0",
   "description": "截屏工具：支持全屏 / 区域 / 窗口三种模式，可设快捷键（含全局热键，窗口不在前台也生效）。截完可直接插入聊天输入框、发送到超级桌面，或保存到当前工作区。",
   "icon": "desktopItemView",
@@ -15,6 +15,14 @@
         "panelKind": "in-main",
         "userManaged": true,
         "content": { "type": "html", "src": "panel.html" },
+        "process": "screenshot-server"
+      },
+      {
+        "id": "preview",
+        "title": "截图预览",
+        "panelKind": "floating",
+        "userManaged": false,
+        "content": { "type": "html", "src": "preview.html" },
         "process": "screenshot-server"
       }
     ],
@@ -37,7 +45,51 @@
         "onInvoke": "window"
       }
     ],
-    "events": []
+    "events": [],
+    "mcpTools": [
+      {
+        "name": "fullscreen",
+        "description": "Capture the screen (one whole monitor) and return the image. Use when you need to see what is currently displayed on the user's screen. Coordinates in the result are physical pixels relative to that monitor's top-left corner. Defaults to the primary monitor.",
+        "process": "screenshot-server",
+        "resultKind": "image",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "monitor": {
+              "type": "number",
+              "description": "Monitor index, 0 = primary (default). Out-of-range values fall back to the primary monitor."
+            }
+          }
+        }
+      },
+      {
+        "name": "region",
+        "description": "Capture a rectangular region of the screen and return the image. Use when you only need part of the screen (e.g. a chart, a dialog, a table). Coordinates are physical pixels relative to the target monitor's top-left corner — call the fullscreen tool first if you need to locate something.",
+        "process": "screenshot-server",
+        "resultKind": "image",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "region": {
+              "type": "object",
+              "description": "Rectangle to capture, in physical pixels relative to the monitor's top-left corner.",
+              "properties": {
+                "x": { "type": "number", "description": "Left offset from the monitor's left edge" },
+                "y": { "type": "number", "description": "Top offset from the monitor's top edge" },
+                "w": { "type": "number", "description": "Width in pixels (must be >= 1)" },
+                "h": { "type": "number", "description": "Height in pixels (must be >= 1)" }
+              },
+              "required": ["x", "y", "w", "h"]
+            },
+            "monitor": {
+              "type": "number",
+              "description": "Monitor index, 0 = primary (default)."
+            }
+          },
+          "required": ["region"]
+        }
+      }
+    ]
   },
   "processes": [
     {
@@ -75,5 +127,5 @@
       "default": true
     }
   },
-  "platforms": ["windows", "macos", "linux"]
+  "platforms": ["windows", "macos"]
 }

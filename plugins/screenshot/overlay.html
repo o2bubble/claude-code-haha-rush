@@ -10,9 +10,20 @@
 
   /* 冻结图：铺满整个窗口。
      窗口由宿主按**物理像素**定位/定尺寸，浏览器按 devicePixelRatio 折算成 CSS 尺寸，
-     所以 width/height:100% 恰好是 1:1 的物理映射 —— 用户点哪，图上的哪个像素就是哪个。 */
+     所以 width/height:100% 恰好是 1:1 的物理映射 —— 用户点哪，图上的哪个像素就是哪个。
+
+     ⚠️ `pointer-events: none` + `-webkit-user-drag: none` **缺一不可**：
+     `<img>` 默认 `draggable=true`，在铺满屏幕的图上按下拖动会被浏览器当成
+     **"拖拽图片"** —— 拖拽期间浏览器**不再派发 mousemove**（只发 drag 事件），
+     于是选框纹丝不动；等拖拽结束（松开）坐标才更新一次，mouseup 算出的
+     宽高≈0，正好命中下面的"误触保护"→ 走 cancel → 冻结图被删、窗口关闭、
+     什么也没截到。现象就是"框不跟手，松手才跟一下，再点一下窗口就没了"。
+     事件改由 document（冒泡自 body）接收，框选逻辑不受影响。 */
   #shot { position: absolute; inset: 0; width: 100%; height: 100%; display: block;
-          image-rendering: pixelated; }
+          image-rendering: pixelated;
+          pointer-events: none;
+          -webkit-user-drag: none;
+          user-select: none; }
 
   /* 选框外区域压暗（box-shadow 挖洞，比四个遮罩块简单且不闪） */
   #sel {
@@ -39,7 +50,8 @@
 </style>
 </head>
 <body>
-<img id="shot" alt="">
+<!-- draggable="false"：与 CSS 的 user-drag:none 同一个目的（见 #shot 注释） -->
+<img id="shot" alt="" draggable="false">
 <div id="sel"></div>
 <div id="size"></div>
 <div id="hint">拖动选择区域 · <kbd>Esc</kbd> 取消 · <kbd>Enter</kbd> 用整屏</div>
@@ -52,6 +64,8 @@
 const q = new URLSearchParams(location.search);
 const PORT = Number(q.get("port") || 0);
 const TOKEN = q.get("token") || "";
+// region = 拖框选区域（默认）；window = 悬停选窗口（Windows）
+const MODE = q.get("mode") || "region";
 const API = `http://127.0.0.1:${PORT}`;
 const PLUGIN = "screenshot";
 const SOURCE = `plugin:viewer:${PLUGIN}`;
@@ -60,16 +74,36 @@ const shot = document.getElementById("shot");
 const sel = document.getElementById("sel");
 const sizeTag = document.getElementById("size");
 const errBox = document.getElementById("err");
+const hint = document.getElementById("hint");
 
 function fail(msg) {
   errBox.style.display = "flex";
   errBox.textContent = msg;
 }
-if (!PORT || !TOKEN) fail("缺少 port / token —— overlay 参数不完整");
+if (!PORT || !TOKEN) {
+  fail("缺少 port / token —— overlay 参数不完整");
+  toHost("ready");  // 参数不完整也要显示，否则用户看不到这句错误提示
+}
 
 // 冻结图：直接由插件进程提供。`<img>` 不受同源限制，无需 CORS。
+//
+// ⚠️ `onload`/`onerror` 必须在赋 `src` **之前**绑定 —— 命中缓存时浏览器可能在
+// 赋值那一行就同步完成加载，之后再绑就永远收不到回调（窗口也就永远不显示）。
+//
+// 两个分支都上报 `ready`：宿主收到才把 overlay 窗口 show 出来（窗口建好时是隐藏的，
+// 为的是避开 WebView2 白底闪屏 —— 见宿主 `show_plugin_overlay`）。全部就绪了才亮，
+// 用户直接看到成品画面，没有中间那一下白闪。
+shot.onload = async () => {
+  // 窗口模式：先把可选窗口列表取回来再亮出窗口 —— 否则用户看到画面却
+  // 悬停无反应，会以为坏了。
+  if (MODE === "window") await loadWindows();
+  toHost("ready");
+};
+shot.onerror = () => {
+  fail("无法加载截图 —— 插件进程可能已退出");
+  toHost("ready");  // 加载失败也得显示，否则用户看不到这句提示
+};
 shot.src = `${API}/frozen?token=${encodeURIComponent(TOKEN)}`;
-shot.onerror = () => fail("无法加载截图 —— 插件进程可能已退出");
 
 /** 上报给宿主：overlay 窗口的父级是宿主页面，postMessage 直接可达。
  *  （宿主再把它转成 Tauri 事件发回主窗 —— 见 PluginOverlayApp。） */
@@ -95,7 +129,11 @@ function paint(x, y, w, h) {
 }
 
 document.addEventListener("mousedown", (e) => {
+  if (MODE === "window") return;   // 窗口模式用悬停+点击，不拖框
   if (e.button !== 0) return;
+  // 阻止浏览器启动原生拖拽 / 文本选择 —— 否则 mousemove 会在拖拽期间被抑制，
+  // 选框完全不跟手（见 #shot 的注释）。
+  e.preventDefault();
   dragging = true;
   sx = e.clientX; sy = e.clientY;
   rect = null;
@@ -103,6 +141,7 @@ document.addEventListener("mousedown", (e) => {
 });
 
 document.addEventListener("mousemove", (e) => {
+  if (MODE === "window") { onHover(e); return; }
   if (!dragging) return;
   const x = Math.min(sx, e.clientX), y = Math.min(sy, e.clientY);
   const w = Math.abs(e.clientX - sx), h = Math.abs(e.clientY - sy);
@@ -111,6 +150,7 @@ document.addEventListener("mousemove", (e) => {
 });
 
 document.addEventListener("mouseup", async (e) => {
+  if (MODE === "window") return;
   if (!dragging) return;
   dragging = false;
   const x = Math.min(sx, e.clientX), y = Math.min(sy, e.clientY);
@@ -119,6 +159,88 @@ document.addEventListener("mouseup", async (e) => {
   if (w < 4 || h < 4) { await cancel(); return; }
   await commit({ x, y, w, h });
 });
+
+// ── 窗口模式（Windows）──
+//
+// 不是拖框，而是"移过去高亮、点一下确认"。窗口列表由插件进程在**冻结抓屏那一刻**
+// 枚举好（那时 overlay 还没建，列表里不会混进我们自己），这里只做命中测试 ——
+// 列表已按 Z-order 排好（最上层在前），所以**第一个命中的就是肉眼看得见的那个**。
+
+let wins = [];
+let hovered = null;
+
+async function loadWindows() {
+  hint.innerHTML = "移动鼠标选择窗口 · <kbd>点击</kbd> 截取 · <kbd>Esc</kbd> 取消";
+  try {
+    const r = await fetch(`${API}/windows?token=${encodeURIComponent(TOKEN)}`);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "获取失败");
+    wins = d.windows || [];
+  } catch (e) {
+    fail("无法获取窗口列表：" + (e && e.message || e));
+    return;
+  }
+  if (!wins.length) fail("没有可选的窗口 —— 试试「区域」模式");
+}
+
+/** 命中测试：坐标是 CSS px，窗口列表是**物理** px（冻结图坐标系）。 */
+function hitTest(cssX, cssY) {
+  const dpr = window.devicePixelRatio || 1;
+  const px = cssX * dpr, py = cssY * dpr;
+  for (const w of wins) {
+    if (px >= w.x && px < w.x + w.w && py >= w.y && py < w.y + w.h) return w;
+  }
+  return null;
+}
+
+function onHover(e) {
+  const w = hitTest(e.clientX, e.clientY);
+  if (w === hovered) return;   // 同窗口内移动不必重画
+  hovered = w;
+  if (!w) {
+    sel.style.display = "none";
+    sizeTag.style.display = "none";
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  // paint 收 CSS px，故把物理矩形折回 CSS
+  paint(w.x / dpr, w.y / dpr, w.w / dpr, w.h / dpr);
+  // 覆盖尺寸标签：窗口模式下标出**标题**比标尺寸有用
+  sizeTag.textContent = `${
+    w.title.length > 42 ? w.title.slice(0, 42) + "…" : w.title
+  }  ·  ${w.w} × ${w.h}`;
+}
+
+document.addEventListener("click", async (e) => {
+  if (MODE !== "window") return;
+  e.preventDefault();
+  const w = hitTest(e.clientX, e.clientY);
+  if (!w) return;   // 点在窗口之外：什么也不做，让用户继续选
+  await commitWindow(w);
+});
+
+async function commitWindow(w) {
+  hint.textContent = "正在截取窗口…";
+  try {
+    const res = await fetch(`${API}/crop-window`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // rect 给的是**物理** px —— 进程在 PrintWindow 失败时会用它从冻结图裁剪兜底
+      body: JSON.stringify({
+        token: TOKEN, hwnd: w.hwnd,
+        rect: { x: w.x, y: w.y, w: w.w, h: w.h },
+      }),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "抓取失败");
+    for (const h of (data.host || [])) toHost(h.kind, h.payload);
+  } catch (e) {
+    fail("抓取窗口失败：" + (e && e.message || e));
+    hint.textContent = "移动鼠标选择窗口 · 点击截取 · Esc 取消";
+    return;
+  }
+  toHost("close-overlay");
+}
 
 async function commit(cssRect) {
   // CSS px → 物理 px：overlay 铺满一块显示器，devicePixelRatio 就是它的缩放比

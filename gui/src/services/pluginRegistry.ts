@@ -65,6 +65,30 @@ export interface PluginContributes {
   panels: PluginPanel[];
   commands: PluginCommand[];
   events: string[];
+  mcpTools: PluginMcpTool[];
+}
+
+/**
+ * 插件贡献的 MCP 工具 —— 让 GUI 里的 AI 能直接调用插件能力（无 UI）。
+ *
+ * 调用契约**固定**，插件不能自定义 endpoint / method：宿主一律
+ * `POST http://127.0.0.1:<插件进程端口>/__mcp`，body `{ tool, args, settings }`。
+ * 不让插件填 URL 是为了收窄攻击面（路径拼接、SSRF）—— 与 `/__command` 同心智，
+ * 但**不复用** `/__command`（那个返回的是 host actions 语义）。
+ *
+ * AI 看到的工具名是 `plugin_<pluginName>_<name>`（宿主拼），插件无法覆盖宿主工具。
+ */
+export interface PluginMcpTool {
+  /** 工具短名（插件内唯一）。完整名由宿主加命名空间前缀。 */
+  name: string;
+  description: string;
+  /** JSON Schema（会被白名单化：只放行 type/properties/required/enum/items/description）。 */
+  inputSchema: Record<string, unknown>;
+  /** 处理它的后台进程 id（必须在本插件 processes[] 里声明过）。缺省 = 该插件唯一进程。 */
+  process?: string;
+  /** 结果形态。`image` = 端点会返回图片，宿主据此注入 image content 块
+   *  （而不是把 base64 当文本塞进上下文 —— 那会白白烧掉几十万 token）。 */
+  resultKind?: "text" | "image";
 }
 
 /** 内置分类（稳定展示+翻译）。作者可声明任意自定义分类字符串——原样透传,
@@ -192,20 +216,9 @@ export function parsePluginManifest(json: string, sourceDir: string): ParseResul
   const description = asString(raw.description);
   const icon = asString(raw.icon);
 
-  // contributes：缺省时归一化为空
-  const contributesRaw = isRecord(raw.contributes) ? raw.contributes : {};
-  const panels = parsePanels(contributesRaw.panels);
-  if (panels === null) return { ok: false, error: `[${pluginName}] contributes.panels 含非法 panel（id/title/panelKind）` };
-  const contributes: PluginContributes = {
-    panels,
-    commands: parseCommands(contributesRaw.commands),
-    events: Array.isArray(contributesRaw.events)
-      ? (contributesRaw.events as unknown[]).filter((e): e is string => typeof e === "string")
-      : [],
-  };
-
   // processes：缺 id/command 的 process 跳过（parse 层严格——坏 manifest 不静默生效）。
   // env 只保留字符串值（数字/数组等非 string 丢弃，避免 spawn 时脏数据）。
+  // ⚠️ 必须在 contributes 之前解析：mcpTools 要拿它校验 process 声明是否存在。
   const processes: PluginProcess[] = Array.isArray(raw.processes)
     ? (raw.processes as unknown[]).filter(isRecord).flatMap((p) => {
         const id = asString(p.id);
@@ -224,6 +237,19 @@ export function parsePluginManifest(json: string, sourceDir: string): ParseResul
         }];
       })
     : [];
+
+  // contributes：缺省时归一化为空
+  const contributesRaw = isRecord(raw.contributes) ? raw.contributes : {};
+  const panels = parsePanels(contributesRaw.panels);
+  if (panels === null) return { ok: false, error: `[${pluginName}] contributes.panels 含非法 panel（id/title/panelKind）` };
+  const contributes: PluginContributes = {
+    panels,
+    commands: parseCommands(contributesRaw.commands),
+    events: Array.isArray(contributesRaw.events)
+      ? (contributesRaw.events as unknown[]).filter((e): e is string => typeof e === "string")
+      : [],
+    mcpTools: parseMcpTools(contributesRaw.mcpTools, processes),
+  };
 
   // 可选扩展字段（T8）: 分类/依赖/安装形态——容错解析, 缺省回落默认。
   // category 作者可自定义: 任意非空字符串原样透传(市场筛选 chips 动态并入);
@@ -331,6 +357,88 @@ function parseCommands(raw: unknown): PluginCommand[] {
   });
 }
 
+/** inputSchema 允许保留的键 —— 白名单，防止插件塞 `$ref`/`$defs` 之类
+ *  让 AI 或校验方去解析外部引用的结构。schema 会被原样交给模型，故收窄。 */
+const SCHEMA_KEY_WHITELIST = new Set([
+  "type", "properties", "required", "description", "enum", "items", "default",
+]);
+
+/** 递归白名单化 JSON Schema（只留简单结构，深度也限一层嵌套）。
+ *  返回值**总是**带 type —— 没有类型的 schema 对模型没有意义（它据此判断参数形状）。 */
+function sanitizeSchema(raw: unknown, depth = 0): Record<string, unknown> {
+  if (!isRecord(raw) || depth > 4) return { type: "object" };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!SCHEMA_KEY_WHITELIST.has(k)) continue;
+    if (k === "properties" && isRecord(v)) {
+      // properties 的值是「字段名 → 子 schema」，**字段名本身不受白名单约束**
+      const props: Record<string, unknown> = {};
+      for (const [pk, pv] of Object.entries(v)) props[pk] = sanitizeSchema(pv, depth + 1);
+      out.properties = props;
+    } else if (k === "items") {
+      out.items = sanitizeSchema(v, depth + 1);
+    } else {
+      out[k] = v;
+    }
+  }
+  // 没有 type 的 schema 对模型没有意义，补一个 object 兜底
+  if (!("type" in out)) out.type = "object";
+  return out;
+}
+
+/** 工具名 / 进程 id 允许的字符 —— 它们会被拼进工具名与 URL，收窄到安全集。 */
+const SAFE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+/**
+ * 解析 `contributes.mcpTools`。
+ *
+ * 容错策略与 parseCommands 一致：**坏条目跳过而非拖垮整个 manifest**（可选贡献）。
+ * 但下面这些是**硬性拒绝**（跳过该条 + 记 warning），因为它们要么会造成工具名
+ * 劫持/歧义，要么让宿主无法定位进程：
+ *   · name 缺失 / 含非法字符
+ *   · name 与宿主已有工具同名（宿主工具**永远优先**，插件不得覆盖）
+ *   · process 声明了但不在本插件 processes[] 内（拼不出来就是死工具）
+ *
+ * 注：插件**之间**的重名在聚合层处理（需要看到全部插件，见 collectPluginMcpTools）。
+ */
+export function parseMcpTools(raw: unknown, processes: PluginProcess[]): PluginMcpTool[] {
+  if (!Array.isArray(raw)) return [];
+  const processIds = new Set(processes.map((p) => p.id));
+  const seen = new Set<string>();
+  const out: PluginMcpTool[] = [];
+  for (const t of raw as unknown[]) {
+    if (!isRecord(t)) continue;
+    const name = asString(t.name);
+    if (!name || !SAFE_ID_RE.test(name)) {
+      console.warn("[plugin] mcpTools: 跳过非法 name", name);
+      continue;
+    }
+    if (seen.has(name)) {
+      console.warn(`[plugin] mcpTools: 跳过重复 name "${name}"`);
+      continue;
+    }
+    const description = asString(t.description);
+    if (!description) {
+      console.warn(`[plugin] mcpTools: "${name}" 缺 description，跳过（模型需要它判断何时调用）`);
+      continue;
+    }
+    const proc = asString(t.process);
+    if (proc && !processIds.has(proc)) {
+      console.warn(`[plugin] mcpTools: "${name}" 声明的 process "${proc}" 不在本插件 processes[] 内，跳过`);
+      continue;
+    }
+    seen.add(name);
+    out.push({
+      name,
+      description,
+      inputSchema: sanitizeSchema(t.inputSchema),
+      ...(proc ? { process: proc } : {}),
+      ...(t.resultKind === "image" ? { resultKind: "image" as const } : {}),
+    });
+  }
+  return out;
+}
+
 /** 收集活动插件声明的快捷键（供 `buildPluginShortcutEntries` 转成条目）。
  *  独立成函数是因为它被两处消费：快捷键分发器（运行时）与设置面板（展示）。 */
 export function collectPluginHotkeys(manifests: PluginManifest[]): PluginHotkeyDecl[] {
@@ -398,6 +506,76 @@ export async function getGuiPlatform(): Promise<GuiPlatform> {
 export function pluginSupportsPlatform(platforms: string[], platform: GuiPlatform): boolean {
   if (!platforms || platforms.length === 0) return true;
   return platforms.includes(platform);
+}
+
+// ─── 插件 MCP 工具（contributes.mcpTools）───
+
+/** 插件 MCP 工具在 AI 侧的名字前缀（`plugin_<插件名>_<工具名>`）。 */
+export const PLUGIN_MCP_PREFIX = "plugin_";
+
+/** 聚合后的插件 MCP 工具 —— 带上归属与进程定位信息，供 mcpBridge 转发用。 */
+export interface CollectedMcpTool extends PluginMcpTool {
+  pluginName: string;
+  /** AI 看到的完整工具名（含命名空间）。 */
+  fullName: string;
+  /** 处理它的进程 id（`process` 缺省时由宿主补为该插件唯一进程）。 */
+  processId: string;
+}
+
+/**
+ * 汇总所有**启用**插件贡献的 MCP 工具。
+ *
+ * 调用方传进来的 `manifests` 已经过滤掉禁用插件（见 `getActiveManifests`），
+ * 这里再做两道收口：
+ *
+ * 1. **平台过滤** —— 插件声明了 platforms 且不含当前平台 → 它的工具不暴露
+ *    （否则 AI 会看到一个注定失败的工具）。
+ * 2. **命名空间 + 冲突消解** —— 工具名一律加 `plugin_` 前缀，插件**结构上**
+ *    无法覆盖宿主工具（否则插件声明个 `note_delete` 就能劫持）。插件之间重名时
+ *    后者让位并记 warning。
+ *
+ * `process` 缺省 = 该插件唯一进程；声明了多个进程又没指明 → 跳过（宿主无法定位，
+ * 暴露出去只会是死工具）。
+ *
+ * ⚠️ 本函数**不抛异常**（逐插件 try/catch）：聚合失败会让整个 tools/list 失败，
+ * 而 claude 遇到 tools/list 失败会判定该 server 损坏 → **宿主全部工具一起消失**。
+ * 单个插件坏掉最多丢它自己的工具。
+ */
+export function collectPluginMcpTools(
+  manifests: PluginManifest[],
+  platform: GuiPlatform,
+): CollectedMcpTool[] {
+  const out: CollectedMcpTool[] = [];
+  const taken = new Set<string>();
+  for (const m of manifests) {
+    try {
+      const tools = m.contributes?.mcpTools ?? [];
+      if (tools.length === 0) continue;
+      if (!pluginSupportsPlatform(m.platforms, platform)) continue;
+
+      const procIds = m.processes.map((p) => p.id);
+      for (const t of tools) {
+        let processId = t.process;
+        if (!processId) {
+          if (procIds.length !== 1) {
+            console.warn(`[plugin] ${m.pluginName}/${t.name}: 未指明 process 且本插件有 ${procIds.length} 个进程，跳过`);
+            continue;
+          }
+          processId = procIds[0];
+        }
+        const fullName = `${PLUGIN_MCP_PREFIX}${m.pluginName}_${t.name}`;
+        if (taken.has(fullName)) {
+          console.warn(`[plugin] MCP 工具名冲突，跳过 ${fullName}`);
+          continue;
+        }
+        taken.add(fullName);
+        out.push({ ...t, processId, pluginName: m.pluginName, fullName });
+      }
+    } catch (e) {
+      console.warn(`[plugin] ${m.pluginName} 的 MCP 工具聚合失败，已跳过`, e);
+    }
+  }
+  return out;
 }
 
 /** semver 比较（≥ 返回 true）——插件版本号(0.1.0/0.1.1, 可带 v 前缀/预发布)。纯函数可测。

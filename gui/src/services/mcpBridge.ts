@@ -36,6 +36,7 @@ import { getPluginAiStatus } from "./pluginStatusStore";
 import { addStatusMessage } from "../stores/statusMsgStore";
 import { windowBus } from "./windowBus";
 import { Events } from "./events";
+import type { CollectedMcpTool } from "./pluginRegistry";
 
 // ─── Types ───
 
@@ -89,8 +90,14 @@ async function handleMcpRequest(req: McpRequest): Promise<void> {
     if (NOTE_MUTATIONS.has(toolName) && !notePhaseWroteNothing) windowBus.emit(Events.NOTES_CHANGED, {});
 
     // MCP protocol: tools/call responses must be wrapped in { content: [...] }
+    // 图片类工具（插件声明 resultKind:"image"）额外附一个 image content 块 —— 见 buildToolContent
+    let isImageTool = false;
+    if (method === "tools/call") {
+      const pt = (await getPluginTools()).find((t) => t.fullName === toolName);
+      isImageTool = pt?.resultKind === "image";
+    }
     const responsePayload = method === "tools/call"
-      ? { content: [{ type: "text", text: JSON.stringify(result) }] }
+      ? buildToolContent(result, isImageTool)
       : result;
     await respond(req.requestId, { jsonrpc: "2.0", result: responsePayload, id });
   } catch (err: any) {
@@ -124,6 +131,107 @@ function clampMcpInt(v: unknown, def: number, min: number, max: number): number 
   const n = typeof v === "number" ? v : NaN;
   if (Number.isNaN(n)) return def;
   return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+// ── 插件贡献的 MCP 工具（contributes.mcpTools）──
+
+/** MCP 工具声明的形状（宿主工具与插件工具共用）。 */
+interface McpToolDef {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+/**
+ * 当前启用插件贡献的 MCP 工具。
+ *
+ * **每次现算**（不缓存）：插件可能刚装上/卸载/启用，缓存会让 AI 的工具表过期。
+ * 聚合本身是纯内存遍历（插件数量级是个位到几十），`getGuiPlatform` 另有缓存，
+ * 所以成本可忽略。
+ *
+ * 失败**不抛异常**：工具表构建失败会让整个 `tools/list` 失败，而 claude 遇到
+ * tools/list 失败会判定该 server 损坏 → **宿主自己的工具也一起消失**。
+ * 丢插件工具是小事，丢宿主工具是事故。
+ */
+async function getPluginTools(): Promise<CollectedMcpTool[]> {
+  try {
+    const { getActiveManifests, collectPluginMcpTools, getGuiPlatform } =
+      await import("./pluginRegistry");
+    return collectPluginMcpTools(getActiveManifests(), await getGuiPlatform());
+  } catch (e) {
+    console.warn("[mcp] 插件工具聚合失败，本次不暴露", e);
+    return [];
+  }
+}
+
+/**
+ * 调用插件贡献的 MCP 工具 —— `POST 127.0.0.1:<插件进程端口>/__mcp`。
+ *
+ * 契约固定（`{tool, args, settings}` → `{ok, ...}`），插件不能自定义路径 ——
+ * 收窄攻击面（见 pluginRegistry 的 PluginMcpTool 注释）。
+ *
+ * `settings` 必须带上：插件进程读不到宿主的设置存储，而它的行为（存哪、送哪去）
+ * 取决于用户配置。宿主本来就有，顺手给它（与 forwardToPluginProcess 一致）。
+ */
+async function callPluginMcpTool(
+  tool: CollectedMcpTool,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const { getPluginProcesses } = await import("./pluginProcessBridge");
+  const proc = getPluginProcesses().find(
+    (p) => p.processId === tool.processId && p.status === "running" && p.port,
+  );
+  if (!proc?.port) {
+    throw new Error(
+      `插件「${tool.pluginName}」的后台进程未运行（${tool.processId}）。` +
+      `该进程在工作区绑定时自动启动 —— 若刚启用插件，请稍候重试或重开会话。`,
+    );
+  }
+  const { getCachedPluginSettings } = await import("./pluginSettingsStore");
+  const resp = await fetch(`http://127.0.0.1:${proc.port}/__mcp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      tool: tool.name,
+      args: args ?? {},
+      settings: getCachedPluginSettings(tool.pluginName),
+    }),
+  });
+  if (!resp.ok) {
+    throw new Error(`插件工具 ${tool.fullName} 调用失败 (HTTP ${resp.status})`);
+  }
+  const data = (await resp.json()) as { ok?: boolean; error?: string } | null;
+  if (!data?.ok) {
+    throw new Error(data?.error || `插件工具 ${tool.fullName} 执行失败`);
+  }
+  return data;
+}
+
+/**
+ * 把工具结果包成 MCP content 数组。
+ *
+ * `resultKind === "image"` 的工具会返回 `{ ..., image: { data, mimeType } }`：
+ *   · 图片单独作为一个 image content 块 —— 模型**能直接看到画面**
+ *   · **base64 必须从文本块里剥掉** —— 否则同一份数据以文本形式再进一次上下文。
+ *     1920×1080 的 PNG base64 约 30 万字符 ≈ 数十万 token，会瞬间撑爆预算，
+ *     而模型从文本里也读不出图像内容（纯浪费）。
+ *
+ * 声明了 image 却没拿到图（插件出错/取消）→ 退回纯文本，并如实带上状态。
+ */
+export function buildToolContent(result: unknown, isImageTool: boolean): { content: unknown[] } {
+  const asText = { content: [{ type: "text", text: JSON.stringify(result) }] };
+  if (!isImageTool) return asText;
+  const r = result as { image?: { data?: unknown; mimeType?: unknown } } | null | undefined;
+  const img = r && typeof r === "object" ? r.image : undefined;
+  const data = img && typeof img.data === "string" ? img.data : "";
+  if (!data) return asText;   // 没图（插件报错/取消）→ 文本里已有原因
+  const { image: _drop, ...meta } = r as Record<string, unknown>;
+  return {
+    content: [
+      { type: "image", data, mimeType: typeof img!.mimeType === "string" ? img!.mimeType : "image/png" },
+      { type: "text", text: JSON.stringify(meta) },
+    ],
+  };
 }
 
 /**
@@ -234,8 +342,10 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
         serverInfo: { name: "claude-code-haha-desktop", version: "1.0.0" },
       };
 
-    case "tools/list":
-      return {
+    case "tools/list": {
+      // 显式类型：不加的话 TS 会把下面的字面量数组推断成一个巨大的联合类型，
+      // 后面 push 插件工具（宽类型）就会报"缺少属性"。
+      const base: { tools: McpToolDef[] } = {
         tools: [
           { name: "desktop_summary", description: "Get lightweight summary of all desktops and items (no content payloads)", inputSchema: { type: "object", properties: { viewportW: { type: "number" }, viewportH: { type: "number" } } } },
           { name: "desktop_get_items", description: "Get full content of specific items by ID", inputSchema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } }, required: ["ids"] } },
@@ -277,6 +387,19 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
           { name: "chat_send_command", description: "Pre-fill a command or prompt (e.g. a slash command like '/mcp-refresh') into the chat input box for the user to review and send with one keystroke — the user stays in control (this is the confirmation itself: nothing is sent automatically). Use when a GUI-side action needs the user to trigger a slash command but you want to spare them typing it. The text is placed at the start of the input box and highlighted by focus; tell the user to press Enter to send.", inputSchema: { type: "object", properties: { text: { type: "string", description: "Command/prompt text to pre-fill (e.g. '/mcp-refresh')" } }, required: ["text"] } },
         ],
       };
+
+      // ── 插件贡献的工具（contributes.mcpTools）──
+      // 工具名已由 collectPluginMcpTools 加上 `plugin_<插件名>_` 前缀，插件**结构上**
+      // 无法覆盖上面任何一个宿主工具。描述里标注来源，便于 AI 与用户辨别出处。
+      for (const t of await getPluginTools()) {
+        base.tools.push({
+          name: t.fullName,
+          description: `[plugin: ${t.pluginName}] ${t.description}`,
+          inputSchema: t.inputSchema,
+        });
+      }
+      return base;
+    }
 
     // ── Query tools ──
 
@@ -528,9 +651,18 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
       const entry = installed.get(name);
       if (!entry?.manifestJson) throw new Error(`Plugin not found: ${name}`);
       const manifest = JSON.parse(entry.manifestJson);
-      // 该插件声明的进程的实时状态（process id 全局形式 plugin:<name>:<declId>）
-      const prefix = `plugin:${name}:`;
-      const processes = getPluginProcesses().filter((p) => p.processId.startsWith(prefix));
+      // 该插件声明的进程的实时状态。
+      // ⚠️ `ProcessInfo.processId` 是**裸 id**（如 `screenshot-server`），**不带**
+      // `plugin:<name>:` 前缀 —— 那个前缀只存在于命令 id / 面板 id。早先按前缀
+      // startsWith 过滤，恒为空数组（AI 永远看不到插件进程状态）。
+      // 正确做法：先从 manifest 取本插件声明了哪些 id，再按裸 id 匹配
+      // （与 pluginCommandBridge.forwardToPluginProcess 同一范式）。
+      const declared = new Set<string>(
+        (Array.isArray(manifest.processes) ? manifest.processes : [])
+          .map((p: { id?: unknown }) => p?.id)
+          .filter((x: unknown): x is string => typeof x === "string"),
+      );
+      const processes = getPluginProcesses().filter((p) => declared.has(p.processId));
       return {
         name,
         enabled: !(getSettings().disabledPlugins ?? []).includes(name),
@@ -698,8 +830,13 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
       return { prefilled: true, text, note: "Placed into the chat input box. Ask the user to review and press Enter to send." };
     }
 
-    default:
+    default: {
+      // 不是宿主工具 → 可能是插件贡献的（名形如 `plugin_<插件名>_<工具>`）。
+      // 现算一次工具表（不缓存）：插件可能刚装上，缓存会让新工具"看不见"。
+      const t = (await getPluginTools()).find((x) => x.fullName === name);
+      if (t) return await callPluginMcpTool(t, params);
       throw new Error(`Unknown tool: ${name}`);
+    }
   }
 }
 

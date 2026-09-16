@@ -72,13 +72,36 @@ function run(cmd, args, opts = {}) {
  * 返回 { path, x, y, width, height, monitorIndex }（x/y 是虚拟桌面坐标）。
  */
 async function captureWindows(outPath, which = "virtual") {
-  const pickBounds = which === "cursor"
-    ? `$pt = [System.Windows.Forms.Cursor]::Position
+  // which:
+  //   "virtual"  整个虚拟桌面（所有显示器并集）
+  //   "cursor"   光标所在那块（区域框选用）
+  //   "primary"  主显示器（AI 调用默认 —— AI 没有"光标在哪"的语义）
+  //   "screen:N" 第 N 块显示器（AllScreens 下标，越界回落主屏）
+  let pickBounds;
+  if (which === "cursor") {
+    pickBounds = `$pt = [System.Windows.Forms.Cursor]::Position
 $scr = [System.Windows.Forms.Screen]::FromPoint($pt)
 $b = $scr.Bounds
-$idx = [System.Windows.Forms.Screen]::AllScreens.IndexOf($scr)`
-    : `$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$idx = [System.Windows.Forms.Screen]::AllScreens.IndexOf($scr)`;
+  } else if (which === "primary") {
+    pickBounds = `$scr = [System.Windows.Forms.Screen]::PrimaryScreen
+$b = $scr.Bounds
+$idx = [System.Windows.Forms.Screen]::AllScreens.IndexOf($scr)`;
+  } else if (/^screen:\d{1,2}$/.test(which)) {
+    // 限 1~2 位数字：既够任何真实显示器配置，也避免超长数字被 PowerShell
+    // 解析成科学计数法（`1e+21`）而语法出错
+    const n = Number(which.slice("screen:".length));
+    // 脚本里做越界保护，避免拿到 undefined 直接崩
+    pickBounds = `$all = [System.Windows.Forms.Screen]::AllScreens
+$n = ${n}
+if ($n -ge $all.Length) { $n = 0 }
+$scr = $all[$n]
+$b = $scr.Bounds
+$idx = $n`;
+  } else {
+    pickBounds = `$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
 $idx = -1`;
+  }
 
   const script = `
 $ErrorActionPreference='Stop'
@@ -107,6 +130,139 @@ $g.Dispose(); $bmp.Dispose()
   }
   const [x, y, w, h, idx] = r.out.trim().split(",").map(Number);
   return { path: outPath, x, y, width: w, height: h, monitorIndex: idx };
+}
+
+// ── 窗口模式（Windows）：枚举顶层窗口 ────────────────────────────────
+
+/**
+ * 枚举当前可见的顶层窗口。
+ *
+ * 返回 `[{ hwnd, x, y, w, h, pid, title }]`，坐标为**虚拟桌面**像素，
+ * 顺序 = Z-order（**最上层在前** —— 前端命中测试靠它取"肉眼看得见的那个"）。
+ *
+ * 过滤掉：不可见 / 最小化 / 无标题 / 桌面与任务栏 / 工具窗口（WS_EX_TOOLWINDOW，
+ * 能滤掉输入法候选窗、托盘弹窗这类"看不见的全屏窗口"）。
+ * UWP 应用会**同时**暴露外框（`ApplicationFrameWindow`）与内容
+ * （`Windows.UI.Core.CoreWindow`），只保留外框 —— 否则「设置」会列两条。
+ * ⚠️ 两者 **pid 不同**（外框由 `ApplicationFrameHost.exe` 托管），
+ * 所以只能按**标题**配对，不能按 pid。
+ *
+ * ⚠️ 脚本内容**必须纯 ASCII**：PowerShell 5.1 按系统代码页（GBK）读脚本，
+ * 中文注释会让内嵌的 C# 编译失败，且报错极具误导性（"名称不存在"之类，
+ * 行号还指向无辜的空行）。这个坑踩过两次。
+ */
+async function enumWindows() {
+  const script = `
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+
+public class WinEnum {
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+
+  public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
+  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+  const int GWL_EXSTYLE = -20;
+  const int WS_EX_TOOLWINDOW = 0x00000080;
+
+  class W {
+    public IntPtr h;
+    public string cls = "";
+    public string title = "";
+    public uint pid;
+    public int x, y, w, hh;
+  }
+
+  public static List<string> List() {
+    var all = new List<W>();
+    EnumWindows(delegate(IntPtr h, IntPtr l) {
+      if (!IsWindowVisible(h)) return true;
+      if (IsIconic(h)) return true;
+
+      var cn = new StringBuilder(256);
+      GetClassName(h, cn, 256);
+      string cls = cn.ToString();
+      if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd") return true;
+
+      int ex = GetWindowLong(h, GWL_EXSTYLE);
+      if ((ex & WS_EX_TOOLWINDOW) != 0) return true;
+
+      int len = GetWindowTextLength(h);
+      if (len == 0) return true;
+      var sb = new StringBuilder(len + 1);
+      GetWindowText(h, sb, sb.Capacity);
+      string title = sb.ToString().Trim();
+      if (title.Length == 0) return true;
+
+      RECT r;
+      int hr = DwmGetWindowAttribute(h, 9, out r, Marshal.SizeOf(typeof(RECT)));
+      if (hr != 0) { if (!GetWindowRect(h, out r)) return true; }
+
+      int w = r.Right - r.Left;
+      int hh = r.Bottom - r.Top;
+      if (w <= 0 || hh <= 0) return true;
+
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      all.Add(new W { h = h, cls = cls, title = title, pid = pid, x = r.Left, y = r.Top, w = w, hh = hh });
+      return true;
+    }, IntPtr.Zero);
+
+    var keep = new List<W>();
+    foreach (var cand in all) {
+      bool dup = false;
+      if (cand.cls == "Windows.UI.Core.CoreWindow") {
+        foreach (var other in all) {
+          if (other.cls == "ApplicationFrameWindow" && other.title == cand.title) { dup = true; break; }
+        }
+      }
+      if (!dup) keep.Add(cand);
+    }
+
+    var order = new Dictionary<IntPtr, int>();
+    for (int i = 0; i < all.Count; i++) order[all[i].h] = i;
+    keep.Sort(delegate(W a, W b) { return order[a.h].CompareTo(order[b.h]); });
+
+    var res = new List<string>();
+    foreach (var k in keep) {
+      res.Add(k.h.ToInt64() + "\\t" + k.x + "\\t" + k.y + "\\t" + k.w + "\\t" + k.hh + "\\t" + k.pid + "\\t" + k.title);
+    }
+    return res;
+  }
+}
+'@
+[WinEnum]::List() | ForEach-Object { Write-Output $_ }
+`;
+  const r = await run("powershell", [
+    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
+  ]);
+  if (r.code !== 0) {
+    log("enumWindows failed:", r.err || r.out);
+    return [];   // 枚举失败 → 空列表；上层据此退化为"不可用"，不打断主流程
+  }
+  return r.out.split(/\r?\n/)
+    .filter((l) => l.includes("\t"))
+    .map((l) => {
+      const p = l.split("\t");
+      // 前 6 段是数字，剩下的是标题（标题里可能含 tab，拼回去）
+      return {
+        hwnd: Number(p[0]), x: +p[1], y: +p[2],
+        w: +p[3], h: +p[4], pid: +p[5], title: p.slice(6).join("\t"),
+      };
+    })
+    .filter((w) => w.hwnd > 0 && w.w > 0 && w.h > 0);
 }
 
 /** 用系统 screencapture（macOS）。mode: "" 全屏 | "-i" 交互区域 | "-w" 交互窗口。 */
@@ -163,6 +319,76 @@ $g.Dispose(); $crop.Dispose(); $src.Dispose()
   if (r.code !== 0 || !fs.existsSync(dst)) {
     throw new Error(`裁剪失败: ${r.err || r.out || `exit ${r.code}`}`);
   }
+}
+
+/**
+ * 抓**指定窗口**的内容（Windows）—— 窗口模式用。
+ *
+ * 用 `PrintWindow(PW_RENDERFULLCONTENT)`：它让窗口**把自己画到内存 DC**，
+ * 所以**被别的窗口盖住也能抓到真实内容**。这点对窗口模式是决定性的 ——
+ * 否则"从屏幕上裁那块区域"只会得到遮挡物的画面（用户想截微信，截出来是 GUI）。
+ *
+ * 代价：部分 GPU 加速窗口（Chromium 内核、部分 UWP）会画成**纯黑**且不报错。
+ * 故抓完采样几个像素检测，全黑返回 false，由调用方回退到"从冻结图裁剪"。
+ *
+ * @returns true = 抓到了有内容的图；false = 失败或全黑（调用方应回退）
+ */
+async function captureWindow(hwnd, outPath) {
+  const script = `
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+
+public class WinCap {
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int s);
+
+  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+  public static string Capture(long hwndVal, string outPath) {
+    IntPtr h = new IntPtr(hwndVal);
+    RECT r;
+    int hr = DwmGetWindowAttribute(h, 9, out r, Marshal.SizeOf(typeof(RECT)));
+    if (hr != 0) { if (!GetWindowRect(h, out r)) return "FAIL"; }
+    int w = r.Right - r.Left;
+    int hh = r.Bottom - r.Top;
+    if (w <= 0 || hh <= 0) return "FAIL";
+
+    using (Bitmap bmp = new Bitmap(w, hh))
+    using (Graphics g = Graphics.FromImage(bmp)) {
+      IntPtr dc = g.GetHdc();
+      bool ok = PrintWindow(h, dc, 2);
+      g.ReleaseHdc(dc);
+
+      bool black = true;
+      int[] xs = new int[] { 2, w / 2, w - 3 };
+      int[] ys = new int[] { 2, hh / 2, hh - 3 };
+      for (int i = 0; i < 3; i++) {
+        int px = xs[i] < 0 ? 0 : (xs[i] >= w ? w - 1 : xs[i]);
+        int py = ys[i] < 0 ? 0 : (ys[i] >= hh ? hh - 1 : ys[i]);
+        Color c = bmp.GetPixel(px, py);
+        if (c.R > 4 || c.G > 4 || c.B > 4) { black = false; break; }
+      }
+      bmp.Save(outPath, ImageFormat.Png);
+      if (!ok) return "FAIL";
+      return black ? "BLACK" : "OK";
+    }
+  }
+}
+'@
+[WinCap]::Capture(${hwnd}, '${outPath.replace(/'/g, "''")}')
+`;
+  const r = await run("powershell", [
+    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
+  ]);
+  const verdict = (r.out || "").trim();
+  if (verdict !== "OK") log(`captureWindow(${hwnd}) -> ${verdict || r.err || "no output"}`);
+  return verdict === "OK";
 }
 
 /** macOS：优先用 screencapture -R 直接从屏幕截该矩形。
@@ -254,14 +480,21 @@ async function captureDirect(mode) {
 }
 
 /** 冻结抓屏 → 准备框选。只抓**光标所在那块显示器**（见 captureWindows 注释）。 */
-async function prepareRegion() {
+async function prepareRegion(opts = {}) {
   fs.mkdirSync(targetDir(), { recursive: true });
   const tmp = path.join(os.tmpdir(), `snipfrozen-${crypto.randomUUID()}.png`);
   const shot = await captureWindows(tmp, "cursor"); // 只有 Windows 走这条路
+
+  // 窗口模式才枚举（区域模式用不上，省掉一次 PowerShell 往返 ≈ 数百毫秒）。
+  // ⚠️ 必须在本函数里（= overlay 建出来**之前**）枚举：overlay 是铺满全屏的窗口，
+  // 等它出现后再枚举，它自己就会混进列表、且是 Z-order 最上层 —— 那用户永远
+  // 只能选中 overlay。同理，冻结图也是在这一刻抓的，两者状态一致。
+  const windows = opts.windows ? await enumWindows() : [];
+
   const token = crypto.randomUUID();
   pending.set(token, {
     file: shot.path, width: shot.width, height: shot.height,
-    x: shot.x, y: shot.y, at: Date.now(),
+    x: shot.x, y: shot.y, windows, at: Date.now(),
   });
   // 顺手清理过期项
   for (const [k, v] of pending) if (Date.now() - v.at > PENDING_TTL_MS) {
@@ -276,15 +509,47 @@ async function prepareRegion() {
   };
 }
 
+/** 把矩形收进 `[0, maxW] × [0, maxH]`，保证至少 1×1。 */
+function clampRect(rect, maxW, maxH) {
+  const x = Math.max(0, Math.min(Math.round(rect.x), maxW - 1));
+  const y = Math.max(0, Math.min(Math.round(rect.y), maxH - 1));
+  const w = Math.max(1, Math.min(Math.round(rect.w), maxW - x));
+  const h = Math.max(1, Math.min(Math.round(rect.h), maxH - y));
+  return { x, y, w, h };
+}
+
+/**
+ * 把枚举到的窗口换算成**冻结图内**坐标并裁进图内。
+ *
+ * 窗口 rect 是虚拟桌面坐标，冻结图只覆盖**光标所在那块显示器**（原点 p.x/p.y），
+ * 两者相减才是图内坐标。完全落在这块屏之外的窗口直接丢弃
+ * （多显示器下，别的屏上的窗口不该出现在本屏的可选列表里）。
+ */
+function windowsInShot(p) {
+  return (p.windows || [])
+    .map((w) => {
+      // 虚拟桌面坐标 → 冻结图内坐标（冻结图只覆盖光标所在那块显示器）
+      const ix = w.x - p.x;
+      const iy = w.y - p.y;
+      // 与冻结图求交（窗口可能有一部分在本屏之外）
+      const x1 = Math.max(0, ix);
+      const y1 = Math.max(0, iy);
+      const x2 = Math.min(p.width, ix + w.w);
+      const y2 = Math.min(p.height, iy + w.h);
+      const cw = x2 - x1;
+      const ch = y2 - y1;
+      if (cw < 8 || ch < 8) return null;   // 交出来的部分太小，不值得列
+      return { hwnd: w.hwnd, title: w.title, x: x1, y: y1, w: cw, h: ch };
+    })
+    .filter(Boolean);
+}
+
 /** 裁剪待框选图并落盘。坐标为**物理像素**（overlay 侧已乘 dpr）。 */
 async function commitRegion(token, rect) {
   const p = pending.get(token);
   if (!p) throw new Error("框选已超时或不存在，请重新截图");
 
-  const x = Math.max(0, Math.min(Math.round(rect.x), p.width - 1));
-  const y = Math.max(0, Math.min(Math.round(rect.y), p.height - 1));
-  const w = Math.max(1, Math.min(Math.round(rect.w), p.width - x));
-  const h = Math.max(1, Math.min(Math.round(rect.h), p.height - y));
+  const { x, y, w, h } = clampRect(rect, p.width, p.height);
 
   const out = uniquePath(targetDir(), stampName());
   if (IS_MAC) await cropMac(p.file, out, x, y, w, h);
@@ -295,6 +560,146 @@ async function commitRegion(token, rect) {
 
   if (settings.copyToClipboard !== false) void toClipboard(out);
   return { path: out, name: path.basename(out), width: w, height: h };
+}
+
+/**
+ * 抓**指定窗口**并落盘（窗口模式点击后调用）。
+ *
+ * 先用 `PrintWindow` 直接抓该窗口（**被遮挡也能抓到真实内容**）；失败或全黑
+ * （GPU 加速窗口的已知限制）则回退为"从冻结图裁那块区域" —— 画面可能被遮挡物
+ * 盖着，但至少能出图，不会让用户点了没反应。
+ */
+async function commitWindow(token, hwnd, rect) {
+  const p = pending.get(token);
+  if (!p) throw new Error("框选已超时或不存在，请重新截图");
+
+  const out = uniquePath(targetDir(), stampName());
+  let ok = false;
+  if (IS_WIN && hwnd) ok = await captureWindow(hwnd, out);
+
+  let dim;
+  if (ok) {
+    dim = await imageSize(out);
+  } else {
+    const r = clampRect(rect || { x: 0, y: 0, w: p.width, h: p.height }, p.width, p.height);
+    if (IS_MAC) await cropMac(p.file, out, r.x, r.y, r.w, r.h);
+    else await cropWindows(p.file, out, r.x, r.y, r.w, r.h);
+    dim = { width: r.w, height: r.h };
+  }
+
+  pending.delete(token);
+  try { fs.unlinkSync(p.file); } catch {}
+
+  if (settings.copyToClipboard !== false) void toClipboard(out);
+  return { path: out, name: path.basename(out), width: dim.width, height: dim.height };
+}
+
+// ── AI 截屏（MCP 工具）：无 UI ───────────────────────────────────────
+//
+// 与区域/窗口模式**本质不同**：那两条要开 overlay 让人来选，AI 没有鼠标。
+// 这里 AI 直接给参数（区域矩形 / 显示器），进程抓屏→裁→落盘→返回 base64。
+
+/**
+ * AI 调用的截屏。返回给宿主的**元数据 + base64**。
+ *
+ * @param args.region  `{x,y,w,h}` 物理像素、**相对目标显示器左上角**；缺省 = 整块显示器
+ * @param args.monitor 显示器序号（0 = 主屏，缺省）；越界回落主屏
+ *
+ * 坐标系刻意选"相对显示器左上角"而不是虚拟桌面绝对坐标：AI 通常只关心"截这块屏的
+ * 这一块"，绝对坐标要它自己知道每块屏的原点，容易错。返回值里给 `monitorOrigin`
+ * 供需要绝对坐标的场合换算。
+ */
+async function mcpCapture(args = {}) {
+  fs.mkdirSync(targetDir(), { recursive: true });
+  const out = uniquePath(targetDir(), stampName());
+
+  // 归一化 monitor：非负整数，缺省 0（主屏）
+  const idx = Number.isInteger(args.monitor) && args.monitor >= 0 ? args.monitor : 0;
+  const which = idx === 0 ? "primary" : `screen:${idx}`;
+
+  let shot;
+  if (IS_MAC) {
+    shot = await captureMac(out, "");   // mac 全屏（-x 静音）
+  } else {
+    shot = await captureWindows(out, which);
+  }
+  if (!shot) return { cancelled: true };
+
+  // 区域：从刚抓的整屏图上裁。坐标由调用方给成**相对该显示器左上角**，
+  // 正好等于图内坐标，不需要换算。
+  const region = args.region;
+  let final = shot;
+  let applied = null;   // 实际生效的区域（clamp 之后）
+  if (region && typeof region === "object") {
+    const want = {
+      x: Number(region.x) || 0,
+      y: Number(region.y) || 0,
+      w: Number(region.w) || 0,
+      h: Number(region.h) || 0,
+    };
+    // ⚠️ 必须在 clamp **之前**校验：clampRect 会把宽高抬到至少 1，
+    // 若先 clamp 再检查，调用方给 w=0 会被静默截成 1×1 的图（而不是报错）。
+    if (want.w < 1 || want.h < 1) {
+      throw new Error(`region 的宽高必须为正数（收到 ${want.w}×${want.h}）`);
+    }
+    const r = clampRect(want, shot.width, shot.height);
+    const dst = uniquePath(targetDir(), stampName());
+    if (IS_MAC) await cropMac(shot.path, dst, r.x, r.y, r.w, r.h);
+    else await cropWindows(shot.path, dst, r.x, r.y, r.w, r.h);
+    // 整屏临时图用完即删（AI 只关心裁出来的那块）
+    try { fs.unlinkSync(shot.path); } catch {}
+    final = { path: dst, x: shot.x + r.x, y: shot.y + r.y, width: r.w, height: r.h };
+    applied = r;
+  }
+
+  if (settings.copyToClipboard !== false) void toClipboard(final.path);
+
+  // base64 给 AI 看图；path 给它后续引用
+  const b64 = fs.readFileSync(final.path).toString("base64");
+  return {
+    cancelled: false,
+    path: final.path,
+    name: path.basename(final.path),
+    // 图片本体（宿主把它转成 MCP image content，**不进文本**）
+    image: { data: b64, mimeType: "image/png" },
+    // 元数据 —— 宿主转给 AI 时剥掉 image.data，只留这些
+    meta: {
+      width: final.width,
+      height: final.height,
+      // 这张图左上角在**虚拟桌面**里的坐标（相对显示器坐标 → 绝对坐标用得上）
+      monitorOrigin: { x: final.x, y: final.y },
+      monitorIndex: idx,
+      // 是否裁过区域（null = 整块显示器）
+      region: applied,
+    },
+  };
+}
+
+/**
+ * 请求宿主开 overlay 显示冻结图（本进程开不了窗口）。
+ * `mode === "window"` 时 overlay 走"悬停选窗口"而不是"拖框选区域"。
+ */
+function overlayHostActions(prep, mode) {
+  return [{
+    kind: "open-overlay",
+    payload: {
+      src: "overlay.html",
+      params: `port=${actualPort()}&token=${prep.token}${mode === "window" ? "&mode=window" : ""}`,
+      // 开在**冻结图所属的那块显示器**上；多屏下错开会让坐标对不上
+      ...(prep.monitor !== undefined ? { monitor: prep.monitor } : {}),
+    },
+  }];
+}
+
+/**
+ * 把外部传入的路径解析到**截图目录内**；越界（目录穿越 / 绝对路径指到别处）
+ * 返回 null。读与删共用这一处校验 —— 分两份写迟早有一份漏掉。
+ */
+function resolveInTargetDir(p) {
+  if (!p) return null;
+  const dir = path.resolve(targetDir());
+  const full = path.resolve(String(p));
+  return full.startsWith(dir + path.sep) ? full : null;
 }
 
 /** 按设置决定投递动作，返回给宿主的 host actions。 */
@@ -347,6 +752,38 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    // AI 调用的 MCP 工具（宿主转发）—— **固定契约**：
+    //   POST /__mcp  body { tool, args, settings }  →  { ok, ...结果 }
+    // 不复用 /__command：那个返回的是 host actions（要宿主再执行一轮），语义不同。
+    if (route === "/__mcp" && req.method === "POST") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      if (body.settings && typeof body.settings === "object") {
+        settings = { ...settings, ...body.settings };
+      }
+      const tool = body.tool;
+      const args = body.args && typeof body.args === "object" ? body.args : {};
+      try {
+        switch (tool) {
+          // 全屏/指定显示器的截图
+          case "fullscreen":
+            return json(res, 200, { ok: true, ...(await mcpCapture({ monitor: args.monitor })) });
+          // 指定区域的截图
+          case "region":
+            return json(res, 200, {
+              ok: true,
+              ...(await mcpCapture({ monitor: args.monitor, region: args.region })),
+            });
+          default:
+            return json(res, 404, { ok: false, error: `未知工具: ${tool}` });
+        }
+      } catch (e) {
+        // 工具级失败：返回结构化错误（宿主会把它包成 MCP 错误给 AI），
+        // 不要走外层 catch 变成 500 —— AI 需要看到"为什么失败"而不是"服务器错误"
+        log(`__mcp ${tool} failed:`, e && e.stack || e);
+        return json(res, 200, { ok: false, error: String((e && e.message) || e) });
+      }
+    }
+
     // 宿主命令直达（快捷键触发时面板可能没开 —— 见宿主侧 forwardToPluginProcess）
     if (route === "/__command" && req.method === "POST") {
       const body = JSON.parse((await readBody(req)) || "{}");
@@ -355,21 +792,10 @@ const server = http.createServer(async (req, res) => {
       }
       const cmd = body.command;
 
-      if (cmd === "region" && IS_WIN) {
-        const prep = await prepareRegion();
-        // 让宿主开一个 overlay 显示冻结图（本进程开不了窗口）
-        return json(res, 200, {
-          ok: true,
-          host: [{
-            kind: "open-overlay",
-            payload: {
-              src: "overlay.html",
-              params: `port=${actualPort()}&token=${prep.token}`,
-              // 开在**冻结图所属的那块显示器**上；多屏下错开会让坐标对不上
-              ...(prep.monitor !== undefined ? { monitor: prep.monitor } : {}),
-            },
-          }],
-        });
+      // Windows 上"区域"与"窗口"都要先冻结抓屏、再交给 overlay 交互
+      if ((cmd === "region" || cmd === "window") && IS_WIN) {
+        const prep = await prepareRegion({ windows: cmd === "window" });
+        return json(res, 200, { ok: true, host: overlayHostActions(prep, cmd) });
       }
       // mac 的区域/窗口走系统原生交互；全屏直接抓
       const shot = await captureDirect(cmd === "window" ? "window" : cmd === "region" ? "region" : "fullscreen");
@@ -393,11 +819,26 @@ const server = http.createServer(async (req, res) => {
       return res.end(buf);
     }
 
+    // 可选窗口列表（overlay 的窗口模式用）—— 坐标已转成**冻结图内**坐标
+    if (route === "/windows" && req.method === "GET") {
+      const p = pending.get(url.searchParams.get("token"));
+      if (!p) return json(res, 404, { error: "框选已超时或不存在，请重新截图" });
+      return json(res, 200, { ok: true, windows: windowsInShot(p) });
+    }
+
     // 框选提交（overlay 调用）—— 坐标为物理像素
     if (route === "/crop" && req.method === "POST") {
       const b = JSON.parse((await readBody(req)) || "{}");
       if (b.settings && typeof b.settings === "object") settings = { ...settings, ...b.settings };
       const shot = await commitRegion(b.token, b);
+      return json(res, 200, { ok: true, shot, host: deliverActions(shot) });
+    }
+
+    // 窗口提交（overlay 的窗口模式点击后调用）—— 优先 PrintWindow 直抓该窗口
+    if (route === "/crop-window" && req.method === "POST") {
+      const b = JSON.parse((await readBody(req)) || "{}");
+      if (b.settings && typeof b.settings === "object") settings = { ...settings, ...b.settings };
+      const shot = await commitWindow(b.token, b.hwnd, b.rect);
       return json(res, 200, { ok: true, shot, host: deliverActions(shot) });
     }
 
@@ -413,19 +854,9 @@ const server = http.createServer(async (req, res) => {
       const b = JSON.parse((await readBody(req)) || "{}");
       if (b.settings && typeof b.settings === "object") settings = { ...settings, ...b.settings };
       const mode = b.mode || "fullscreen";
-      if (mode === "region" && IS_WIN) {
-        const prep = await prepareRegion();
-        return json(res, 200, {
-          ok: true,
-          host: [{
-            kind: "open-overlay",
-            payload: {
-              src: "overlay.html",
-              params: `port=${actualPort()}&token=${prep.token}`,
-              ...(prep.monitor !== undefined ? { monitor: prep.monitor } : {}),
-            },
-          }],
-        });
+      if ((mode === "region" || mode === "window") && IS_WIN) {
+        const prep = await prepareRegion({ windows: mode === "window" });
+        return json(res, 200, { ok: true, host: overlayHostActions(prep, mode) });
       }
       const shot = await captureDirect(mode);
       if (shot.cancelled) return json(res, 200, { ok: true, cancelled: true });
@@ -456,9 +887,8 @@ const server = http.createServer(async (req, res) => {
       const p = url.searchParams.get("path");
       if (!p) return json(res, 400, { error: "path required" });
       // ⚠️ 只允许读**截图目录内**的文件 —— 否则就是无认证的任意文件读取
-      const dir = path.resolve(targetDir());
-      const full = path.resolve(p);
-      if (!full.startsWith(dir + path.sep)) return json(res, 403, { error: "outside screenshot dir" });
+      const full = resolveInTargetDir(p);
+      if (!full) return json(res, 403, { error: "outside screenshot dir" });
       if (!fs.existsSync(full)) return json(res, 404, { error: "not found" });
       const buf = fs.readFileSync(full);
       res.writeHead(200, {
@@ -466,6 +896,27 @@ const server = http.createServer(async (req, res) => {
         "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*",
       });
       return res.end(buf);
+    }
+
+    // 删除截图（面板多选/单张删除用）。**只删截图目录内**的文件。
+    // 逐个删、逐个记结果：某一张被别的程序占用不该让整批失败。
+    if (route === "/delete" && req.method === "POST") {
+      const b = JSON.parse((await readBody(req)) || "{}");
+      const list = Array.isArray(b.paths) ? b.paths : (b.path ? [b.path] : []);
+      const deleted = [];
+      const failed = [];
+      for (const raw of list) {
+        const full = resolveInTargetDir(raw);
+        if (!full) { failed.push({ path: raw, error: "不在截图目录内" }); continue; }
+        try {
+          fs.unlinkSync(full);
+          deleted.push(path.basename(full));
+        } catch (e) {
+          failed.push({ path: path.basename(String(raw)), error: e && e.message || String(e) });
+        }
+      }
+      log(`delete: ${deleted.length} ok, ${failed.length} failed`);
+      return json(res, 200, { ok: true, deleted, failed });
     }
 
     if (route === "/settings" && req.method === "PUT") {
