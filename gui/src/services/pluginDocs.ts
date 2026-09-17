@@ -83,6 +83,33 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
 7. **改了 plugin.json 没生效?** 重扫由安装/启停触发；手动改文件后需触发重扫（重装或
    禁用再启用）
 
+## 请求宿主动作（host actions）
+
+插件进程**开不了窗口** —— 需要窗口时（浮窗、覆盖层、提示条）要在 HTTP 响应里
+**请求宿主代开**。两种来源：
+
+| 来源 | 形态 | 例子 |
+|---|---|---|
+| MCP 工具调用的响应 | `{ ..., "host": [动作] }` | 鼠标键盘插件每次操作请求 `open-indicator` |
+| `/__command` 命令的响应 | 同上 | 截屏插件请求 overlay |
+
+动作形如 `{ kind: "<动作名>", payload: {...} }`。已支持的 kind（宿主侧
+`pluginPanelBridge.tsx` 的 `dispatchPluginUplink` 是权威清单）：
+
+- `open-indicator` / `move-indicator` / `close-indicator` —— **置顶小浮标**
+  （约 300×132，不进任务栏、**不抢焦点**）。payload: `{src, params, x?, y?, width?, height?}`
+  （缺省位置 = 主屏右下角）。适合"AI 正在做什么 + 一个停止入口"这类常驻小窗。
+  ⚠️ 窗口标题带**宿主 PID**（`indicator::<插件名>::<PID>`）—— 插件要按标题找回它
+  （读屏幕矩形等）时必须拼上 `CLAUDE_PLUGIN_HOST_PID`，否则多开时会拿到**别的实例**的窗口。
+- `open-overlay` 等 —— 覆盖层（截屏插件用；详见其源码）
+
+要点：
+- **已存在就不要再请求开**（`open` 是"关掉重建"，重复请求会让窗口闪）——
+  插件可先自己探测（如按标题 FindWindow）
+- **窗口不会给插件返回信息** —— 页面与进程通信走**插件自己的 HTTP 端口**（页面从
+  `params` 拿到端口后轮询）；窗口几何（位置/尺寸）也要插件自己从进程侧查 Win32
+- 派发是**逐个 try** 的：某个动作失败不影响后续动作，失败会记 console
+
 ## MCP 工具
 
 - plugin_list: 已装插件 + enabled/disabled + manifest 摘要
