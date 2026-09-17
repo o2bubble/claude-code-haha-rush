@@ -373,6 +373,13 @@ pub fn run() {
                 }
             }
 
+            // 清理卸载时改名留下的 `.trash-*`（见 uninstall_plugin 的改名兜底）：
+            // 那时目录被占用删不掉，只能先改名让卸载"成功"。现在重启过了，
+            // 占用者（孤儿进程）已被上面的清扫杀掉，这里真删。
+            if let Ok(root) = plugins_base_dir(app.handle()) {
+                cleanup_trash_plugin_dirs(&root);
+            }
+
             // Create the main window programmatically with a per-instance WebView2
             // user data folder. WebView2 only allows one browser process per data
             // folder — a shared default folder makes a second GUI instance's webview
@@ -2581,6 +2588,27 @@ fn count_gui_instances() -> usize {
     }
 }
 
+/// 删除插件根下所有 `.trash-*` 目录（卸载时删不掉、改名留下的残留）。
+///
+/// 只要名字前缀匹配就删 —— 这些目录是**我们自己**改名产生的，且不在插件扫描范围内
+/// （`.trash-` 前缀不是合法插件名），删错的可能不存在。
+fn cleanup_trash_plugin_dirs(plugins_root: &str) {
+    let Ok(entries) = std::fs::read_dir(plugins_root) else { return };
+    let mut n = 0usize;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with(".trash-") {
+            continue;
+        }
+        if std::fs::remove_dir_all(e.path()).is_ok() {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        log::info!("startup: cleaned up {n} trashed plugin dir(s)");
+    }
+}
+
 /// 显示某插件的 overlay 窗口（内容已就绪，可以亮出来了）。
 ///
 /// **为什么要有这条命令**：`open_plugin_overlay` 建窗时刻意**不 show**。窗口一显示，
@@ -4051,14 +4079,23 @@ async fn uninstall_plugin(
     for id in &ids {
         plugin_process::kill_plugin_process(&app, id);
     }
-    // 决定性一步: 杀所有 **cwd 在该插件目录** 的进程。registry 只覆盖当前 GUI 自己
-    // spawn 的进程——更新/强杀留下的孤儿 node（cwd 钉在插件目录, Windows 目录句柄）
-    // 不在表里, 上面杀不到, 不杀干净这里就会报「另一个程序正在使用此文件」(os error 32)。
+    // 决定性的一步：把**占着这个目录的进程**全杀掉。registry 只覆盖当前 GUI 自己
+    // spawn 的进程 —— 更新/强杀/重启 GUI 留下的进程不在表里，上面杀不到，
+    // 不杀干净这里就会报「另一个程序正在使用此文件」/「拒绝访问」。
+    //
+    // **两种占用来源都要杀，缺一个就会漏**（2026-09-17 实测踩到）：
+    //   ① cwd 钉住**目录** ② 加载了 .node/.dll → 锁住**文件**
+    // 当时只做了 ①，日志显示一个都没命中，而 ② 精确找到了持有 vendor/*.node 的进程。
     #[cfg(windows)]
     {
-        let n = crate::prockill::kill_processes_with_cwd_under(&target.to_string_lossy());
-        if n > 0 {
-            log::info!("uninstall_plugin: killed {} processes holding cwd in {}", n, plugin_name);
+        let t = target.to_string_lossy().to_string();
+        let n1 = crate::prockill::kill_processes_with_cwd_under(&t);
+        let n2 = crate::prockill::kill_processes_loading_from(&t);
+        if n1 + n2 > 0 {
+            log::info!(
+                "uninstall_plugin: killed {n1} cwd-holder(s) + {n2} module-loader(s) of {plugin_name}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(150));
         }
     }
     // Windows: 进程退出后文件句柄释放有延迟——重试删除（最多 ~2s）。
@@ -4075,7 +4112,34 @@ async fn uninstall_plugin(
         }
     }
     if !last_err.is_empty() {
-        return Err(format!("Cannot remove plugin dir: {last_err}"));
+        // **兜底：改名而不是放弃。** 目录里可能还有我们杀不掉的占用者（别的用户
+        // 起的进程、杀不动的权限等）。改名在"文件被占用"时通常仍能成功（锁的是
+        // 具体文件/目录内容，不是父目录项），于是：
+        //   · 对用户 = 卸载成功（插件从列表消失、目录不再被扫描）
+        //   · 残留的真删除交给下次启动的清理（见 sweep_trash_plugin_dirs）
+        // 比"卸载失败 + 让用户自己找占用进程"好得多。
+        let trash = base.join("plugins").join(format!(
+            ".trash-{}-{}",
+            plugin_name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        match std::fs::rename(&target, &trash) {
+            Ok(()) => {
+                log::warn!(
+                    "uninstall_plugin: {plugin_name} could not be deleted ({last_err}); \
+                     moved to {} for cleanup on next start",
+                    trash.display()
+                );
+            }
+            Err(re) => {
+                return Err(format!(
+                    "Cannot remove plugin dir: {last_err}（改名兜底也失败: {re}）"
+                ));
+            }
+        }
     }
     log::info!("Plugin uninstalled: {}", plugin_name);
     Ok(true)

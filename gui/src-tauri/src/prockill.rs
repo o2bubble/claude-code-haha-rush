@@ -18,7 +18,8 @@ use windows_sys::Win32::Foundation::{
     LRESULT, WPARAM,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW, Process32NextW,
+    MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
@@ -325,6 +326,66 @@ pub fn kill_processes_with_cwd_under(dir: &str) -> usize {
         }
     }
     killed
+}
+
+/// Kill every process that has **loaded a module from** `dir` (or below).
+///
+/// 与 `kill_processes_with_cwd_under` 是**两种不同的占用来源，都要杀**：
+/// - **cwd**：进程的工作目录 = 该目录的一个句柄，钉住目录本身
+/// - **模块**：`.node` / `.dll` 被加载进进程地址空间 → 那个**文件**被锁到进程退出
+///
+/// 实测（2026-09-17）：卸载 `mouse-keyboard` 报「拒绝访问」，日志显示
+/// `kill_processes_with_cwd_under` **一个都没命中**（没有 killed 日志），而按模块
+/// 路径能精确找到持有 `vendor/win32-x64/*.node` 的进程；杀掉后立刻可删。
+/// 日志里连"Plugin uninstalled"都没有 → 只补 cwd 那一路不够。
+///
+/// 用 Toolhelp32 的**模块快照**（不需要打开目标进程读 PEB，故不受权限/位数影响），
+/// 比逐进程 OpenProcess+VM_READ 更稳。
+pub fn kill_processes_loading_from(dir: &str) -> usize {
+    let base = norm_dir(dir);
+    let procs = snapshot_processes();
+    let mut killed = 0usize;
+    for (pid, _, _, _) in procs {
+        if pid == std::process::id() {
+            continue;
+        }
+        if process_loads_module_under(pid, &base) {
+            kill_process_tree(pid);
+            killed += 1;
+        }
+    }
+    killed
+}
+
+/// 该进程是否加载了 `base_norm` 下的任何模块（base_norm 已 norm_dir）。
+fn process_loads_module_under(pid: u32, base_norm: &str) -> bool {
+    unsafe {
+        // ⚠️ 模块快照必须**按 pid 单独取**（TH32CS_SNAPMODULE 不接受 0）——
+        // 传 0 是"当前进程"，会漏掉全部目标。
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if snap == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let mut me: MODULEENTRY32W = std::mem::zeroed();
+        me.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+        let mut found = false;
+        if Module32FirstW(snap, &mut me) != 0 {
+            loop {
+                // szExePath: [u16; 260]，NUL 结尾
+                let end = me.szExePath.iter().position(|&c| c == 0).unwrap_or(me.szExePath.len());
+                let path = String::from_utf16_lossy(&me.szExePath[..end]);
+                if !path.is_empty() && norm_dir(&path).starts_with(base_norm) {
+                    found = true;
+                    break;
+                }
+                if Module32NextW(snap, &mut me) == 0 {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+        found
+    }
 }
 
 /// Kill **orphaned** plugin processes: parent PID no longer exists AND cwd is
