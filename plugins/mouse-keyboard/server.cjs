@@ -249,9 +249,19 @@ let lastActivityAt = 0;
  * 于是窗口一出现就是"空闲"，用户看到鼠标在动、窗口却说「AI 空闲」，完全对不上。
  * 实测用户报的就是这个：「指示器里一直显示 AI 空闲 啥意思」。
  *
- * 给一段活跃窗口：刚操作过的几秒内仍显示"操作中"，与实际观感一致。
+ * 给一段活跃窗口：刚操作过的这段时间内仍显示"操作中"，与实际观感一致。
+ *
+ * **取 10 秒**（不是 3 秒）：AI 干活的节奏是"发一批操作 → 想 2~10 秒 → 再发一批"，
+ * 而"想"的那几秒里 `currentAction` 是空的。窗口太短（试过 3 秒）会让显示在这两者
+ * 之间反复横跳 —— 用户看到的是"AI 一直在干活，但窗口一会儿操作中一会儿空闲"，
+ * 跟"永远显示空闲"一样让人困惑。10 秒能盖住一轮思考，连续工作期间稳定显示"操作中"。
+ *
+ * 与 `IDLE_CLOSE_MS`（30 秒）的分工：
+ *   0~10 秒   → "AI 操作中"（在干活，或刚干完一批，可能正在想下一批）
+ *   10~30 秒  → "AI 空闲"（大概真停手了，窗口还留着让你看最后结果）
+ *   30 秒后   → 窗口淡出
  */
-const ACTIVE_WINDOW_MS = 3000;
+const ACTIVE_WINDOW_MS = 10000;
 
 function noteActivity(action, args) {
   lastActivityAt = Date.now();
@@ -1081,12 +1091,13 @@ const server = http.createServer(async (req, res) => {
 // ── 启动 ─────────────────────────────────────────────────────────
 
 const requestedPort = Number(process.env.PLUGIN_PORT) || 0;
-const PORT_RANGE = [0, 41000, 42000];   // 0 = 由系统分配，再在范围内重试
+/** 首次尝试的端口：宿主可以指定，缺省用 41000（好认）。 */
+const DEFAULT_PORT = 41000;
 
 /**
  * 进程实际监听的端口。
  *
- * 端口可能不是请求的那个（被占用时会重试/由系统分配），所以别用 `requestedPort` ——
+ * 端口可能不是请求的那个（被占用时会换），所以别用 `requestedPort` ——
  * 指示窗页面要靠这个端口回来轮询，给错了它会一直连不上。
  */
 function actualPort() {
@@ -1094,28 +1105,57 @@ function actualPort() {
   return a && typeof a === "object" ? a.port : 0;
 }
 
-function listen(port, attempt = 0) {
-  server.once("error", (err) => {
-    if (err.code === "EADDRINUSE" && attempt < 2) {
-      log(`端口 ${port} 被占用，换一个再试`);
-      listen(PORT_RANGE[attempt + 1] || 0, attempt + 1);
-      return;
-    }
-    log("监听失败:", err && err.message);
-    console.log("PLUGIN_PORT=0");
-    process.exit(1);
-  });
-  server.listen(port, "127.0.0.1", () => {
-    const actual = server.address().port;
-    // ⚠️ stdout 只此一行（见文件头约束 1）
-    console.log(`PLUGIN_PORT=${actual}`);
-    log(`listening on 127.0.0.1:${actual}; platform=${process.platform}; ` +
-        `hostPid=${process.env.CLAUDE_PLUGIN_HOST_PID || "(未注入)"}; ` +
-        `abortHotkey=${settings.abortHotkey}`);
-  });
-}
+/**
+ * 监听，**保证无论如何都能起来**。
+ *
+ * ## 为什么端口被占时必须退到 `0`（系统分配），而不是"在范围内重试"
+ *
+ * **多开 GUI 时每个实例都会起一份本插件进程**，它们默认都要同一个端口。
+ * 范围重试会在第 3 个实例上耗尽然后启动失败（实测踩到，用户开了 3 个 GUI）：
+ *   实例1 抢到 41000 ✓｜实例2 退到 42000 ✓｜实例3 两个都被占 → 失败退出 ✗
+ * → 宿主报「后台进程未运行」，这个实例里工具整个用不了。
+ *
+ * 而插件端口**不需要固定**：契约是"stdout 第一行报 PLUGIN_PORT"，宿主读它就知道
+ * 去哪找。所以 `listen(0)` 让系统随便给一个，是最稳的兜底。
+ *
+ * ## ⚠️ `started` 标志是必须的（不是防御性代码）
+ *
+ * Node 的行为：`server.listen()` 失败后再次 `listen()`，**第一次挂着的 'listening'
+ * 回调仍然会执行** —— 于是两个回调都打印 `PLUGIN_PORT=`，**破坏"stdout 只一行"的
+ * 宿主协议**（宿主读完第一行就停止读 stdout，第二行会 EPIPE）。实测踩到过：
+ * 日志里整个启动序列打印了两遍。
+ */
+let started = false;
+let retriedWithSystemPort = false;
 
-listen(requestedPort || PORT_RANGE[1]);
+server.on("error", (err) => {
+  if (started) {
+    // 运行期错误（非启动期）—— 记下来即可，不要退出
+    log("运行期 server 错误:", err && err.message);
+    return;
+  }
+  if (err.code === "EADDRINUSE" && !retriedWithSystemPort) {
+    retriedWithSystemPort = true;
+    log(`端口 ${requestedPort || DEFAULT_PORT} 被占用（多开 GUI 时正常）→ 改用系统分配端口`);
+    server.listen(0, "127.0.0.1");
+    return;
+  }
+  // 连系统分配都失败（极罕见：句柄/内存耗尽）→ 如实上报，宿主会显示"进程已停止"
+  log("监听失败:", err && err.message);
+  console.log("PLUGIN_PORT=0");
+  process.exit(1);
+});
+
+server.listen(requestedPort || DEFAULT_PORT, "127.0.0.1", () => {
+  if (started) return;   // 见上方注释：首次 listen 失败后它的回调仍挂着
+  started = true;
+  const actual = server.address().port;
+  // ⚠️ stdout 只此一行（见文件头约束 1）
+  console.log(`PLUGIN_PORT=${actual}`);
+  log(`listening on 127.0.0.1:${actual}; platform=${process.platform}; ` +
+      `hostPid=${process.env.CLAUDE_PLUGIN_HOST_PID || "(未注入)"}; ` +
+      `abortHotkey=${settings.abortHotkey}`);
+});
 
 // ── 退出清理 ──────────────────────────────────────────────────────
 //
