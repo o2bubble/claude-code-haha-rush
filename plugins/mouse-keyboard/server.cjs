@@ -266,6 +266,10 @@ function setAborted(reason) {
   if (aborted) return;
   aborted = true;
   abortReason = reason;
+  // 刷新活动时间：指示窗用它决定何时淡出。用户刚按了停止，窗口至少再留
+  // IDLE_CLOSE_MS（30 秒）让人看清"已停止"—— 否则会按"上次操作"的时间算，
+  // 可能刚点完就消失。
+  lastActivityAt = Date.now();
   log(`ABORT: ${reason}`);
   releaseAll();
 }

@@ -116,21 +116,14 @@
   var hkEl = document.getElementById("hk");
 
   /**
-   * 打开后**至少**显示这么久（从"最后一次操作"算起）。
+   * 距**最后一次操作**超过这么久 → 淡出。
    *
-   * ⚠️ 这个必须有，否则窗口打开即开始倒计时：`open-indicator` 是随工具**响应**
-   * 返回的，也就是"操作已经做完"时窗口才打开 —— 此刻就是空闲状态，立刻开始倒计时，
-   * 几秒后自己关掉。实测日志：开 → 10 秒后关 → 再开 → 9 秒后关，用户看到的就是
-   * "闪一下就没了"（用户报的第一句话就是这个）。
-   *
-   * 取 30 秒：AI 干活的节奏是"几个动作 → 想几秒 → 再来几个"，8 秒太短（窗口会在
-   * 两次操作之间消失、下次操作又冒出来一顿闪）；30 秒能让一段连续工作期间窗口
-   * **稳定在屏幕上**，真正收工后才消失。
+   * 取 30 秒：AI 干活的节奏是"几个动作 → 想几秒 → 再来几个"，短了会让窗口在两次
+   * 操作之间消失、下次又冒出来一顿闪。
    */
-  var MIN_SHOW_MS = 30000;
+  var IDLE_CLOSE_MS = 30000;
 
   var openedAt = Date.now();
-  var lastBusyAt = Date.now();
   var closed = false;
 
   function toHost(kind, payload) {
@@ -175,12 +168,23 @@
     var secs = Math.round((s.uptimeMs || 0) / 1000);
     statEl.textContent = "累计 " + (s.count || 0) + " 个动作 · " + fmtDur(secs);
 
-    // 空闲判定：**从"最后一次活动"起算**（不是从打开时刻）—— 只要 AI 还在动就把
-    // 时钟往后推，停手满 MIN_SHOW_MS 才关。这样连续工作期间窗口稳定在屏幕上，
-    // 真正收工后约半分钟安静地淡出。
-    var now = Date.now();
-    if (busy || stopped) lastBusyAt = now;
-    else if (now - lastBusyAt > MIN_SHOW_MS) closeSelf();
+    // ── 关闭判定 ──
+    // 用**进程侧**的"距上次操作多久"（s.lastActivityMs），不是本页自己数的
+    // "我上次看到 busy 是何时"。
+    //
+    // ⚠️ 这个区别是 bug 与修好的分界：本页每 600ms 才轮询一次，而一批操作可能几百
+    // 毫秒就跑完 —— 本页**根本轮询不到** currentAction 非空的那一瞬，于是它以为
+    // "一直空闲"，倒计时照跑，第二批操作做到一半窗口就淡出了（用户报的正是这个：
+    // "第二批操作中间就自动淡出了"）。
+    // 进程侧的 lastActivityAt 在**每次操作时**更新，与轮询节奏无关，所以可靠。
+    //
+    // 正在操作 / 急停 → 一定留着；否则看"距上次操作多久"。
+    if (!busy && !stopped) {
+      var idleFor = typeof s.lastActivityMs === "number"
+        ? s.lastActivityMs
+        : Date.now() - openedAt;   // 进程还没记录过任何操作（如只调过 screen_info）→ 按窗口年龄算
+      if (idleFor > IDLE_CLOSE_MS) closeSelf();
+    }
   }
 
   function fmtDur(sec) {
@@ -209,9 +213,12 @@
 
   stopBtn.onclick = function () {
     if (!API) return;
+    // 只管发停止请求 —— 窗口寿命由进程侧的 lastActivityAt 管：
+    // /abort 会让进程把 lastActivityAt 刷新到现在，于是窗口至少再留 IDLE_CLOSE_MS，
+    // 用户来得及看清"已停止"（不用在这里自己续命）。
     fetch(API + "/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
       .then(function (r) { return r.json(); })
-      .then(function () { lastBusyAt = Date.now(); tick(); })
+      .then(function () { tick(); })
       .catch(function () {});
   };
 

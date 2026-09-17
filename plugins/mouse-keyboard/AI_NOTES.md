@@ -106,7 +106,34 @@ koffi 的在 `@koromix/koffi-<platform>/`），放进 `vendor/<platform>/`，
 （`OPERATE_ACTIONS` 集合内的动作才走锁；只读/自停/挪窗不需要）。
 已有操作在进行时**直接拒绝**而不是排队 —— 排队会让调用方等到天荒地老且看不出原因。
 
-### 10. 指示窗相关
+### 10. 🔴 窗口寿命必须按**进程侧时间戳**算，不能按页面轮询到的状态
+用户报：「第二批操作中间就自动淡出了」。根因是页面这样判断"忙不忙"：
+
+```js
+if (busy || stopped) lastBusyAt = now;    // busy = !!s.currentAction（轮询到的瞬时状态）
+else if (now - lastBusyAt > IDLE_CLOSE_MS) closeSelf();
+```
+
+**本页每 600ms 才轮询一次，而一批操作可能几百毫秒就跑完** → 本页**根本轮询不到**
+`currentAction` 非空的那一瞬 → 以为"一直空闲" → 倒计时照跑 → 第二批做到一半就到点关闭。
+
+**正确做法**：关闭判定用**进程侧**的 `lastActivityMs`（进程在**每次操作时**更新
+`lastActivityAt`，与轮询节奏无关）：
+```js
+if (!busy && !stopped) {
+  var idleFor = typeof s.lastActivityMs === "number" ? s.lastActivityMs : Date.now() - openedAt;
+  if (idleFor > IDLE_CLOSE_MS) closeSelf();
+}
+```
+（`openedAt` 兜底：进程还没记录过任何操作时——如只调过 screen_info——按窗口年龄算。）
+
+**配套**：`setAborted` 也要刷新 `lastActivityAt` —— 否则用户刚点「停止」，窗口按
+"上次操作"的时间算，可能立刻消失，用户看不到"已停止"这个反馈。
+
+**验证手法**（可复用）：静置观察，记下窗口在"距上次操作 29s"时还在、34s 时不在
+（= 按 30 秒关闭）；再起一次操作，确认 `lastActivityMs` 被重置为 ~0。
+
+### 11. 指示窗相关机制
 - **窗口由宿主建**（进程开不了窗口）：AI 调用时 `/__mcp` 的响应里带
   `host:[{kind:"open-indicator",...}]`，宿主 `mcpBridge` 派发。
   已存在就不重复请求（`open` 是"关掉重建"，重复请求会让窗口闪）
@@ -121,7 +148,7 @@ koffi 的在 `@koromix/koffi-<platform>/`），放进 `vendor/<platform>/`，
 - **指示窗页面跨源读不到宿主坐标** —— 但不需要：页面只管展示与调 `/abort`，
   几何判断全在进程侧（进程能查 Win32）
 
-### 11. 🔴 批量里每一步都要重新过 guard（别改成只查一次）
+### 12. 🔴 批量里每一步都要重新过 guard（别改成只查一次）
 `actSequence` 在**每次重复**前都调 `guard(step.action)`。这不是冗余：
 执行途中前台窗口可能变成宿主（弹出了工具权限确认框），后续步骤**必须被拦** ——
 这正是防"AI 一边调工具弹确认框、一边点允许给自己授权"的机制。
@@ -129,7 +156,7 @@ koffi 的在 `@koromix/koffi-<platform>/`），放进 `vendor/<platform>/`，
 
 改成"开头查一次"会让长序列在中途弹框后继续操作那个框。
 
-### 12. 🔴 逐项绑定 Win32 API，不要一把 try 包住
+### 13. 🔴 逐项绑定 Win32 API，不要一把 try 包住
 曾因一个笔误（`u.func` 应为 `user32.func`）导致**整个 w32 为 null** ——
 前台防护、急停轮询、滚轮**全部静默降级**（只打了一行日志，功能看着"能用"但防护没了）。
 现在 `bind()` 逐项独立 try，一项失败不影响其它，并在启动日志里报"已绑定 N 项"。
