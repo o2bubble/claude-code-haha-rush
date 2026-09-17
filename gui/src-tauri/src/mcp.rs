@@ -164,7 +164,13 @@ fn parse_http(raw: &str) -> (&str, &str, &str) {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     let method = parts.first().copied().unwrap_or("");
     let path = parts.get(1).copied().unwrap_or("");
-    let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+    // ⚠️ 必须用 `splitn(2, ...)`（只切一次），不能用 `split(...).nth(1)`：
+    // 后者只返回**第一段** —— body 里若含 `\r\n\r\n` 就会被**静默截断**
+    // （实测：`{"a":"x\r\n\r\ny"}` 解析成 `{"a":"x`，后面的内容全丢）。
+    // 后果很难查：请求本身看起来正常，JS 侧只是 JSON.parse 失败报个模糊的错。
+    // 合法 JSON body 里换行会被转义成 `\n`，所以触发条件罕见但非不可能
+    // （非 JSON body、或客户端未转义的原始多行文本）。
+    let body = raw.splitn(2, "\r\n\r\n").nth(1).unwrap_or("");
     (method, path, body.trim())
 }
 
@@ -190,12 +196,169 @@ pub fn get_mcp_port() -> u16 {
 }
 
 /// Simple UUID v4 generation (no external crate needed).
+///
+/// ⚠️ **必须有进程内计数器，不能只靠时钟。**
+/// 原实现是 `秒 + 纳秒低16位` —— 而 `SystemTime::now()` 在 Windows 上精度约
+/// 100ns，**同一 tick 内连续调用会返回相同的时间戳**。实测：快速循环到第 1793 次
+/// 就撞出重复 id。
+///
+/// 这个 id 是 `pending` map 的 key（每个在途请求一个）—— **重复的后果很严重**：
+/// 两个并发请求共用一个 key → 后插入的 channel 覆盖先插入的 → **前一个请求永远
+/// 等不到响应，直到 10 秒超时**。而 AI 是会并行调工具的。
 fn uuid_v4() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     format!(
-        "mcp-{:x}-{:04x}",
+        "mcp-{:x}-{:04x}-{:x}",
         now.as_secs(),
         now.subsec_nanos() & 0xFFFF,
+        seq,
     )
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── find_subslice ──
+    // 用途：在原始字节流里找 `\r\n\r\n`（HTTP 头结束标记）。
+    // 找错位置 → 头/体切分错 → 请求解析整体失败。
+
+    #[test]
+    fn find_subslice_basic_positions() {
+        assert_eq!(find_subslice(b"abcdef", b"cd"), Some(2));
+        assert_eq!(find_subslice(b"abcdef", b"ab"), Some(0), "开头");
+        assert_eq!(find_subslice(b"abcdef", b"ef"), Some(4), "结尾");
+        assert_eq!(find_subslice(b"abcdef", b"xyz"), None, "不存在");
+        assert_eq!(find_subslice(b"abcdef", b"abcdefg"), None, "needle 比 haystack 长");
+        assert_eq!(find_subslice(b"aXbXc", b"X"), Some(1), "返回**首个**匹配");
+    }
+
+    #[test]
+    fn find_subslice_finds_http_header_terminator() {
+        let raw = b"POST /mcp HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}";
+        // 偏移：18（请求行）+ 2（CRLF）+ 17（Content-Length: 2）= 37
+        assert_eq!(find_subslice(raw, b"\r\n\r\n"), Some(37));
+    }
+
+    // ── parse_content_length ──
+    // 用途：决定"body 读够了没有"。解析错 → 要么读不完整、要么死等。
+
+    #[test]
+    fn parse_content_length_normal() {
+        assert_eq!(parse_content_length("Content-Length: 42"), Some(42));
+        assert_eq!(parse_content_length("Host: x\r\nContent-Length: 7\r\n"), Some(7));
+    }
+
+    #[test]
+    fn parse_content_length_case_insensitive() {
+        // HTTP 头名大小写不敏感（客户端实际会发各种形态）
+        assert_eq!(parse_content_length("content-length: 5"), Some(5));
+        assert_eq!(parse_content_length("CONTENT-LENGTH: 5"), Some(5));
+        assert_eq!(parse_content_length("CoNtEnT-LeNgTh: 5"), Some(5));
+    }
+
+    #[test]
+    fn parse_content_length_whitespace_and_missing() {
+        assert_eq!(parse_content_length("Content-Length:   9  "), Some(9), "多余空格");
+        assert_eq!(parse_content_length("Host: x"), None, "没有该头");
+        assert_eq!(parse_content_length(""), None, "空头");
+    }
+
+    #[test]
+    fn parse_content_length_invalid_values() {
+        assert_eq!(parse_content_length("Content-Length: abc"), None);
+        assert_eq!(parse_content_length("Content-Length: -1"), None, "负数不是合法的 usize");
+        assert_eq!(parse_content_length("Content-Length:"), None, "无值");
+        assert_eq!(parse_content_length("Content-Length: 12.5"), None);
+    }
+
+    #[test]
+    fn parse_content_length_duplicate_takes_first() {
+        // 重复 Content-Length 是 HTTP 请求走私的经典载体。
+        // 本实现**取第一个**（拒绝比取最后一个安全）—— 这条测试把这个选择钉住，
+        // 以后若有人改成"取最后一个"会被抓出来。
+        let h = "Content-Length: 5\r\nContent-Length: 99";
+        assert_eq!(parse_content_length(h), Some(5));
+    }
+
+    // ── parse_http ──
+    // 用途：切出 (method, path, body)。body 直接交给 JS 做 JSON.parse，
+    // 所以**切错 = AI 的工具调用失败**，且报错模糊（JSON.parse 失败）。
+
+    #[test]
+    fn parse_http_normal_request() {
+        let raw = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 13\r\n\r\n{\"tool\":\"a\"}";
+        let (m, p, b) = parse_http(raw);
+        assert_eq!(m, "POST");
+        assert_eq!(p, "/mcp");
+        assert_eq!(b, "{\"tool\":\"a\"}");
+    }
+
+    #[test]
+    fn parse_http_no_body() {
+        let (m, p, b) = parse_http("GET /x HTTP/1.1\r\nHost: y\r\n\r\n");
+        assert_eq!((m, p, b), ("GET", "/x", ""));
+    }
+
+    #[test]
+    fn parse_http_empty_and_malformed() {
+        assert_eq!(parse_http(""), ("", "", ""));
+        assert_eq!(parse_http("garbage"), ("garbage", "", ""));
+        assert_eq!(parse_http("POST"), ("POST", "", ""), "只有 method");
+    }
+
+    /// 🔴 **回归测试**：body 含 `\r\n\r\n` 时不能被截断。
+    ///
+    /// 原实现是 `raw.split("\r\n\r\n").nth(1)` —— 只返回**第一段**，
+    /// 实测 `{"a":"x\r\n\r\ny"}` 被解析成 `{"a":"x`（后面的内容全丢）。
+    /// 修法是 `splitn(2, ...)`（只切一次，返回分隔符之后的全部）。
+    #[test]
+    fn parse_http_body_containing_header_terminator_is_not_truncated() {
+        let raw = "POST /mcp HTTP/1.1\r\nContent-Length: 18\r\n\r\n{\"a\":\"x\r\n\r\ny\"}";
+        let (_m, _p, body) = parse_http(raw);
+        assert!(
+            body.contains("y"),
+            "body 被截断了 —— 必须用 splitn(2) 而非 split().nth(1)。实际得到: {body:?}"
+        );
+        assert_eq!(body, "{\"a\":\"x\r\n\r\ny\"}");
+    }
+
+    #[test]
+    fn parse_http_multiline_body_preserved() {
+        // 多行 body（每行 \r\n）—— 旧实现下第一行之后就被切掉
+        let raw = "POST /mcp HTTP/1.1\r\n\r\nline1\r\nline2\r\nline3";
+        let (_m, _p, body) = parse_http(raw);
+        assert!(body.contains("line2") && body.contains("line3"), "多行 body 应完整保留: {body:?}");
+    }
+
+    // ── uuid_v4（request_id）──
+    // 用途：`pending` map 的 key —— 每个在途请求一个。
+    // **冲突的后果很严重**：两个请求共用一个 key → 响应张冠李戴 →
+    // AI 拿到**别的工具调用**的结果。所以唯一性是硬要求。
+
+    #[test]
+    fn uuid_v4_format() {
+        let id = uuid_v4();
+        assert!(id.starts_with("mcp-"), "前缀: {id}");
+        assert!(id.len() > 8);
+        assert!(!id.contains(' '), "不该有空格: {id}");
+    }
+
+    #[test]
+    fn uuid_v4_distinct_across_many_calls() {
+        // 现有实现是 `秒 + 纳秒低16位`。同一纳秒内连调两次会**撞车** ——
+        // 这条测试把这个风险钉住（若红了，说明并发下 request_id 可能重复，
+        // 需要引入真正的随机源或计数器）。
+        let mut seen = std::collections::HashSet::new();
+        let n = 10_000;
+        for _ in 0..n {
+            let id = uuid_v4();
+            assert!(seen.insert(id.clone()), "request_id 重复: {id}（第 {} 次插入失败）", seen.len());
+        }
+    }
 }
