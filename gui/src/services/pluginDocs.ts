@@ -52,7 +52,10 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
 - \`platforms\`: \`["windows","macos","linux"]\` —— 缺省/空 = 全平台
 - \`category\`: \`tool\` | \`integration\` | 自定义非空字符串（市场筛选用）
 - \`icon\`: 必须是合法 IconKey（见 gui/src/types/layout.ts）；**写非法值不报错、
-  静默兜底成 grid3x3**（曾见插件写 "compass" 显示成九宫格）。常用 "package"
+  静默兜底成 grid3x3**（曾见插件写 "compass" 显示成九宫格）。常用 "package"。
+  ⚠️ **新插件要挑一个没被别的插件用过的** —— 拿现有插件的 manifest 当模板时最容易
+  漏改这一项，结果是两个插件图标一模一样（用户一眼就看出来）。
+  查已用：\`grep '"icon"' plugins/*/plugin.json\`
 - \`settings\`: 插件设置声明（轻量 JSON Schema：type/title/default/options 等），
   设置面板按插件分组渲染
 
