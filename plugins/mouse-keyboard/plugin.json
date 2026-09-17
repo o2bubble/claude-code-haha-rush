@@ -1,0 +1,98 @@
+{
+  "pluginName": "mouse-keyboard",
+  "displayName": "鼠标键盘",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "description": "让 AI 能模拟鼠标与键盘操作电脑（点击、拖拽、滚动、按键、输入文字）。内置急停与安全防护。",
+  "icon": "desktopItemView",
+  "category": "tool",
+  "installType": "standard",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "鼠标键盘",
+        "panelKind": "in-main",
+        "userManaged": true,
+        "content": { "type": "html", "src": "panel.html" },
+        "process": "mouse-keyboard-server"
+      }
+    ],
+    "commands": [],
+    "events": [],
+    "mcpTools": [
+      {
+        "name": "control",
+        "description": "Control the user's mouse and keyboard to operate the computer. Use this when the user asks you to click, type, drag, or otherwise drive another application.\n\nACTIONS (pass via `action`):\n- `screen_info`: no params. Returns all displays (id/x/y/width/height/isMain) and the current mouse position. CALL THIS FIRST to calibrate coordinates.\n- `move`: x, y (numbers), smooth? (bool). Moves the cursor.\n- `click`: x?, y?, button? ('left'|'right'|'middle', default left), double? (bool). Omit x/y to click wherever the cursor already is.\n- `drag`: fromX, fromY, toX, toY, button?, duration? (ms). Presses at the start point, moves smoothly, releases at the end.\n- `scroll`: dx, dy (positive dy scrolls DOWN, positive dx scrolls RIGHT).\n- `key`: key (e.g. 'enter','tab','escape','f5','a','left'), modifiers? (array, e.g. ['ctrl','shift']), hold? (bool — press and keep held).\n- `type`: text (string). Types the text; Chinese and other Unicode work (sent as unicode key events, bypassing the IME).\n- `abort`: stop immediately. Use it if you realize you are doing something wrong.\n\nCOORDINATES are in virtual-desktop absolute pixels. To convert a coordinate you measured in a screenshot from the screenshot plugin: absolute = thatDisplay.(x, y) + coordinateInsideImage.\n\nIMPORTANT LIMITS: (1) You CANNOT operate the GUI app itself — if the GUI window is in the foreground the action is refused, because confirmation dialogs must be handled by the user, not by you. (2) Windows running as administrator cannot be controlled (input is silently blocked); the tool reports when this happens. (3) The user can abort at any moment; subsequent calls will return an error saying it is stopped.",
+        "process": "mouse-keyboard-server",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["screen_info", "move", "click", "drag", "scroll", "key", "type", "abort"],
+              "description": "Which operation to perform."
+            },
+            "x": { "type": "number", "description": "move/click: target X (virtual-desktop absolute pixels)" },
+            "y": { "type": "number", "description": "move/click: target Y" },
+            "smooth": { "type": "boolean", "description": "move: move gradually instead of jumping" },
+            "speed": { "type": "number", "description": "move: smooth-move speed (1-10, default 3; larger = slower)" },
+            "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "click/drag: mouse button" },
+            "double": { "type": "boolean", "description": "click: double-click" },
+            "fromX": { "type": "number", "description": "drag: press point X" },
+            "fromY": { "type": "number", "description": "drag: press point Y" },
+            "toX": { "type": "number", "description": "drag: release point X" },
+            "toY": { "type": "number", "description": "drag: release point Y" },
+            "duration": { "type": "number", "description": "drag: how long the drag takes in ms (default 400)" },
+            "dx": { "type": "number", "description": "scroll: horizontal amount (positive = right)" },
+            "dy": { "type": "number", "description": "scroll: vertical amount (positive = down)" },
+            "key": { "type": "string", "description": "key: key name, e.g. enter / tab / escape / f5 / a / left" },
+            "modifiers": { "type": "array", "items": { "type": "string" }, "description": "key: modifier keys, e.g. ['ctrl','shift']" },
+            "hold": { "type": "boolean", "description": "key: press and keep held (release with a later call)" },
+            "text": { "type": "string", "description": "type: the text to type" },
+            "delayMs": { "type": "number", "description": "type: delay between characters in ms (default from settings)" }
+          },
+          "required": ["action"]
+        }
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "mouse-keyboard-server",
+      "command": "node",
+      "args": ["server.cjs"],
+      "env": {
+        "CLAUDE_PLUGIN_WORKSPACE": "${workspace}"
+      },
+      "startOn": "workspace_bound"
+    }
+  ],
+  "settings": {
+    "abortHotkey": {
+      "type": "string",
+      "title": "急停快捷键",
+      "description": "AI 操作期间按住这个组合会立即停止（任何时候都有效，不需要本窗口在前台）。默认 ctrl+alt+shift+f12",
+      "default": "ctrl+alt+shift+f12"
+    },
+    "blockHostWindows": {
+      "type": "boolean",
+      "title": "禁止 AI 操作本应用窗口",
+      "description": "开着时，如果本应用窗口在前台，AI 的操作会被拒绝 —— 防止 AI 代替你点「允许」之类的确认框。建议保持开启",
+      "default": true
+    },
+    "smoothMoveMs": {
+      "type": "number",
+      "title": "拖拽默认时长（毫秒）",
+      "description": "AI 拖拽时默认用多久完成，越慢越稳（有些应用跟不上瞬移）",
+      "default": 400
+    },
+    "typeDelayMs": {
+      "type": "number",
+      "title": "输入字符间隔（毫秒）",
+      "description": "每个字符之间的间隔。设 0 会让部分应用丢字，一般 2-8 即可",
+      "default": 4
+    }
+  },
+  "platforms": ["windows"]
+}
