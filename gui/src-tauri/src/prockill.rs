@@ -239,6 +239,26 @@ pub fn snapshot_processes() -> Vec<(u32, u32, String, String)> {
     out
 }
 
+/// 本机有几个**同款 GUI 实例**（含当前这个，最小返回值 1）。
+///
+/// 用途：区分「全局热键注册失败」的两种来源 —— 另一个 GUI 实例（多开的正常现象，
+/// 用户无需处理）vs 其它软件（微信/QQ/输入法，用户需要换键）。OS 只给一句
+/// `HotKey already registered`，不区分这两者，而它们对用户意味着完全不同的动作。
+///
+/// 判定方式：数命令行里含**当前 exe 文件名**的进程（`snapshot_processes` 读的是
+/// PEB 里的完整命令行）。用当前 exe 名而非硬编码 `claude-code-gui.exe`，
+/// 这样改名/多版本共存时仍然正确。
+pub fn count_sibling_instances() -> usize {
+    let Ok(exe) = std::env::current_exe() else { return 1 };
+    let Some(name) = exe.file_name().and_then(|s| s.to_str()) else { return 1 };
+    let needle = name.to_ascii_lowercase();
+    snapshot_processes()
+        .iter()
+        .filter(|(_, _, cmd, _)| cmd.to_ascii_lowercase().contains(&needle))
+        .count()
+        .max(1)
+}
+
 /// Terminate every process (plus its descendants) whose command line contains
 /// `needle` (case-insensitive). Used with `--ide-mode` to kill only GUI
 /// backends, never the terminal TUI.

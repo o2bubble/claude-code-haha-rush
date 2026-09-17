@@ -25,7 +25,19 @@ import { getActiveManifests, collectPluginHotkeys } from "./pluginRegistry";
 import { getSettings } from "../stores/settingsStore";
 import { isMacPlatform } from "./shortcutDispatcher";
 
-/** 单个热键的注册结果（供设置面板显示"已生效 / 被占用"）。 */
+/**
+ * 单个热键的**状态**。三态而非"成功/失败"两态，因为三者对用户的意义完全不同：
+ *
+ * - `ok`        已注册，全局生效（失焦也能按）
+ * - `disabled`  **用户主动关闭**了本实例的全局热键（设置里的开关）——
+ *               是选择，不是故障，界面不该标红
+ * - `taken`     尝试注册但键被占。再看 `takenBy` 决定要不要用户行动：
+ *               `instance` = 另一个 GUI 实例（多开的正常现象，无需处理）
+ *               `other`    = 其它软件占用（需要换键）
+ */
+export type HotkeyState = "ok" | "disabled" | "taken";
+
+/** 单个热键的注册结果（供设置面板显示"已生效 / 已关闭 / 被占用"）。 */
 export interface HotkeyStatus {
   id: string;
   /** 显示名（插件条目无 i18n 键，用其自带 label） */
@@ -35,6 +47,9 @@ export interface HotkeyStatus {
   /** 转出的 accelerator（null = 该键位无法表达，未注册） */
   accelerator: string | null;
   registered: boolean;
+  state: HotkeyState;
+  /** `state === "taken"` 时区分占用来源 */
+  takenBy?: "instance" | "other";
   /** 失败原因（注册被拒时为 OS 的错误信息） */
   error?: string;
 }
@@ -43,6 +58,13 @@ export interface GlobalShortcutHandle {
   dispose(): void;
   /** 当前注册状态（设置面板读它显示徽标） */
   getStatus(): HotkeyStatus[];
+  /**
+   * 立刻重算一遍（重新尝试注册）。
+   *
+   * 用于「关掉另一个实例的全局热键后，本实例想接管」—— 跨实例没有通知机制，
+   * 所以给用户一个显式的重试入口，而不是搞轮询/自动接管那套（不可预测）。
+   */
+  retry(): void;
 }
 
 // ── 模块级状态订阅 ──
@@ -97,8 +119,52 @@ export function collectGlobalHotkeys(
     keys: e.keys,
     accelerator: isGlobalHotkeyBindable(e.keys) ? toAccelerator(e.keys) : null,
     registered: false,
+    // 占位 = "ok"（**尚未判定，不报警**）。真正状态由 reconcile 填。
+    // 用 "taken" 当占位会让面板在启动瞬间闪一下"被占用"再变正常。
+    state: "ok" as HotkeyState,
     ...(isGlobalHotkeyBindable(e.keys) ? {} : { error: "键位不满足全局热键要求" }),
   }));
+}
+
+/** 本实例是否参与全局热键注册（缺省 = 参与，未设开关的老用户行为不变）。 */
+export function hotkeysEnabled(): boolean {
+  return getSettings().globalHotkeysEnabled !== false;
+}
+
+/** 已启动实例的 retry —— 供设置面板的「重新检测」按钮直接调用。 */
+let _retry: (() => void) | null = null;
+
+/** 立刻重算全局热键注册（跨实例无通知机制，故给用户一个显式重试入口）。 */
+export function retryGlobalShortcuts(): void {
+  _retry?.();
+}
+
+/**
+ * 由「本机同款实例数」判断热键被谁占了（纯函数，可测）。
+ *
+ * - 多于一个实例 → 归因给另一个实例。多开场景下这是最常见的原因；即便归错
+ *   （其实是微信占的），用户也能从"关掉另一个实例后仍不行"自行发现。
+ * - 只有一个实例（= 只有自己）却注册失败 → **一定是别的软件**。这个判断很准，
+ *   不该含糊成"可能被占用" —— 那时用户需要的是"换键"这个明确动作。
+ */
+export function classifyTakenBy(siblingInstances: number): "instance" | "other" {
+  return siblingInstances > 1 ? "instance" : "other";
+}
+
+/**
+ * 本机有几个同款 GUI 实例（含自己），用于区分"被另一个实例占"与"被其它软件占"。
+ *
+ * 失败/非 Tauri 环境回落 1（= 不声称有多实例）—— 宁可少说，不要把
+ * "微信占了你的键"误报成"被另一个实例占了"（那会让用户放弃处理）。
+ */
+async function siblingInstanceCount(): Promise<number> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const n = await invoke<number>("count_gui_instances");
+    return typeof n === "number" && n >= 1 ? n : 1;
+  } catch {
+    return 1;
+  }
 }
 
 /**
@@ -154,9 +220,12 @@ export function startGlobalShortcuts(
     try {
       mod = await import("@tauri-apps/plugin-global-shortcut");
     } catch (e) {
-      // 插件未安装/权限缺失：整体记失败，不静默
+      // 插件未安装/权限缺失：整体记失败，不静默。
+      // state 必须显式给 —— 沿用占位的 "ok" 会让面板**什么都不显示**，
+      // 而这时候热键其实完全没工作（静默失败正是本模块开头注释要避免的）。
       status = desired().map((w) => ({
-        ...w, registered: false, error: "全局热键不可用（插件未加载）",
+        ...w, registered: false, state: "taken" as HotkeyState,
+        error: "全局热键不可用（插件未加载）",
       }));
       publish();
       return;
@@ -165,6 +234,18 @@ export function startGlobalShortcuts(
     const want = desired();
     const wantAccels = new Map<string, string>(); // accel → id
     for (const w of want) if (w.accelerator) wantAccels.set(w.accelerator, w.id);
+
+    // ⓪ 本实例被主动关闭了全局热键（设置开关）→ 注销已注册的，且不再尝试。
+    //    与"让位"不同：这是**用户的选择**，界面不该显示成故障。
+    if (!hotkeysEnabled()) {
+      for (const accel of [...live.keys()]) {
+        try { await mod.unregister(accel); } catch { /* 已不在也无所谓 */ }
+        live.delete(accel);
+      }
+      status = want.map((w) => ({ ...w, registered: false, state: "disabled" as HotkeyState, error: undefined }));
+      publish();
+      return;
+    }
 
     // ① 注销：已注册但不再需要（条目被删/改键/解绑/插件卸载）
     for (const [accel, id] of [...live.entries()]) {
@@ -178,14 +259,16 @@ export function startGlobalShortcuts(
     }
 
     // ② 注册新增（差集 —— 未变的不动，避免瞬时失效）
-    const results = new Map<string, { ok: boolean; error?: string }>();
+    //    实例数只在**确实有注册失败**时才查（避免每次 reconcile 都读一遍进程表）。
+    let siblings = 0;   // 0 = 尚未查询
+    const results = new Map<string, { ok: boolean; error?: string; state: HotkeyState; takenBy?: "instance" | "other" }>();
     for (const w of want) {
       if (!w.accelerator) {
-        results.set(w.id, { ok: false, error: "键位无法转为全局热键" });
+        results.set(w.id, { ok: false, error: "键位无法转为全局热键", state: "taken" });
         continue;
       }
       if (live.get(w.accelerator) === w.id) {
-        results.set(w.id, { ok: true }); // 已在注册状态，跳过
+        results.set(w.id, { ok: true, state: "ok" }); // 已在注册状态，跳过
         continue;
       }
       const onFire = (event: unknown) => {
@@ -198,16 +281,18 @@ export function startGlobalShortcuts(
         // 逐个注册：批量注册时一个失败会拖垮整批，且无法定位是哪个键被占用
         await mod.register(w.accelerator, onFire);
         live.set(w.accelerator, w.id);
-        results.set(w.id, { ok: true });
+        results.set(w.id, { ok: true, state: "ok" });
       } catch (e) {
         const msg = String((e as { message?: string })?.message ?? e);
         // 「已被注册」有两种来源，必须区分：
         //  ① **我们自己**的残留 —— 页面 reload / HMR 会销毁 JS 上下文但**不会**调
         //     dispose()，而 OS 热键注册是**进程级**的，于是旧注册还在。此时
         //     unregister 会成功，重注册即可自愈。
-        //  ② 别的软件（微信 Alt+A / QQ / 输入法 / 另一个 GUI 实例）占着 ——
-        //     unregister 对**不属于本进程**的注册会失败，于是照实上报"被占用"。
-        // 不区分的话，一次 reload 就会让所有热键永久显示"注册失败"。
+        //  ② 别的进程占着 —— unregister 对**不属于本进程**的注册会失败。
+        //     这里再分两种，因为它们对用户的含义完全不同：
+        //       · 另一个 GUI 实例 → 多开的正常现象，**无需处理**（界面标"已让位"，不标红）
+        //       · 其它软件（微信/QQ/输入法）→ 用户**需要换键**
+        //       OS 只给一句 "already registered"，不区分这两者 → 自己数实例数来判断。
         let recovered = false;
         try {
           await mod.unregister(w.accelerator);
@@ -217,18 +302,32 @@ export function startGlobalShortcuts(
         } catch {
           /* ① 不成立 → 是 ②，保持失败 */
         }
-        results.set(w.id, recovered ? { ok: true } : { ok: false, error: msg });
+        if (recovered) {
+          results.set(w.id, { ok: true, state: "ok" });
+        } else {
+          if (siblings === 0) siblings = await siblingInstanceCount();
+          results.set(w.id, {
+            ok: false, error: msg, state: "taken",
+            takenBy: classifyTakenBy(siblings),
+          });
+        }
       }
     }
 
-    status = want.map((w) => ({
-      ...w,
-      registered: results.get(w.id)?.ok ?? false,
-      ...(results.get(w.id)?.error ? { error: results.get(w.id)!.error } : {}),
-    }));
+    status = want.map((w) => {
+      const r = results.get(w.id);
+      return {
+        ...w,
+        registered: r?.ok ?? false,
+        state: r?.state ?? ("taken" as HotkeyState),
+        ...(r?.takenBy ? { takenBy: r.takenBy } : {}),
+        ...(r?.error ? { error: r.error } : {}),
+      };
+    });
     publish();
   };
 
+  _retry = () => void reconcile();
   void reconcile();
 
   // 设置变化（改键 / 解绑）与插件重扫（装/卸带热键的插件）都要重算。
@@ -245,6 +344,7 @@ export function startGlobalShortcuts(
 
   return {
     getStatus: () => [...status],
+    retry: () => void reconcile(),
     dispose() {
       disposed = true;
       for (const un of unsubs) un();

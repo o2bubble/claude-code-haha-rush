@@ -149,6 +149,23 @@ pub struct AppSettings {
     /// 保持"全局"语义：**不进** `merge_workspace_overrides`（快捷键不按工作区分）。
     #[serde(rename = "shortcuts", default)]
     pub shortcuts: Option<std::collections::HashMap<String, String>>,
+
+    /// 本实例是否参与 OS 级全局热键注册（缺省 = 参与）。
+    ///
+    /// 全局热键是**进程级独占**的（`RegisterHotKey` 一类的语义）：同一组合键全系统
+    /// 只能有一个进程持有。多开 GUI 时只有**先注册**的那个实例生效，其余会拿到
+    /// `HotKey already registered` —— 这不是故障，是 OS 机制。
+    ///
+    /// 默认 `None`（= 参与，保持旧行为"都去抢，先到先得"）。显式关掉即**主动放弃**：
+    /// 本实例不注册全局热键，把键让给别的实例（本实例内该键不再可用 —— 注意**不能**
+    /// 退化成"应用内快捷键"来兜底，那会与持有实例的全局热键**双重触发**：
+    /// OS 热键在输入法激活/远程桌面等场景下可能不吞按键，见 shortcutDispatcher 注释）。
+    ///
+    /// ⚠️ **要进** `merge_workspace_overrides`（与上面的 `shortcuts` 相反）：
+    /// 多开时每个实例绑不同工作区，"哪个实例持有全局热键"本身就是**按实例**的决策，
+    /// 存工作区级天然每实例独立。
+    #[serde(rename = "globalHotkeysEnabled", default)]
+    pub global_hotkeys_enabled: Option<bool>,
 }
 
 pub fn default_work_dir() -> String {
@@ -210,6 +227,7 @@ impl Default for AppSettings {
             compact_extract_script: None,
             stream_stall_wake_prompt: None,
             shortcuts: None,
+            global_hotkeys_enabled: None,
         }
     }
 }
@@ -718,6 +736,8 @@ fn merge_workspace_overrides(base: &mut AppSettings, o: &AppSettings) {
     if !o.quick_prompts.is_empty() { base.quick_prompts = o.quick_prompts.clone(); }
     if !o.favorite_skills.is_empty() { base.favorite_skills = o.favorite_skills.clone(); }
     if o.msg_queue_position.is_some() { base.msg_queue_position = o.msg_queue_position.clone(); }
+    // 全局热键开关是**按实例**的（多开时每个实例绑不同工作区）—— 见字段注释。
+    if o.global_hotkeys_enabled.is_some() { base.global_hotkeys_enabled = o.global_hotkeys_enabled; }
     if o.msg_queue_max_items.is_some() { base.msg_queue_max_items = o.msg_queue_max_items; }
     if o.msg_selection_toolbar.is_some() { base.msg_selection_toolbar = o.msg_selection_toolbar; }
     if o.session_folders.is_some() { base.session_folders = o.session_folders; }

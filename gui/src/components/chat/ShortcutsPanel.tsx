@@ -27,8 +27,10 @@ import {
 } from "../../services/shortcuts";
 import { getActiveManifests, collectPluginHotkeys } from "../../services/pluginRegistry";
 import {
-  getGlobalHotkeyStatus, subscribeGlobalHotkeyStatus, type HotkeyStatus,
+  getGlobalHotkeyStatus, subscribeGlobalHotkeyStatus, hotkeysEnabled,
+  retryGlobalShortcuts, type HotkeyStatus,
 } from "../../services/globalShortcutService";
+import { saveSettings } from "../../stores/settingsStore";
 import { useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
 import { S } from "./settingsStyles";
@@ -102,6 +104,12 @@ export default function ShortcutsPanel({
 
   const overriddenCount = Object.keys(overrides ?? {}).length;
 
+  // 开关状态直接读 settings（每次渲染取最新值）。改动会经 SETTINGS_CHANGED →
+  // reconcile 更新 hotkeyStatus → 本组件重渲染，所以不需要额外的本地 state。
+  const globalHotkeysOn = hotkeysEnabled();
+  // 有热键被另一个实例占着时才显示「重新检测」—— 那是唯一需要手动重试的场景
+  const hasTakenByInstance = hotkeyStatus.some((s) => s.state === "taken" && s.takenBy === "instance");
+
   /** 按分组归拢条目（保持表内顺序）。 */
   const grouped = useMemo(() => {
     const map = new Map<string, ShortcutEntry[]>();
@@ -157,6 +165,57 @@ export default function ShortcutsPanel({
         )}
       </div>
 
+      {/* 全局热键开关 —— **按实例**（存工作区级）。多开 GUI 时全局热键是进程级
+          独占的：只有先注册的那个实例能用，其余拿到 "already registered"。
+          关掉即主动让位，避免"两个实例都在抢同一个键"。 */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "8px 10px", borderRadius: 5,
+        border: "1px solid var(--border-light)", background: "var(--bg-subtle, transparent)",
+      }}>
+        <input
+          type="checkbox"
+          id="global-hotkeys-enabled"
+          checked={globalHotkeysOn}
+          onChange={(ev) => {
+            // ⚠️ 必须用 saveSettings 而非 updateSettings —— 后者只改内存 + 发事件，
+            // **不落盘**（重启即丢）。且它默认 scope="workspace"：开关是**按实例**的
+            // （多开时每个实例绑不同工作区），存工作区级才独立。未绑工作区时
+            // workspace 写入会被 Rust 侧丢弃（设计如此，避免污染全局）——可接受：
+            // 没绑工作区时插件进程都不启动，也无从谈全局热键。
+            void saveSettings({ globalHotkeysEnabled: ev.target.checked });
+            // saveSettings 内部 emit SETTINGS_CHANGED → globalShortcutService reconcile
+          }}
+          style={{ cursor: "pointer", flexShrink: 0 }}
+        />
+        <label
+          htmlFor="global-hotkeys-enabled"
+          style={{
+            flex: 1, cursor: "pointer",
+            fontSize: "calc(var(--font-scale, 1) * 12px)", color: "var(--fg-secondary)",
+          }}
+        >
+          {t("shortcuts.osDisabledHint")}
+        </label>
+        {hasTakenByInstance && (
+          <button
+            type="button"
+            onClick={() => retryGlobalShortcuts()}
+            title={t("shortcuts.osRetryHint")}
+            style={{
+              display: "flex", alignItems: "center", gap: 4, flexShrink: 0,
+              padding: "4px 10px", border: "1px solid var(--border-medium)",
+              borderRadius: 4, background: "transparent",
+              color: "var(--fg-secondary)", cursor: "pointer",
+              fontSize: "calc(var(--font-scale, 1) * 11px)",
+            }}
+          >
+            <RotateCcw size={12} />
+            {t("shortcuts.osRetry")}
+          </button>
+        )}
+      </div>
+
       {/* 分组列表 */}
       {GROUP_ORDER.map((g) => {
         const list = grouped.get(g.id);
@@ -205,20 +264,56 @@ export default function ShortcutsPanel({
                     )}
                   </span>
 
-                  {/* 全局热键的注册结果 —— 注册失败是静默的（键被别的软件占用时
-                      没有任何其它反馈），不显示的话用户只会觉得"时灵时不灵" */}
-                  {e.scope === "os" && hotkeyById.get(e.id) && !hotkeyById.get(e.id)!.registered && (
-                    <span
-                      title={hotkeyById.get(e.id)!.error ?? ""}
-                      style={{
-                        fontSize: "calc(var(--font-scale, 1) * 10px)",
-                        color: "var(--semantic-error, #d32f2f)",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {t("shortcuts.osConflict")}
-                    </span>
-                  )}
+                  {/* 全局热键的注册结果 —— 注册失败是静默的（键被占时没有任何其它
+                      反馈），不显示的话用户只会觉得"时灵时不灵"。
+                      三态：**已让位给另一个实例**用中性色（多开的正常现象，不是故障）、
+                      **被其它软件占用**才标红（那才需要用户换键）、**已关闭**是用户的选择。 */}
+                  {e.scope === "os" && hotkeyById.get(e.id) && (() => {
+                    const st = hotkeyById.get(e.id)!;
+                    if (st.state === "ok" || st.registered) return null;
+                    if (st.state === "disabled") {
+                      return (
+                        <span
+                          title={t("shortcuts.osDisabledHint")}
+                          style={{
+                            fontSize: "calc(var(--font-scale, 1) * 10px)",
+                            color: "var(--fg-muted)", whiteSpace: "nowrap",
+                          }}
+                        >
+                          {t("shortcuts.osDisabled")}
+                        </span>
+                      );
+                    }
+                    // 键位**本身**不满足全局要求（如绑成 `shift+a`）—— accelerator
+                    // 为 null 就是这个信号。别套 osConflict：那会把它误报成"被其它
+                    // 软件占用"，而用户真正要做的是换成一个带修饰键的组合。
+                    if (!st.accelerator) {
+                      return (
+                        <span
+                          title={st.error ?? ""}
+                          style={{
+                            fontSize: "calc(var(--font-scale, 1) * 10px)",
+                            color: "var(--fg-muted)", whiteSpace: "nowrap",
+                          }}
+                        >
+                          {st.error ?? t("shortcuts.osConflict")}
+                        </span>
+                      );
+                    }
+                    const byInstance = st.takenBy === "instance";
+                    return (
+                      <span
+                        title={byInstance ? t("shortcuts.osRetryHint") : (st.error ?? "")}
+                        style={{
+                          fontSize: "calc(var(--font-scale, 1) * 10px)",
+                          color: byInstance ? "var(--fg-muted)" : "var(--semantic-error, #d32f2f)",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {byInstance ? t("shortcuts.osTakenByInstance") : t("shortcuts.osConflict")}
+                      </span>
+                    );
+                  })()}
 
                   {/* 键位 —— 点击录制（仅上下文型不可改：它的生效条件不可控） */}
                   {e.contextual ? (

@@ -592,6 +592,7 @@ pub fn run() {
             note_get,
             note_list,
             note_search,
+            count_gui_instances,
             note_associate,
             note_disassociate,
             note_tags,
@@ -2404,6 +2405,23 @@ fn close_plugin_overlay(app: tauri::AppHandle, plugin: String) -> Result<usize, 
     }
     log::info!("[Rust] close_plugin_overlay: {plugin} -> closed {closed}");
     Ok(closed)
+}
+
+/// 本机有几个同款 GUI 实例（含自己，最小 1）。
+///
+/// 前端用它把「全局热键注册失败」的两种来源分开：另一个 GUI 实例（多开的正常现象）
+/// vs 其它软件（需要用户换键）。OS 的错误信息不区分这两者，而用户要采取的动作
+/// 完全不同 —— 见 `prockill::count_sibling_instances`。
+#[tauri::command]
+fn count_gui_instances() -> usize {
+    #[cfg(windows)]
+    {
+        crate::prockill::count_sibling_instances()
+    }
+    #[cfg(not(windows))]
+    {
+        1
+    }
 }
 
 /// 显示某插件的 overlay 窗口（内容已就绪，可以亮出来了）。
