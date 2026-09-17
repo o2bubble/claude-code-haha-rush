@@ -157,6 +157,12 @@ pub fn spawn_plugin_process(
             cmd.env(k, v);
         }
     }
+    // 注入宿主 PID —— 插件进程据此定位「宿主窗口」（如截屏插件让位时要最小化它）。
+    //
+    // ⚠️ 不能用 `process.ppid` 代替：本进程 spawn 的子进程可能是**孤儿**
+    // （宿主退出/被强杀后残留），那时 ppid 指向的是一个**已被回收复用的 PID**，
+    // 插件会去操作毫不相干的窗口。实测确认过这种情况真实存在。
+    cmd.env("CLAUDE_PLUGIN_HOST_PID", std::process::id().to_string());
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = match cmd.spawn() {

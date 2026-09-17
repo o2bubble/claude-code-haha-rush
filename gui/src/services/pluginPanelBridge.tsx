@@ -253,19 +253,26 @@ async function sendPluginViewerChip(d: { kind: string; payload?: { file?: string
  *  `params` 是不透明查询串（宿主不解释，只透传）—— 长度设上限防滥用。 */
 export function sanitizeOverlayRequest(
   raw: unknown,
-): { src: string; monitor?: number; params?: string } | null {
+): { src: string; monitor?: number; params?: string; hostPort?: number } | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const src = typeof r.src === "string" ? r.src.trim() : "";
   if (!src) return null;
   if (src.startsWith("/") || src.includes("\\") || src.includes("..")) return null;
   if (/^[a-zA-Z]:/.test(src)) return null;
-  const out: { src: string; monitor?: number; params?: string } = { src };
+  const out: { src: string; monitor?: number; params?: string; hostPort?: number } = { src };
   if (typeof r.monitor === "number" && Number.isInteger(r.monitor) && r.monitor >= 0) {
     out.monitor = r.monitor;
   }
   if (typeof r.params === "string" && r.params.trim()) {
     out.params = r.params.trim().slice(0, 2048);
+  }
+  // 插件请求「overlay 关闭时通知我把让位过的宿主窗口还回去」时带上它的端口。
+  // 只在插件真的让位过时才带（`restoreHostOnClose`），没有这个标记就完全不参与。
+  if (r.restoreHostOnClose === true
+      && typeof r.hostPort === "number" && Number.isInteger(r.hostPort)
+      && r.hostPort > 0 && r.hostPort < 65536) {
+    out.hostPort = r.hostPort;
   }
   return out;
 }
@@ -290,6 +297,9 @@ export function sanitizeChatReference(raw: unknown): { path: string; label?: str
 async function openPluginOverlay(pluginName: string, raw: unknown): Promise<void> {
   const req = sanitizeOverlayRequest(raw);
   if (!req) return;
+  // 插件为截图**让位**过（最小化了宿主窗口），要我们在 overlay 关掉后通知它恢复。
+  // 记在这里、由 closePluginOverlay / overlay-closed 事件消费 —— 见 restoreHostIfNeeded。
+  if (req.hostPort) pendingHostRestore.set(pluginName, req.hostPort);
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("open_plugin_overlay", {
     plugin: pluginName,
@@ -303,6 +313,35 @@ async function openPluginOverlay(pluginName: string, raw: unknown): Promise<void
 async function closePluginOverlay(pluginName: string): Promise<void> {
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("close_plugin_overlay", { plugin: pluginName });
+  // overlay 收起来了 → 把让位时最小化的窗口还回去。
+  // 挂在这里是因为**所有**正常关闭路径都会走到它（截图完成、Esc 取消、
+  // 插件禁用、退出清理）；Alt+F4 那种外部销毁走不到，由插件进程侧兜底
+  // （下次让位前先恢复残留，见 server.cjs 的 hideHost）。
+  await restoreHostIfNeeded(pluginName);
+}
+
+/** 让位过（还没恢复）的插件 → 它的进程端口。见 `restoreHostIfNeeded`。 */
+const pendingHostRestore = new Map<string, number>();
+
+/**
+ * 把让位过的宿主窗口还回去 —— 由插件进程执行（窗口句柄列表在它手里）。
+ *
+ * 为什么要绕这一圈：让位时最小化的是**该进程的全部可见窗口**（主窗 + 浮窗，
+ * 插件分不清哪个是主窗），而宿主前端的窗口 API 只能操作自己那一个 →
+ * 恢复只能由持有句柄列表的进程做，宿主只负责**时机**（overlay 关了）。
+ *
+ * 幂等：没有 pending 记录时直接返回（普通 overlay 不走让位，不参与）。
+ */
+export async function restoreHostIfNeeded(pluginName: string): Promise<void> {
+  const port = pendingHostRestore.get(pluginName);
+  if (!port) return;
+  pendingHostRestore.delete(pluginName);
+  try {
+    await fetch(`http://127.0.0.1:${port}/restore-host`, { method: "POST" });
+  } catch {
+    // 插件进程已退出等 —— 窗口留在最小化状态，用户点任务栏即可。
+    // 不重试：重试也无处可去（端口没了），且不该为此留住 pending 记录。
+  }
 }
 
 /** 插件 → 聊天输入框：以 `file` 引用插入（图片走这条，chip 图标 📄，

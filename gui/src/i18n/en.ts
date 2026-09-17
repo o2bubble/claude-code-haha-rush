@@ -236,7 +236,7 @@ const en: Locale = {
     osDisabled: "Disabled",
     osDisabledHint: "This instance does not register global hotkeys (yields to other instances when running multiple)",
     osRetry: "Re-check",
-    osRetryHint: "After disabling global hotkeys in another instance, click to let this one take over",
+    osRetryHint: "Another GUI instance is holding this key — close that instance and reopen this window to take over",
     osBadge: "(global, works while the window is unfocused)",
     osNeedsModifier: "\"{keys}\" can't be a global hotkey — it needs Ctrl / Alt / Cmd or a function key, otherwise it steals normal typing in other apps",
     hint: "Click a key then press a new combination to rebind. Entries marked \"context-dependent\" only work in specific panels, so they can't be changed.",

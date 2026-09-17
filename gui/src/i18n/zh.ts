@@ -235,7 +235,7 @@ const zh = {
     osDisabled: "已关闭",
     osDisabledHint: "本实例不注册全局热键（多开时让给别的实例）",
     osRetry: "重新检测",
-    osRetryHint: "关掉另一个实例的全局热键后，点这里让本实例接管",
+    osRetryHint: "另一个 GUI 实例正持有这个键 —— 关掉那个实例后重开本窗口即可接管",
     osBadge: "（全局，窗口不在前台也生效）",
     osNeedsModifier: "「{keys}」不能作全局热键：它需要 Ctrl / Alt / Cmd 或功能键，否则会抢走其它软件里的正常输入",
     hint: "点击键位后按下新组合即可修改；带「有上下文条件」的快捷键只在特定面板生效，故不可修改。",

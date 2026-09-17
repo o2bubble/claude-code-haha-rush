@@ -131,13 +131,6 @@ export function hotkeysEnabled(): boolean {
   return getSettings().globalHotkeysEnabled !== false;
 }
 
-/** 已启动实例的 retry —— 供设置面板的「重新检测」按钮直接调用。 */
-let _retry: (() => void) | null = null;
-
-/** 立刻重算全局热键注册（跨实例无通知机制，故给用户一个显式重试入口）。 */
-export function retryGlobalShortcuts(): void {
-  _retry?.();
-}
 
 /**
  * 由「本机同款实例数」判断热键被谁占了（纯函数，可测）。
@@ -327,7 +320,6 @@ export function startGlobalShortcuts(
     publish();
   };
 
-  _retry = () => void reconcile();
   void reconcile();
 
   // 设置变化（改键 / 解绑）与插件重扫（装/卸带热键的插件）都要重算。

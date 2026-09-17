@@ -1,9 +1,9 @@
 {
   "pluginName": "screenshot",
   "displayName": "截屏",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "apiVersion": "1.0",
-  "description": "截屏工具：支持全屏 / 区域 / 窗口三种模式，可设快捷键（含全局热键，窗口不在前台也生效）。截完可直接插入聊天输入框、发送到超级桌面，或保存到当前工作区。",
+  "description": "截屏工具：支持全屏 / 区域 / 窗口三种模式，截图时窗口自动让开位置。截完可直接插入聊天输入框、发送到超级桌面，或保存到当前工作区；AI 也能直接截屏看图。",
   "icon": "desktopItemView",
   "category": "tool",
   "installType": "standard",
@@ -32,7 +32,7 @@
         "title": "截屏：区域",
         "onInvoke": "region",
         "hotkey": "Mod+Shift+X",
-        "scope": "os"
+        "scope": "app"
       },
       {
         "id": "fullscreen",
@@ -58,6 +58,10 @@
             "monitor": {
               "type": "number",
               "description": "Monitor index, 0 = primary (default). Out-of-range values fall back to the primary monitor."
+            },
+            "clearScreen": {
+              "type": "boolean",
+              "description": "Minimize the GUI window just before capturing so that whatever it was covering shows up in the shot (the window is restored right after). Pass true when you need to see what is BEHIND the GUI window; pass false to leave the user's window untouched (e.g. they are actively looking at it and you only need a quick look). Omit to use the user's configured default."
             }
           }
         }
@@ -84,6 +88,10 @@
             "monitor": {
               "type": "number",
               "description": "Monitor index, 0 = primary (default)."
+            },
+            "clearScreen": {
+              "type": "boolean",
+              "description": "Minimize the GUI window just before capturing so that whatever it was covering shows up in the shot (the window is restored right after). Pass true when the region you need is currently hidden BEHIND the GUI window; pass false to leave the user's window untouched (e.g. they are actively looking at it). Omit to use the user's configured default."
             }
           },
           "required": ["region"]
@@ -124,6 +132,12 @@
       "type": "boolean",
       "title": "同时复制到剪贴板",
       "description": "每次截图后把图片写入系统剪贴板，方便直接粘到别处",
+      "default": true
+    },
+    "clearScreen": {
+      "type": "boolean",
+      "title": "截图时让开位置",
+      "description": "截图前把本窗口最小化，好让出被它挡住的画面（截图完成后自动恢复）。想让主窗口也在截图里出现时关掉它",
       "default": true
     }
   },

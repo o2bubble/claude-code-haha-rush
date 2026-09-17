@@ -46,6 +46,167 @@ function log(...a) {
   console.error("[screenshot]", ...a);
 }
 
+// ── 让位：截图时把宿主窗口最小化 ──────────────────────────────────────
+//
+// 为什么需要：截图要拿到"没有被 GUI 挡着"的画面。GUI 在前台时冻结图里就是 GUI，
+// 想截它**后面**的窗口根本做不到 —— 而按热键本身又要求 GUI 在前台，是个死循环。
+// 让位把这个环打开：先让开，再抓屏。
+//
+// 为什么在**进程侧**做（而不是宿主）：抓屏发生在这里，而触发路径有三条
+// （快捷键 / 面板按钮 / AI 调用），其中**面板那条是 iframe 直接 fetch，绕过宿主 JS** ——
+// 只有放在进程侧才能三条统一。
+//
+// 宿主 PID 由宿主 spawn 时注入（见 plugin_process.rs 的 CLAUDE_PLUGIN_HOST_PID）。
+// ⚠️ 不能用 `process.ppid` 顶替：宿主退出后的**孤儿进程**其 ppid 指向的是已被
+// 回收复用的 PID，会去最小化毫不相干的窗口。实测确认这种情况真实存在。
+
+/** 被我们最小化的宿主窗口句柄。恢复时只动这些 —— 用户自己最小化的窗口不碰。 */
+let hiddenHostWindows = [];
+
+/** 让位是否开启（设置项，缺省开）。 */
+function clearScreenEnabled() {
+  return settings.clearScreen !== false;
+}
+
+/**
+ * 最小化宿主窗口（让开位置）。
+ *
+ * 最小化宿主 PID 的**全部可见顶层窗口**（主窗 + 开着的浮窗），而不是只挑主窗：
+ * 插件进程分不清哪个是主窗（Tauri 的 label 在 Win32 层看不到），而且"让开位置"
+ * 本来就该让 GUI 整体让开。已经是最小化的窗口**不动**（那可能是用户自己收起来的）。
+ *
+ * @returns 被最小化的窗口数（0 = 没让位 / 失败）
+ */
+async function hideHost() {
+  if (!IS_WIN) return 0;                 // 让位走 Win32 窗口 API，mac 未实现
+  const pid = Number(process.env.CLAUDE_PLUGIN_HOST_PID) || 0;
+  if (!pid) return 0;                    // 没有宿主 PID（手动跑的实例）→ 跳过，不阻塞截图
+
+  // 兜底：上一次让位没走到恢复（overlay 被 Alt+F4 强关、宿主异常退出等）——
+  // 先把残留还回去再重新让位。不这么做的话句柄列表会被这次的覆盖，
+  // 那批窗口就永远回不来了（用户只能手动点任务栏）。
+  if (hiddenHostWindows.length) await restoreHost();
+
+  try {
+    const r = await run("powershell", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", HIDE_HOST_SCRIPT(pid),
+    ]);
+    if (r.code !== 0) {
+      log("hideHost failed:", r.err || r.out);
+      return 0;
+    }
+    hiddenHostWindows = r.out.trim().split(",").filter((s) => s && s !== "0");
+    if (hiddenHostWindows.length) {
+      // 等最小化动画播完再抓屏 —— 动画期间抓会拿到半透明/中间态的窗口，
+      // 那比"有没有 GUI"更难看出问题（画面看着正常，其实糊了一层）。
+      await new Promise((res) => setTimeout(res, HIDE_SETTLE_MS));
+    }
+    return hiddenHostWindows.length;
+  } catch (e) {
+    log("hideHost error:", e && e.message);
+    return 0;
+  }
+}
+
+/** 恢复那些被我们最小化的宿主窗口（没让位过则 no-op）。 */
+async function restoreHost() {
+  if (!hiddenHostWindows.length) return;
+  const ids = hiddenHostWindows.join(",");
+  hiddenHostWindows = [];
+  try {
+    await run("powershell", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", RESTORE_HOST_SCRIPT(ids),
+    ]);
+  } catch (e) {
+    log("restoreHost error:", e && e.message);
+  }
+}
+
+/** 最小化动画的等待时长。太短会抓到中间态，太长则用户干等。 */
+const HIDE_SETTLE_MS = 380;
+
+/** 枚举宿主进程的可见顶层窗口并最小化（纯 ASCII —— PowerShell 5.1 按 GBK 读脚本）。 */
+function HIDE_HOST_SCRIPT(pid) {
+  return `
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public class HostWin {
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+
+  public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
+  const int GWL_EXSTYLE = -20;
+  const int WS_EX_TOOLWINDOW = 0x00000080;
+  const int SW_MINIMIZE = 6;
+
+  static uint target;
+  static List<IntPtr> found;
+
+  public static string Hide(uint pid) {
+    target = pid;
+    found = new List<IntPtr>();
+    EnumWindows(new EnumWindowsProc(Cb), IntPtr.Zero);
+    var ids = new List<string>();
+    foreach (var h in found) {
+      ShowWindow(h, SW_MINIMIZE);
+      ids.Add(h.ToInt64().ToString());
+    }
+    return ids.Count == 0 ? "0" : string.Join(",", ids);
+  }
+
+  static bool Cb(IntPtr h, IntPtr l) {
+    uint pid;
+    GetWindowThreadProcessId(h, out pid);
+    if (pid != target) return true;
+    if (!IsWindowVisible(h)) return true;
+    if (IsIconic(h)) return true;
+    int ex = GetWindowLong(h, GWL_EXSTYLE);
+    if ((ex & WS_EX_TOOLWINDOW) != 0) return true;
+    found.Add(h);
+    return true;
+  }
+}
+'@
+[HostWin]::Hide(${pid})
+`;
+}
+
+/** 恢复指定的窗口句柄（SW_RESTORE）。 */
+function RESTORE_HOST_SCRIPT(ids) {
+  return `
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public class HostRestore {
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  const int SW_RESTORE = 9;
+
+  public static int Restore(string ids) {
+    int n = 0;
+    foreach (var s in ids.Split(',')) {
+      long v;
+      if (!long.TryParse(s, out v)) continue;
+      ShowWindow(new IntPtr(v), SW_RESTORE);
+      n++;
+    }
+    return n;
+  }
+}
+'@
+[HostRestore]::Restore('${ids}')
+`;
+}
+
 // ── 抓屏 ─────────────────────────────────────────────────────────────
 
 function run(cmd, args, opts = {}) {
@@ -617,11 +778,24 @@ async function mcpCapture(args = {}) {
   const idx = Number.isInteger(args.monitor) && args.monitor >= 0 ? args.monitor : 0;
   const which = idx === 0 ? "primary" : `screen:${idx}`;
 
+  // 是否让开位置：**调用方可显式指定**（AI 工具的 clearScreen 参数），
+  // 不指定则跟随插件设置。让 AI 自己决定是有意的 —— 它可能知道用户正在看 GUI
+  // （那就别打扰），也可能正是要截 GUI 后面的东西（那就必须让开）。
+  // 这条路径没有 overlay 遮挡，所以**抓完立即恢复**。
+  const shouldHide = args.clearScreen === undefined
+    ? clearScreenEnabled()
+    : args.clearScreen === true;
+  const hidden = shouldHide ? await hideHost() : 0;
+
   let shot;
-  if (IS_MAC) {
-    shot = await captureMac(out, "");   // mac 全屏（-x 静音）
-  } else {
-    shot = await captureWindows(out, which);
+  try {
+    if (IS_MAC) {
+      shot = await captureMac(out, "");   // mac 全屏（-x 静音）
+    } else {
+      shot = await captureWindows(out, which);
+    }
+  } finally {
+    if (hidden) await restoreHost();      // 抓屏失败也要还回去，否则 GUI 卡在最小化
   }
   if (!shot) return { cancelled: true };
 
@@ -679,7 +853,7 @@ async function mcpCapture(args = {}) {
  * 请求宿主开 overlay 显示冻结图（本进程开不了窗口）。
  * `mode === "window"` 时 overlay 走"悬停选窗口"而不是"拖框选区域"。
  */
-function overlayHostActions(prep, mode) {
+function overlayHostActions(prep, mode, restoreOnClose = false) {
   return [{
     kind: "open-overlay",
     payload: {
@@ -687,6 +861,11 @@ function overlayHostActions(prep, mode) {
       params: `port=${actualPort()}&token=${prep.token}${mode === "window" ? "&mode=window" : ""}`,
       // 开在**冻结图所属的那块显示器**上；多屏下错开会让坐标对不上
       ...(prep.monitor !== undefined ? { monitor: prep.monitor } : {}),
+      // 让位过的，请宿主在**关闭 overlay 时**回来敲 /restore-host 把窗口还回去。
+      // 为什么不让宿主直接 unminimize 自己：让位时最小化的是**该进程的全部可见
+      // 窗口**（主窗 + 浮窗，插件分不清哪个是主窗），宿主的前端 API 只能操作
+      // 自己那个窗口 → 句柄列表在进程手里，恢复也得由进程做。
+      ...(restoreOnClose ? { restoreHostOnClose: true, hostPort: actualPort() } : {}),
     },
   }];
 }
@@ -766,12 +945,25 @@ const server = http.createServer(async (req, res) => {
         switch (tool) {
           // 全屏/指定显示器的截图
           case "fullscreen":
-            return json(res, 200, { ok: true, ...(await mcpCapture({ monitor: args.monitor })) });
+            return json(res, 200, {
+              ok: true,
+              // ⚠️ clearScreen 必须透传 —— 漏掉它的话 mcpCapture 里
+              // `args.clearScreen === undefined` 成立，会**回落成设置默认值**，
+              // 于是 AI 显式传的 false 被静默忽略（想不打扰却还是最小化了窗口）。
+              ...(await mcpCapture({
+                monitor: args.monitor,
+                clearScreen: args.clearScreen,
+              })),
+            });
           // 指定区域的截图
           case "region":
             return json(res, 200, {
               ok: true,
-              ...(await mcpCapture({ monitor: args.monitor, region: args.region })),
+              ...(await mcpCapture({
+                monitor: args.monitor,
+                region: args.region,
+                clearScreen: args.clearScreen,
+              })),
             });
           default:
             return json(res, 404, { ok: false, error: `未知工具: ${tool}` });
@@ -792,13 +984,22 @@ const server = http.createServer(async (req, res) => {
       }
       const cmd = body.command;
 
-      // Windows 上"区域"与"窗口"都要先冻结抓屏、再交给 overlay 交互
+      // Windows 上"区域"与"窗口"都要先冻结抓屏、再交给 overlay 交互。
+      // 让位在抓屏**之前** —— 抓屏在进程侧，所以让位也在这里（面板触发时 iframe
+      // 直接调本进程，绕过宿主 JS，只有放这里三条路径才统一）。
+      // 这两个模式**不在返回前恢复**：overlay 还开着，让宿主在关闭它时回来敲
+      // /restore-host（见 overlayHostActions 的 restoreHostOnClose）。
       if ((cmd === "region" || cmd === "window") && IS_WIN) {
+        const hidden = await hideHost();
         const prep = await prepareRegion({ windows: cmd === "window" });
-        return json(res, 200, { ok: true, host: overlayHostActions(prep, cmd) });
+        return json(res, 200, { ok: true, host: overlayHostActions(prep, cmd, hidden > 0) });
       }
-      // mac 的区域/窗口走系统原生交互；全屏直接抓
+      // mac 的区域/窗口走系统原生交互；全屏直接抓。
+      // 全屏与 mac 都要让位 → 抓 → **立即恢复**：这条路径没有 overlay 遮挡，
+      // 抓完就该把窗口还回去（否则要等下一次命令才恢复）。
+      const hidden = await hideHost();
       const shot = await captureDirect(cmd === "window" ? "window" : cmd === "region" ? "region" : "fullscreen");
+      if (hidden) await restoreHost();
       if (shot.cancelled) return json(res, 200, { ok: true, cancelled: true });
       return json(res, 200, { ok: true, shot, host: deliverActions(shot) });
     }
@@ -817,6 +1018,13 @@ const server = http.createServer(async (req, res) => {
         "Access-Control-Allow-Origin": "*",
       });
       return res.end(buf);
+    }
+
+    // 宿主关闭 overlay 时来敲 —— 把让位时最小化的窗口还回去。
+    // 句柄列表在进程内存里（让位时记的），所以恢复只能由进程做；宿主只负责时机。
+    if (route === "/restore-host" && req.method === "POST") {
+      await restoreHost();
+      return json(res, 200, { ok: true });
     }
 
     // 可选窗口列表（overlay 的窗口模式用）—— 坐标已转成**冻结图内**坐标
