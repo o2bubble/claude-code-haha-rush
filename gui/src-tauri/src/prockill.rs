@@ -388,27 +388,69 @@ fn process_loads_module_under(pid: u32, base_norm: &str) -> bool {
     }
 }
 
-/// Kill **orphaned** plugin processes: parent PID no longer exists AND cwd is
+/// 判断一个进程是不是本 GUI（命令行情包含自己 exe 的文件名）。
+/// 插件的**合法父进程只可能是 GUI** —— 这条性质是下面孤儿判定成立的基础。
+///
+/// 用 `current_exe` 的文件名而非硬编码字符串：与 `count_sibling_instances` 同款，
+/// 改名/多版本共存时也正确。`needle` 由调用方预先算好（避免循环里重复取 exe 路径）。
+fn is_gui_process(cmdline: &str, needle: &str) -> bool {
+    !needle.is_empty() && cmdline.to_ascii_lowercase().contains(needle)
+}
+
+/// 这个进程是不是**孤儿插件进程**（该杀）。
+///
+/// 抽成纯函数是为了能测 —— 这里曾经的真 bug 不在"匹配"而在**判据选错**：
+/// 用「父 PID 是否存在于活进程表」代替「父进程是不是 GUI」，被 PID 复用骗过。
+///
+/// `gui_pids` 是**活着的 GUI 进程**的 PID 集合（不是"所有活进程"）。
+fn is_orphan_plugin_process(
+    ppid: u32,
+    cwd: &str,
+    gui_pids: &std::collections::HashSet<u32>,
+    plugins_root_norm: &str,
+) -> bool {
+    // 父进程是活着的 GUI → 这是它在用的插件进程，绝不能动
+    if gui_pids.contains(&ppid) {
+        return false;
+    }
+    // cwd 不在插件根下 → 与插件无关（可能是别的 node 程序）
+    norm_dir(cwd).starts_with(plugins_root_norm)
+}
+
+/// Kill **orphaned** plugin processes: parent is NOT a running GUI AND cwd is
 /// inside `plugins_root`. Cleanup for processes whose GUI was force-killed /
 /// crashed / updated (bypassing RunEvent::Exit) — they hold their plugin dir
 /// hostage so uninstall fails with os error 32. Returns how many were killed.
 ///
-/// The two-way condition matters: a live GUI's own plugin process also has a
-/// cwd under plugins_root, but its parent is alive — never touched.
+/// ⚠️ **判据是"父进程是不是 GUI"，不是"父 PID 是否还存在"。**
+/// 后者看着更简单，但**会被 PID 复用骗过**：GUI 退出后它的 PID 很快被系统
+/// 分配给别的进程，于是 `live.contains(ppid)` 为真 → 把孤儿当成"GUI 的子进程"
+/// 放过。实测（2026-09-17）：这台机器上累积了 **8 组** git-viewer + screenshot
+/// 孤儿进程（从早上 08:38 到 14:18 每次 GUI 更新遗留一组），全都因为这个误判而
+/// 没被清理；其中 screenshot 的那组把插件目录 cwd 钉死，导致**卸载报「拒绝访问」**
+/// 且改名兜底也失败（cwd 句柄阻止 rename），用户界面里留下一个删不掉的空壳。
 pub fn kill_orphan_plugin_processes(plugins_root: &str) -> usize {
     let base = norm_dir(plugins_root);
     let procs = snapshot_processes();
-    let live: std::collections::HashSet<u32> = procs.iter().map(|(pid, _, _, _)| *pid).collect();
+    // 活着的 GUI 进程 PID 集合 —— 插件进程的父进程若在集合里，就是"正在服役"的
+    let needle = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_ascii_lowercase()))
+        .unwrap_or_else(|| "claude-code-gui".to_string());
+    let gui_pids: std::collections::HashSet<u32> = procs
+        .iter()
+        .filter(|(_, _, cmd, _)| is_gui_process(cmd, &needle))
+        .map(|(pid, _, _, _)| *pid)
+        .collect();
     let mut killed = 0usize;
     for (pid, ppid, _, cwd) in &procs {
         if *pid == std::process::id() {
             continue;
         }
-        if live.contains(ppid) {
-            continue; // parent alive — this is a running GUI's child
+        if !is_orphan_plugin_process(*ppid, cwd, &gui_pids, &base) {
+            continue;
         }
-        let cwd_n = norm_dir(cwd);
-        if cwd_n.starts_with(&base) {
+        {
             kill_process_tree(*pid);
             killed += 1;
         }
@@ -510,7 +552,64 @@ pub fn install_session_end_cleanup(callback: impl Fn() + Send + Sync + 'static) 
 
 #[cfg(test)]
 mod tests {
-    use super::norm_dir;
+    use super::{is_gui_process, is_orphan_plugin_process, norm_dir};
+
+    /// 🔴 **本测试锁的是一个真实事故**（2026-09-17）：
+    /// 孤儿判定若用「父 PID 是否存在于活进程表」，会被 **PID 复用**骗过 ——
+    /// GUI 退出后它的 PID 被系统分配给别的进程，孤儿子是被当成"GUI 的子进程"放过。
+    /// 实测累积了 **8 组**孤儿（git-viewer + screenshot 各 8 个），其中 screenshot
+    /// 那组把插件目录 cwd 钉死 → 卸载报「拒绝访问」、**改名兜底也失败**（cwd 句柄
+    /// 阻止 rename）→ 用户界面里留下一个删不掉、也重装不了的空壳。
+    ///
+    /// 判据必须是「**父进程是不是 GUI**」（gui_pids），不是「父 PID 是否存在」。
+    #[test]
+    fn orphan_detection_survives_pid_reuse() {
+        use std::collections::HashSet;
+        let root = norm_dir(r"C:\Users\X\AppData\plugins");
+        // 活着的 GUI 只有 1000
+        let gui_pids: HashSet<u32> = [1000u32].into_iter().collect();
+        let in_root = r"C:\Users\X\AppData\plugins\screenshot";
+
+        // ① 正在服役：父进程是活着的 GUI → **不杀**
+        assert!(
+            !is_orphan_plugin_process(1000, in_root, &gui_pids, &root),
+            "GUI 自己的插件进程绝不能被当孤儿杀掉"
+        );
+
+        // ② 真孤儿，且父 PID 已消失 → 杀
+        assert!(
+            is_orphan_plugin_process(9999, in_root, &gui_pids, &root),
+            "父进程不存在的插件进程是孤儿"
+        );
+
+        // ③ 🔴 关键用例：父 PID **被复用**给了别的进程（不在 gui_pids 里）——
+        //    旧实现（按"PID 是否存在"）会放过它，导致孤儿永久累积
+        assert!(
+            is_orphan_plugin_process(4242, in_root, &gui_pids, &root),
+            "父 PID 被复用给非 GUI 进程时，仍必须判为孤儿（这正是旧实现的漏洞）"
+        );
+
+        // ④ cwd 不在插件根下 → 与插件无关，不动
+        assert!(
+            !is_orphan_plugin_process(9999, r"C:\Users\X\projects\my-app", &gui_pids, &root),
+            "cwd 不在插件目录下的进程不该被杀"
+        );
+    }
+
+    #[test]
+    fn gui_process_match_uses_exe_name_not_pid_liveness() {
+        let needle = "claude-code-gui.exe";
+        // 真正的 GUI 进程
+        assert!(is_gui_process(r#""C:\app\claude-code-gui.exe""#, needle));
+        assert!(is_gui_process(r#""C:\Program Files (x86)\Claude Code Haha\claude-code-gui.exe" --flag"#, needle));
+        // 大小写不敏感（Windows 路径）
+        assert!(is_gui_process(r#""C:\APP\CLAUDE-CODE-GUI.EXE""#, needle));
+        // ⚠️ 关键：PID 被复用后的"假父进程"长这样 —— 它不是 GUI，必须判为"非 GUI"
+        assert!(!is_gui_process(r#""C:\Windows\System32\svchost.exe" -k netsvcs"#, needle));
+        assert!(!is_gui_process(r#""node" server.cjs"#, needle));
+        // needle 为空时一律 false（避免空串 contains 恒真把所有进程都当 GUI）
+        assert!(!is_gui_process("anything", ""));
+    }
 
     #[test]
     fn norm_dir_normalizes_case_separators_and_trailing_slash() {

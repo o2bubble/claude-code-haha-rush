@@ -186,8 +186,10 @@ for n, v in sorted(emb["components"].items()):
 —— 报错文案指向权限，**真因是目录不存在**。先 `mkdir -p` + `chmod 777`。
 
 **③ `workbench upload` 遇同名文件会交互式问覆盖**
-输出 `Overwrite? [y/N]`，非交互环境直接当"取消"→ 上传失败。
+输出 `Overwrite? [y/N]`，非交互环境直接当"取消"→ 上传失败（`upload canceled by user`）。
 → 每次上传前 `rm -rf` 目标目录，从干净状态开始。
+→ **或更简单：加 `-f`**（`--force` = Overwrite remote file without confirmation），
+   省掉一次 exec 调用。实测有效（2026-09-17 Windows 侧）。
 
 **④ `workbench` 输出含 Braille 进度字符（`⠋⠙⠹…`），Windows 控制台 GBK 会崩**
 `UnicodeDecodeError: 'gbk' codec can't decode byte 0x8b` / 打印时 `UnicodeEncodeError`。
