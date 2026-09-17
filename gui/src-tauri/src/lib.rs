@@ -4047,16 +4047,151 @@ async fn install_plugin_package(
 }
 
 /// 卸载插件: 杀该插件声明的后台进程 → 删除 plugins/<name>/ 目录。
+
+// ── 插件生命周期 hook（beforeUninstall）──────────────────────────────
+//
+// 卸载流程是「**先杀进程 → 再删目录**」，所以 hook 不能是"让插件进程自己跑"
+// —— 那一刻它已经死了。必须是**声明式脚本、由宿主执行**。
+//
+// 与更新组件的 `post_install`（update.rs）同一模式，但有两个关键差别：
+//
+// ① **用 bun / python 跑，不用 node**
+//    宿主安装包自带 bun（安装目录 `bun.exe`）与 python（`python/python.exe`），
+//    两者都已由 `prepend_tool_dirs` 前置进 PATH → **零前置条件**。
+//    而 node 要靠 `nodejs` **插件**提供 —— hook 是基础能力，不该依赖另一个插件。
+//
+// ② **失败绝不阻断卸载**
+//    刚修完"卸载不了"的坑（见 uninstall_plugin 的注释），不能因为 hook 写错、
+//    超时、或依赖缺失又让用户卸不掉。所有异常只 warn。
+//
+// 参数经**环境变量**传给脚本（不用命令行，避免引号/转义地狱，也给更多上下文）：
+//   CLAUDE_PLUGIN_NAME      被卸载的插件名
+//   CLAUDE_PLUGIN_DIR       插件目录（**即将被删除**，脚本应只读它）
+//   CLAUDE_PLUGIN_DATA_DIR  插件数据目录（宿主管理，卸载时自动清；脚本可提前处理）
+//   CLAUDE_PLUGIN_WORKSPACE 当前工作区（可能为空）
+const HOOK_TIMEOUT_SECS: u64 = 15;
+
+/// 选解释器：bun 优先（安装目录自带），其次 python（自带），最后 PATH 里的。
+/// 返回 (exe, 额外参数)。缺失时返回 None（调用方 warn 后跳过 hook）。
+fn pick_hook_interpreter(install_dir: &std::path::Path, script: &str) -> Option<(std::path::PathBuf, Vec<String>)> {
+    let ext = std::path::Path::new(script)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_py = ext == "py";
+    let is_js = ext == "js" || ext == "mjs" || ext == "cjs";
+
+    let bun = if cfg!(target_os = "windows") { "bun.exe" } else { "bun" };
+    let py = if cfg!(target_os = "windows") { "python.exe" } else { "python3" };
+
+    if is_js {
+        // .js/.cjs/.mjs → bun run（bun 直接跑脚本，无需额外子命令）
+        let cand = install_dir.join(bun);
+        if cand.is_file() { return Some((cand, vec![])); }
+        return Some((std::path::PathBuf::from("bun"), vec![]));   // 交给 PATH
+    }
+    if is_py {
+        // .py → python（Windows 在 install_dir/python/，mac 在 python/bin/）
+        let cand = if cfg!(target_os = "windows") {
+            install_dir.join("python").join(py)
+        } else {
+            install_dir.join("python").join("bin").join(py)
+        };
+        if cand.is_file() { return Some((cand, vec![])); }
+        return Some((std::path::PathBuf::from(py), vec![]));
+    }
+    None   // 未知扩展名 → 不猜
+}
+
+/// 执行插件的 beforeUninstall hook。**任何失败只 warn，返回 Err 供调用方记日志。**
+fn run_uninstall_hook(
+    install_dir: &std::path::Path,
+    plugin_dir: &std::path::Path,
+    plugin_name: &str,
+    script_rel: &str,
+) -> Result<(), String> {
+    let script = plugin_dir.join(script_rel);
+    if !script.is_file() {
+        return Err(format!("hook 脚本不存在: {}", script.display()));
+    }
+    let (exe, extra) = pick_hook_interpreter(install_dir, script_rel)
+        .ok_or_else(|| format!("hook 脚本扩展名不支持（只认 .js/.cjs/.mjs/.py）: {script_rel}"))?;
+
+    log::info!("uninstall_plugin: running hook {script_rel} via {}", exe.display());
+    let mut cmd = Command::new(&exe);
+    cmd.arg(&script);
+    for a in &extra { cmd.arg(a); }
+    cmd.current_dir(plugin_dir);
+    cmd.env("CLAUDE_PLUGIN_NAME", plugin_name);
+    cmd.env("CLAUDE_PLUGIN_DIR", plugin_dir.to_string_lossy().to_string());
+    cmd.env("CLAUDE_PLUGIN_DATA_DIR", plugin_data_dir(install_dir, plugin_name).to_string_lossy().to_string());
+    let wd = crate::settings::bound_work_dir();
+    if !wd.is_empty() { cmd.env("CLAUDE_PLUGIN_WORKSPACE", wd); }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("启动 hook 失败: {e}"))?;
+
+    // 超时：到点就杀（不能让它挂住卸载流程）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(HOOK_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    log::info!("uninstall_plugin: hook {script_rel} ok");
+                    return Ok(());
+                }
+                return Err(format!("hook 退出码 {status}"));
+            }
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    return Err(format!("hook 超时（>{HOOK_TIMEOUT_SECS}s），已终止"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+            Err(e) => return Err(format!("等待 hook 失败: {e}")),
+        }
+    }
+}
+
+/// 插件数据目录（宿主管理；卸载时自动清空）。
+/// 与 plugins-settings 同级放在 app_data_dir 下，便于统一清理。
+fn plugin_data_dir(install_dir: &std::path::Path, plugin: &str) -> std::path::PathBuf {
+    install_dir.join("plugins-data").join(plugin)
+}
+
 /// 前端卸载后调 reloadPlugins 重扫, 面板/命令即消失。
 /// process_ids: 前端从 manifest.processes[].id 取（**裸名**, 如 "git-viewer-server"——
 /// 与 registry 实际注册 id 一致; 曾按 `plugin:<name>:` 前缀过滤, 与裸名不匹配 → 进程
 /// 没被杀 → Windows 文件占用删目录失败「另一个程序正在使用此文件」, 用户实测）。
+/// 卸载结果（前端据此决定是否提示"需要重启"）。
+#[derive(serde::Serialize)]
+struct UninstallOutcome {
+    /// 是否真的卸载了（false = 本来就没装，幂等）
+    removed: bool,
+    /// 插件声明了"卸载后需重启才生效" → 前端提示用户
+    needs_restart: bool,
+    /// beforeUninstall hook 的问题（有值时前端可提示"清理未完全"，但不阻断）
+    hook_warning: Option<String>,
+}
+
+/// 插件可在 manifest 声明 `beforeUninstall`（脚本路径）与 `needsRestart: true`。
+/// 两者都由**前端**从 manifest 读出后传进来 —— Rust 侧不解析 manifest
+/// （插件目录即将被删，不必也不该在这里读它）。
 #[tauri::command]
 async fn uninstall_plugin(
     app: tauri::AppHandle,
     plugin_name: String,
     process_ids: Vec<String>,
-) -> Result<bool, String> {
+    before_uninstall_hook: Option<String>,
+    needs_restart: Option<bool>,
+) -> Result<UninstallOutcome, String> {
     if plugin_name.trim().is_empty() || plugin_name.contains(['/', '\\', '.', ':']) {
         return Err(format!("invalid plugin name: {plugin_name}"));
     }
@@ -4066,8 +4201,24 @@ async fn uninstall_plugin(
         .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"));
     let target = base.join("plugins").join(&plugin_name);
     if !target.exists() {
-        return Ok(false); // 未安装, 幂等
+        return Ok(UninstallOutcome { removed: false, needs_restart: false, hook_warning: None }); // 未安装, 幂等
     }
+    // ── beforeUninstall hook（**在杀进程之前**）──
+    // 放到杀进程前，插件还有机会做"需要活着"的事（发通知、断连接、刷盘）；
+    // 只清文件的 hook 在杀前跑也没问题。
+    // ⚠️ 失败只 warn，**绝不阻断卸载**（刚修完"卸载不了"的坑，不能因 hook 又卸不掉）。
+    let mut hook_warning: Option<String> = None;
+    if let Some(script) = before_uninstall_hook.as_deref().filter(|s| !s.trim().is_empty()) {
+        let install_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::env::temp_dir());
+        if let Err(e) = run_uninstall_hook(&install_dir, &target, &plugin_name, script) {
+            log::warn!("uninstall_plugin: beforeUninstall hook 未成功（不阻断卸载）: {e}");
+            hook_warning = Some(e);
+        }
+    }
+
     // 杀该插件的后台进程: 裸名 id（前端传） + 前缀约定兜底（兼容未来带命名空间的注册）。
     let prefix = format!("plugin:{plugin_name}:");
     let mut ids: Vec<String> = process_ids;
@@ -4141,8 +4292,53 @@ async fn uninstall_plugin(
             }
         }
     }
+    // ── 清宿主侧的插件残留（目录之外的东西）──
+    // 这两样**卸载时必须清**，否则重装后旧设置/旧数据会"借尸还魂"：
+    //   · plugins-settings/<name>.json（全局 + 工作区）—— 之前一直没清，是既有 bug
+    //   · plugins-data/<name>/（宿主管理的插件数据目录）
+    cleanup_plugin_residue(&app, &plugin_name);
+
     log::info!("Plugin uninstalled: {}", plugin_name);
-    Ok(true)
+    Ok(UninstallOutcome {
+        removed: true,
+        needs_restart: needs_restart.unwrap_or(false),
+        hook_warning,
+    })
+}
+
+/// 清宿主侧的插件残留（插件目录之外）。
+/// 失败只 warn —— 残留比"卸载不了"轻得多。
+fn cleanup_plugin_residue(app: &tauri::AppHandle, plugin: &str) {
+    let fname = format!("{plugin}.json");
+    // 全局设置
+    if let Ok(dir) = app.path().app_data_dir() {
+        let p = dir.join("plugins-settings").join(&fname);
+        if p.exists() {
+            match std::fs::remove_file(&p) {
+                Ok(()) => log::info!("uninstall_plugin: removed {}", p.display()),
+                Err(e) => log::warn!("uninstall_plugin: 清全局设置失败 {}: {e}", p.display()),
+            }
+        }
+        // 插件数据目录
+        let data = plugin_data_dir(&dir, plugin);
+        if data.exists() {
+            match std::fs::remove_dir_all(&data) {
+                Ok(()) => log::info!("uninstall_plugin: removed {}", data.display()),
+                Err(e) => log::warn!("uninstall_plugin: 清数据目录失败 {}: {e}", data.display()),
+            }
+        }
+    }
+    // 工作区设置（<workdir>/.claude/plugins-settings/<name>.json）
+    let wd = crate::settings::bound_work_dir();
+    if !wd.is_empty() {
+        let p = std::path::PathBuf::from(&wd).join(".claude").join("plugins-settings").join(&fname);
+        if p.exists() {
+            match std::fs::remove_file(&p) {
+                Ok(()) => log::info!("uninstall_plugin: removed {}", p.display()),
+                Err(e) => log::warn!("uninstall_plugin: 清工作区设置失败 {}: {e}", p.display()),
+            }
+        }
+    }
 }
 
 /// 验证市场插件包签名(Ed25519)。下载 zip 原始字节 + 拉 `<slug>/signature` 端点,
@@ -4891,4 +5087,48 @@ async fn note_apply_tag_mapping(
         }
     }
     notes::note_apply_tag_mapping(mappings)
+}
+
+
+#[cfg(test)]
+mod uninstall_hook_tests {
+    use super::pick_hook_interpreter;
+
+    /// 解释器选择：`.js/.cjs/.mjs` → bun，`.py` → python，其它 → None（不猜）。
+    ///
+    /// 为什么用 bun/python 而不是 node：宿主安装包**自带**这两个
+    /// （`bun.exe` + `python/python.exe`，且已由 prepend_tool_dirs 前置进 PATH），
+    /// 而 node 要靠 **nodejs 插件**提供 —— hook 是基础能力，不该依赖另一个插件。
+    #[test]
+    fn picks_bun_for_js_and_python_for_py() {
+        let dir = std::path::Path::new("C:/nonexistent-install-dir");
+        for s in ["cleanup.cjs", "cleanup.js", "cleanup.mjs"] {
+            let (exe, _) = pick_hook_interpreter(dir, s).unwrap_or_else(|| panic!("{s} 应可解析"));
+            let name = exe.file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+            assert!(name.starts_with("bun"), "{s} 应选 bun，实际 {name}");
+        }
+        for s in ["cleanup.py", "clean.py"] {
+            let (exe, _) = pick_hook_interpreter(dir, s).unwrap_or_else(|| panic!("{s} 应可解析"));
+            let name = exe.file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+            assert!(name.starts_with("python"), "{s} 应选 python，实际 {name}");
+        }
+    }
+
+    /// 大小写不敏感（用户可能写 `Cleanup.CJS`）
+    #[test]
+    fn extension_match_is_case_insensitive() {
+        let dir = std::path::Path::new("C:/nonexistent");
+        assert!(pick_hook_interpreter(dir, "Cleanup.CJS").is_some());
+        assert!(pick_hook_interpreter(dir, "CLEANUP.PY").is_some());
+    }
+
+    /// 🔴 **未知扩展名必须返回 None**，绝不能猜着用某个解释器跑 ——
+    /// 那等于让 manifest 决定"用什么程序执行什么文件"，是个提权面。
+    #[test]
+    fn unknown_extension_is_refused() {
+        let dir = std::path::Path::new("C:/nonexistent");
+        for s in ["cleanup.sh", "cleanup.bat", "cleanup.exe", "cleanup", "cleanup.txt", "cleanup.cmd"] {
+            assert!(pick_hook_interpreter(dir, s).is_none(), "{s} 不该被接受");
+        }
+    }
 }

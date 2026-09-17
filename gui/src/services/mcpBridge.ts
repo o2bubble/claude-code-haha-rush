@@ -811,9 +811,25 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
       }
       // 依赖反查 + 删除 + 重扫全部在 uninstallPlugin 单一入口（GUI 面板共用同一门）
       const { uninstallPlugin } = await import("./pluginRegistry");
-      await uninstallPlugin(pluginName);
+      const result = await uninstallPlugin(pluginName);
       addStatusMessage(`Plugin uninstalled: ${pluginName}`, "success");
-      return { uninstalled: true, pluginName };
+      // ⚠️ **不在这里弹重启确认** —— 重启是破坏性操作（会中断当前 AI 会话），
+      // 必须由**用户**决定。AI 代卸路径把它作为**结果字段**回给 AI，
+      // 由 AI 在对话里询问用户（与 app_relaunch 的 confirm 门同一原则）。
+      return {
+        uninstalled: true,
+        pluginName,
+        ...(result?.needsRestart
+          ? {
+              needsRestart: true,
+              note: "该插件声明卸载后需重启本应用才完全生效。请询问用户是否现在重启；" +
+                    "用户同意后再调用 app_relaunch（带 confirm:true）。",
+            }
+          : {}),
+        ...(result?.hookWarning
+          ? { cleanupWarning: result.hookWarning, note2: "卸载已完成，但插件的清理脚本没跑成功 —— 请如实告知用户清理可能不完整。" }
+          : {}),
+      };
     }
 
     case "plugin_set_status": {

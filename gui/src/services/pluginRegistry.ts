@@ -128,6 +128,24 @@ export interface PluginManifest {
   platforms: string[];
   /** 插件设置声明——设置面板按插件分组渲染。缺省 {} = 无设置。 */
   settings: PluginSettingsDecl;
+  /**
+   * 卸载前要执行的清理脚本（相对插件根的路径，如 "cleanup.cjs"）。
+   *
+   * 用途：插件在**插件目录之外**留下的东西（外部数据、系统资源、要通知的外部服务）
+   * 宿主无从知晓，只能由插件自己声明怎么清。
+   *
+   * 由宿主执行（插件进程那时可能已经死了）：`.js/.cjs/.mjs` 用 **bun**、
+   * `.py` 用 **python** —— 两者都是 GUI 安装包自带的运行时（零前置条件）。
+   * 参数经环境变量传入（`CLAUDE_PLUGIN_NAME` / `_DIR` / `_DATA_DIR` / `_WORKSPACE`）。
+   *
+   * ⚠️ **失败绝不阻断卸载**（只记 warn 并在结果里回报）—— 不能让 hook 写错就卸不掉。
+   */
+  beforeUninstall?: string;
+  /**
+   * 卸载后是否需要重启 GUI 才完全生效（如 hook 改了 PATH/环境变量、清了宿主进程
+   * 已加载的资源）。**只有声明了才提示用户** —— 大多数插件不需要，别打扰。
+   */
+  needsRestart?: boolean;
 }
 
 export type ParseResult = { ok: true; manifest: PluginManifest } | { ok: false; error: string };
@@ -267,10 +285,18 @@ export function parsePluginManifest(json: string, sourceDir: string): ParseResul
     : [];
   // 插件设置声明（VS Code contributes.configuration 心智, 设置面板按插件分组渲染）
   const settings = parsePluginSettings(raw.settings);
+  // 卸载 hook：只认"相对路径且不含 .. 穿越"的脚本名（与 runtimes.path 同款校验）。
+  // 非字符串/空/绝对路径/穿越 → 忽略（宁可不跑，也不让 manifest 指向插件目录之外）。
+  const rawHook = asString(raw.beforeUninstall);
+  const looksAbsolute =
+    !!rawHook && (rawHook.startsWith("/") || rawHook.startsWith("\\") || /^[a-zA-Z]:/.test(rawHook));
+  const hasTraversal = !!rawHook && rawHook.split(/[/\\]/).includes("..");
+  const beforeUninstall = rawHook && !looksAbsolute && !hasTraversal ? rawHook : undefined;
+  const needsRestart = raw.needsRestart === true;
 
   return {
     ok: true,
-    manifest: { pluginName, displayName, version, apiVersion, description, icon, contributes, processes, category, dependencies, installType, runtimes, platforms, settings },
+    manifest: { pluginName, displayName, version, apiVersion, description, icon, contributes, processes, category, dependencies, installType, runtimes, platforms, settings, beforeUninstall, needsRestart },
   };
 }
 
@@ -722,7 +748,16 @@ export function pluginEventTopic(pluginName: string, event: string): string {
  * 面板/MCP plugin_uninstall）必须走本函数，保证反查判定单一。
  * @throws Error 反查命中时（message 列出 dependents），调用方按普通失败展示
  */
-export async function uninstallPlugin(pluginName: string): Promise<void> {
+/** 卸载结果 —— 调用方据此决定是否提示"需要重启"。 */
+export interface UninstallResult {
+  removed: boolean;
+  /** 插件声明了 needsRestart → 提示用户（用户可以拒绝，那就下次自己重启） */
+  needsRestart: boolean;
+  /** beforeUninstall hook 没跑成（不阻断卸载，但要如实告诉用户"清理可能不完整"） */
+  hookWarning?: string;
+}
+
+export async function uninstallPlugin(pluginName: string): Promise<UninstallResult> {
   const { getSettings } = await import("../stores/settingsStore");
   const disabled = new Set(getSettings().disabledPlugins ?? []);
   const dependents = activeManifests
@@ -738,8 +773,15 @@ export async function uninstallPlugin(pluginName: string): Promise<void> {
   // 否则 node 进程持有文件句柄 → Windows「另一个程序正在使用此文件」删目录失败（用户实测）。
   const manifest = activeManifests.find((m) => m.pluginName === pluginName);
   const processIds = (manifest?.processes ?? []).map((p) => p.id);
-  await invoke("uninstall_plugin", { pluginName, processIds });
+  // 两个声明由前端从 manifest 读出后传给 Rust（Rust 不解析 manifest —— 那时目录即将被删）
+  const out = await invoke<UninstallResult>("uninstall_plugin", {
+    pluginName,
+    processIds,
+    beforeUninstallHook: manifest?.beforeUninstall ?? null,
+    needsRestart: manifest?.needsRestart ?? false,
+  });
   await reloadPlugins();
+  return out ?? { removed: true, needsRestart: false };
 }
 
 // ─── reloadPlugins — 插件重扫单一入口（App / FloatingApp / 插件市场共用）───

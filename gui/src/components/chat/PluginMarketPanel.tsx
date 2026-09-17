@@ -194,9 +194,12 @@ export default function PluginMarketPanel() {
     if (!confirm(i18nT("pluginMarket.uninstallConfirm", { name: pluginName }))) return;
     try {
       const { uninstallPlugin } = await import("../../services/pluginRegistry");
-      await uninstallPlugin(pluginName);
+      const { handleUninstallResult } = await import("../../services/pluginUninstallFlow");
+      const result = await uninstallPlugin(pluginName);
       addStatusMessage(i18nT("pluginMarket.uninstallSuccess"), "success");
       await refreshInstalled();
+      // 需要重启 / hook 没跑成 → 在这里提示（用户可拒绝重启）
+      await handleUninstallResult(result, i18nT, addStatusMessage);
     } catch (e: any) {
       addStatusMessage(`${i18nT("pluginMarket.uninstallFailed")}: ${e}`, "error");
     }
