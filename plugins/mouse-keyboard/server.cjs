@@ -241,6 +241,18 @@ let actionCount = 0;         // 本次进程生命周期内累计执行的动作
 const sessionStart = Date.now();
 let lastActivityAt = 0;
 
+/**
+ * 距上次操作多久还算"活跃"（指示窗据此显示「AI 操作中 / AI 空闲」）。
+ *
+ * ⚠️ **不能只看瞬时状态**（`currentAction !== ""`）：一批操作可能几百毫秒就跑完，
+ * 而指示窗**恰恰是操作做完才打开的**（`open-indicator` 随工具响应返回）——
+ * 于是窗口一出现就是"空闲"，用户看到鼠标在动、窗口却说「AI 空闲」，完全对不上。
+ * 实测用户报的就是这个：「指示器里一直显示 AI 空闲 啥意思」。
+ *
+ * 给一段活跃窗口：刚操作过的几秒内仍显示"操作中"，与实际观感一致。
+ */
+const ACTIVE_WINDOW_MS = 3000;
+
 function noteActivity(action, args) {
   lastActivityAt = Date.now();
   actionCount++;
@@ -1022,6 +1034,10 @@ const server = http.createServer(async (req, res) => {
         aborted,
         abortReason,
         currentAction,
+        // **活跃** = 有操作正在进行，或刚操作过（见 ACTIVE_WINDOW_MS）。
+        // 指示窗用它显示"操作中/空闲" —— 别让它自己看 currentAction 判断，
+        // 那玩意在窗口出现时早就空了（原因见 ACTIVE_WINDOW_MS 注释）。
+        active: !!currentAction || (lastActivityAt > 0 && Date.now() - lastActivityAt < ACTIVE_WINDOW_MS),
         log: activityLog.slice(-8).reverse(),      // 最近几条，新的在前
         count: actionCount,
         uptimeMs: Date.now() - sessionStart,

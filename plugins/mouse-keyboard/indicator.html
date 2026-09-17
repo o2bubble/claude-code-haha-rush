@@ -72,6 +72,12 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   #log div:first-child { color: var(--fg); }
+  /* 新出现的动作闪一下 —— 操作只有几百毫秒，光靠"内容变了"用户注意不到 */
+  #log div.fresh { animation: freshIn .7s ease-out; }
+  @keyframes freshIn {
+    0% { background: rgba(88, 196, 232, .30); }
+    100% { background: transparent; }
+  }
 
   #foot { color: var(--fg-dim); font-size: 10px; display: flex; gap: 6px; }
   kbd {
@@ -130,27 +136,58 @@
     try { parent.postMessage({ source: SOURCE, kind: kind, payload: payload }, "*"); } catch (e) {}
   }
 
+  /**
+   * 上次渲染的"指纹" —— 只有内容真的变了才重建 DOM。
+   *
+   * 为什么要这个：本页 250ms 轮询一次（操作只有几百毫秒，慢了就看不见变化），
+   * 而下面重建 logEl 是 `textContent="" + 逐条 append` —— 每 250ms 重来一次会**闪**。
+   * 指纹里用 `Math.floor(uptimeMs/1000)`（秒级）而不是原始毫秒，否则"运行时长的
+   * 数字"每秒变动 4 次，等于没比较。
+   */
+  var lastSig = "";
+  /** 上次渲染时最新动作的时间戳 —— 用来判断"有没有新动作"（见下面的 .fresh） */
+  var lastNewestT = 0;
+
   function render(s) {
     var busy = !!s.currentAction;
     var stopped = !!s.aborted;
 
-    dot.className = busy ? "busy" : (stopped ? "stopped" : "");
-    title.textContent = stopped ? "已停止" : (busy ? "AI 操作中" : "AI 空闲");
+    // 「忙/闲」用**进程侧的活跃判定**（s.active = 有操作在跑，或刚操作过几秒内），
+    // 不是瞬时的 currentAction —— 后者在窗口出现时早就空了，会一直显示"空闲"
+    // 而用户明明看到鼠标在动（用户报的就是这个困惑）。
+    var active = !!s.active;
+
+    // ⚠️ 关闭判定必须在"指纹相同就提前 return"**之前** —— 它依赖时间流逝，
+    // 而内容可能一直不变（画面静止时倒计时照跑）。放后面会被 return 跳过，窗口永不关闭。
+    if (!busy && !stopped) {
+      var idleFor = typeof s.lastActivityMs === "number"
+        ? s.lastActivityMs
+        : Date.now() - openedAt;   // 进程还没记录过任何操作（如只调过 screen_info）→ 按窗口年龄算
+      if (idleFor > IDLE_CLOSE_MS) { closeSelf(); return; }
+    }
+
+    // 内容没变就不重建 DOM（本页 250ms 轮询，重建 logEl 会闪）
+    var sig = JSON.stringify([s.currentAction, s.aborted, active, s.log, s.count,
+                              Math.floor((s.uptimeMs || 0) / 1000), s.hotkey]);
+    if (sig === lastSig) return;
+    lastSig = sig;
+
+    dot.className = stopped ? "stopped" : (active ? "busy" : "");
+    title.textContent = stopped ? "已停止" : (active ? "AI 操作中" : "AI 空闲");
     stopBtn.disabled = stopped;
 
-    // 窗口多半是"操作刚做完"才打开的（见 MIN_SHOW_MS 注释）—— 空闲时显示
-    // **刚才做了什么**，而不是"等待 AI 操作…"（那个读起来像还没开始）。
+    // 正在做 → "正在：xxx"；刚做完 → "刚完成：xxx"（窗口多半是操作做完才开的）。
     var last = (s.log && s.log[0]) ? s.log[0].text : "";
-    var justNow = s.lastActivityMs !== null && s.lastActivityMs !== undefined && s.lastActivityMs < 60000;
     curEl.textContent = stopped
       ? ("已急停（" + (s.abortReason || "原因未知") + "）")
-      : (busy ? s.currentAction
-        : (justNow && last ? "刚完成：" + last : "等待 AI 操作…"));
+      : (busy ? ("正在：" + s.currentAction)
+        : (last ? "刚完成：" + last : "等待 AI 操作…"));
     curEl.className = busy || stopped ? "" : "idle";
 
     if (s.hotkey) hkEl.textContent = s.hotkey;
 
-    // 最近动作（新的在前）
+    // 最近动作（新的在前）。最新那条若与上次渲染的不同 → 加 .fresh 闪一下
+    // （每次 DOM 重建都会重放动画，正是想要的"又有新动作了"提示）
     logEl.textContent = "";
     var items = (s.log || []).slice(0, 3);
     if (!items.length) {
@@ -158,33 +195,18 @@
       d.textContent = "（还没有动作）";
       logEl.appendChild(d);
     } else {
+      var newestT = items[0].t;
       for (var i = 0; i < items.length; i++) {
         var d = document.createElement("div");
+        if (i === 0 && newestT !== lastNewestT) d.className = "fresh";
         d.textContent = (i === 0 ? "› " : "  ") + items[i].text;
         logEl.appendChild(d);
       }
+      lastNewestT = newestT;
     }
 
     var secs = Math.round((s.uptimeMs || 0) / 1000);
     statEl.textContent = "累计 " + (s.count || 0) + " 个动作 · " + fmtDur(secs);
-
-    // ── 关闭判定 ──
-    // 用**进程侧**的"距上次操作多久"（s.lastActivityMs），不是本页自己数的
-    // "我上次看到 busy 是何时"。
-    //
-    // ⚠️ 这个区别是 bug 与修好的分界：本页每 600ms 才轮询一次，而一批操作可能几百
-    // 毫秒就跑完 —— 本页**根本轮询不到** currentAction 非空的那一瞬，于是它以为
-    // "一直空闲"，倒计时照跑，第二批操作做到一半窗口就淡出了（用户报的正是这个：
-    // "第二批操作中间就自动淡出了"）。
-    // 进程侧的 lastActivityAt 在**每次操作时**更新，与轮询节奏无关，所以可靠。
-    //
-    // 正在操作 / 急停 → 一定留着；否则看"距上次操作多久"。
-    if (!busy && !stopped) {
-      var idleFor = typeof s.lastActivityMs === "number"
-        ? s.lastActivityMs
-        : Date.now() - openedAt;   // 进程还没记录过任何操作（如只调过 screen_info）→ 按窗口年龄算
-      if (idleFor > IDLE_CLOSE_MS) closeSelf();
-    }
   }
 
   function fmtDur(sec) {
@@ -235,7 +257,9 @@
       });
   }
 
-  var timer = setInterval(tick, 600);
+  // 250ms：一批操作可能几百毫秒就跑完，600ms 会整批漏掉（用户看不到变化）。
+  // 本地回环 HTTP，4 次/秒的开销可忽略；DOM 重建有指纹去重，不会闪。
+  var timer = setInterval(tick, 250);
   tick();
 
   // 主题跟随（宿主推来）
