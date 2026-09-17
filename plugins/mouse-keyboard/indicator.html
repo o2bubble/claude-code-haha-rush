@@ -38,15 +38,10 @@
   /* 标题可被压缩（两个按钮 + 标题在 300px 里要放得下） */
   #title { font-weight: 600; font-size: 11.5px; white-space: nowrap; overflow: hidden; }
 
-  #stop {
-    -webkit-app-region: no-drag;        /* 按钮不参与拖窗 */
-    flex-shrink: 0; cursor: pointer;
-    font: inherit; font-size: 11px; padding: 2px 9px;
-    border-radius: 5px; border: 1px solid var(--danger);
-    background: rgba(226, 86, 79, .18); color: var(--danger);
-  }
-  #stop:hover:not(:disabled) { background: rgba(226, 86, 79, .32); }
-  #stop:disabled { opacity: .4; cursor: default; }
+  /* 锁定态：整块变成醒目的警示色边框 —— 用户必须一眼看出"现在键鼠被接管了"，
+     否则他会以为电脑卡了 */
+  body.locked { border-color: var(--danger); box-shadow: 0 0 0 1px rgba(226, 86, 79, .35); }
+  #dot.locked { background: var(--danger); animation: pulse 1.2s ease-in-out infinite; }
 
   /* 关闭按钮 —— 与「停止」语义**不同**：停止是停 AI 的操作，关闭只是收起这个窗口 */
   #close {
@@ -92,6 +87,7 @@
     font-family: inherit; font-size: 9.5px; padding: 0 3px;
     border: 1px solid var(--border); border-radius: 3px; color: var(--fg-dim);
   }
+  #esc kbd { color: var(--fg); border-color: var(--fg-muted); }
 </style>
 </head>
 <body>
@@ -99,7 +95,8 @@
   <span id="dot" class="busy"></span>
   <span id="title">AI 操作中</span>
   <span class="spacer"></span>
-  <button id="stop" title="立即停止 AI 的操作">■ 停止</button>
+  <!-- 没有「停止」按钮：AI 声明独占键盘时，用户的鼠标根本动不了 → 那个按钮
+       在最需要它的时刻恰恰点不到。中断统一走键盘（见下面的提示行）。 -->
   <button id="close" title="关闭此窗口（不影响 AI 的操作状态）">✕</button>
 </div>
 
@@ -110,7 +107,7 @@
 <div id="foot">
   <span id="stat">—</span>
   <span class="spacer"></span>
-  <span><kbd id="hk">—</kbd> 急停</span>
+  <span id="esc"><kbd>Ctrl+Q</kbd> 接管</span>
 </div>
 
 <script>
@@ -123,11 +120,9 @@
 
   var dot = document.getElementById("dot");
   var title = document.getElementById("title");
-  var stopBtn = document.getElementById("stop");
   var curEl = document.getElementById("current");
   var logEl = document.getElementById("log");
   var statEl = document.getElementById("stat");
-  var hkEl = document.getElementById("hk");
 
   /**
    * 距**最后一次操作**超过这么久 → 淡出。
@@ -177,27 +172,34 @@
     // 内容没变就不重建 DOM（本页 250ms 轮询，重建 logEl 会闪）。
     // ⚠️ 指纹要含 `ago(t)` 的结果而非原始 `t` —— 时间戳不变，但"5 秒前"会变成
     // "10 秒前"，不带上它列表里的时间就永远停在第一次渲染的样子。
+    // 锁定状态（AI 声明独占键鼠时）—— 用户必须一眼看出"现在不能操作"，
+    // 否则会以为电脑卡死。锁定时整窗变警示色边框 + 红点。
+    var locked = !!s.locked;
+    var lockRemainS = Math.max(0, Math.ceil((s.lockRemainMs || 0) / 1000));
+
     var sig = JSON.stringify([
-      s.currentAction, s.aborted, active, s.count,
-      Math.floor((s.uptimeMs || 0) / 1000), s.hotkey,
+      s.currentAction, s.aborted, active, s.count, locked, lockRemainS,
+      Math.floor((s.uptimeMs || 0) / 1000),
       (s.log || []).map(function (x) { return x.t + "|" + ago(x.t); }),
     ]);
     if (sig === lastSig) return;
     lastSig = sig;
 
-    dot.className = stopped ? "stopped" : (active ? "busy" : "");
-    title.textContent = stopped ? "已停止" : (active ? "AI 操作中" : "AI 空闲");
-    stopBtn.disabled = stopped;
+    document.body.className = locked ? "locked" : "";
+    dot.className = stopped ? "stopped" : (locked ? "locked" : (active ? "busy" : ""));
+    title.textContent = stopped ? "已停止"
+      : (locked ? "AI 独占中" : (active ? "AI 操作中" : "AI 空闲"));
 
     // 正在做 → "正在：xxx"；刚做完 → "刚完成：xxx"（窗口多半是操作做完才开的）。
     var last = (s.log && s.log[0]) ? s.log[0].text : "";
     curEl.textContent = stopped
       ? ("已急停（" + (s.abortReason || "原因未知") + "）")
-      : (busy ? ("正在：" + s.currentAction)
-        : (last ? "刚完成：" + last : "等待 AI 操作…"));
-    curEl.className = busy || stopped ? "" : "idle";
-
-    if (s.hotkey) hkEl.textContent = s.hotkey;
+      : (locked
+        ? ("键鼠已锁定（" + (s.lockScope === "both" ? "键盘+鼠标" : s.lockScope === "keyboard" ? "键盘" : "鼠标")
+           + "）· 剩 " + lockRemainS + "s")
+        : (busy ? ("正在：" + s.currentAction)
+          : (last ? "刚完成：" + last : "等待 AI 操作…")));
+    curEl.className = busy || stopped || locked ? "" : "idle";
 
     // 动作历史（新的在前），每条带**相对时间**。
     //
@@ -276,23 +278,24 @@
   // 设置里关掉「AI 操作时显示浮动指示窗」。
   document.getElementById("close").onclick = function () { closeSelf(); };
 
-  stopBtn.onclick = function () {
-    if (!API) return;
-    // 只管发停止请求 —— 窗口寿命由进程侧的 lastActivityAt 管：
-    // /abort 会让进程把 lastActivityAt 刷新到现在，于是窗口至少再留 IDLE_CLOSE_MS，
-    // 用户来得及看清"已停止"（不用在这里自己续命）。
-    fetch(API + "/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
-      .then(function (r) { return r.json(); })
-      .then(function () { tick(); })
-      .catch(function () {});
-  };
+  /** 上次向服务端续租约的时刻 —— 别每 250ms 都发一次。 */
+  var lastRenewAt = 0;
 
   function tick() {
     if (!API) { curEl.textContent = "缺少端口参数"; return; }
     fetch(API + "/activity")
       .then(function (r) { return r.json(); })
       .then(function (s) {
-        if (s && s.ok) render(s);
+        if (s && s.ok) {
+          render(s);
+          // 输入锁的租约续期：只在"锁着 + AI 确实在干活"时续。
+          // 服务端还会再校验一次活跃度（防伪造）——所以即使这里出错，锁也不会
+          // 被无限续下去（那是最坏的失败模式，见服务端 /lock/renew 注释）。
+          if (s.locked && s.active && Date.now() - lastRenewAt > 3000) {
+            lastRenewAt = Date.now();
+            fetch(API + "/lock/renew", { method: "POST" }).catch(function () {});
+          }
+        }
       })
       .catch(function () {
         // 插件进程没了（禁用/崩溃）→ 自己收起来，别留一个孤零零的窗口

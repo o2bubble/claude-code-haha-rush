@@ -74,7 +74,6 @@ const IS_WIN = process.platform === "win32";
 // ⚠️ 宿主侧 `getCachedPluginSettings` 可能是 `{}`（用户没打开过本插件的设置页
 // 时），所以这里的缺省值必须能独立工作。
 let settings = {
-  abortHotkey: "ctrl+alt+shift+f12",
   smoothMoveMs: 400,
   typeDelayMs: 4,
   blockHostWindows: true,
@@ -131,6 +130,25 @@ if (IS_WIN) {
       return { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top };
     };
   });
+
+  // ── 输入锁定用的低级钩子（见"输入锁定"一节）──
+  //
+  // WH_KEYBOARD_LL / WH_MOUSE_LL 是**唯一不需要注入 DLL、也不需要管理员权限**的钩子
+  // （回调在安装它的进程里执行，系统只是把事件转过来）。实测在普通权限下能装上并
+  // 收到事件、能区分物理/注入（LLKHF_INJECTED）。
+  bind("setWindowsHookEx", () => user32.func("void* SetWindowsHookExW(int idHook, void* lpfn, void* hMod, uint32 dwThreadId)"));
+  bind("unhookWindowsHookEx", () => user32.func("bool UnhookWindowsHookEx(void* hhk)"));
+  bind("callNextHookEx", () => user32.func("intptr_t CallNextHookEx(void* hhk, int nCode, uintptr_t wParam, intptr_t lParam)"));
+  bind("peekMessage", () => {
+    const MSG = koffi.struct("MSG", {
+      hwnd: "void*", message: "uint32", wParam: "uintptr_t", lParam: "intptr_t",
+      time: "uint32", ptX: "int32", ptY: "int32",
+    });
+    const fn = user32.func("bool PeekMessageW(_Out_ MSG* msg, void* hWnd, uint32 min, uint32 max, uint32 remove)");
+    const buf = {};
+    return () => fn(buf, null, 0, 0, 1 /* PM_REMOVE */);
+  });
+  bind("getModuleHandle", () => koffi.load("kernel32.dll").func("void* GetModuleHandleW(str16 name)"));
 
   // ── 自己实现滚轮（robotjs 的 scrollMouse 在本机实测**窗口收不到消息**）──
   //
@@ -270,6 +288,405 @@ function noteActivity(action, args) {
   if (activityLog.length > ACTIVITY_MAX) activityLog.shift();
 }
 
+// ── 输入锁定（低级钩子）────────────────────────────────────────────
+//
+// ## 为什么需要
+//
+// 用户报的：「AI 操作时如果用户也操作，互相抢夺，其实没法保证最终 AI 操作的结果」。
+// 确实 —— 鼠标只有一个，用户动一下就可能让 AI 的点击落到别处。用户要的解法：
+// **AI 提前声明"这个长操作别打扰我"，期间屏蔽用户的物理输入**。
+//
+// ## 为什么不用 BlockInput
+//
+// 实测 `BlockInput(TRUE)` **返回 false**（失败）：它要求调用线程是**前台线程**，
+// 而本插件是后台进程。所以只能走低级钩子。
+//
+// ## 为什么钩子比 BlockInput 安全得多
+//
+//   · 回调超过 LowLevelHooksTimeout（默认 300ms）没返回 → 系统**自动忽略该钩子**，
+//     事件照常传递（不会把用户键鼠锁死）
+//   · 进程退出/崩溃 → 系统**自动卸载**钩子
+//   这两条是"锁输入"这类功能能安全存在的前提。
+//
+// ## 怎么只锁用户、不锁 AI 自己
+//
+// 钩子回调里读 `LLKHF_INJECTED / LLMHF_INJECTED` 标志：
+//   · **物理**事件（用户操作）→ 吞掉（返回 1，不再传给目标窗口）
+//   · **注入**事件（AI 自己的 SendInput）→ 放行
+// 这是 BlockInput 做不到的（它不区分来源，会把 AI 自己也锁住）。
+//
+// ## 逃生门
+//
+// 锁定时用户按 **Ctrl+Q** → 立即解除锁定 + 完全停住 AI（沿用急停语义：需要用户
+// 在面板显式解除才能继续）。为什么必须留这个：锁输入如果因为任何意外没解开，
+// 用户的键鼠就"没反应"了 —— 必须有用户自己能按的出路。
+
+const WH_KEYBOARD_LL = 13;
+const WH_MOUSE_LL = 14;
+const HC_ACTION = 0;
+/** 键盘事件是"注入的"（SendInput）—— 见 KBDLLHOOKSTRUCT.flags */
+const LLKHF_INJECTED = 0x10;
+/** 鼠标事件是"注入的" */
+const LLMHF_INJECTED = 0x01;
+
+// 钩子回调 wParam（消息）常量。
+// ⚠️ 这几个**必须定义**：早期实现漏了，而回调里的 try/catch 会把 ReferenceError
+// 静默吞掉 —— 表现是"钩子装上了、事件计数也在涨，但逃生键永不触发"，日志里只有
+// 一行不易察觉的"键盘钩子异常"。回调里的这类错误特别隐蔽。
+const WM_KEYDOWN = 0x0100;
+const WM_KEYUP = 0x0101;
+const WM_SYSKEYDOWN = 0x0104;
+const WM_SYSKEYUP = 0x0105;
+
+/** 逃生键：Q（配合 Ctrl）。见文件头的"逃生门"说明。 */
+const ESCAPE_VK = 0x51;
+const VK_CONTROL = 0x11;
+
+/**
+ * 测试模式：把**注入**事件当成**物理**事件处理（即也吞掉）。
+ *
+ * 为什么需要：验证"物理事件被吞掉"必须有人真的按键 —— 而自动化测试只能发注入
+ * 事件（那些本该放行）。开了这个开关，注入事件也会被吞 → 用"目标窗口收不到"
+ * 就能验证吞掉逻辑真的生效。
+ */
+const TEST_SWALLOW_INJECTED = process.env.MK_TEST_SWALLOW_INJECTED === "1";
+
+/** 临时诊断：把钩子里看到的事件打出来（排查"逃生键不触发"这类问题用）。 */
+const DEBUG_HOOK = process.env.MK_DEBUG_HOOK === "1";
+
+// ── 租约（⚠️ 锁绝不能是永久的）──
+//
+// 锁忘了解除 = 用户键鼠全没反应 —— 这是这个功能最大的风险。所以锁是**租约**：
+//   · 最长 LOCK_LEASE_MS 后**自动解除**（无论 AI 在不在续）
+//   · AI 每次续期（heartbeat）把到期时间往后推
+//   · 即使续期全断（进程卡死/被杀/网络断），用户最多只被锁这么久
+//
+// 与"AI 死了怎么办"的关系：租约到期即解锁，所以**不需要**依赖任何一方活着。
+const LOCK_LEASE_MS = 10000;
+/** 租约剩余多少时该续期（AI 每批操作、以及指示窗轮询时都会顺带续） */
+const LOCK_RENEW_WITHIN_MS = 3000;
+
+/** 当前锁定状态（给 /activity、/status 与指示窗用）。 */
+const lockState = {
+  active: false, scope: "none", installed: false,
+  since: 0,        // 本次锁定开始的时刻
+  expiresAt: 0,    // 租约到期时刻 —— 到点自动解除
+};
+
+let hookProcs = null;     // koffi 回调（必须保引用，否则被 GC 掉 → 崩溃）
+let hooks = { kb: null, ms: null };
+let pumpTimer = null;
+let leaseTimer = null;
+
+/** 事件是否算"物理"（= 该被吞）。测试模式下注入事件也算物理。 */
+function isPhysicalEvent(flags, injectedBit) {
+  if (TEST_SWALLOW_INJECTED) return true;
+  return (flags & injectedBit) === 0;
+}
+
+/**
+ * Ctrl 键是否按下的两种判定 —— **用途不同，不能混用**。
+ *
+ * ① `escapeComboDownAsync()`：用 GetAsyncKeyState 现读。
+ *    只适用于**没装钩子**的时候（未锁定）。锁定期间被吞掉的按键**不会**进入系统的
+ *    键状态表，这个接口读不到 —— 早期实现就踩了这个坑：逃生键在锁定时完全失效。
+ *
+ * ② `ctrlDown`（由钩子自己跟踪）：锁定期间唯一可靠的来源。
+ *    钩子能拿到每一个物理按键消息，所以自己维护一份按下集合。
+ */
+function escapeComboDownAsync() {
+  if (!w32 || !w32.getAsyncKeyState) return false;
+  if (!(w32.getAsyncKeyState(ESCAPE_VK) & 0x8000)) return false;
+  // Ctrl 左右键的 vk 不同（0xA2/0xA3），一并查（只查 0x11 在某些键盘上会漏）
+  return (w32.getAsyncKeyState(VK_CONTROL) & 0x8000) !== 0
+      || (w32.getAsyncKeyState(0xA2) & 0x8000) !== 0
+      || (w32.getAsyncKeyState(0xA3) & 0x8000) !== 0;
+}
+
+/**
+ * 钩子活动计数（排查用）。
+ *
+ * 为什么留这个：钩子"没生效"和"生效了但判定错"从外面看起来一样（都是"输入没被吞"
+ * 或"逃生键不灵"），而日志里什么都不会有 —— 有这个计数器就能一眼区分：
+ * 计数涨了 = 钩子在跑；不涨 = 根本没收到事件（装错了/被系统忽略）。
+ */
+const hookStats = { kb: 0, ms: 0, escapes: 0 };
+
+/** 钩子跟踪的 Ctrl 按下集合（含左右键）；只在锁定期间维护。 */
+const ctrlDown = new Set();
+const CTRL_VKS = new Set([VK_CONTROL, 0xA2, 0xA3]);   // Control / LControl / RControl
+
+/** 钩子里更新 Ctrl 状态（keydown/keyup 都会走到）。 */
+function trackCtrl(vk, isKeyDown) {
+  if (!CTRL_VKS.has(vk)) return;
+  if (isKeyDown) ctrlDown.add(vk);
+  else ctrlDown.delete(vk);
+}
+
+/** 锁定期间判定逃生组合：钩子看到 Ctrl 按下（跟踪）+ 此刻按下的是 Q。 */
+function escapeComboDownInHook() {
+  return ctrlDown.size > 0;
+}
+
+/**
+ * 用户按下逃生键：解除锁定 + 急停。
+ *
+ * 语义是**完全停住**（不是暂停）：用户插手意味着桌面状态可能已经变了，
+ * 之前那批操作的前提不再成立 —— 继续执行是危险的（同"失败即停"的理由）。
+ */
+function triggerEscape() {
+  uninstallLock();
+  setAborted("用户按下 Ctrl+Q 强行接管");
+}
+
+/**
+ * 消息泵。
+ *
+ * ⚠️ 低级钩子的回调是在**安装钩子的线程**上、由系统投递消息触发的 —— 该线程必须
+ * 抽消息（PeekMessage/GetMessage）回调才会跑。Node 的事件循环**不抽 Win32 消息**，
+ * 所以必须自己轮询。
+ *
+ * 间隔取 4ms：钩子没及时响应时事件会延迟（最多这么多），但锁定期间用户的输入本来
+ * 就是被吞的，延迟只影响 AI 自己的注入事件 —— 4ms 对观感无影响。
+ */
+function startPump() {
+  if (pumpTimer || !w32 || !w32.peekMessage) return;
+  pumpTimer = setInterval(() => {
+    try {
+      // 抽空队列（一次 tick 多抽几次，避免进程忙碌时积压）
+      for (let i = 0; i < 32; i++) {
+        if (!w32.peekMessage()) break;
+      }
+    } catch (e) {
+      log("消息泵异常:", e && e.message);
+    }
+  }, 4);
+  if (pumpTimer.unref) pumpTimer.unref();   // 不阻止进程退出
+}
+
+function stopPump() {
+  if (pumpTimer) { clearInterval(pumpTimer); pumpTimer = null; }
+}
+
+/** 是否该锁键盘 / 鼠标。 */
+const wantsKeyboard = (scope) => scope === "keyboard" || scope === "both";
+const wantsMouse = (scope) => scope === "mouse" || scope === "both";
+
+/** 池化范围校验（AI 传进来的值）。 */
+function normalizeLockScope(v) {
+  // AI 常写 `lock: true` 表示"这次别打扰我" —— 等价于 both。
+  // 布尔比字符串省 token，且意图明确，所以两种都收。
+  if (v === true) return "both";
+  if (typeof v !== "string") return "none";
+  const s = v.trim().toLowerCase();
+  if (s === "keyboard" || s === "mouse" || s === "both") return s;
+  return "none";
+}
+
+/**
+ * 键盘钩子回调。
+ * ⚠️ 回调里绝不能抛异常 —— 会让钩子链断掉、输入行为不可预期。全部包 try。
+ */
+function onKeyboardEvent(nCode, wParam, lParam) {
+  try {
+    if (nCode === HC_ACTION && lockState.active && wantsKeyboard(lockState.scope)) {
+      const info = koffi.decode(lParam, "KBDLLHOOKSTRUCT");
+      if (isPhysicalEvent(info.flags, LLKHF_INJECTED)) {
+        // ⚠️ wParam 声明为 uintptr_t → koffi 传进来的是 **BigInt**（如 256n）。
+        // 直接跟数字常量比（256n === 256 为 false）会让 isKeyDown 永远不成立 ——
+        // 表现是"按键确实被吞了，但逃生键死活不触发"（实测踩到）。
+        hookStats.kb++;
+        const msg = Number(wParam);
+        const isKeyDown = msg === WM_KEYDOWN || msg === WM_SYSKEYDOWN;
+        const isKeyUp = msg === WM_KEYUP || msg === WM_SYSKEYUP;
+
+        // 自己跟踪 Ctrl —— 见 escapeComboDownAsync 注释（吞掉的键读不到键状态表）
+        if (isKeyDown) trackCtrl(info.vkCode, true);
+        else if (isKeyUp) trackCtrl(info.vkCode, false);
+
+        if (DEBUG_HOOK && hookStats.kb < 40) {
+          const isEsc = isKeyDown && info.vkCode === ESCAPE_VK && escapeComboDownInHook();
+          log(`[hook] vk=0x${Number(info.vkCode).toString(16)} down=${isKeyDown} up=${isKeyUp} ctrlAfter=${ctrlDown.size} isEscVk=${info.vkCode === ESCAPE_VK} esc=${isEsc}`);
+        }
+
+        // 逃生组合：Ctrl 跟踪为按下 + 此刻按下的是 Q → 接管（并把 Q 吞掉，
+        // 免得它落到当前前台应用里触发什么快捷键）
+        if (isKeyDown && info.vkCode === ESCAPE_VK && escapeComboDownInHook()) {
+          hookStats.escapes++;
+          log("用户按下 Ctrl+Q —— 接管");
+          triggerEscape();
+        }
+        return 1;   // 吞：不传下去
+      }
+    }
+  } catch (e) {
+    // 钩子里的异常很容易被忽略（日志里只有一行），但它会让**整个锁定失效**：
+    // 异常 → 走到下面的 callNextHookEx → 事件被放行（既不吞、也不检测逃生键）。
+    // 所以计入 stats（/activity 可见）并带上堆栈。
+    hookStats.kbErrors = (hookStats.kbErrors || 0) + 1;
+    if (hookStats.kbErrors <= 3) log("键盘钩子异常（锁定会失效！）:", (e && e.stack) || e);
+  }
+  return w32.callNextHookEx(hooks.kb, nCode, wParam, lParam);
+}
+
+/** 鼠标钩子回调（移动/点击/滚轮全部按需吞掉）。 */
+function onMouseEvent(nCode, wParam, lParam) {
+  try {
+    if (nCode === HC_ACTION && lockState.active && wantsMouse(lockState.scope)) {
+      const info = koffi.decode(lParam, "MSLLHOOKSTRUCT");
+      hookStats.ms++;
+      if (isPhysicalEvent(info.flags, LLMHF_INJECTED)) {
+        return 1;   // 吞掉用户的一切鼠标事件（含移动）
+      }
+    }
+  } catch (e) {
+    hookStats.msErrors = (hookStats.msErrors || 0) + 1;
+    if (hookStats.msErrors <= 3) log("鼠标钩子异常（锁定会失效！）:", (e && e.stack) || e);
+  }
+  return w32.callNextHookEx(hooks.ms, nCode, wParam, lParam);
+}
+
+/** 注册结构体与回调（只做一次）。 */
+function ensureHookProcs() {
+  if (hookProcs) return hookProcs;
+  koffi.struct("KBDLLHOOKSTRUCT", {
+    vkCode: "uint32", scanCode: "uint32", flags: "uint32", time: "uint32", dwExtraInfo: "uintptr_t",
+  });
+  koffi.struct("POINT", { x: "int32", y: "int32" });
+  koffi.struct("MSLLHOOKSTRUCT", {
+    pt: "POINT", mouseData: "uint32", flags: "uint32", time: "uint32", dwExtraInfo: "uintptr_t",
+  });
+  // ⚠️ 回调原型必须用 koffi.proto 定义（直接写字符串签名会报
+  // "Unexpected character '(' in type specifier"）；返回值必须是 intptr_t
+  const HOOKPROC = koffi.proto("intptr_t HOOKPROC(int nCode, uintptr_t wParam, intptr_t lParam)");
+  hookProcs = {
+    kb: koffi.register(onKeyboardEvent, koffi.pointer(HOOKPROC)),
+    ms: koffi.register(onMouseEvent, koffi.pointer(HOOKPROC)),
+  };
+  return hookProcs;
+}
+
+/**
+ * 锁定用户输入（AI 声明独占时调用）。
+ * @param scope "keyboard" | "mouse" | "both"
+ * @returns 成功锁定的范围（可能是 "none" —— 钩子装不上时如实返回）
+ */
+function installLock(scope) {
+  if (!IS_WIN || !w32 || !w32.setWindowsHookEx) return "none";
+  if (lockState.active) {
+    // 已在锁定：取并集（sequence 里嵌套调用时不会互相解锁）
+    if (scope === "both" || lockState.scope !== scope) lockState.scope = "both";
+    inLockDepth++;
+    return lockState.scope;
+  }
+  const procs = ensureHookProcs();
+  const hMod = w32.getModuleHandle ? w32.getModuleHandle(null) : null;
+  let ok = false;
+  if (wantsKeyboard(scope)) {
+    hooks.kb = w32.setWindowsHookEx(WH_KEYBOARD_LL, procs.kb, hMod, 0);
+    if (hooks.kb) ok = true;
+    else log("键盘钩子安装失败（锁定不生效）");
+  }
+  if (wantsMouse(scope)) {
+    hooks.ms = w32.setWindowsHookEx(WH_MOUSE_LL, procs.ms, hMod, 0);
+    if (hooks.ms) ok = true;
+    else log("鼠标钩子安装失败（锁定不生效）");
+  }
+  if (!ok) return "none";
+
+  lockState.active = true;
+  lockState.scope = scope;
+  lockState.installed = true;
+  // 清空 Ctrl 跟踪：装锁这一刻的状态是未知的（用户可能正按着 Ctrl），
+  // 保留旧值会让"下一个 Q"被误判成逃生组合
+  ctrlDown.clear();
+  lockState.since = Date.now();
+  lockState.expiresAt = Date.now() + LOCK_LEASE_MS;
+  inLockDepth = 1;
+  startPump();
+  startLeaseWatchdog();
+  log(`已锁定用户输入（${scope}，租约 ${LOCK_LEASE_MS / 1000}s）—— 逃生键 Ctrl+Q`);
+  return scope;
+}
+
+/**
+ * 租约续期（心跳）。
+ * 每批操作、以及指示窗轮询 /activity 时都会调 —— 两重来源，避免单点依赖。
+ */
+function renewLock() {
+  if (!lockState.active) return false;
+  lockState.expiresAt = Date.now() + LOCK_LEASE_MS;
+  return true;
+}
+
+/**
+ * 租约看门狗：到点自动解除。
+ *
+ * ⚠️ 这是"忘了解除"的**唯一兜底**，必须有。用定时器而不是"每次操作时检查"——
+ * 因为最坏情况恰恰是"没有任何操作了"（AI 进程卡死、宿主崩了、网络断了），
+ * 那种情况下没有东西会来触发检查。
+ */
+function startLeaseWatchdog() {
+  if (leaseTimer) return;
+  leaseTimer = setInterval(() => {
+    if (!lockState.active) { stopLeaseWatchdog(); return; }
+    if (Date.now() >= lockState.expiresAt) {
+      log(`锁定租约到期（${LOCK_LEASE_MS / 1000}s 未续期）→ 自动解除`);
+      uninstallLock(true);
+    }
+  }, 500);
+  if (leaseTimer.unref) leaseTimer.unref();
+}
+
+function stopLeaseWatchdog() {
+  if (leaseTimer) { clearInterval(leaseTimer); leaseTimer = null; }
+}
+
+/**
+ * 解除锁定。
+ * @param force true = 无视嵌套深度强制解除（租约到期、急停、进程退出时用）
+ */
+function uninstallLock(force = false) {
+  if (!lockState.active) return;
+  if (!force) {
+    inLockDepth = Math.max(0, inLockDepth - 1);
+    if (inLockDepth > 0) return;    // 还有嵌套的调用在锁着
+  }
+  try {
+    if (hooks.kb && w32.unhookWindowsHookEx) w32.unhookWindowsHookEx(hooks.kb);
+    if (hooks.ms && w32.unhookWindowsHookEx) w32.unhookWindowsHookEx(hooks.ms);
+  } catch (e) {
+    log("卸载钩子失败（进程退出时系统会自动清）:", e && e.message);
+  }
+  hooks.kb = null;
+  hooks.ms = null;
+  lockState.active = false;
+  lockState.scope = "none";
+  lockState.installed = false;
+  lockState.expiresAt = 0;
+  ctrlDown.clear();
+  inLockDepth = 0;
+  stopPump();
+  stopLeaseWatchdog();
+  log("已解除输入锁定");
+}
+
+/** 嵌套深度（sequence 内部的子动作不会再装/卸一次） */
+let inLockDepth = 0;
+
+/** 供 /activity、/status 用的快照。 */
+function lockSnapshot() {
+  return {
+    locked: lockState.active,
+    lockScope: lockState.scope,
+    lockedMs: lockState.active ? Date.now() - lockState.since : 0,
+    /** 距租约到期还有多久 —— 用户/调试都能看到"锁还剩几秒" */
+    lockRemainMs: lockState.active ? Math.max(0, lockState.expiresAt - Date.now()) : 0,
+    escapeKey: "Ctrl+Q",
+    hookEvents: { ...hookStats },
+  };
+}
+
 // ── 安全层 ────────────────────────────────────────────────────────
 
 /** AI 是否被急停（进程级状态，不自动恢复）。 */
@@ -288,6 +705,8 @@ function setAborted(reason) {
   if (aborted) return;
   aborted = true;
   abortReason = reason;
+  // 急停必解锁：用户要拿回控制权，锁着键鼠就本末倒置了（force=true 无视嵌套深度）
+  uninstallLock(true);
   // 刷新活动时间：指示窗用它决定何时淡出。用户刚按了停止，窗口至少再留
   // IDLE_CLOSE_MS（30 秒）让人看清"已停止"—— 否则会按"上次操作"的时间算，
   // 可能刚点完就消失。
@@ -319,56 +738,41 @@ function releaseAll() {
   heldKeys.clear();
 }
 
-// ── 急停轮询 ──────────────────────────────────────────────────────
+// ── 中断检查 ──────────────────────────────────────────────────────
 //
-// **只在有操作进行时**轮询（空闲时不占 CPU）。默认 ctrl+alt+shift+f12 —— 三修饰键
-// + F12 极少被别的软件占用，且用户单手可及。
+// 长操作（拖拽、长文本输入）在每个循环里调 `checkAbort()` —— 已急停就抛错打断。
 //
-// 为什么不用"注册全局热键"：那是 OS 进程级独占的，多开 GUI 时只有先注册的实例
-// 能用（用户正是因为这个把截屏热键改成了窗口内）。而**急停必须任何情况都能用**。
-
-/** 键名 → VK 码（只列急停可能用到的）。 */
-const VK = {
-  ctrl: 0x11, control: 0x11, alt: 0x12, shift: 0x10,
-  win: 0x5b,
-  f1: 0x70, f2: 0x71, f3: 0x72, f4: 0x73, f5: 0x74, f6: 0x75,
-  f7: 0x76, f8: 0x77, f9: 0x78, f10: 0x79, f11: 0x7a, f12: 0x7b,
-  escape: 0x1b, esc: 0x1b,
-};
-
-function parseHotkey(spec) {
-  const parts = String(spec || "").toLowerCase().split("+").map((s) => s.trim()).filter(Boolean);
-  const codes = [];
-  for (const p of parts) {
-    const vk = VK[p] ?? (/^[a-z]$/.test(p) ? p.toUpperCase().charCodeAt(0) : undefined);
-    if (vk === undefined) return null;   // 无法解析 → 急停禁用（面板会显示）
-    codes.push(vk);
-  }
-  return codes.length ? codes : null;
-}
-
-/** 急停组合当前是否被按住。 */
-function abortHotkeyDown() {
-  if (!w32) return false;
-  const codes = parseHotkey(settings.abortHotkey);
-  if (!codes) return false;
-  for (const vk of codes) {
-    // GetAsyncKeyState 高字节 = 当前是否按下。返回类型声明为 uint16，故直接比 0x8000。
-    if (!(w32.getAsyncKeyState(vk) & 0x8000)) return false;
-  }
-  return true;
-}
+// **用户的中断途径**（两条，都在本文件别处实现）：
+//   · 键盘 → Ctrl+Q，由输入锁定的钩子捕获（见 ESCAPE_VK / triggerEscape）
+//   · 鼠标 → 点指示窗的「停止」按钮（仅在未锁定时可点）
+//
+// 为什么**不用"注册全局热键"**：那是 OS 进程级独占的，多开 GUI 时只有先注册的
+// 实例能用（用户正是因为这个把截屏热键改成了窗口内）。钩子没有这个问题 ——
+// 每个实例各自装自己的。
 
 /**
- * 在长操作期间轮询急停；被按下则抛错中断。
+ * 在长操作期间轮询中断；已急停则抛错打断。
  *
  * 只在操作循环里调用（`drag` 的每一步、`type` 的每个字符）—— 短操作（一次点击）
  * 不需要，也来不及按。
+ *
+ * 用户的**中断途径**统一为 Ctrl+Q（锁定与否都有效）：
+ *   · 锁定期间 → 键盘钩子捕获（见 onKeyboardEvent，那里能拿到被吞的按键）
+ *   · 未锁定时 → 这里轮询（GetAsyncKeyState 在没装钩子时是可靠的）
+ * 两者都走 setAborted，效果一致。
  */
 function checkAbort() {
   if (aborted) throw new AbortError();
-  if (abortHotkeyDown()) {
-    setAborted("用户按下急停键");
+
+  // 长操作期间把租约往后推 —— 否则一个 30 秒的 sequence 会在中途租约到期、
+  // 用户输入突然恢复（正是要防止的"半路被插手"）。纯内存操作，代价可忽略。
+  if (lockState.active) renewLock();
+
+  // 逃生组合的**第二重检测**：锁定期间由钩子负责（那里能拿到被吞的按键）；
+  // 未锁定时没有任何东西被吞，GetAsyncKeyState 可靠，就在这里轮询。
+  // 两重覆盖完整：锁定 → 钩子；未锁定 → 这里。
+  if (!lockState.active && escapeComboDownAsync()) {
+    setAborted("用户按下 Ctrl+Q 强行接管");
     throw new AbortError();
   }
 }
@@ -1008,7 +1412,28 @@ const server = http.createServer(async (req, res) => {
           },
         });
       }
+      // ── 输入锁定（AI 声明独占时）──
+      // `lock` 是**整次调用**的属性：AI 在动手前声明"这个长操作别打扰我"。
+      // 见"输入锁定"一节的完整说明（为什么是租约、为什么用钩子而不是 BlockInput）。
+      const lockScope = normalizeLockScope(args.lock);
+      let lockJustInstalled = false;
+      if (lockScope !== "none") {
+        if (lockState.active) {
+          renewLock();                    // 已锁着 → 续期（AI 又发了一批，说明还在干）
+        } else {
+          const got = installLock(lockScope);
+          lockJustInstalled = got !== "none";
+          if (got === "none") {
+            log(`警告：锁不上输入（钩子安装失败），本次操作不独占（lock=${lockScope}）`);
+          }
+        }
+      }
+      // 无论是否声明 lock，只要锁是活的就续期 —— 保证"已经在锁"的任务不会因
+      // 某一批操作忘了带 lock 参数而被租约收走。**另外**指示窗轮询 /activity 也会续。
+      renewLock();
+
       const out = await runAction(args.action, args);
+
       // 收集插件请求的宿主动作。**sequence 的每步也要看** —— 里面可能有
       // `move_indicator`（那一步的 host 挂在 results 里，不上抛的话永远不会执行）。
       const collect = (o) => {
@@ -1017,13 +1442,39 @@ const server = http.createServer(async (req, res) => {
         if (Array.isArray(o.results)) for (const r of o.results) collect(r);
       };
       collect(out);
-      return json(res, 200, host.length ? { ...out, host } : out);
+
+      // 锁定状态一并回给 AI（它要据此知道用户是否已接管、还剩多少租约）
+      const extra = {};
+      const snap = lockSnapshot();
+      if (snap.locked || lockJustInstalled) {
+        extra.lock = {
+          scope: snap.lockScope,
+          remainMs: snap.lockRemainMs,
+          escapeKey: snap.escapeKey,
+          note: "用户按住 Ctrl+Q 可强行接管（届时本操作会立即停下，且需用户重新下指令）。",
+        };
+      }
+      return json(res, 200, { ...out, ...extra, ...(host.length ? { host } : {}) });
     }
 
     // 面板：急停
     if (route === "/abort" && req.method === "POST") {
       setAborted("用户在面板按下停止");
       return json(res, 200, { ok: true, aborted: true, reason: abortReason });
+    }
+    // 锁定租约续期（指示窗在 AI 活跃期间调）。
+    //
+    // ⚠️ **必须带"AI 真的活跃"这个门槛**，不能只因为有请求就续 —— 否则一个
+    // 卡住的页面/别的本地程序就能让锁永不过期，"忘了解锁自动解开"的兜底就废了。
+    // 判定用服务端自己的 lastActivityAt（进程在每次操作时更新），请求方无从伪造。
+    if (route === "/lock/renew" && req.method === "POST") {
+      const activeNow = !!currentAction
+        || (lastActivityAt > 0 && Date.now() - lastActivityAt < ACTIVE_WINDOW_MS);
+      if (!lockState.active || !activeNow) {
+        return json(res, 200, { ok: true, renewed: false, reason: lockState.active ? "AI 已不活跃" : "未锁定" });
+      }
+      renewLock();
+      return json(res, 200, { ok: true, renewed: true, remainMs: lockSnapshot().lockRemainMs });
     }
     // 面板：解除急停
     if (route === "/resume" && req.method === "POST") {
@@ -1038,6 +1489,10 @@ const server = http.createServer(async (req, res) => {
     // 指示窗轮询：既拿状态，也**借此证明自己还活着**（进程据此决定要不要
     // 重新请求开窗 —— 见 /__mcp 的处理）。
     if (route === "/activity" && (req.method === "GET" || req.method === "POST")) {
+      // ⚠️ **这个接口绝不能续期**（曾经加过，是个真 bug）：它是**只读**的状态查询，
+      // 而指示窗每 250ms 就轮询一次 —— 在这里 renew 会让租约**永远不过期**，
+      // "忘了解锁自动解开"的兜底直接失效（实测：remaining 恒为 10000ms 不减少）。
+      // 续期是**显式**行为，走独立的 /lock/renew（由指示窗在 AI 活跃时调）。
       const pos = mousePos();
       return json(res, 200, {
         ok: true,
@@ -1052,8 +1507,8 @@ const server = http.createServer(async (req, res) => {
         count: actionCount,
         uptimeMs: Date.now() - sessionStart,
         lastActivityMs: lastActivityAt ? Date.now() - lastActivityAt : null,
-        hotkey: settings.abortHotkey,
         mouse: pos,
+        ...lockSnapshot(),                          // locked / lockScope / lockRemainMs / escapeKey
       });
     }
 
@@ -1068,8 +1523,7 @@ const server = http.createServer(async (req, res) => {
         mouse: pos,
         heldKeys: [...heldKeys],
         heldButtons: [...heldButtons],
-        abortHotkey: settings.abortHotkey,
-        abortHotkeyValid: !!parseHotkey(settings.abortHotkey),
+        ...lockSnapshot(),
         blockHostWindows: settings.blockHostWindows !== false,
         hostPidKnown: !!Number(process.env.CLAUDE_PLUGIN_HOST_PID),
         platform: process.platform,
@@ -1154,20 +1608,26 @@ server.listen(requestedPort || DEFAULT_PORT, "127.0.0.1", () => {
   console.log(`PLUGIN_PORT=${actual}`);
   log(`listening on 127.0.0.1:${actual}; platform=${process.platform}; ` +
       `hostPid=${process.env.CLAUDE_PLUGIN_HOST_PID || "(未注入)"}; ` +
-      `abortHotkey=${settings.abortHotkey}`);
+      `escapeKey=Ctrl+Q`);
 });
 
 // ── 退出清理 ──────────────────────────────────────────────────────
 //
-// 无论怎么退出，都要把按下的键/按钮抬起来 —— 否则系统层面它们一直是按下的
-// （见 releaseAll 注释）。硬杀（宿主 prockill）走不到这里，由面板的「释放」兜底。
+// 无论怎么退出，都要做两件事：
+//   ① 把按下的键/按钮抬起来 —— 否则系统层面它们一直是按下的（见 releaseAll 注释）
+//   ② **解除输入锁定** —— 钩子虽然会随进程退出被系统自动卸载，但显式解开更明确
+//      （且正常退出的路径上应该立刻让用户恢复对键鼠的控制）
+// 硬杀（宿主 prockill）走不到这里：那种情况下钩子由系统自动清理，且租约到期也会
+// 兜底（见 LOCK_LEASE_MS）—— 两道保险都不依赖本进程活着。
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(sig, () => {
-    log(`收到 ${sig}，释放按键后退出`);
+    log(`收到 ${sig}，释放按键/解锁后退出`);
+    try { uninstallLock(true); } catch { /* 退出路径尽力而为 */ }
     releaseAll();
     process.exit(0);
   });
 }
 process.on("exit", () => {
-  try { releaseAll(); } catch { /* 退出路径上尽力而为 */ }
+  try { uninstallLock(true); } catch { /* 退出路径尽力而为 */ }
+  try { releaseAll(); } catch { /* 退出路径尽力而为 */ }
 });

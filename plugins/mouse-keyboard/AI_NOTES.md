@@ -21,6 +21,56 @@
 
 ## 故障模式
 
+### 0. 🔴 输入锁定（AI 独占键鼠）—— 四个坑
+
+AI 用工具参数 `lock` 声明独占时，插件用**低级钩子**（`WH_KEYBOARD_LL` / `WH_MOUSE_LL`）
+吞掉用户的**物理**输入，同时放行**注入**输入（`LLKHF_INJECTED` / `LLMHF_INJECTED` 标志区分）。
+逃生键 **Ctrl+Q**。改这块最容易踩的四处：
+
+#### ① 钩子回调里未定义的常量会被 try/catch 静默吞掉
+
+回调里用了 `WM_KEYDOWN` 等消息常量却没在文件里定义（只在测试脚本里有）→ 每次回调抛
+ReferenceError → 被 catch 吞掉 → 走到 `callNextHookEx` → **事件既不吞、也不检测逃生键**。
+表现极具迷惑性：钩子装上了、事件计数器还在涨、日志里只有一行"键盘钩子异常"。
+
+**所以**：回调的 catch 里必须 `log(完整堆栈)` **并把异常计入 stats**（`/activity` 的
+`hookEvents.kbErrors` 可见）—— 否则"锁定失效"会伪装成"什么都没发生"。
+
+#### ② 被吞掉的按键**读不到** `GetAsyncKeyState`
+
+逃生键早期实现是 `GetAsyncKeyState(Q) && GetAsyncKeyState(Ctrl)` —— 在锁定时**必然失效**，
+因为被钩子吞掉的键不会进入系统键状态表。
+**改法**：钩子自己跟踪 Ctrl 状态（keydown/keyup 维护一个 Set）。未锁定时没有钩子，
+才用 `GetAsyncKeyState`（`checkAbort` 里轮询）。
+
+#### ③ 续期绝不能挂在只读接口上
+
+`/activity` 是指示窗每 250ms 轮询的只读接口。曾经在里面 `renewLock()` → **租约永远不过期**
+（实测 `remaining` 恒为 10000ms 不减少），"忘了解锁自动解开"的兜底直接失效。
+**改法**：续期独立成 `/lock/renew`，且服务端**再校验一次"AI 真的在活跃"**（用进程自己的
+`lastActivityAt`，请求方无从伪造）。
+
+#### ④ 探针必须自证可用，否则"被吞"是假象
+
+验证"输入被吞"时我用裸 `SendInput`（只给 VK、无 scan code）发按键 —— 它**本来
+就进不去 tkinter**，于是"内容没变"被误读成"被吞了"。同理 robotjs 的 `keyTap` 也进不去
+那个窗口。**改法**：用**插件自己的 `type`/`click` 工具调用**当探针（测试模式下注入=物理，
+判定路径完全相同），并加一条**基线自检**（未锁定时探针必须能进）+ 一条**解锁后恢复**的对照。
+
+#### 其他事实（备查）
+
+- `BlockInput(TRUE)` **实测返回 false**（要求调用线程是前台线程）→ 不可用，且它不区分
+  输入来源、会把 AI 自己也锁住。低级钩子是唯一选择，且**失败方向安全**：回调超时
+  （`LowLevelHooksTimeout`）系统会忽略钩子、进程退出自动卸载。
+- 钩子回调在**安装它的线程**上执行，该线程必须抽 Win32 消息。Node 事件循环不抽 →
+  用 `setInterval(4ms)` 里 `PeekMessage(PM_REMOVE)` 手动抽（实测可行）。
+- 回调的 `wParam` 是 `uintptr_t`：koffi 这里给的是 **number**，但为稳妥仍应 `Number(wParam)`
+  后比较（不同 koffi 版本/平台上 64 位整数可能是 BigInt，`256n === 256` 为 false）。
+- 用户按键 `VK_CONTROL`(0x11) 在钩子里可能被规范化成 `VK_LCONTROL`(0xA2) / `VK_RCONTROL`(0xA3)
+  —— Ctrl 的判定要三个都认。
+- 吞掉鼠标事件**不能阻止光标移动**（光标由系统按原始输入移动，钩子只过滤消息）——
+  用户会觉得"光标能动但点不了东西"，所以指示窗必须显著提示，否则会被当成死机。
+
 ### 1. 装完 AI 看不到工具 / 调用报「未知工具」
 - **工具表在会话加载时刷新** → 装完/启用后**重开会话**（或让 AI 跑 `/mcp-refresh`）
 - 进程没起：`startOn: workspace_bound` —— **未绑工作区时进程不启动**
