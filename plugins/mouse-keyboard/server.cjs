@@ -308,6 +308,24 @@ function mousePos() {
   try { return robot.getMousePos(); } catch { return null; }
 }
 
+/**
+ * 解析目标坐标 —— 支持**绝对**（x/y）与**相对**（dx/dy，相对当前位置）两种写法。
+ *
+ * 为什么要有相对坐标：AI 经常只想"往右挪一点再点"，用绝对坐标就得先查一次
+ * `screen_info` 拿到当前位置再算 —— 多一轮工具调用（1~3 秒）。给 dx/dy 就省掉了。
+ *
+ * @returns `{x, y}` 绝对坐标；两者都没给返回 null（= 用当前位置）。
+ */
+function resolveTarget(args) {
+  const hasAbs = Number.isFinite(Number(args.x)) && Number.isFinite(Number(args.y));
+  if (hasAbs) return { x: Math.round(Number(args.x)), y: Math.round(Number(args.y)) };
+  const hasRel = Number.isFinite(Number(args.dx)) || Number.isFinite(Number(args.dy));
+  if (!hasRel) return null;
+  const cur = mousePos();
+  if (!cur) throw new Error("需要相对坐标（dx/dy）但读不到当前鼠标位置");
+  return { x: cur.x + Math.round(Number(args.dx) || 0), y: cur.y + Math.round(Number(args.dy) || 0) };
+}
+
 function actScreenInfo() {
   let displays = [];
   try { displays = robot.getDisplays() || []; } catch (e) { log("getDisplays 失败:", e && e.message); }
@@ -326,28 +344,27 @@ function actScreenInfo() {
 }
 
 function actMove(args) {
-  const x = Math.round(Number(args.x)), y = Math.round(Number(args.y));
-  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("move 需要数字 x / y");
+  const t = resolveTarget(args);
+  if (!t) throw new Error("move 需要 x/y（绝对）或 dx/dy（相对当前位置）");
   if (args.smooth) {
-    robot.moveMouseSmooth(x, y, Number(args.speed) || 3);
+    robot.moveMouseSmooth(t.x, t.y, Number(args.speed) || 3);
   } else {
-    robot.moveMouse(x, y);
+    robot.moveMouse(t.x, t.y);
   }
   const after = mousePos();
-  const ok = after && Math.abs(after.x - x) <= 2 && Math.abs(after.y - y) <= 2;
+  const ok = after && Math.abs(after.x - t.x) <= 2 && Math.abs(after.y - t.y) <= 2;
   return {
     ok: true,
-    movedTo: { x, y },
+    movedTo: t,
     actual: after,
-    ...(ok ? {} : { warning: `鼠标未到达目标位置（期望 ${x},${y}，实际 ${after ? `${after.x},${after.y}` : "未知"}）—— 可能被系统拦截（目标窗口权限更高？）` }),
+    ...(ok ? {} : { warning: `鼠标未到达目标位置（期望 ${t.x},${t.y}，实际 ${after ? `${after.x},${after.y}` : "未知"}）—— 可能被系统拦截（目标窗口权限更高？）` }),
   };
 }
 
 function actClick(args) {
   const btn = (args.button === "right" || args.button === "middle") ? args.button : "left";
-  if (Number.isFinite(Number(args.x)) && Number.isFinite(Number(args.y))) {
-    robot.moveMouse(Math.round(Number(args.x)), Math.round(Number(args.y)));
-  }
+  const t = resolveTarget(args);   // null = 不给坐标，点当前位置
+  if (t) robot.moveMouse(t.x, t.y);
   const before = mousePos();
   robot.mouseClick(btn, !!args.double);
   return { ok: true, clicked: btn, double: !!args.double, at: before };
@@ -509,6 +526,159 @@ function actType(args) {
   return { ok: true, chars: typed, textLength: text.length };
 }
 
+// ── 批量执行（sequence）────────────────────────────────────────────
+//
+// 为什么需要：**慢的不是插件执行**（那是毫秒级），而是每步都要等 AI 想一轮
+// （模型生成下一个 tool call 要 1~3 秒）。"点击 → 输入 → 回车"三连如果分三次调用，
+// 光往返就 3~9 秒；合成一次调用则在毫秒级做完。
+//
+// ⚠️ 但有个硬约束：**宿主 MCP 是 10 秒超时**（gui/src-tauri/src/mcp.rs 的
+// recv_timeout）。批量执行若超过它，宿主直接返回 timeout —— AI 会以为失败，
+// 而操作其实还在做，于是**可能重试造成重复操作**。所以这里必须自己掐预算（见下方）。
+
+/** 单次 sequence 的步数上限（防 AI 一轮刷屏式操作）。 */
+const SEQ_MAX_STEPS = 100;
+/** 每步的 repeat 上限。 */
+const SEQ_MAX_REPEAT = 200;
+/**
+ * 总时长预算（毫秒）。宿主超时是 10s，留 2s 余量给协议往返与网络。
+ * 超预算就停下并如实上报"还剩几步没做"，让 AI 再发一次 —— 绝不做到超时。
+ */
+const SEQ_BUDGET_MS = 8000;
+
+/** 估算一步要花多久（用于"这一步做下去会不会撑爆预算"的前瞻）。 */
+function estimateStepMs(step) {
+  if (step.action === "drag") {
+    return Math.max(50, Math.min(5000, Number(step.duration) || settings.smoothMoveMs || 400)) + 100;
+  }
+  if (step.action === "type") {
+    const delay = Math.max(0, Math.min(100, Number(step.delayMs ?? settings.typeDelayMs ?? 4)));
+    return String(step.text ?? "").length * (delay + 1) + 50;
+  }
+  if (step.action === "move" && step.smooth) return 600;
+  return 60;
+}
+
+/**
+ * 批量提前收尾 —— 统一出口，保证"做到哪、剩什么"始终如实上报。
+ *
+ * ⚠️ `remaining` 会**修正停在半途的那个 repeat 步骤**：若某步声明 `repeat:200` 而
+ * 只做到第 163 次就停了，remaining 里那步会被改写成 `repeat:37`。不改的话 AI 直接
+ * 重发会把已经做过的 163 次**再做一遍**（比如多按 163 次方向键）。
+ *
+ * `note` 反复强调"已执行的都已生效，不要重做" —— 同理，防 AI 看到 ok:false
+ * 就以为整批失败而整批重发。
+ *
+ * @param halfStep 停在半途的步骤信息（`{ index, doneRounds }`）—— 停在步与步之间时不传
+ */
+function seqStop(kind, results, remaining, error, started, halfStep) {
+  let rem = remaining;
+  if (halfStep && halfStep.doneRounds > 0 && remaining.length > 0) {
+    const declared = Math.max(1, Math.min(SEQ_MAX_REPEAT, Number(remaining[0].repeat) || 1));
+    const left = declared - halfStep.doneRounds;
+    rem = left > 0
+      ? [{ ...remaining[0], repeat: left }, ...remaining.slice(1)]
+      : remaining.slice(1);
+  }
+
+  return {
+    ok: false,
+    stopped: kind,                         // step_failed | budget | invalid
+    executed: results.length,              // 已执行的动作数（repeat 展开后的）
+    failedStep: results.length + 1,
+    remaining: rem,
+    elapsedMs: Date.now() - started,
+    results,
+    error,
+    note: "已执行的步骤都已生效，**不要重做**。" +
+      (kind === "budget"
+        ? "把 remaining 里没做的再发一次即可（半途那步的 repeat 已改成剩余次数）。"
+        : "请先检查失败原因再决定怎么办。"),
+  };
+}
+
+/**
+ * 批量执行一串动作。
+ *
+ * 为什么需要：**慢的不是插件执行**（那是毫秒级），而是每步都要等 AI 想一轮
+ * （模型生成下一个 tool call 要 1~3 秒）。"点击 → 输入 → 回车"三连分三次调用，
+ * 光往返就 3~9 秒；合成一次则在毫秒级做完。
+ *
+ * 设计要点：
+ * - **每步都过 guard**（急停 + 前台窗口检查）—— 不能只在开头查一次：执行途中可能
+ *   弹出了确认框（前台变成宿主），后续步骤必须被拦，这正是防"AI 给自己授权"的机制
+ * - **失败即停**：后续步骤可能依赖前面的（点输入框失败后输入密码会打到别处去）
+ * - **超预算即停**：见 SEQ_BUDGET_MS 注释
+ * - 不允许嵌套 sequence（防递归/失控）；允许 `abort`（它是安全出口）
+ */
+function actSequence(args) {
+  const steps = Array.isArray(args.steps) ? args.steps : null;
+  if (!steps || steps.length === 0) throw new Error("sequence 需要非空的 steps 数组");
+  if (steps.length > SEQ_MAX_STEPS) {
+    throw new Error(`步骤太多（${steps.length}），单次最多 ${SEQ_MAX_STEPS} 步 —— 请分批发送`);
+  }
+  const gapMs = Math.max(0, Math.min(2000, Number(args.stepDelayMs ?? 30)));
+
+  const started = Date.now();
+  const results = [];
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (!step || typeof step !== "object" || typeof step.action !== "string") {
+      return seqStop("invalid", results, steps.slice(i), `第 ${i + 1} 步缺少合法的 action`, started);
+    }
+    if (step.action === "sequence") {
+      return seqStop("invalid", results, steps.slice(i),
+        `第 ${i + 1} 步试图嵌套 sequence —— 不支持（会失控）。请把步骤平铺开`, started);
+    }
+    // abort 是安全出口，允许出现在序列里
+    if (step.action === "abort") {
+      setAborted("AI 在批量执行中主动停止");
+      return { ok: true, executed: results.length, total: steps.length, aborted: true, results,
+        note: "已在第 " + (i + 1) + " 步停止。请在面板点「解除急停」后才能继续。" };
+    }
+    if (!ACTIONS[step.action]) {
+      return seqStop("invalid", results, steps.slice(i), `未知 action: ${step.action}`, started);
+    }
+
+    const repeat = Math.max(1, Math.min(SEQ_MAX_REPEAT, Number(step.repeat) || 1));
+
+    for (let r = 0; r < repeat; r++) {
+      // 预算前瞻：这步做下去会不会超宿主超时？会就停在这里（宁可少做，不可超时）
+      const used = Date.now() - started;
+      if (used + estimateStepMs(step) > SEQ_BUDGET_MS) {
+        return seqStop("budget", results, steps.slice(i),
+          `已用 ${used}ms，再执行会超出 ${SEQ_BUDGET_MS}ms 预算（工具调用硬超时是 10 秒，` +
+          `超了宿主会报 timeout 而操作其实还在做 → 你会误判失败并重做）。`,
+          started, { index: i, doneRounds: r });
+      }
+
+      // 每次重复都重新过 guard —— 急停与前台窗口状态在执行途中会变
+      currentAction = `sequence ${i + 1}/${steps.length}${repeat > 1 ? ` ×${r + 1}/${repeat}` : ""}: ${step.action}`;
+      try {
+        guard(step.action);
+        const out = ACTIONS[step.action](step);
+        results.push({ step: i + 1, action: step.action, ...(repeat > 1 ? { round: r + 1 } : {}), ...out });
+      } catch (e) {
+        if (e instanceof AbortError) throw e;   // 急停：抛给外层统一成"已急停"
+        return seqStop("step_failed", results, steps.slice(i), String((e && e.message) || e), started);
+      }
+      if (gapMs) sleepSync(gapMs);
+    }
+  }
+
+  return {
+    ok: true,
+    // executed 是**动作次数**（repeat 展开后），totalActions 是同一维度的总数 ——
+    // 别拿它和 steps.length（步数）比，那会让 AI 看到 "7/3" 这种莫名其妙的数
+    executed: results.length,
+    totalActions: steps.reduce((n, s) => n + Math.max(1, Math.min(SEQ_MAX_REPEAT, Number(s.repeat) || 1)), 0),
+    steps: steps.length,
+    elapsedMs: Date.now() - started,
+    results,
+  };
+}
+
 /** action → 实现（只读与急停豁免前置检查，见 guard）。 */
 const ACTIONS = {
   screen_info: actScreenInfo,
@@ -518,6 +688,7 @@ const ACTIONS = {
   scroll: actScroll,
   key: actKey,
   type: actType,
+  sequence: actSequence,
 };
 
 // ── HTTP ─────────────────────────────────────────────────────────

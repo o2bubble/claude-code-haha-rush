@@ -82,7 +82,28 @@ koffi 的在 `@koromix/koffi-<platform>/`），放进 `vendor/<platform>/`，
 - 验证手法（可复用）：用 `temp/press_hotkey.cjs` 那套 koffi SendInput 注入键盘事件，
   **注入的按键 `GetAsyncKeyState` 能读到**（实测 0x8001）——可以用它做自动化测试
 
-### 8. 🔴 逐项绑定 Win32 API，不要一把 try 包住
+### 8. 批量（sequence）相关的行为，别误会成故障
+- **`stopped: "budget"`**：不是失败，是"快撞宿主 10 秒超时了，主动停下"。
+  宿主硬超时是 `gui/src-tauri/src/mcp.rs` 的 `recv_timeout(10s)`；超了宿主返回
+  timeout 而**插件其实还在做** → AI 会误判失败并重做。所以这里自己掐 8s 预算
+  （`SEQ_BUDGET_MS`），留 2s 给协议往返。
+- **`remaining` 里的 `repeat` 是"剩余次数"不是原始值**：停在半途时会把
+  `repeat:200` 改写成 `repeat:71`（已做 129 次）—— 见 `seqStop` 的 `halfStep` 参数。
+  不这么改，AI 直接重发就会把已做过的再做一遍。**改这块代码时别把这个修正弄丢**。
+- **`failedStep` 是 1-based**，等于 `results.length + 1`。
+- **`executed` 是动作数（repeat 展开后），不是步数**；要步数看 `steps`。
+  别拿 `executed` 和 `steps` 比（3 步各 repeat 5 会显示 7/4 这种看着像 bug 的数）。
+- **sequence 里不允许嵌套 sequence**（防失控），但**允许 `abort`**（安全出口）。
+
+### 9. 🔴 批量里每一步都要重新过 guard（别改成只查一次）
+`actSequence` 在**每次重复**前都调 `guard(step.action)`。这不是冗余：
+执行途中前台窗口可能变成宿主（弹出了工具权限确认框），后续步骤**必须被拦** ——
+这正是防"AI 一边调工具弹确认框、一边点允许给自己授权"的机制。
+实测验证过：第 1 步点击把靶子带到前台后，第 2 步立刻被拒。
+
+改成"开头查一次"会让长序列在中途弹框后继续操作那个框。
+
+### 10. 🔴 逐项绑定 Win32 API，不要一把 try 包住
 曾因一个笔误（`u.func` 应为 `user32.func`）导致**整个 w32 为 null** ——
 前台防护、急停轮询、滚轮**全部静默降级**（只打了一行日志，功能看着"能用"但防护没了）。
 现在 `bind()` 逐项独立 try，一项失败不影响其它，并在启动日志里报"已绑定 N 项"。
