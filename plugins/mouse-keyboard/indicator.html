@@ -66,18 +66,26 @@
   }
   #current.idle { color: var(--fg-dim); }
 
-  #log { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 1px; }
-  #log div {
-    color: var(--fg-dim); font-size: 10.5px;
+  /* 动作历史：每行 = 相对时间 + 动作。**只表示"已经发生过"**，
+     不表示"当前进行到哪一步"（见 render 里的注释）。 */
+  #log { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 2px; }
+  #log > div { display: flex; gap: 7px; align-items: baseline; }
+  #log .t {
+    color: var(--fg-muted); font-size: 9.5px;
+    flex-shrink: 0; min-width: 46px; text-align: right;
+  }
+  #log .a {
+    color: var(--fg-dim); font-size: 10.5px; padding: 0 2px; border-radius: 2px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  #log div:first-child { color: var(--fg); }
-  /* 新出现的动作闪一下 —— 操作只有几百毫秒，光靠"内容变了"用户注意不到 */
-  #log div.fresh { animation: freshIn .7s ease-out; }
+  #log .a.recent { color: var(--fg); }
+  /* 新出现的那条闪一下 —— 操作只有几百毫秒，光靠"内容变了"用户注意不到 */
+  #log .a.fresh { animation: freshIn .8s ease-out; }
   @keyframes freshIn {
-    0% { background: rgba(88, 196, 232, .30); }
+    0% { background: rgba(88, 196, 232, .32); }
     100% { background: transparent; }
   }
+  #log .empty { color: var(--fg-muted); font-size: 10px; }
 
   #foot { color: var(--fg-dim); font-size: 10px; display: flex; gap: 6px; }
   kbd {
@@ -166,9 +174,14 @@
       if (idleFor > IDLE_CLOSE_MS) { closeSelf(); return; }
     }
 
-    // 内容没变就不重建 DOM（本页 250ms 轮询，重建 logEl 会闪）
-    var sig = JSON.stringify([s.currentAction, s.aborted, active, s.log, s.count,
-                              Math.floor((s.uptimeMs || 0) / 1000), s.hotkey]);
+    // 内容没变就不重建 DOM（本页 250ms 轮询，重建 logEl 会闪）。
+    // ⚠️ 指纹要含 `ago(t)` 的结果而非原始 `t` —— 时间戳不变，但"5 秒前"会变成
+    // "10 秒前"，不带上它列表里的时间就永远停在第一次渲染的样子。
+    var sig = JSON.stringify([
+      s.currentAction, s.aborted, active, s.count,
+      Math.floor((s.uptimeMs || 0) / 1000), s.hotkey,
+      (s.log || []).map(function (x) { return x.t + "|" + ago(x.t); }),
+    ]);
     if (sig === lastSig) return;
     lastSig = sig;
 
@@ -186,21 +199,35 @@
 
     if (s.hotkey) hkEl.textContent = s.hotkey;
 
-    // 最近动作（新的在前）。最新那条若与上次渲染的不同 → 加 .fresh 闪一下
-    // （每次 DOM 重建都会重放动画，正是想要的"又有新动作了"提示）
+    // 动作历史（新的在前），每条带**相对时间**。
+    //
+    // ⚠️ 这里是**过去时**的记录，不是进度条：不要把某条标成"当前步"。
+    // 之前用 `›` 标"最新一条"，用户直接问「前面那个 › 又不会随着具体到哪一步
+    // 更新状态啊 你弄那个干啥？」—— 它确实不表示进度，那个符号只会误导。
+    // 改成「时间 + 动作」后语义就清楚了：这些都是**已经发生过的**。
+    // （"当前在做什么"由上面那行负责，不要在这里重复表达。）
     logEl.textContent = "";
     var items = (s.log || []).slice(0, 3);
     if (!items.length) {
-      var d = document.createElement("div");
-      d.textContent = "（还没有动作）";
-      logEl.appendChild(d);
+      var em = document.createElement("div");
+      em.className = "empty";
+      em.textContent = "（还没有动作）";
+      logEl.appendChild(em);
     } else {
       var newestT = items[0].t;
+      var justArrived = newestT !== lastNewestT;
       for (var i = 0; i < items.length; i++) {
-        var d = document.createElement("div");
-        if (i === 0 && newestT !== lastNewestT) d.className = "fresh";
-        d.textContent = (i === 0 ? "› " : "  ") + items[i].text;
-        logEl.appendChild(d);
+        var row = document.createElement("div");
+        var tt = document.createElement("span");
+        tt.className = "t";
+        tt.textContent = ago(items[i].t);
+        var aa = document.createElement("span");
+        // 最新那条亮一点；刚出现的再加闪一下（操作只有几百毫秒，不加动效看不见）
+        aa.className = "a" + (i === 0 ? " recent" : "") + (i === 0 && justArrived ? " fresh" : "");
+        aa.textContent = items[i].text;
+        row.appendChild(tt);
+        row.appendChild(aa);
+        logEl.appendChild(row);
       }
       lastNewestT = newestT;
     }
@@ -213,6 +240,22 @@
     if (sec < 60) return sec + "s";
     if (sec < 3600) return Math.floor(sec / 60) + "m" + (sec % 60) + "s";
     return Math.floor(sec / 3600) + "h" + Math.floor((sec % 3600) / 60) + "m";
+  }
+
+  /**
+   * 相对时间（"刚刚" / "5 秒前" / "2 分钟前"）。
+   *
+   * 秒数**取整到 5 的倍数**：一是"6 秒前"和"5 秒前"对用户没差别，二是这个字符串
+   * 会进渲染指纹（见 render）—— 粒度粗一点，DOM 重建就少一点。
+   * `t` 是**进程侧**的时间戳（`Date.now()`），同机可直接相减。
+   */
+  function ago(t) {
+    var s = Math.floor((Date.now() - t) / 1000);
+    if (s < 5) return "刚刚";
+    if (s < 60) return (Math.floor(s / 5) * 5) + " 秒前";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + " 分钟前";
+    return Math.floor(m / 60) + " 小时前";
   }
 
   /**
