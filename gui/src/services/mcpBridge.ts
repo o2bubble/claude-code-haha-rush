@@ -213,12 +213,19 @@ async function callPluginMcpTool(
       const { dispatchPluginUplink } = await import("./pluginPanelBridge");
       for (const action of data.host) {
         const a = action as { kind?: unknown; payload?: unknown };
-        if (a && typeof a.kind === "string") {
-          await dispatchPluginUplink(tool.pluginName, a.kind, a.payload);
+        if (!a || typeof a.kind !== "string") continue;
+        // 逐个兜住：一个动作失败不该拖累后面的，而且要能看到**是哪个**失败、为什么
+        try {
+          const handled = await dispatchPluginUplink(tool.pluginName, a.kind, a.payload);
+          if (!handled) {
+            console.warn(`[mcp] 插件 ${tool.pluginName} 请求的 host 动作未被识别: ${a.kind}`);
+          }
+        } catch (e) {
+          console.error(`[mcp] 插件 ${tool.pluginName} 的 host 动作「${a.kind}」执行失败:`, e);
         }
       }
     } catch (e) {
-      console.warn("[mcp] 插件 host 动作派发失败", e);
+      console.error("[mcp] 插件 host 动作派发失败（import 阶段）", e);
     }
   }
 

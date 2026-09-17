@@ -102,8 +102,21 @@
   var statEl = document.getElementById("stat");
   var hkEl = document.getElementById("hk");
 
-  /** 连续多久"没活动"就自己关掉（用户要求：停后几秒淡出）。 */
-  var IDLE_CLOSE_MS = 3000;
+  /**
+   * 打开后**至少**显示这么久（从"最后一次操作"算起）。
+   *
+   * ⚠️ 这个必须有，否则窗口打开即开始倒计时：`open-indicator` 是随工具**响应**
+   * 返回的，也就是"操作已经做完"时窗口才打开 —— 此刻就是空闲状态，立刻开始倒计时，
+   * 几秒后自己关掉。实测日志：开 → 10 秒后关 → 再开 → 9 秒后关，用户看到的就是
+   * "闪一下就没了"（用户报的第一句话就是这个）。
+   *
+   * 取 30 秒：AI 干活的节奏是"几个动作 → 想几秒 → 再来几个"，8 秒太短（窗口会在
+   * 两次操作之间消失、下次操作又冒出来一顿闪）；30 秒能让一段连续工作期间窗口
+   * **稳定在屏幕上**，真正收工后才消失。
+   */
+  var MIN_SHOW_MS = 30000;
+
+  var openedAt = Date.now();
   var lastBusyAt = Date.now();
   var closed = false;
 
@@ -119,9 +132,14 @@
     title.textContent = stopped ? "已停止" : (busy ? "AI 操作中" : "AI 空闲");
     stopBtn.disabled = stopped;
 
+    // 窗口多半是"操作刚做完"才打开的（见 MIN_SHOW_MS 注释）—— 空闲时显示
+    // **刚才做了什么**，而不是"等待 AI 操作…"（那个读起来像还没开始）。
+    var last = (s.log && s.log[0]) ? s.log[0].text : "";
+    var justNow = s.lastActivityMs !== null && s.lastActivityMs !== undefined && s.lastActivityMs < 60000;
     curEl.textContent = stopped
       ? ("已急停（" + (s.abortReason || "原因未知") + "）")
-      : (busy ? s.currentAction : "等待 AI 操作…");
+      : (busy ? s.currentAction
+        : (justNow && last ? "刚完成：" + last : "等待 AI 操作…"));
     curEl.className = busy || stopped ? "" : "idle";
 
     if (s.hotkey) hkEl.textContent = s.hotkey;
@@ -144,9 +162,12 @@
     var secs = Math.round((s.uptimeMs || 0) / 1000);
     statEl.textContent = "累计 " + (s.count || 0) + " 个动作 · " + fmtDur(secs);
 
-    // 空闲判定：连续 IDLE_CLOSE_MS 没有正在进行的动作 → 请宿主关掉本窗口
-    if (busy || stopped) lastBusyAt = Date.now();
-    else if (Date.now() - lastBusyAt > IDLE_CLOSE_MS) closeSelf();
+    // 空闲判定：**从"最后一次活动"起算**（不是从打开时刻）—— 只要 AI 还在动就把
+    // 时钟往后推，停手满 MIN_SHOW_MS 才关。这样连续工作期间窗口稳定在屏幕上，
+    // 真正收工后约半分钟安静地淡出。
+    var now = Date.now();
+    if (busy || stopped) lastBusyAt = now;
+    else if (now - lastBusyAt > MIN_SHOW_MS) closeSelf();
   }
 
   function fmtDur(sec) {
@@ -155,12 +176,17 @@
     return Math.floor(sec / 3600) + "h" + Math.floor((sec % 3600) / 60) + "m";
   }
 
-  /** 自己请求宿主关掉（本窗口是宿主开的，自己关不了）。 */
+  /**
+   * 自己请求宿主关掉（本窗口是宿主开的，自己关不了）。
+   * 先做一个淡出，再请求关闭 —— 硬消失太突兀。
+   */
   function closeSelf() {
     if (closed) return;
     closed = true;
     clearInterval(timer);
-    toHost("close-indicator");
+    document.body.style.transition = "opacity .45s ease";
+    document.body.style.opacity = "0";
+    setTimeout(function () { toHost("close-indicator"); }, 460);
   }
 
   stopBtn.onclick = function () {
