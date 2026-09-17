@@ -200,7 +200,28 @@ async function callPluginMcpTool(
   if (!resp.ok) {
     throw new Error(`插件工具 ${tool.fullName} 调用失败 (HTTP ${resp.status})`);
   }
-  const data = (await resp.json()) as { ok?: boolean; error?: string } | null;
+  const data = (await resp.json()) as { ok?: boolean; error?: string; host?: unknown[] } | null;
+
+  // 插件可以在响应里请求宿主做事（`host: [动作]`）—— 与 `/__command` 那条路同一套
+  // 契约（见 pluginCommandBridge.forwardToPluginProcess）。鼠标键盘插件用它开/移
+  // 自己的"AI 操作中"指示窗：那个窗口只有宿主能建，而进程开不了。
+  //
+  // **无论 ok 与否都派发**：`host` 是插件的显式请求，与本次工具调用成败是两件事
+  // （例如"被前台防护拒绝"时它仍希望把指示窗亮出来说明发生了什么）。
+  if (data?.host?.length) {
+    try {
+      const { dispatchPluginUplink } = await import("./pluginPanelBridge");
+      for (const action of data.host) {
+        const a = action as { kind?: unknown; payload?: unknown };
+        if (a && typeof a.kind === "string") {
+          await dispatchPluginUplink(tool.pluginName, a.kind, a.payload);
+        }
+      }
+    } catch (e) {
+      console.warn("[mcp] 插件 host 动作派发失败", e);
+    }
+  }
+
   if (!data?.ok) {
     throw new Error(data?.error || `插件工具 ${tool.fullName} 执行失败`);
   }

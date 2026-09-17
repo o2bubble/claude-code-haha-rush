@@ -116,6 +116,22 @@ if (IS_WIN) {
   bind("getWindowThreadProcessId", () => user32.func("uint32 GetWindowThreadProcessId(void* hWnd, _Out_ uint32* lpdwProcessId)"));
   bind("getAsyncKeyState", () => user32.func("uint16 GetAsyncKeyState(int vKey)"));
 
+  // 指示窗定位：FindWindowW 按**标题**精确查找（宿主把 title 设成 `indicator::<插件名>`）
+  // + GetWindowRect 拿屏幕矩形。这样"别操作指示窗所在区域"的判断与用户拖动窗口都能
+  // 自动跟上 —— 不必让页面跨源向父窗要坐标（iframe 里读不到顶层窗口的屏幕位置）。
+  bind("findWindow", () => user32.func("void* FindWindowW(str16 cls, str16 name)"));
+  bind("getWindowRect", () => {
+    const RECT = koffi.struct("RECT", {
+      left: "int32", top: "int32", right: "int32", bottom: "int32",
+    });
+    const fn = user32.func("bool GetWindowRect(void* hWnd, _Out_ RECT* rect)");
+    return (hwnd) => {
+      const r = {};
+      if (!fn(hwnd, r)) return null;
+      return { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top };
+    };
+  });
+
   // ── 自己实现滚轮（robotjs 的 scrollMouse 在本机实测**窗口收不到消息**）──
   //
   // 实测数据：`robot.scrollMouse(0, -1)` 连发多次，目标窗口的 <MouseWheel> 事件数
@@ -149,6 +165,88 @@ if (IS_WIN) {
 
 /** 一个滚轮"格"对应的增量 —— Windows 标准值。 */
 const WHEEL_DELTA = 120;
+
+// ── 指示窗（"AI 操作中"浮标）──────────────────────────────────────
+//
+// 用户要的：AI 操作时有个**看得见**的东西，显示在做什么、最近几步、累计数，以及
+// 一个停止按钮。窗口由**宿主**建（进程开不了窗口），这里负责：
+//   · 决定何时请宿主开窗（AI 开始操作时；已开着就不重复请求 —— 重复 = 重建 = 闪）
+//   · 查它的屏幕矩形（FindWindowW + GetWindowRect），用于"别操作它所在区域"
+//   · 提供 /activity 给窗口轮询
+
+/**
+ * 指示窗的标题 —— 与宿主 Rust 侧**必须完全一致**（`indicator::<插件名>::<宿主PID>`）。
+ *
+ * ⚠️ 带宿主 PID 是必需的：多开时每个实例各有一个指示窗，标题只含插件名的话
+ * FindWindow 可能返回**另一个实例**的窗口 → 读错矩形、挪错窗口。
+ * 宿主 PID 来自 env（见 plugin_process.rs 的注入）；手动跑的实例没有它，
+ * 此时定位不到指示窗（功能自然降级，不报错）。
+ */
+const PLUGIN_NAME = path.basename(__dirname);
+const HOST_PID = Number(process.env.CLAUDE_PLUGIN_HOST_PID) || 0;
+const INDICATOR_TITLE = `indicator::${PLUGIN_NAME}::${HOST_PID}`;
+/** 指示窗尺寸（配合 indicator.html 的高度；尽量小，少遮挡）。 */
+const INDICATOR_W = 300;
+const INDICATOR_H = 132;
+
+/** 指示窗当前的屏幕矩形（物理像素）。null = 窗口不在（没开 / 已关）。 */
+function indicatorRect() {
+  if (!w32 || !w32.findWindow || !w32.getWindowRect) return null;
+  try {
+    const hwnd = w32.findWindow(null, INDICATOR_TITLE);
+    if (!hwnd) return null;
+    return w32.getWindowRect(hwnd);
+  } catch (e) {
+    log("查询指示窗矩形失败:", e && e.message);
+    return null;
+  }
+}
+
+/** 点是否落在指示窗内（用于拒绝会打到它身上的操作）。 */
+function inIndicator(x, y) {
+  const r = indicatorRect();
+  if (!r) return false;
+  return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+}
+
+/** 操作目标是文字描述（给指示窗显示）。 */
+function describeStep(action, args) {
+  const a = args || {};
+  const coord = (p) => (a.x !== undefined ? `(${a.x},${a.y})`
+    : a.dx !== undefined || a.dy !== undefined ? `+(${a.dx || 0},${a.dy || 0})` : "");
+  switch (action) {
+    case "move": return `移动 ${coord()}`;
+    case "click": return `点击 ${coord() || "当前处"}${a.double ? "（双击）" : ""}${a.button && a.button !== "left" ? ` ${a.button}` : ""}`;
+    case "drag": return `拖拽 (${a.fromX},${a.fromY})→(${a.toX},${a.toY})`;
+    case "scroll": return `滚动 (${a.dx || 0},${a.dy || 0})`;
+    case "key": {
+      const mods = Array.isArray(a.modifiers) && a.modifiers.length ? `${a.modifiers.join("+")}+` : "";
+      return `按键 ${mods}${a.key}${a.hold ? "（按住）" : ""}`;
+    }
+    case "type": {
+      const t = String(a.text ?? "");
+      return `输入「${t.length > 14 ? t.slice(0, 14) + "…" : t}」`;
+    }
+    case "screen_info": return "读取屏幕信息";
+    case "move_indicator": return "移动指示窗";
+    case "abort": return "停止";
+    default: return action;
+  }
+}
+
+// ── 活动记录（指示窗展示用）──
+const ACTIVITY_MAX = 20;
+let activityLog = [];        // `{ t, text }[]`，最近在后
+let actionCount = 0;         // 本次进程生命周期内累计执行的动作数
+const sessionStart = Date.now();
+let lastActivityAt = 0;
+
+function noteActivity(action, args) {
+  lastActivityAt = Date.now();
+  actionCount++;
+  activityLog.push({ t: lastActivityAt, text: describeStep(action, args) });
+  if (activityLog.length > ACTIVITY_MAX) activityLog.shift();
+}
 
 // ── 安全层 ────────────────────────────────────────────────────────
 
@@ -280,6 +378,24 @@ function foregroundIsHost() {
   }
 }
 
+/**
+ * 拒绝落在指示窗上的操作。
+ *
+ * 为什么需要：指示窗是**置顶**的 —— 点它会打到窗口自己，而不是目标应用。更糟的是
+ * robotjs 不会报错，AI 会以为点成功了，然后困惑"为什么没反应"。
+ *
+ * 用户给的解法很干净：**让 AI 自己挪**（`move_indicator`），所以错误信息里明确告诉它
+ * 怎么做，而不是简单粗暴地拒绝。
+ */
+function assertNotOnIndicator(x, y) {
+  if (!inIndicator(x, y)) return;
+  const r = indicatorRect();
+  throw new Error(
+    `目标坐标 (${x},${y}) 落在「AI 操作中」指示窗上（它当前在 ${r.x},${r.y}，${r.w}×${r.h}）` +
+    `—— 点它不会打到目标应用。请先用 action:"move_indicator" 把它挪到别处（例如屏幕角落），再重试。`
+  );
+}
+
 /** 操作类 action 的统一前置检查。 */
 function guard(action) {
   if (action === "abort" || action === "screen_info") return;   // 只读/自停豁免
@@ -299,8 +415,46 @@ function guard(action) {
 
 // ── 工具实现 ──────────────────────────────────────────────────────
 
-function sleepSync(ms) {
-  if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+/**
+ * 异步等待。
+ *
+ * ⚠️ **必须异步，不能用 `Atomics.wait` 同步阻塞**：本进程同时是个 HTTP 服务，
+ * 同步 sleep 会把事件循环整个卡住 —— 长操作（拖拽、长文本输入）期间
+ * `/activity`（指示窗轮询）与 `/abort`（停止按钮）**都得不到响应**，
+ * 表现是"指示窗卡住不动、点了停止没反应，操作跑完才生效"。
+ * 停止按钮延迟到操作结束才起作用，等于没有。
+ *
+ * 代价是操作之间可能交错，故有 `withOpLock` 串行化。
+ */
+function sleep(ms) {
+  return ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve();
+}
+
+/**
+ * 操作串行锁：同一时刻只允许一个**会动鼠标键盘**的操作。
+ *
+ * 为什么需要：改成异步 sleep 后，两个并发调用（AI 同时发多个 tool call）会在
+ * `await` 处交错 —— 一个的 `mouseToggle('down')` 可能和另一个的移动混在一起，
+ * 拖出莫名其妙的结果。
+ *
+ * 已有操作在进行 → **直接拒绝并说明**（不排队）：排队会让调用方等到天荒地老，
+ * 也看不出发生了什么；拒绝是即时的、可理解的，AI 重试即可。
+ */
+let opInFlight = false;
+
+async function withOpLock(label, fn) {
+  if (opInFlight) {
+    throw new Error(
+      `已有操作正在进行中（${opInFlight}），本次「${label}」未执行。` +
+      `请稍等片刻后重试；若卡住了，用 action:"abort" 或急停键停止。`
+    );
+  }
+  opInFlight = label;
+  try {
+    return await fn();
+  } finally {
+    opInFlight = false;
+  }
 }
 
 /** 稳定读取鼠标位置（UIPI 拦截时 robotjs 不报错，只能靠比对发现）。 */
@@ -346,6 +500,7 @@ function actScreenInfo() {
 function actMove(args) {
   const t = resolveTarget(args);
   if (!t) throw new Error("move 需要 x/y（绝对）或 dx/dy（相对当前位置）");
+  assertNotOnIndicator(t.x, t.y);
   if (args.smooth) {
     robot.moveMouseSmooth(t.x, t.y, Number(args.speed) || 3);
   } else {
@@ -364,13 +519,20 @@ function actMove(args) {
 function actClick(args) {
   const btn = (args.button === "right" || args.button === "middle") ? args.button : "left";
   const t = resolveTarget(args);   // null = 不给坐标，点当前位置
-  if (t) robot.moveMouse(t.x, t.y);
+  if (t) {
+    assertNotOnIndicator(t.x, t.y);
+    robot.moveMouse(t.x, t.y);
+  } else {
+    // 不给坐标时点的是**当前位置** —— 若它恰好在指示窗上，同样要拦
+    const cur = mousePos();
+    if (cur) assertNotOnIndicator(cur.x, cur.y);
+  }
   const before = mousePos();
   robot.mouseClick(btn, !!args.double);
   return { ok: true, clicked: btn, double: !!args.double, at: before };
 }
 
-function actDrag(args) {
+async function actDrag(args) {
   const fx = Math.round(Number(args.fromX)), fy = Math.round(Number(args.fromY));
   const tx = Math.round(Number(args.toX)), ty = Math.round(Number(args.toY));
   if (![fx, fy, tx, ty].every(Number.isFinite)) {
@@ -378,12 +540,14 @@ function actDrag(args) {
   }
   const btn = (args.button === "right" || args.button === "middle") ? args.button : "left";
   const dur = Math.max(50, Math.min(5000, Number(args.duration) || settings.smoothMoveMs || 400));
+  assertNotOnIndicator(fx, fy);   // 起点落在指示窗上 → 按下就丢了
+  assertNotOnIndicator(tx, ty);   // 终点落在上面 → 松开也丢
 
   robot.moveMouse(fx, fy);
   robot.mouseToggle("down", btn);
   heldButtons.add(btn);
   try {
-    sleepSync(50);   // 按下后停一下再动 —— 有些应用需要时间进入拖拽态
+    await sleep(50);   // 按下后停一下再动 —— 有些应用需要时间进入拖拽态
     const steps = Math.max(8, Math.min(150, Math.round(dur / 12)));
     const stepMs = Math.round(dur / steps);
     for (let i = 1; i <= steps; i++) {
@@ -393,7 +557,7 @@ function actDrag(args) {
         Math.round(fx + (tx - fx) * t),
         Math.round(fy + (ty - fy) * t),
       );
-      sleepSync(stepMs);
+      await sleep(stepMs);
     }
   } finally {
     // 无论成功、出错还是急停，都必须把按钮抬起来
@@ -506,7 +670,7 @@ function actKey(args) {
  * robotjs 的 `unicodeTap` 参数是 WORD(16bit)，非 BMP 字符（emoji / 扩展 B 汉字）
  * 传码点会被截断成垃圾；按码元发则代理对天然正确。
  */
-function actType(args) {
+async function actType(args) {
   const text = String(args.text ?? "");
   if (!text) throw new Error("type 需要非空 text");
   const delay = Math.max(0, Math.min(100, Number(args.delayMs ?? settings.typeDelayMs ?? 4)));
@@ -517,11 +681,11 @@ function actType(args) {
     const code = text.charCodeAt(i);
     if (code === 0) continue;                  // U+0000 会让 unicodeTap 抛异常
     if (code === 13) continue;                 // \r —— 与 \n 重复，跳过
-    if (code === 10) { robot.keyTap("enter"); typed++; sleepSync(delay); continue; }
-    if (code === 9) { robot.keyTap("tab"); typed++; sleepSync(delay); continue; }
+    if (code === 10) { robot.keyTap("enter"); typed++; await sleep(delay); continue; }
+    if (code === 9) { robot.keyTap("tab"); typed++; await sleep(delay); continue; }
     robot.unicodeTap(code);
     typed++;
-    sleepSync(delay);
+    await sleep(delay);
   }
   return { ok: true, chars: typed, textLength: text.length };
 }
@@ -611,7 +775,7 @@ function seqStop(kind, results, remaining, error, started, halfStep) {
  * - **超预算即停**：见 SEQ_BUDGET_MS 注释
  * - 不允许嵌套 sequence（防递归/失控）；允许 `abort`（它是安全出口）
  */
-function actSequence(args) {
+async function actSequence(args) {
   const steps = Array.isArray(args.steps) ? args.steps : null;
   if (!steps || steps.length === 0) throw new Error("sequence 需要非空的 steps 数组");
   if (steps.length > SEQ_MAX_STEPS) {
@@ -654,16 +818,17 @@ function actSequence(args) {
       }
 
       // 每次重复都重新过 guard —— 急停与前台窗口状态在执行途中会变
-      currentAction = `sequence ${i + 1}/${steps.length}${repeat > 1 ? ` ×${r + 1}/${repeat}` : ""}: ${step.action}`;
+      currentAction = `${describeStep(step.action, step)} · ${i + 1}/${steps.length}`;
+      if (r === 0) noteActivity(step.action, step);   // 每步记一次（不是每次重复，免得刷屏）
       try {
         guard(step.action);
-        const out = ACTIONS[step.action](step);
+        const out = await ACTIONS[step.action](step);
         results.push({ step: i + 1, action: step.action, ...(repeat > 1 ? { round: r + 1 } : {}), ...out });
       } catch (e) {
         if (e instanceof AbortError) throw e;   // 急停：抛给外层统一成"已急停"
         return seqStop("step_failed", results, steps.slice(i), String((e && e.message) || e), started);
       }
-      if (gapMs) sleepSync(gapMs);
+      if (gapMs) await sleep(gapMs);
     }
   }
 
@@ -679,6 +844,41 @@ function actSequence(args) {
   };
 }
 
+/**
+ * 移动指示窗（用户要求：AI 发现它挡住操作时自己挪开）。
+ *
+ * 窗口是宿主建的，进程只能**请求**宿主移动 —— 响应里带 `host: [{kind:"move-indicator"}]`，
+ * 宿主（mcpBridge）会派发。坐标用绝对像素；也可给 `dx`/`dy` 相对**当前窗口位置**偏移。
+ */
+function actMoveIndicator(args) {
+  const cur = indicatorRect();
+  let x, y;
+  if (Number.isFinite(Number(args.x)) && Number.isFinite(Number(args.y))) {
+    x = Math.round(Number(args.x));
+    y = Math.round(Number(args.y));
+  } else if (Number.isFinite(Number(args.dx)) || Number.isFinite(Number(args.dy))) {
+    if (!cur) throw new Error("指示窗当前不在（未打开），无法按相对位置移动");
+    x = cur.x + Math.round(Number(args.dx) || 0);
+    y = cur.y + Math.round(Number(args.dy) || 0);
+  } else {
+    throw new Error("move_indicator 需要 x/y（绝对）或 dx/dy（相对当前位置）");
+  }
+  // 简单边界保护：别让它跑到离谱的地方找不回来
+  if (Math.abs(x) > 30000 || Math.abs(y) > 30000) {
+    throw new Error(`目标位置 (${x},${y}) 超出合理范围 —— 请给屏幕内的坐标`);
+  }
+  return {
+    ok: true,
+    movedTo: { x, y },
+    from: cur,
+    host: [{ kind: "move-indicator", payload: { x, y } }],
+    note: "指示窗已移动（宿主执行）。若仍挡住目标区域，可再调整。",
+  };
+}
+
+/** 会真正操作鼠标键盘的动作 —— 这些要串行（见 withOpLock）。 */
+const OPERATE_ACTIONS = new Set(["move", "click", "drag", "scroll", "key", "type", "sequence"]);
+
 /** action → 实现（只读与急停豁免前置检查，见 guard）。 */
 const ACTIONS = {
   screen_info: actScreenInfo,
@@ -689,6 +889,7 @@ const ACTIONS = {
   key: actKey,
   type: actType,
   sequence: actSequence,
+  move_indicator: actMoveIndicator,
 };
 
 // ── HTTP ─────────────────────────────────────────────────────────
@@ -712,8 +913,13 @@ function readBody(req) {
 }
 
 /** 跑一个 action（统一错误→结构化返回，AI 需要看到原因而不是"服务器错误"）。 */
-function runAction(action, args) {
-  currentAction = action;
+async function runAction(action, args) {
+  // sequence 不在这一层记活动 —— 它每步自己记（否则列表里只有一条"序列"，
+  // 看不出到底做了什么）
+  if (action !== "sequence") {
+    currentAction = describeStep(action, args);
+    if (action !== "screen_info") noteActivity(action, args);   // 读屏幕信息不算"操作"
+  }
   try {
     guard(action);
     if (action === "abort") {
@@ -724,7 +930,12 @@ function runAction(action, args) {
     if (!fn) {
       return { ok: false, error: `未知 action: ${action}（可用：${Object.keys(ACTIONS).join(", ")}, abort）` };
     }
-    return fn(args || {});
+    // 会用鼠标键盘的动作走串行锁：异步化之后并发调用会在 await 处交错
+    // （一个的"按住"和另一个的"移动"搅在一起）。只读/自停/挪窗不需要。
+    if (OPERATE_ACTIONS.has(action)) {
+      return await withOpLock(describeStep(action, args), () => fn(args || {}));
+    }
+    return await fn(args || {});
   } catch (e) {
     if (e instanceof AbortError) {
       return { ok: false, aborted: true, error: `已急停（${abortReason}）。请在面板点「解除急停」后再试。` };
@@ -757,7 +968,30 @@ const server = http.createServer(async (req, res) => {
       if (body.tool !== "control") {
         return json(res, 200, { ok: false, error: `未知工具: ${body.tool}（本插件只提供 control）` });
       }
-      return json(res, 200, runAction(args.action, args));
+      // 指示窗：AI 开始操作时请宿主把它亮出来（用户要求"AI 操作时自动出现"）。
+      // **已存在就不重复请求** —— open 是"关掉重建"，重复请求会让窗口闪。
+      const host = [];
+      if (settings.showIndicator !== false && !indicatorRect()) {
+        host.push({
+          kind: "open-indicator",
+          payload: {
+            src: "indicator.html",
+            params: `port=${actualPort()}`,
+            width: INDICATOR_W,
+            height: INDICATOR_H,
+          },
+        });
+      }
+      const out = await runAction(args.action, args);
+      // 收集插件请求的宿主动作。**sequence 的每步也要看** —— 里面可能有
+      // `move_indicator`（那一步的 host 挂在 results 里，不上抛的话永远不会执行）。
+      const collect = (o) => {
+        if (!o || typeof o !== "object") return;
+        if (Array.isArray(o.host)) host.push(...o.host);
+        if (Array.isArray(o.results)) for (const r of o.results) collect(r);
+      };
+      collect(out);
+      return json(res, 200, host.length ? { ...out, host } : out);
     }
 
     // 面板：急停
@@ -775,6 +1009,24 @@ const server = http.createServer(async (req, res) => {
       releaseAll();
       return json(res, 200, { ok: true, heldKeys: [...heldKeys], heldButtons: [...heldButtons] });
     }
+    // 指示窗轮询：既拿状态，也**借此证明自己还活着**（进程据此决定要不要
+    // 重新请求开窗 —— 见 /__mcp 的处理）。
+    if (route === "/activity" && (req.method === "GET" || req.method === "POST")) {
+      const pos = mousePos();
+      return json(res, 200, {
+        ok: true,
+        aborted,
+        abortReason,
+        currentAction,
+        log: activityLog.slice(-8).reverse(),      // 最近几条，新的在前
+        count: actionCount,
+        uptimeMs: Date.now() - sessionStart,
+        lastActivityMs: lastActivityAt ? Date.now() - lastActivityAt : null,
+        hotkey: settings.abortHotkey,
+        mouse: pos,
+      });
+    }
+
     // 面板：状态
     if (route === "/status" && req.method === "GET") {
       const pos = mousePos();
@@ -810,6 +1062,17 @@ const server = http.createServer(async (req, res) => {
 
 const requestedPort = Number(process.env.PLUGIN_PORT) || 0;
 const PORT_RANGE = [0, 41000, 42000];   // 0 = 由系统分配，再在范围内重试
+
+/**
+ * 进程实际监听的端口。
+ *
+ * 端口可能不是请求的那个（被占用时会重试/由系统分配），所以别用 `requestedPort` ——
+ * 指示窗页面要靠这个端口回来轮询，给错了它会一直连不上。
+ */
+function actualPort() {
+  const a = server.address();
+  return a && typeof a === "object" ? a.port : 0;
+}
 
 function listen(port, attempt = 0) {
   server.once("error", (err) => {

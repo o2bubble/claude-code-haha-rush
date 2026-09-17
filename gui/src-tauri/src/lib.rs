@@ -569,6 +569,9 @@ pub fn run() {
             open_plugin_overlay,
             show_plugin_overlay,
             close_plugin_overlay,
+            open_plugin_indicator,
+            move_plugin_indicator,
+            close_plugin_indicator,
             open_url_window,
             open_in_explorer,
             guard::guard_event,
@@ -2254,6 +2257,11 @@ fn create_floating_window(
 /// 故到点仍没显示就强制显示：宁可闪一下，也不能让窗口永远不出来。
 const OVERLAY_SHOW_FALLBACK_MS: u64 = 1200;
 
+/// 指示窗（小浮标）建好后延迟多久显示。
+/// 同样是为了避开 WebView2 的白底首帧，但小窗的构造与绘制开销远小于全屏 overlay，
+/// 固定短延迟即可，不必像 overlay 那样要前端回报就绪。
+const INDICATOR_SHOW_DELAY_MS: u64 = 250;
+
 /// overlay 窗口 label 前缀 —— open / close 共用同一份，保证两边对得上。
 /// Tauri 的 label 只允许 `[A-Za-z0-9-/:_.]`，而插件名是自由字符串，故净化一次。
 fn overlay_label_prefix(plugin: &str) -> String {
@@ -2390,6 +2398,155 @@ fn open_plugin_overlay(
         opened.push(idx);
     }
     Ok(opened)
+}
+
+/// 指示窗 label —— 每插件**一个**（不像 overlay 是每显示器一个）。
+fn indicator_label(plugin: &str) -> String {
+    let slug: String = plugin
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    format!("indicator-{slug}")
+}
+
+/// 打开插件的小指示窗（如鼠标键盘插件的"AI 操作中"浮标）。
+///
+/// 与 `open_plugin_overlay`（铺满整块显示器、给区域框选用）的区别：这是**小窗**，
+/// 位置尺寸由调用方给，且**不抢焦点**。
+///
+/// ## 两个必须做对的地方
+///
+/// 1. **`set_focusable(false)`（WS_EX_NOACTIVATE）** —— 指示窗属于宿主进程，若点击它
+///    会让它成为前台窗口，而鼠标键盘插件的"前台是宿主就拒绝操作"防护会立刻生效 →
+///    用户点一次停止按钮之后，AI 的后续操作**全被拒**，且原因看不出来。
+///    设成不可激活：点得到按钮、但前台窗口不变。
+/// 2. **`always_on_top` + `skip_taskbar`** —— 它是"随时能看见"的浮标，不进任务栏。
+///
+/// 位置缺省：主显示器右下角（不挡常见操作区）。
+#[tauri::command]
+fn open_plugin_indicator(
+    app: tauri::AppHandle,
+    plugin: String,
+    src: String,
+    params: Option<String>,
+    x: Option<i32>,
+    y: Option<i32>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<(), String> {
+    let label = indicator_label(&plugin);
+    // 已存在则先关掉重建（可能换了 src / 尺寸）。要**移动**请用 move_plugin_indicator
+    // —— 那条路不重建窗口（重建会闪、也会丢页面状态）。
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.close();
+    }
+
+    // 与 overlay 同一套 hash 协议 —— 复用前端 PluginOverlayApp 的渲染与上行通道
+    let mut path = format!("index.html#overlay/{}|{}", hash_enc(&plugin), hash_enc(&src));
+    if let Some(p) = params.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        path.push('|');
+        path.push_str(&hash_enc(p));
+    }
+
+    let w = width.unwrap_or(300).clamp(120, 2000);
+    let h = height.unwrap_or(150).clamp(60, 2000);
+
+    let (px, py) = match (x, y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => {
+            let m = app
+                .primary_monitor()
+                .map_err(|e| format!("取主显示器失败: {e}"))?
+                .ok_or("没有主显示器")?;
+            let pos = m.position();
+            let size = m.size();
+            (
+                pos.x + size.width as i32 - w as i32 - 16,
+                pos.y + size.height as i32 - h as i32 - 64,   // 多留一点，避开任务栏
+            )
+        }
+    };
+
+    log::info!("[Rust] open_plugin_indicator: plugin={plugin} {w}x{h} @({px},{py})");
+
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let built = with_debug_args(tauri::WebviewWindowBuilder::new(
+            &app2,
+            &label,
+            tauri::WebviewUrl::App(path.into()),
+        ))
+        // 标题是插件**找回这个窗口**的锚点：插件进程按标题 FindWindow 找到它、
+        // GetWindowRect 拿屏幕矩形（用于"别操作指示窗所在区域"的判断）。
+        //
+        // ⚠️ 必须带**宿主 PID**：多开时每个实例都有自己的指示窗，标题若只含插件名，
+        // FindWindow 会返回**另一个实例**的窗口 —— 既会读错矩形，也会挪错窗口。
+        // 插件侧用同一个规则拼（`indicator::<插件名>::<CLAUDE_PLUGIN_HOST_PID>`）。
+        // 窗口无装饰 + 不进任务栏，这个标题用户看不到。
+        .title(&format!("indicator::{}::{}", plugin, std::process::id()))
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .visible(false)      // 先隐藏，稍后再显示（避免 WebView2 白底闪一下）
+        .data_directory(webview_data_dir(&app2))
+        .build();
+
+        match built {
+            Ok(win) => {
+                // ⚠️ 不可激活：见函数注释（否则点一次停止按钮就触发"前台是宿主"防护）
+                if let Err(e) = win.set_focusable(false) {
+                    log::error!("[Rust] indicator set_focusable(false) failed: {e}");
+                }
+                if let Err(e) = win.set_position(tauri::PhysicalPosition::new(px, py)) {
+                    log::error!("[Rust] indicator set_position failed: {e}");
+                }
+                if let Err(e) = win.set_size(tauri::PhysicalSize::new(w, h)) {
+                    log::error!("[Rust] indicator set_size failed: {e}");
+                }
+                let win_t = win.clone();
+                std::thread::spawn(move || {
+                    // 小窗构造开销远小于全屏 overlay，固定短延迟即可
+                    std::thread::sleep(std::time::Duration::from_millis(INDICATOR_SHOW_DELAY_MS));
+                    let _ = win_t.show();
+                });
+                log::info!("[Rust] indicator built: {label}");
+            }
+            Err(e) => log::error!("[Rust] indicator build FAILED: {e}"),
+        }
+    });
+
+    Ok(())
+}
+
+/// 移动指示窗（AI 发现它挡住操作时可请求挪开；也可用于恢复到缺省位置）。
+#[tauri::command]
+fn move_plugin_indicator(
+    app: tauri::AppHandle,
+    plugin: String,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    let label = indicator_label(&plugin);
+    let Some(w) = app.get_webview_window(&label) else {
+        return Err(format!("指示窗不存在（{label}）"));
+    };
+    w.set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|e| format!("移动指示窗失败: {e}"))?;
+    log::info!("[Rust] move_plugin_indicator: {plugin} -> ({x},{y})");
+    Ok(())
+}
+
+/// 关闭指示窗（插件请求 / 面板关 / 禁用插件时清理）。
+#[tauri::command]
+fn close_plugin_indicator(app: tauri::AppHandle, plugin: String) -> Result<(), String> {
+    let label = indicator_label(&plugin);
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.close();
+        log::info!("[Rust] close_plugin_indicator: {plugin}");
+    }
+    Ok(())
 }
 
 /// 关闭某插件的全部 overlay 窗口（插件主动收起 / 禁用 / 退出时清理）。

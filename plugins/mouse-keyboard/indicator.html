@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>AI 操作中</title>
+<style>
+  /* 小指示窗：置顶、无装饰、不可激活（点它不会抢焦点）。
+     尺寸约 300×132，做成两行信息 + 最近动作 + 一行汇总 —— 尽量少遮挡。
+     整体可拖动（-webkit-app-region: drag），按钮单独排除。 */
+  :root {
+    --bg: rgba(16, 17, 22, .92);
+    --fg: #d7dbe4;
+    --fg-dim: #8a90a0;
+    --accent: #58c4e8;
+    --danger: #e2564f;
+    --ok: #4caf7d;
+    --border: rgba(255, 255, 255, .10);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 11px/1.35 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    border: 1px solid var(--border); border-radius: 8px;
+    display: flex; flex-direction: column; padding: 7px 9px; gap: 4px;
+    -webkit-app-region: drag;           /* 整窗可拖 */
+    user-select: none;
+  }
+
+  .row { display: flex; align-items: center; gap: 6px; }
+  .spacer { flex: 1; }
+
+  #dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+  #dot.busy { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+  #dot.stopped { background: var(--danger); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+  #title { font-weight: 600; font-size: 11.5px; }
+
+  #stop {
+    -webkit-app-region: no-drag;        /* 按钮不参与拖窗 */
+    flex-shrink: 0; cursor: pointer;
+    font: inherit; font-size: 11px; padding: 2px 9px;
+    border-radius: 5px; border: 1px solid var(--danger);
+    background: rgba(226, 86, 79, .18); color: var(--danger);
+  }
+  #stop:hover:not(:disabled) { background: rgba(226, 86, 79, .32); }
+  #stop:disabled { opacity: .4; cursor: default; }
+
+  #current {
+    color: var(--accent); font-size: 11.5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-height: 15px;
+  }
+  #current.idle { color: var(--fg-dim); }
+
+  #log { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 1px; }
+  #log div {
+    color: var(--fg-dim); font-size: 10.5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #log div:first-child { color: var(--fg); }
+
+  #foot { color: var(--fg-dim); font-size: 10px; display: flex; gap: 6px; }
+  kbd {
+    font-family: inherit; font-size: 9.5px; padding: 0 3px;
+    border: 1px solid var(--border); border-radius: 3px; color: var(--fg-dim);
+  }
+</style>
+</head>
+<body>
+<div class="row">
+  <span id="dot" class="busy"></span>
+  <span id="title">AI 操作中</span>
+  <span class="spacer"></span>
+  <button id="stop" title="立即停止 AI 的操作">■ 停止</button>
+</div>
+
+<div id="current">连接中…</div>
+
+<div id="log"></div>
+
+<div id="foot">
+  <span id="stat">—</span>
+  <span class="spacer"></span>
+  <span><kbd id="hk">—</kbd> 急停</span>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var q = new URLSearchParams(location.search);
+  var PORT = q.get("port");
+  var API = PORT ? "http://127.0.0.1:" + PORT : null;
+  var SOURCE = "plugin:viewer:mouse-keyboard";
+
+  var dot = document.getElementById("dot");
+  var title = document.getElementById("title");
+  var stopBtn = document.getElementById("stop");
+  var curEl = document.getElementById("current");
+  var logEl = document.getElementById("log");
+  var statEl = document.getElementById("stat");
+  var hkEl = document.getElementById("hk");
+
+  /** 连续多久"没活动"就自己关掉（用户要求：停后几秒淡出）。 */
+  var IDLE_CLOSE_MS = 3000;
+  var lastBusyAt = Date.now();
+  var closed = false;
+
+  function toHost(kind, payload) {
+    try { parent.postMessage({ source: SOURCE, kind: kind, payload: payload }, "*"); } catch (e) {}
+  }
+
+  function render(s) {
+    var busy = !!s.currentAction;
+    var stopped = !!s.aborted;
+
+    dot.className = busy ? "busy" : (stopped ? "stopped" : "");
+    title.textContent = stopped ? "已停止" : (busy ? "AI 操作中" : "AI 空闲");
+    stopBtn.disabled = stopped;
+
+    curEl.textContent = stopped
+      ? ("已急停（" + (s.abortReason || "原因未知") + "）")
+      : (busy ? s.currentAction : "等待 AI 操作…");
+    curEl.className = busy || stopped ? "" : "idle";
+
+    if (s.hotkey) hkEl.textContent = s.hotkey;
+
+    // 最近动作（新的在前）
+    logEl.textContent = "";
+    var items = (s.log || []).slice(0, 3);
+    if (!items.length) {
+      var d = document.createElement("div");
+      d.textContent = "（还没有动作）";
+      logEl.appendChild(d);
+    } else {
+      for (var i = 0; i < items.length; i++) {
+        var d = document.createElement("div");
+        d.textContent = (i === 0 ? "› " : "  ") + items[i].text;
+        logEl.appendChild(d);
+      }
+    }
+
+    var secs = Math.round((s.uptimeMs || 0) / 1000);
+    statEl.textContent = "累计 " + (s.count || 0) + " 个动作 · " + fmtDur(secs);
+
+    // 空闲判定：连续 IDLE_CLOSE_MS 没有正在进行的动作 → 请宿主关掉本窗口
+    if (busy || stopped) lastBusyAt = Date.now();
+    else if (Date.now() - lastBusyAt > IDLE_CLOSE_MS) closeSelf();
+  }
+
+  function fmtDur(sec) {
+    if (sec < 60) return sec + "s";
+    if (sec < 3600) return Math.floor(sec / 60) + "m" + (sec % 60) + "s";
+    return Math.floor(sec / 3600) + "h" + Math.floor((sec % 3600) / 60) + "m";
+  }
+
+  /** 自己请求宿主关掉（本窗口是宿主开的，自己关不了）。 */
+  function closeSelf() {
+    if (closed) return;
+    closed = true;
+    clearInterval(timer);
+    toHost("close-indicator");
+  }
+
+  stopBtn.onclick = function () {
+    if (!API) return;
+    fetch(API + "/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .then(function (r) { return r.json(); })
+      .then(function () { lastBusyAt = Date.now(); tick(); })
+      .catch(function () {});
+  };
+
+  function tick() {
+    if (!API) { curEl.textContent = "缺少端口参数"; return; }
+    fetch(API + "/activity")
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (s && s.ok) render(s);
+      })
+      .catch(function () {
+        // 插件进程没了（禁用/崩溃）→ 自己收起来，别留一个孤零零的窗口
+        if (!closed) { closed = true; clearInterval(timer); toHost("close-indicator"); }
+      });
+  }
+
+  var timer = setInterval(tick, 600);
+  tick();
+
+  // 主题跟随（宿主推来）
+  window.addEventListener("message", function (ev) {
+    var d = ev.data;
+    if (!d || d.source !== "plugin:host") return;
+    if (d.kind === "theme" && d.payload && d.payload.theme === "light") {
+      document.body.style.background = "rgba(250,250,252,.95)";
+      document.body.style.color = "#1f2430";
+    }
+  });
+})();
+</script>
+</body>
+</html>

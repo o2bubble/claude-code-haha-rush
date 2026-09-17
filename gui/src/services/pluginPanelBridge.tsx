@@ -323,6 +323,67 @@ async function closePluginOverlay(pluginName: string): Promise<void> {
 /** 让位过（还没恢复）的插件 → 它的进程端口。见 `restoreHostIfNeeded`。 */
 const pendingHostRestore = new Map<string, number>();
 
+// ── 小指示窗 ──────────────────────────────────────────────────────
+
+/**
+ * 指示窗请求的校验：**只允许相对定位的宽高**，坐标交给 Rust 侧兜底
+ * （不给坐标 = 用缺省位置）。
+ *
+ * 不复用 `sanitizeOverlayRequest` —— 那个是给"铺满显示器"的 overlay 用的，
+ * 语义（monitor 索引）与这里（像素坐标 + 尺寸）不同。
+ */
+export function sanitizeIndicatorRequest(
+  raw: unknown,
+): { src: string; params?: string; x?: number; y?: number; width?: number; height?: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const src = typeof r.src === "string" ? r.src.trim() : "";
+  if (!src) return null;
+  if (src.startsWith("/") || src.includes("\\") || src.includes("..")) return null;
+  if (/^[a-zA-Z]:/.test(src)) return null;
+  const out: { src: string; params?: string; x?: number; y?: number; width?: number; height?: number } = { src };
+  if (typeof r.params === "string" && r.params.trim()) out.params = r.params.trim().slice(0, 2048);
+  // 坐标：限个合理范围，避免插件传离谱的值把窗口丢到屏幕外
+  const num = (v: unknown, lo: number, hi: number) =>
+    typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi ? Math.round(v) : undefined;
+  out.x = num(r.x, -32000, 32000);
+  out.y = num(r.y, -32000, 32000);
+  out.width = num(r.width, 120, 2000);
+  out.height = num(r.height, 60, 2000);
+  return out;
+}
+
+/** 移动指示窗的载荷校验。 */
+export function sanitizeIndicatorMove(raw: unknown): { x: number; y: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const x = typeof r.x === "number" && Number.isFinite(r.x) ? Math.round(r.x) : null;
+  const y = typeof r.y === "number" && Number.isFinite(r.y) ? Math.round(r.y) : null;
+  if (x === null || y === null) return null;
+  if (Math.abs(x) > 32000 || Math.abs(y) > 32000) return null;
+  return { x, y };
+}
+
+async function openPluginIndicator(pluginName: string, raw: unknown): Promise<void> {
+  const req = sanitizeIndicatorRequest(raw);
+  if (!req) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("open_plugin_indicator", {
+    plugin: pluginName,
+    src: req.src,
+    params: req.params ?? null,
+    x: req.x ?? null,
+    y: req.y ?? null,
+    width: req.width ?? null,
+    height: req.height ?? null,
+  });
+}
+
+async function closePluginIndicator(pluginName: string): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("close_plugin_indicator", { plugin: pluginName });
+}
+
 /**
  * 把让位过的宿主窗口还回去 —— 由插件进程执行（窗口句柄列表在它手里）。
  *
@@ -425,6 +486,21 @@ export async function dispatchPluginUplink(
       return true;
     case "close-overlay":
       await closePluginOverlay(pluginName);
+      return true;
+    // ── 小指示窗（"AI 操作中"浮标那一类）──
+    case "open-indicator":
+      await openPluginIndicator(pluginName, payload);
+      return true;
+    case "move-indicator": {
+      const mv = sanitizeIndicatorMove(payload);
+      if (mv) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("move_plugin_indicator", { plugin: pluginName, x: mv.x, y: mv.y });
+      }
+      return true;
+    }
+    case "close-indicator":
+      await closePluginIndicator(pluginName);
       return true;
     case "chat-reference":
       await sendPluginChatReference(payload);
