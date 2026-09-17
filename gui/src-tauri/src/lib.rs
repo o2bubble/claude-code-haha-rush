@@ -590,6 +590,7 @@ pub fn run() {
             load_skills_i18n,
             close_me,
             get_skills_dir,
+            sync_plugin_skill_links,
             install_skill,
             install_package,
             install_plugin_package,
@@ -3788,6 +3789,202 @@ fn load_skills_i18n() -> Result<String, String> {
         return Ok(String::new());
     }
     std::fs::read_to_string(&path).map_err(|e| format!("Cannot load: {}", e))
+}
+
+
+// ── 插件贡献的 skill：把插件内的 skill 目录"链接"进 ~/.claude/skills/ ──
+//
+// ## 为什么是链接而不是复制
+//
+// 链接让**插件目录**成为唯一来源：改插件里的 skill 文件立刻生效，不会出现
+// "插件更新了、技能目录里还是旧副本"。也省掉一份磁盘副本。
+// 卸载插件 → 目录没了 → 链接变悬空 → 下次扫描自动清掉（见下）。
+//
+// ## 为什么放在"每次扫描"而不是安装时的一次性动作
+//
+// 这是**幂等同步**：插件在 → 链接在（缺了补、指向错了重建）；插件不在 → 链接清掉。
+// 用户手删了链接、或插件被手工挪走，下次重扫都会自愈。
+// 做成"安装时建一次"的话，之后状态漂了没人管。
+//
+// ## 平台差异（都实测过）
+//
+// - **Windows**：用 **junction**（`mklink /J`）—— 目录联接**不需要管理员权限、
+//   也不需要开发者模式**（真 symlink 两者都要）。虽叫 junction，Node 的
+//   `Dirent.isSymbolicLink()` 对它返回 true（reparse point），而 skill 加载器
+//   显式接受 `isSymbolicLink()`（见 `src/skills/loadSkillsDir.ts`）→ 能被识别。
+// - **macOS/Linux**：用 symlink。
+
+/// 一个要链接进来的 skill。
+#[derive(serde::Deserialize)]
+pub struct SkillLinkSpec {
+    /// 目标目录名：`~/.claude/skills/<name>`。必须是安全的单层目录名。
+    pub name: String,
+    /// **绝对路径**：插件目录内那个 skill 目录（须含 SKILL.md）。
+    /// 由前端拼好（`<pluginsRoot>/<pluginName>/<path>`）——
+    /// 与其它 contributes 一致：宿主不解析插件 manifest。
+    pub source: String,
+}
+
+/// 校验 skill 名：只允许字母/数字/`-`/`_`/`.`。
+/// name 会被直接 join 进 skills 目录，故必须杜绝路径穿越。
+fn sanitize_skill_name(name: &str) -> Option<&str> {
+    let n = name.trim();
+    if n.is_empty() || n == "." || n == ".." || n.len() > 64 {
+        return None;
+    }
+    if !n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return None;
+    }
+    Some(n)
+}
+
+/// 建目录链接（Windows=junction，其它=symlink）。链接位已占时先清，保证幂等。
+fn create_dir_link(link: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    if link.symlink_metadata().is_ok() {
+        remove_dir_link(link)?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // ⚠️ 用 `mklink /J` 而不是 `std::os::windows::fs::symlink_dir`：
+        // 后者建的是**真 symlink**，要管理员或开发者模式；junction 不要。
+        let out = Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("mklink 启动失败: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("mklink /J 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::os::unix::fs::symlink(target, link).map_err(|e| format!("symlink 失败: {e}"))
+    }
+}
+
+/// 删目录链接。**只摘链接本身，绝不递归删目标**。
+/// 发现它不是链接（而是真目录）时报错返回 —— 那是用户的东西，不擅自删。
+fn remove_dir_link(link: &std::path::Path) -> Result<(), String> {
+    let is_link = link
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_link {
+        return Err(format!("{} 不是链接（为安全起见不递归删除）", link.display()));
+    }
+    std::fs::remove_dir(link).map_err(|e| format!("移除链接失败: {e}"))
+}
+
+/// 收尾：清掉 skills 目录里**指向插件目录、但本次没在清单里**的链接。
+///
+/// 两个"只动自己的"判据，避免误删用户手建的链接（如指向 `~/.agents/skills` 的）：
+///   ① 必须是链接（真目录一律不碰）
+///   ② 目标路径含 `/plugins/`（我们建的链接都指向插件目录）
+fn prune_stale_plugin_skill_links(
+    skills_dir: &std::path::Path,
+    keep: &std::collections::HashSet<String>,
+    plugins_root_norm: &str,
+) {
+    let Ok(entries) = std::fs::read_dir(skills_dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if keep.contains(&name) {
+            continue;
+        }
+        let p = e.path();
+        let is_link = p.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+        if !is_link {
+            continue;   // 用户自己装的技能目录 → 不动
+        }
+        // 目标是插件目录下 → 是我们建的（含已悬空的）。read_link 对 junction 也有效。
+        let owned = std::fs::read_link(&p)
+            .map(|t| {
+                let ts = t.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+                ts.starts_with(plugins_root_norm)
+            })
+            .unwrap_or(false);
+        if owned {
+            match remove_dir_link(&p) {
+                Ok(()) => log::info!("skill link pruned: {name}"),
+                Err(err) => log::warn!("skill link prune 失败 {name}: {err}"),
+            }
+        }
+    }
+}
+
+/// 同步插件贡献的 skill 链接。**幂等**，可反复调用。
+#[tauri::command]
+fn sync_plugin_skill_links(
+    app: tauri::AppHandle,
+    specs: Vec<SkillLinkSpec>,
+) -> Result<serde_json::Value, String> {
+    let skills_dir = user_home().join(".claude").join("skills");
+    std::fs::create_dir_all(&skills_dir).map_err(|e| format!("Cannot create skills dir: {e}"))?;
+
+    let plugins_base = plugins_base_dir(&app)?;
+    let plugins_root = std::path::PathBuf::from(&plugins_base);
+    // 归一化用于前缀比对（大小写 + 分隔符），只用于 prune 的归属判断
+    let plugins_root_norm = plugins_root
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+
+    let mut linked: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for spec in &specs {
+        let Some(name) = sanitize_skill_name(&spec.name) else {
+            errors.push(format!("非法 skill 名（已跳过）: {}", spec.name));
+            continue;
+        };
+        let src = std::path::PathBuf::from(&spec.source);
+        // **只允许链接插件目录内的东西**（source 由前端拼，仍校验一道 ——
+        // 万一前端被改了，这里挡住"把任意目录挂进技能目录"）
+        let src_norm = src.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        if !src_norm.starts_with(&plugins_root_norm) {
+            errors.push(format!("source 不在插件目录内（已跳过）: {name} → {}", src.display()));
+            continue;
+        }
+        if !src.is_dir() {
+            errors.push(format!("skill 目录不存在（已跳过）: {name} → {}", src.display()));
+            continue;
+        }
+        if !src.join("SKILL.md").exists() {
+            errors.push(format!("缺 SKILL.md（已跳过）: {name} → {}", src.display()));
+            continue;
+        }
+        keep.insert(name.to_string());
+
+        let link = skills_dir.join(name);
+        // 已存在且已指向同一目标 → 不动（省一次 mklink，也避免无谓的目录抖动）
+        if link.symlink_metadata().is_ok() {
+            if let Ok(cur) = std::fs::read_link(&link) {
+                if cur == src {
+                    linked.push(name.to_string());
+                    continue;
+                }
+            }
+        }
+        match create_dir_link(&link, &src) {
+            Ok(()) => {
+                log::info!("skill link: {name} → {}", src.display());
+                linked.push(name.to_string());
+            }
+            Err(e) => errors.push(format!("建链失败 {name}: {e}")),
+        }
+    }
+
+    prune_stale_plugin_skill_links(&skills_dir, &keep, &plugins_root_norm);
+
+    Ok(serde_json::json!({ "linked": linked, "errors": errors }))
 }
 
 // ── Skill Marketplace ──

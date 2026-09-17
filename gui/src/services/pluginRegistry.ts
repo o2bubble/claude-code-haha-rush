@@ -66,6 +66,22 @@ export interface PluginContributes {
   commands: PluginCommand[];
   events: string[];
   mcpTools: PluginMcpTool[];
+  /** 插件附带的 skill（链接进 ~/.claude/skills，见 sync_plugin_skill_links）。 */
+  skills: PluginSkillDecl[];
+}
+
+/**
+ * 插件贡献的 skill —— 只是"把插件里某个目录链接进技能目录"，**没有任何注册机制**
+ * （skill 就是 `SKILL.md` + 附属文件的目录，AI 侧只扫 `~/.claude/skills`）。
+ *
+ * 宿主把 `path` 拼成绝对路径后交给 Rust 建链接，于是**插件目录是唯一来源**：
+ * 改插件里的 skill 文件立刻生效，不会出现"技能目录里还是旧副本"。
+ */
+export interface PluginSkillDecl {
+  /** 目标目录名：`~/.claude/skills/<name>`（须含 SKILL.md 的目录会链到那里） */
+  name: string;
+  /** 插件目录内的相对路径（如 `"skill"`） */
+  path: string;
 }
 
 /**
@@ -267,6 +283,7 @@ export function parsePluginManifest(json: string, sourceDir: string): ParseResul
       ? (contributesRaw.events as unknown[]).filter((e): e is string => typeof e === "string")
       : [],
     mcpTools: parseMcpTools(contributesRaw.mcpTools, processes),
+    skills: parsePluginSkills(contributesRaw.skills),
   };
 
   // 可选扩展字段（T8）: 分类/依赖/安装形态——容错解析, 缺省回落默认。
@@ -427,6 +444,45 @@ const SAFE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
  *
  * 注：插件**之间**的重名在聚合层处理（需要看到全部插件，见 collectPluginMcpTools）。
  */
+/**
+ * 解析 `contributes.skills`。
+ * 容错：非数组/元素非法（缺 name 或 path、名字含非法字符、path 绝对或穿越）→ 跳过该条，
+ * 不整个 manifest 失败（与 parseMcpTools / parseRuntimes 同心智）。
+ */
+export function parsePluginSkills(raw: unknown): PluginSkillDecl[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: PluginSkillDecl[] = [];
+  for (const s of raw as unknown[]) {
+    if (!isRecord(s)) continue;
+    const name = asString(s.name);
+    const path = asString(s.path);
+    // 名字：只允许字母/数字/-/_/.（与 Rust 侧 sanitize_skill_name 同规则；
+    // 两边都校验 —— 前端挡住明显错的，Rust 是最终防线）
+    if (!name || !/^[A-Za-z0-9._-]{1,64}$/.test(name) || name === "." || name === "..") {
+      console.warn("[plugin] skills: 跳过非法 name", name);
+      continue;
+    }
+    if (seen.has(name)) {
+      console.warn(`[plugin] skills: 跳过重复 name "${name}"`);
+      continue;
+    }
+    // path：插件内相对路径，禁绝对与穿越。
+    // ⚠️ 拆成两个布尔量而不是写成一长串条件 —— 那个路径分隔符字符类
+    // （`[/\\]` 形态）在多层转义里极易被写坏，而且写坏后看起来仍像对的。
+    const pathAbsolute =
+      !!path && (path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:/.test(path));
+    const pathTraversal = !!path && path.split(/[/\\]/).includes("..");
+    if (!path || pathAbsolute || pathTraversal) {
+      console.warn(`[plugin] skills: 跳过非法 path "${path}"（${name}）`);
+      continue;
+    }
+    seen.add(name);
+    out.push({ name, path });
+  }
+  return out;
+}
+
 export function parseMcpTools(raw: unknown, processes: PluginProcess[]): PluginMcpTool[] {
   if (!Array.isArray(raw)) return [];
   const processIds = new Set(processes.map((p) => p.id));
@@ -784,6 +840,49 @@ export async function uninstallPlugin(pluginName: string): Promise<UninstallResu
   return out ?? { removed: true, needsRestart: false };
 }
 
+/**
+ * 把插件声明的 skill 链接进 `~/.claude/skills/`，并清掉不再需要的链接。
+ *
+ * 为什么要**每次重扫都同步**（而不是安装时做一次）：
+ * 链接是外部状态，会漂 —— 用户手删了、插件被手工挪走、卸载后留下悬空链接。
+ * 幂等同步能让这些情况在下次重扫时自愈；一次性动作则漂了就没人管。
+ *
+ * 失败只 `console.warn`：skill 不可用不该影响插件本身可用。
+ */
+async function syncPluginSkillLinks(manifests: PluginManifest[]): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    // 插件根目录（`get_plugins_base_dir`）——Rust 侧的最终防线也要求 source 在此之下
+    const base = await invoke<string>("get_plugins_base_dir").catch(() => "");
+    if (!base) return;
+    const baseClean = base.replace(/[\\/]+$/, "").replace(/\\/g, "/");
+
+    const specs: Array<{ name: string; source: string }> = [];
+    for (const m of manifests) {
+      for (const sk of m.contributes?.skills ?? []) {
+        // 拼绝对路径交给 Rust（宿主不解析插件 manifest，与其它 contributes 一致）
+        const rel = sk.path.replace(/\\/g, "/").replace(/^\/+/, "");
+        specs.push({ name: sk.name, source: `${baseClean}/${m.pluginName}/${rel}` });
+      }
+    }
+    if (specs.length === 0) {
+      // 没有 skill 贡献也要调一次：让 Rust 清理"插件已卸载但链接还在"的残留
+      await invoke("sync_plugin_skill_links", { specs: [] }).catch(() => {});
+      return;
+    }
+    const out = await invoke<{ linked: string[]; errors: string[] }>(
+      "sync_plugin_skill_links",
+      { specs },
+    );
+    for (const e of out?.errors ?? []) console.warn("[plugin] skill link:", e);
+    if (out?.linked?.length) {
+      console.debug("[plugin] skill links synced:", out.linked.join(", "));
+    }
+  } catch (e) {
+    console.warn("[plugin] syncPluginSkillLinks 失败（skill 可能不可用）:", e);
+  }
+}
+
 // ─── reloadPlugins — 插件重扫单一入口（App / FloatingApp / 插件市场共用）───
 
 /**
@@ -818,6 +917,10 @@ export async function reloadPlugins(): Promise<void> {
     }
     const { registerPluginPanels } = await import("./pluginPanelBridge");
     registerPluginPanels(manifests);
+    // 插件贡献的 skill → 链接进 ~/.claude/skills（**幂等**：缺了补、悬空清）。
+    // 放在每次重扫里而不是"安装时建一次"—— 用户手删了链接、插件被手工挪走，
+    // 下次重扫都会自愈。失败只告警：skill 不可用不该阻断插件本身。
+    await syncPluginSkillLinks(manifests);
     const {
       stopPluginEventForwarding, startPluginEventForwarding, registerPluginCommands,
     } = await import("./pluginCommandBridge");

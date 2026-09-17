@@ -33,6 +33,18 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
 - contributes 全部可选；panels[].panelKind ∈ in-main | floating（第一版等价，均可开浮窗）
 - contributes.events 只接受 GUI Events 枚举值（如 chat.stateChanged, backend.stateChanged），
   未知名被静默忽略
+- contributes.skills（可选）: [{ "name": "my-skill", "path": "skill" }] ——
+  把插件内的技能目录**链接**进 \`~/.claude/skills/\`。
+  ⚠️ 这不是"能力注册" —— 技能就是 \`SKILL.md\` + 附属文件的目录，
+  AI 侧（claude.exe）只扫 \`~/.claude/skills\`（+ managed + 项目级），**不扫插件目录**，
+  所以必须放到那里。
+  - 宿主在**每次插件重扫**时做**幂等同步**：插件在 → 链接在（缺了补、指向错了重建）；
+    插件不在 → 链接清掉。用户手删了、插件被挪走，下次重扫自愈
+  - **链接**（Windows junction / unix symlink）而非复制 → 插件目录是唯一来源：
+    改插件里的技能文件立刻生效，不会留旧副本
+  - 约束：\`name\` 只允许字母数字与 \`-_.\`（防路径穿越）；
+    \`path\` 必须是插件目录内的相对路径；目标目录须含 \`SKILL.md\`
+  - ⚠️ **技能在会话启动时扫描** —— 装完要**新开会话**才看得到（与面板/命令"立刻可见"不同）
 - 进程声明（可选）: "processes": [{ "id": "srv", "command": "node",
   "args": ["server.cjs"], "env": {}, "startOn": "workspace_bound" }]
   **command 与 args 必须分开** —— 平台用 \`Command::new(command)\` 直接 spawn，

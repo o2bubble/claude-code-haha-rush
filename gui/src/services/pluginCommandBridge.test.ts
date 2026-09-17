@@ -23,6 +23,7 @@ function makeManifest(overrides?: Partial<PluginManifest>): PluginManifest {
       commands: [{ id: "refresh", title: "刷新", onInvoke: "refresh" }],
       events: ["chat.stateChanged"],
       mcpTools: [],
+      skills: [],
     },
     processes: [],
     category: "tool",
@@ -91,7 +92,7 @@ describe("startPluginEventForwarding — 事件转发", () => {
 
   it("订阅声明的 Events 值并转发", () => {
     setActiveManifests([
-      makeManifest({ contributes: { panels: [], commands: [], events: ["chat.stateChanged"], mcpTools: [] } }),
+      makeManifest({ contributes: { panels: [], commands: [], events: ["chat.stateChanged"], mcpTools: [], skills: [] } }),
     ]);
     startPluginEventForwarding();
 
@@ -109,7 +110,7 @@ describe("startPluginEventForwarding — 事件转发", () => {
 
   it("忽略不在 Events 枚举值的事件", () => {
     setActiveManifests([
-      makeManifest({ contributes: { panels: [], commands: [], events: ["nonexistent.event"], mcpTools: [] } }),
+      makeManifest({ contributes: { panels: [], commands: [], events: ["nonexistent.event"], mcpTools: [], skills: [] } }),
     ]);
     startPluginEventForwarding();
 
@@ -120,7 +121,7 @@ describe("startPluginEventForwarding — 事件转发", () => {
   });
 
   it("stop 后不再转发", () => {
-    setActiveManifests([makeManifest({ contributes: { panels: [], commands: [], events: ["chat.stateChanged"], mcpTools: [] } })]);
+    setActiveManifests([makeManifest({ contributes: { panels: [], commands: [], events: ["chat.stateChanged"], mcpTools: [], skills: [] } })]);
     startPluginEventForwarding();
     stopPluginEventForwarding();
 

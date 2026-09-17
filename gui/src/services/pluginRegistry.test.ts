@@ -58,7 +58,7 @@ describe("parsePluginManifest — 合法 manifest", () => {
     expect(r.ok).toBe(true);
     const m = (r as { ok: true; manifest: PluginManifest }).manifest;
     expect(m.pluginName).toBe("min");
-    expect(m.contributes).toEqual({ panels: [], commands: [], events: [], mcpTools: [] });
+    expect(m.contributes).toEqual({ panels: [], commands: [], events: [], mcpTools: [], skills: [] });
     expect(m.processes).toEqual([]);
   });
 });
@@ -400,6 +400,7 @@ function mf(over: Partial<PluginManifest> & { mcpTools?: unknown[] } = {}): Plug
     contributes: {
       panels: [], commands: [], events: [],
       mcpTools: (mcpTools ?? []) as PluginManifest["contributes"]["mcpTools"],
+      skills: [],
     },
     processes: [{ id: "shot-server", command: "node" }],
     category: "tool",
