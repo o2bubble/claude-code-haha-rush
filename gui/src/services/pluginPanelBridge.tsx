@@ -760,11 +760,26 @@ export function registerPluginPanels(manifests: PluginManifest[]): void {
   }
 }
 
-/** 注销插件贡献的面板（禁用/卸载时调用）：
+/**
+ * 注销插件贡献的面板（禁用/卸载时调用）：
  *  ① panelRegistry 摘定义（图标栏/面板下拉即消失）
- *  ② 布局树移除已打开的实例（removePanelsFromTree 纯函数, T2 预留）
- *  ③ 浮窗形态的含该面板的窗口一并关闭 */
+ *  ② 布局树移除已打开的实例（removePanelsFromTree 纯函数）
+ *  ③ 浮窗形态的含该面板的窗口一并关闭
+ *  ④ **关掉该插件开的指示窗与 overlay 窗口**
+ *
+ * ④ 的必要性：**宿主自己开的窗口该由宿主收拾**。此前只在插件**主动请求**关闭时
+ * 才调 closePlugin*，禁用/卸载路径没有 —— 指示窗靠"插件进程没了就自愈"才没留下
+ * 残骸，但那是插件侧的兜底，不该当主路径用。
+ *
+ * ④ 异步且**失败即忽略**：窗口清理失败不该影响"注销面板"这件正事。
+ * 且它在 `panelIds.length === 0` 的早退**之前** —— 没贡献面板的插件
+ * （如鼠标键盘只开指示窗）同样要关窗。
+ */
 export function unregisterPluginPanels(pluginName: string): void {
+  // ④ 先发出去（不等结果）
+  void closePluginIndicator(pluginName).catch(() => {});
+  void closePluginOverlay(pluginName).catch(() => {});
+
   const panelIds = getAllPanels()
     .map((p) => p.id)
     .filter((id) => id.startsWith(`plugin:${pluginName}:`));
