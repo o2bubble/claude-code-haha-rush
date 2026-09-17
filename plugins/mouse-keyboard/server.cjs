@@ -351,6 +351,16 @@ const VK_CONTROL = 0x11;
  */
 const TEST_SWALLOW_INJECTED = process.env.MK_TEST_SWALLOW_INJECTED === "1";
 
+/**
+ * 测试模式：require 本文件时**不启动 HTTP 监听**（见文件尾的守卫）。
+ *
+ * 用途：`security.test.cjs` 要 require 本模块测纯函数（锁的范围校验、租约计算、
+ * 逃生键跟踪、动作描述……），而正常加载会 listen 端口、装钩子、改 DPI ——
+ * 测试进程不需要这些，且会互相干扰。
+ * 与 git-viewer 的 `GIT_VIEWER_TEST=1` 同款做法。
+ */
+const TEST_MODE = process.env.MK_TEST === "1";
+
 /** 临时诊断：把钩子里看到的事件打出来（排查"逃生键不触发"这类问题用）。 */
 const DEBUG_HOOK = process.env.MK_DEBUG_HOOK === "1";
 
@@ -766,7 +776,14 @@ function checkAbort() {
 
   // 长操作期间把租约往后推 —— 否则一个 30 秒的 sequence 会在中途租约到期、
   // 用户输入突然恢复（正是要防止的"半路被插手"）。纯内存操作，代价可忽略。
-  if (lockState.active) renewLock();
+  if (lockState.active) {
+    renewLock();
+    // **同时续指示窗的寿命**：长操作（如 40 秒拖拽）跑起来时序列内部不调
+    // noteActivity（那只在单条动作时调）→ lastActivityAt 不更新 → 指示窗会在
+    // 操作跑到 30 秒时自己淡出。而此刻键鼠**正锁着**，用户恰恰最需要看到
+    // "锁着呢 / 剩几秒 / 怎么接管"。锁没解除，窗口就不该消失。
+    lastActivityAt = Date.now();
+  }
 
   // 逃生组合的**第二重检测**：锁定期间由钩子负责（那里能拿到被吞的按键）；
   // 未锁定时没有任何东西被吞，GetAsyncKeyState 可靠，就在这里轮询。
@@ -1238,6 +1255,13 @@ async function actSequence(args) {
     const repeat = Math.max(1, Math.min(SEQ_MAX_REPEAT, Number(step.repeat) || 1));
 
     for (let r = 0; r < repeat; r++) {
+      // ⚠️ **每次重复都要过一遍中断检查** —— 早期实现只在 drag/type 的**内部**循环
+      // 调 checkAbort，而 `{action:"move", repeat:80}` 这类"单步 + 大重复"的形态
+      // 走的是这个循环：里面没有检查 → 用户按 Ctrl+Q 要**等整个 repeat 跑完**才停，
+      // 且期间不续租约/不续指示窗寿命。实测测试用例正是 `move repeat:80`。
+      // （checkAbort 内部只做内存判断，每次 repeat 调一次代价可忽略。）
+      checkAbort();
+
       // 预算前瞻：这步做下去会不会超宿主超时？会就停在这里（宁可少做，不可超时）
       const used = Date.now() - started;
       if (used + estimateStepMs(step) > SEQ_BUDGET_MS) {
@@ -1600,7 +1624,7 @@ server.on("error", (err) => {
   process.exit(1);
 });
 
-server.listen(requestedPort || DEFAULT_PORT, "127.0.0.1", () => {
+if (!TEST_MODE) server.listen(requestedPort || DEFAULT_PORT, "127.0.0.1", () => {
   if (started) return;   // 见上方注释：首次 listen 失败后它的回调仍挂着
   started = true;
   const actual = server.address().port;
@@ -1631,3 +1655,27 @@ process.on("exit", () => {
   try { uninstallLock(true); } catch { /* 退出路径尽力而为 */ }
   try { releaseAll(); } catch { /* 退出路径尽力而为 */ }
 });
+
+// ── 测试接口（仅 MK_TEST=1 时导出）──────────────────────────────────
+//
+// 只导出**纯函数与可安全操作的状态**：这些是"锁 / 租约 / 逃生键 / 输入判定"的核心，
+// 出错的后果是"用户被锁死"或"锁形同虚设"，必须有回归测试兜着。
+// 不导出任何会真的操作鼠标键盘的东西（robot.* 仍留在模块内部）。
+if (TEST_MODE) {
+  module.exports = {
+    // 锁定范围
+    normalizeLockScope,
+    // 租约
+    lockState, renewLock, lockSnapshot, LOCK_LEASE_MS,
+    // 逃生键状态跟踪（钩子在锁定期间靠它判定 —— 读不到系统键状态）
+    trackCtrl, escapeComboDownInHook, ctrlDown,
+    // 输入来源判定（物理 vs 注入）—— 决定"吞谁放行谁"
+    isPhysicalEvent, LLKHF_INJECTED, LLMHF_INJECTED,
+    // 动作描述（指示窗列表显示的内容）
+    describeStep,
+    // 常量（测试用）
+    ESCAPE_VK, VK_CONTROL, CTRL_VKS,
+    // 测试模式开关本身
+    TEST_MODE,
+  };
+}

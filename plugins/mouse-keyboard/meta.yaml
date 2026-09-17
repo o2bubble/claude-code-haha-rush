@@ -1,5 +1,5 @@
 name: "mouse-keyboard"
 author: "官方"
-version: "0.3.0"
+version: "0.3.1"
 description: "鼠标键盘 — 让 AI 能操作电脑：移动、点击、拖拽、滚动、按键、输入中文；支持批量执行一串动作（快很多）。内置三层急停与防护（AI 不能操作本应用窗口、按键不会卡住）"
 tags: ["automation", "input", "mouse", "keyboard", "plugin"]
