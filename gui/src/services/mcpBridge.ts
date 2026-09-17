@@ -776,15 +776,28 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
       if (!slug) throw new Error("slug is required");
       const { skillMarketplace } = await import("./skillMarketplace");
       const { reloadPlugins } = await import("./pluginRegistry");
-      // 依赖校验: 市场详情里 dependencies 未装 → 拒绝并列出（AI 据此先装依赖）
+      // 依赖校验（与前端市场一键安装**同一套检查**，见 pluginDependencyCheck）：
+      //   · 未安装 → 拒绝并列出（AI 据此先装依赖）
+      //   · 装了但**未就绪**（如 nodejs 的 runtime 没下载）→ 也拒绝，
+      //     否则本插件装上了也跑不起来，用户只看到"插件坏了"
       const detail = await skillMarketplace.getPackage(slug);
       const deps: string[] = (detail as any).dependencies ?? [];
       if (deps.length > 0) {
-        const { getInstalledPluginEntries } = await import("./pluginRegistry");
-        const installed = await getInstalledPluginEntries();
-        const missing = deps.filter((d) => !installed.has(d));
-        if (missing.length > 0) {
-          throw new Error(`Missing dependencies: ${missing.join(", ")}. Install them first (plugin_install slug=<each>).`);
+        const { checkPluginDependencies } = await import("./pluginDependencyCheck");
+        const chk = await checkPluginDependencies(deps);
+        if (chk.missing.length > 0) {
+          throw new Error(
+            `Missing dependencies: ${chk.missing.join(", ")}. ` +
+            `Install them first (plugin_install slug=<each>).`,
+          );
+        }
+        if (chk.notReady.length > 0) {
+          const detailLines = chk.notReady.map((x) => `${x.name}: ${x.reason}`).join("; ");
+          throw new Error(
+            `Dependencies installed but NOT READY: ${detailLines}. ` +
+            `Finish their environment setup first (plugin_docs name=<dep> for the guided steps), ` +
+            `then retry. (Installing this plugin now would produce a plugin that cannot run.)`,
+          );
         }
       }
       // ai-guided 插件没有运行时, GUI 装了也只是文件——拒绝并引导 AI 走指导

@@ -167,10 +167,53 @@ export default function PluginMarketPanel() {
     }
   }, [installedMap, trustedSlugs]);
 
-  const handleInstall = async (slug: string, zipUrl: string) => {
+  const handleInstall = async (slug: string, zipUrl: string, deps: string[] = []) => {
     setInstalling((prev) => new Set(prev).add(slug));
     try {
       const { invoke } = await import("@tauri-apps/api/core");
+
+      // ── 依赖检查（安装**之前**）──
+      // 为什么必须做：依赖没装/没就绪时装了本插件，它会**装得上但跑不起来**
+      // （如依赖 nodejs 的插件进程 command:"node" 解析不到），
+      // 用户看到的是"这个插件坏了"而不是"依赖没装好"。
+      if (deps.length > 0) {
+        const { checkPluginDependencies } = await import("../../services/pluginDependencyCheck");
+        let chk = await checkPluginDependencies(deps);
+
+        // ① 缺依赖 → 问用户是否**一并安装**（不擅自替他装东西）
+        if (chk.missing.length > 0) {
+          const list = chk.missing.join("、");
+          const go = confirm(i18nT("pluginMarket.installMissingDeps", { deps: list }));
+          if (!go) {
+            addStatusMessage(i18nT("pluginMarket.installCancelled"), "info");
+            return;
+          }
+          // 依次安装缺失的依赖（各自带 z 自己的 zipUrl）
+          const { skillMarketplace } = await import("../../services/skillMarketplace");
+          for (const dep of chk.missing) {
+            addStatusMessage(i18nT("pluginMarket.installingDep", { dep }), "info");
+            await invoke("install_plugin_package", {
+              zipUrl: skillMarketplace.getPackageDownloadUrl(dep),
+              packageName: dep,
+            });
+          }
+          await refreshInstalled();
+          chk = await checkPluginDependencies(deps);   // 复查（可能依赖自己还缺东西）
+        }
+
+        // ② 装了但**未就绪**（如 nodejs 的 runtime 还没下载）→ 告知并让用户选
+        if (chk.notReady.length > 0) {
+          // detail 用 `；` 连接（**不在代码里写换行转义** —— 换行由 i18n 模板控制，
+          // 免得又踩"多层转义把 \n 写成真换行"的坑）
+          const detail = chk.notReady.map((x) => `${x.name}：${x.reason}`).join("；");
+          const go = confirm(i18nT("pluginMarket.installDepsNotReady", { detail }));
+          if (!go) {
+            addStatusMessage(i18nT("pluginMarket.installCancelled"), "info");
+            return;
+          }
+        }
+      }
+
       await invoke("install_plugin_package", { zipUrl, packageName: slug });
       addStatusMessage(`${i18nT("pluginMarket.installSuccess")}`, "success");
       // 安装即活: 重扫插件 manifest → 面板注册 + 事件转发 + 进程刷新
@@ -366,7 +409,8 @@ export interface PkgCardCtx {
   installedMap: Map<string, LocalPluginEntry>;
   installing: Set<string>;
   openDetail: (pkg: PackageSummary) => void;
-  handleInstall: (slug: string, zipUrl: string) => void;
+  /** deps = 该包的 dependencies（安装前做依赖校验 + 可选一并安装） */
+  handleInstall: (slug: string, zipUrl: string, deps: string[]) => void;
   handleUninstall: (pluginName: string) => void;
   toggleDisabled: (pluginName: string, disabled: boolean) => void;
   /** installedVersion 传入 = 更新场景(提示词走 aiUpdatePrompt, AI 先检查现状再决定是否跳过) */
@@ -403,7 +447,7 @@ export function PkgCard({ pkg, ctx }: { pkg: PackageSummary; ctx: PkgCardCtx }) 
     aiGuided: (pkg.installType ?? "standard") === "ai-guided",
   };
   const pk: PluginActions = {
-    install: () => ctx.handleInstall(pkg.slug, skillMarketplace.getPackageDownloadUrl(pkg.slug)),
+    install: () => ctx.handleInstall(pkg.slug, skillMarketplace.getPackageDownloadUrl(pkg.slug), pkg.dependencies ?? []),
     toggle: () => installedName != null && ctx.toggleDisabled(installedName, !isDisabled),
     uninstall: () => installedName != null && ctx.handleUninstall(installedName),
     aiInstall: () => void ctx.requestAiInstall(pkg, needsUpdate ? installedVersion : undefined),
