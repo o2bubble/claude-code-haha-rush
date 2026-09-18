@@ -95,7 +95,57 @@ description: "READ THIS BEFORE DRIVING THE DESKTOP — practical, hard-won habit
 
 ---
 
-## 三、批量：一次调用做完一串
+## 三、先让目标出现：启动程序与找窗口
+
+要操作的程序可能还没开。**启动它**有两个实测出来的坑 —— 而直觉解法往往是错的。
+
+### 坑 1：`Start-Process <名字>` 可能压根启不动
+
+```
+✗ Start-Process notepad                             → 失败："系统找不到所需的全部信息"
+✓ Start-Process notepad.exe                         → 成功
+✓ Start-Process "C:\Windows\System32\notepad.exe"   → 最稳
+```
+
+**原因**：PATH 里排前面的 `notepad` 可能是 **Git 自带的 POSIX shell 脚本**
+（`<安装目录>\git\usr\bin\notepad`，635 字节，`#!/bin/sh`）—— 不是 exe，启动不了。
+
+**规则**：启动程序**一律用全路径**（或至少带 `.exe`），别裸写名字。
+
+### 坑 2：Store 应用的窗口**不在**你启动的那个 PID 上
+
+Win11 的记事本、计算器等 **Store（打包）应用是多窗口共享进程模型**：
+
+- 你启动的进程可能只是个转发器 —— 活着，但 `MainWindowHandle = 0`
+- 真正的窗口在**另一个进程**上（常是早先就存在的实例）
+- 实测：启动后 `PID A 窗口=0`、`PID B 窗口=3213918` —— 后者才是窗口
+
+**规则**：
+- **别按 PID 认窗口** —— 按 `MainWindowTitle` 找（Store 应用标题如 `无标题 - Notepad`）
+- 启动后**验证**：`Get-Process <名> | Select MainWindowHandle`，**非 0 才算真起来了**
+
+### 别把「没窗口」归咎于「进程树受限」
+
+实测（2026-09-18）：**在 agent 自己的进程树里启动普通 GUI 程序完全正常**
+（一个 tkinter 窗口有正常的 `MainWindowHandle`）。
+
+窗口没出现时，按顺序查：① 路径对不对（坑 1）→ ② 是不是 Store 应用（坑 2）
+→ ③ 程序是否需要特定工作目录/参数。
+
+### 需要窗口在前台时（别第一时间找用户）
+
+第七章说「前台是本 GUI」会被拒绝 —— 那是保护，但**解法不用麻烦用户**：
+
+```powershell
+# ⚠️ 别把变量名写成 $pid —— 那是 PowerShell 保留变量（= 当前进程），会静默激活错对象
+$targetPid = (Get-Process notepad | Select-Object -First 1).Id
+(New-Object -ComObject WScript.Shell).AppActivate($targetPid)   # 返回 True 为成功
+explorer.exe "C:\path\to\app.exe"                                # 或经 explorer 中转启动（新窗口通常直接在前台）
+```
+
+---
+
+## 四、批量：一次调用做完一串
 
 `action: "sequence"` + `steps: [...]` —— **每一步省一次 AI 往返（1~3 秒）**。
 
@@ -133,7 +183,7 @@ description: "READ THIS BEFORE DRIVING THE DESKTOP — practical, hard-won habit
 
 ---
 
-## 四、长操作：声明独占（`lock`）
+## 五、长操作：声明独占（`lock`）
 
 如果一批操作**中途被打断就会前功尽弃**（填表单、拖拽、多步向导），加 `lock`：
 
@@ -158,7 +208,7 @@ description: "READ THIS BEFORE DRIVING THE DESKTOP — practical, hard-won habit
 
 ---
 
-## 五、输入中文：两个必须记住的事
+## 六、输入中文：两个必须记住的事
 
 ### ① 非 ASCII 一律 `delayMs: 100`（不是"60~100"，就是 100）
 
@@ -178,6 +228,15 @@ description: "READ THIS BEFORE DRIVING THE DESKTOP — practical, hard-won habit
 ```
 ⚠️ 顶层 `stepDelayMs` 是**步骤之间**的间隔，管不着**字符之间** —— 两者极易混淆。
 
+### ①b 预算换算：中文输入 ≈ **10 字符/秒**
+
+`delayMs: 100` 的代价是速度 —— 实测 **42 字符耗时 ~4.2 秒**。
+
+> **宿主 MCP 有 8 秒硬超时**（超了宿主报 timeout，而插件还在打字 → AI 误判失败并重做）。
+> 所以：**单次 `type` 的中文超过 ~50 字符，就该拆成多批**（每批之间 screenshot 或继续下一步）。
+
+算得过来就不会撞墙：`字符数 ÷ 10 = 秒数`，留操作余量。
+
 ### ② `chars` 字段**不可信** —— 它报的是"打算输入多少"
 
 **失败时返回与成功时一模一样**：
@@ -195,22 +254,23 @@ description: "READ THIS BEFORE DRIVING THE DESKTOP — practical, hard-won habit
 
 ---
 
-## 六、常见失败与对策
+## 七、常见失败与对策
 
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
 | 返回"目标坐标落在指示窗上" | AI 操作指示窗挡住了目标 | 工具返回里会告诉你，调 `move_indicator` 挪开再重试 |
-| 返回"当前前台窗口是本应用" | 宿主 GUI 在前台 | **这是保护**（防止 AI 点自己的权限框）。先让用户切走，或操作别的窗口 |
-| 点击成功但目标没反应 | 窗口不在前台 / 被遮挡 / 控件禁用 | **截图看**（第一章第 ③ 步的道理）；必要时先 `click` 一次把它带到前台 |
+| 返回"当前前台窗口是本应用" | 宿主 GUI 在前台 | **这是保护**（防止 AI 点自己的权限框）。**自己激活目标窗口即可，别麻烦用户**：`AppActivate($targetPid)` 或经 `explorer.exe` 启动新实例（完整写法见第三章末） |
+| 点击成功但目标没反应 | 窗口不在前台 / 被遮挡 / 控件禁用 / **系统对话框不吃模拟点击** | **截图看**（第一章第 ③ 步的道理）；**系统对话框（保存/打开/确认）优先走键盘**：`Tab`/方向键切换、`Enter` 确认、`Esc` 取消 —— 实测鼠标点两次无效时，键盘一次就过 |
+| 截图里出现"AI 操作中"小窗 | **正常现象**，不是错误 | 它还能当**操作历史**用 —— 反过来核对"我刚才做过什么" |
 | "输入被系统拦截" | 目标窗口以管理员权限运行 | Windows 的 UIPI 限制，**无解** —— 如实告诉用户，请他自己操作或以普通权限重开目标 |
-| 输入的中文丢了几个字 | `delayMs` 太小（默认仅 4ms） | 改成 **`delayMs: 100`**（见第五章；60 也会丢） |
+| 输入的中文丢了几个字 | `delayMs` 太小（默认仅 4ms） | 改成 **`delayMs: 100`**（见第六章；60 也会丢） |
 | 滚动方向反了 | —— | 工具语义是 **正 `dy` = 向下滚**，符合直觉，不用管 Windows 原生符号 |
 
 **失败时的第一反应应该是截图，而不是调大参数重试。**
 
 ---
 
-## 七、组合范例
+## 八、组合范例
 
 ### 例：在某个应用里填一个表单
 
@@ -234,16 +294,20 @@ description: "READ THIS BEFORE DRIVING THE DESKTOP — practical, hard-won habit
 
 ---
 
-## 八、别做的事
+## 九、别做的事
 
 - **别在没截图的情况下猜坐标**（哪怕你"刚看过"）
 - **别把 `ok: true` 当成"操作生效了"**
-- **别信 `type` 返回的 `chars`/`textLength`** —— 那是"打算输入多少"，不是实际落屏（见第五章）
+- **别信 `type` 返回的 `chars`/`textLength`** —— 那是"打算输入多少"，不是实际落屏（见第六章）
 - **别用低于 100 的 `delayMs` 打中文**（60 实测会丢字）
 - **别在用户接管（Ctrl+Q）后盲目重试**
 - **别对连续几十步的操作一次发完**（8 秒预算会截断）—— 分批
 - **别重发 `results` 里已执行的步骤**（会重复操作）
 - **别操作你无法验证结果的东西**（如不可逆的删除、支付）—— 那类操作应先问用户
+- **屏幕和预期不符时别脑补** —— 停下 → 截图/查进程 → 不确定就问。
+  （实测教训：看到内容变了就脑补"另一个 agent 在抢桌面"，其实是之前的测试残留）
+- **收尾要清场** —— 关掉自己启动的程序、确认最终状态；
+  跑清理脚本时**别用 `$pid` 这类保留变量命名**（PowerShell 里会静默失效，进程根本没关掉）
 
 ---
 
