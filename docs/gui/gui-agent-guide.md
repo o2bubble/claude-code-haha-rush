@@ -296,6 +296,21 @@ You may be able to **drive the user's browser or their whole desktop** — but o
 plugin is installed. This is **not a built-in GUI capability**: the tools come from plugins, so
 **always check what's actually available before deciding, and don't assume a tool exists**.
 
+### ⚠️ Before your first action: read the `computer-use` skill, if you have it
+
+**Check your skill list for `computer-use` (or any desktop-control skill) and read it BEFORE you
+act.** It is not optional background reading — it carries the hard-won operating experience:
+
+- **verify each step** (a tool reporting success means the event was *sent*, not that it landed)
+- **coordinate conversion** (screenshot pixels → screen-absolute)
+- **input timing** (non-ASCII text needs a slower cadence; the reported character count is
+  *intent*, not what actually landed)
+- when to take exclusive input control, and what to do if the user takes over
+
+Driving a desktop without it means re-discovering each of those failures live — with the user's
+mouse and keyboard. **Skills are scanned at session start**: if the plugin was just installed,
+the skill appears only in a **new session**.
+
 ### Check what's installed, then decide
 
 `plugin_list` shows installed plugins (name, `enabled`, category, dependencies). `plugin_get
@@ -340,7 +355,8 @@ If they agree:
 - **Don't fight the user for the mouse.** If they're actively working, ask before taking over.
 
 *(Exact tool names, parameters, and safety behavior belong to each plugin — read its README /
-AI_NOTES via `plugin_docs name=<name>`, and the skill if it ships one.)*
+AI_NOTES via `plugin_docs name=<name>`. If it ships a skill (see the top of this section),
+that skill is where the *operating* knowledge lives — read it first.)*
 
 ## Key Differences from CLI
 

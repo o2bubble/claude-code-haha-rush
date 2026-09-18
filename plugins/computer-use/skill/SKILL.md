@@ -1,6 +1,6 @@
 ---
 name: computer-use
-description: "Reliably drive a Windows desktop with the mouse-keyboard and screenshot plugins: taking screenshots, converting pixel coordinates to screen-absolute coordinates, clicking/typing/dragging, doing multi-step operations in one batch, and recovering when something goes wrong (wrong window, blocked input, user takeover). Use when the user asks you to operate another application, fill a form, click through a UI, automate a GUI task, or verify what is on screen. Also use before any computer-control action to avoid the common failure modes (wrong coordinates, lost foreground, mid-operation interruption)."
+description: "READ THIS BEFORE DRIVING THE DESKTOP — practical, hard-won habits for operating a computer with the mouse-keyboard + screenshot plugins, so you don't rediscover each failure live with the user's real mouse. Covers: screenshot-verify every step (a success result means the event was dispatched, not that it landed), converting image pixels to screen-absolute coordinates, batching multi-step operations, taking exclusive input control, and recovering from common failures (wrong coordinates, blocked input, user takeover). Triggers when the user asks you to operate another application, fill a form, click through a UI, automate a GUI task, or verify what's on screen — and as a prerequisite before any computer-control action."
 ---
 
 # 操作电脑（看屏幕 + 鼠标键盘）
