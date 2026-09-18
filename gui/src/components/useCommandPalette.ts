@@ -8,7 +8,7 @@ import { Commands } from "../services/commands";
 import { togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
 import { getChatState } from "../stores/chatStore";
 import { switchSession } from "./chat/useChatBridge";
-import { ALL_PANEL_DEFS } from "../services/panelDefs";
+import { getAllPanels } from "../stores/panelRegistry";
 import type { PaletteItem } from "../utils/commandPaletteLogic";
 import { buildPanelItems, buildCommandItems, buildSessionItems, type SkillI18n } from "../utils/commandPaletteItems";
 import { buildEditorCommandItems } from "../utils/editorCommands";
@@ -41,6 +41,9 @@ export function useCommandPalette() {
   useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
   useEvent<LayoutTreeChangedPayload>(Events.LAYOUT_TREE_CHANGED);
   useEvent<LayoutFloatingChangedPayload>(Events.LAYOUT_FLOATING_CHANGED);
+  // 🔴 面板注册表变化（装/卸/禁用插件时 registerPanel/rerenderPanel/unregisterPanel 都会 emit）。
+  // 少了这一条，插件面板要等别的刷新才出现 —— 见下方 buildPanelItems 的数据源说明。
+  useEvent(Events.PANEL_REGISTRY_CHANGED);
 
   const chat = getChatState();
 
@@ -70,8 +73,12 @@ export function useCommandPalette() {
 
   const items = useMemo<PaletteItem[]>(() => {
     // 面板：最近使用排序，点击记录
+    // 🔴 数据源用**运行时注册表** getAllPanels()，不是静态 ALL_PANEL_DEFS ——
+    // 插件面板经 rerenderPanel() 注册进 Map，不在静态列表里。用静态列表会导致
+    // 插件面板「在下拉里能开、在命令面板搜不到」（2026-09-18 修）。
+    // 子窗口（FloatingApp）里两者等价：那边只 forEach ALL_PANEL_DEFS 注册。
     const panels: PaletteItem[] = sortByRecent(
-      buildPanelItems(ALL_PANEL_DEFS, (panelId) => isPanelOpenInTree(panelId)),
+      buildPanelItems(getAllPanels(), (panelId) => isPanelOpenInTree(panelId)),
       getRecent("panel"),
     ).map((p) => ({
       ...p,

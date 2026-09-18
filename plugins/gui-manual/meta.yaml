@@ -1,5 +1,5 @@
 name: "gui-manual"
 author: "官方"
-version: "0.1.1"
+version: "0.1.2"
 description: "GUI 功能手册 — 把 78 个用户可见功能（面板/快捷键/右键菜单/操作步骤）装进侧栏面板：可搜索、可跳转、跟主题。同一份手册也做成技能——用户问「XX 在哪」「怎么用」或遇到界面问题时，AI 能按章检索给出准确指引"
 tags: ["guide", "manual", "help", "skill", "文档"]
