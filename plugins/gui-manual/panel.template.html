@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>GUI 功能手册</title>
+<style>
+  :root {
+    --bg: #20242f; --bg2: #161a23; --bg3: #1a1f2b;
+    --fg: #e6e9f0; --fg-muted: #8b93a7; --fg-dim: #6b7285;
+    --border: #2c3547; --accent: #5aa8ff; --accent-subtle: rgba(90,168,255,.14);
+    --mark: rgba(255,214,0,.28);
+  }
+  html.theme-light {
+    --bg: #f3f5f9; --bg2: #ffffff; --bg3: #f8f9fc;
+    --fg: #1f2430; --fg-muted: #5b6474; --fg-dim: #8a92a3;
+    --border: #d8dee8; --accent: #2563eb; --accent-subtle: rgba(37,99,235,.10);
+    --mark: rgba(255,214,0,.45);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: flex; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.65 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+
+  /* ── 侧栏 ── */
+  aside {
+    width: 240px; flex: 0 0 240px; height: 100vh;
+    display: flex; flex-direction: column;
+    background: var(--bg2); border-right: 1px solid var(--border);
+  }
+  .search-wrap { padding: 10px 10px 6px; position: relative; }
+  #search {
+    width: 100%; padding: 7px 26px 7px 9px;
+    background: var(--bg3); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 12.5px; outline: none;
+  }
+  #search:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-subtle); }
+  #search::placeholder { color: var(--fg-dim); }
+  /* 隐藏浏览器给 type=search 的原生清除按钮（我们有自己的 ×，否则会并排两个） */
+  #search::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
+  #clear {
+    position: absolute; right: 17px; top: 50%; transform: translateY(-50%);
+    width: 18px; height: 18px; border: 0; border-radius: 50%;
+    background: transparent; color: var(--fg-muted); cursor: pointer;
+    font-size: 14px; line-height: 1; padding: 0; display: none;
+  }
+  #clear:hover { background: var(--accent-subtle); color: var(--fg); }
+  #clear.on { display: block; }
+  .meta {
+    padding: 0 12px 8px; font-size: 11px; color: var(--fg-dim);
+    border-bottom: 1px solid var(--border);
+  }
+  #nav { flex: 1; overflow-y: auto; padding: 6px 0 20px; }
+  #nav::-webkit-scrollbar, #content::-webkit-scrollbar { width: 9px; }
+  #nav::-webkit-scrollbar-thumb, #content::-webkit-scrollbar-thumb {
+    background: var(--border); border-radius: 5px;
+  }
+  #nav::-webkit-scrollbar-thumb:hover, #content::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }
+
+  .nav-ch {
+    display: block; padding: 7px 12px 5px; color: var(--fg);
+    font-weight: 600; font-size: 12.5px; text-decoration: none;
+    border-left: 2px solid transparent;
+  }
+  .nav-ch:hover { color: var(--accent); }
+  .nav-chapter.active .nav-ch { color: var(--accent); border-left-color: var(--accent); }
+  .nav-items { display: none; padding-bottom: 4px; }
+  .nav-chapter.expanded .nav-items, .nav-chapter.active .nav-items { display: block; }
+  .nav-item {
+    display: block; padding: 3px 12px 3px 24px;
+    color: var(--fg-muted); font-size: 12px; text-decoration: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .nav-item:hover { color: var(--fg); background: var(--accent-subtle); }
+  .nav-item.cur { color: var(--accent); background: var(--accent-subtle); }
+  .nav-item.hit-title { color: var(--fg); font-weight: 600; }
+  .nav-item.hit-title::before { content: "› "; color: var(--accent); }
+  .no-hit { padding: 14px 12px; color: var(--fg-dim); font-size: 12px; display: none; }
+  .no-hit.on { display: block; }
+
+  /* ── 内容区 ── */
+  main { flex: 1; height: 100vh; overflow-y: auto; scroll-behavior: smooth; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 26px 34px 80px; }
+
+  h2 {
+    margin: 34px 0 14px; padding-bottom: 8px; font-size: 19px;
+    border-bottom: 1px solid var(--border);
+  }
+  h2:first-child { margin-top: 4px; }
+  h3 { margin: 22px 0 8px; font-size: 14.5px; color: var(--fg); }
+  article.item {
+    padding: 2px 0 14px 13px; margin-bottom: 6px;
+    border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
+  }
+  article.item.flash {
+    border-left-color: var(--accent);
+    background: var(--accent-subtle);
+    transition: background .25s;
+  }
+  p { margin: 5px 0; }
+  ul { margin: 5px 0; padding-left: 20px; }
+  li { margin: 3px 0; }
+  ul ul { margin: 2px 0; }
+  code {
+    padding: 1.5px 5px; border-radius: 4px; font-size: 12px;
+    background: var(--bg3); border: 1px solid var(--border);
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  strong { color: var(--fg); font-weight: 600; }
+  a { color: var(--accent); }
+  blockquote {
+    margin: 8px 0; padding: 6px 12px; color: var(--fg-muted);
+    border-left: 3px solid var(--border); background: var(--bg3);
+  }
+  table { border-collapse: collapse; margin: 8px 0; font-size: 12.5px; width: 100%; }
+  th, td { padding: 5px 9px; border: 1px solid var(--border); text-align: left; }
+  th { background: var(--bg3); font-weight: 600; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 22px 0; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; }
+</style>
+</head>
+<body>
+  <aside>
+    <div class="search-wrap">
+      <input id="search" type="search" placeholder="搜索功能…（如：快捷键、工作区）" autocomplete="off" />
+      <button id="clear" title="清空">×</button>
+    </div>
+    <div class="meta"><!--META--></div>
+    <nav id="nav"><!--NAV--><div class="no-hit" id="noHit">没有匹配的功能</div></nav>
+  </aside>
+  <main id="content"><div class="wrap"><!--CONTENT--></div></main>
+
+<script>
+(function () {
+  // ── 主题跟随（与 git-viewer 同一套：初始 URL 参数 + 宿主 postMessage 推送）──
+  function applyTheme(t) {
+    document.documentElement.classList.toggle('theme-light', t === 'light');
+  }
+  var params = new URLSearchParams(location.search);
+  applyTheme(params.get('theme'));
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (d && d.source === 'plugin:host' && d.kind === 'theme' && d.payload) applyTheme(d.payload.theme);
+  });
+
+  var INDEX = /*INDEX*/;
+  var nav = document.getElementById('nav');
+  var content = document.getElementById('content');
+  var search = document.getElementById('search');
+  var clearBtn = document.getElementById('clear');
+  var noHit = document.getElementById('noHit');
+  var byId = {};
+  INDEX.forEach(function (x) { byId[x.id] = x; });
+
+  // ── 跳转 + 闪烁提示 ──
+  function goTo(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    el.classList.add('flash');
+    setTimeout(function () { el.classList.remove('flash'); }, 1400);
+    nav.querySelectorAll('.nav-item.cur').forEach(function (n) { n.classList.remove('cur'); });
+    var link = nav.querySelector('.nav-item[data-target="' + id + '"]');
+    if (link) link.classList.add('cur');
+  }
+  nav.addEventListener('click', function (e) {
+    var a = e.target.closest('a[data-target]');
+    if (!a) return;
+    e.preventDefault();
+    goTo(a.dataset.target);
+  });
+
+  // ── 搜索：过滤导航（章节标题命中 → 整章；否则列出命中的功能点）──
+  function applyFilter() {
+    var q = search.value.trim().toLowerCase();
+    clearBtn.classList.toggle('on', !!q);
+    var any = false;
+    nav.querySelectorAll('.nav-chapter').forEach(function (ch) {
+      var chTitle = ch.querySelector('.nav-ch').textContent.toLowerCase();
+      var chHit = q && chTitle.indexOf(q) >= 0;
+      var itemAny = false;
+      ch.querySelectorAll('.nav-item').forEach(function (it) {
+        var rec = byId[it.dataset.target];
+        var hitTitle = !!(rec && rec.title.toLowerCase().indexOf(q) >= 0);
+        var hit = !q || chHit || hitTitle ||
+          (rec && rec.text.toLowerCase().indexOf(q) >= 0);
+        it.hidden = !hit;
+        // 标题命中要突出（否则「设置与快捷键」会被「插件市场」这类正文提及的挤在后面）
+        it.classList.toggle('hit-title', !!q && hitTitle);
+        if (hit) itemAny = true;
+      });
+      ch.hidden = q ? !(itemAny || chHit) : false;
+      if (itemAny) any = true;
+      // 搜索时自动展开命中章节
+      ch.classList.toggle('expanded', !!q && (itemAny || chHit));
+      if (q && chHit) ch.querySelectorAll('.nav-item').forEach(function (i) { i.hidden = false; });
+    });
+    noHit.classList.toggle('on', !!q && !any);
+  }
+  search.addEventListener('input', applyFilter);
+  clearBtn.addEventListener('click', function () {
+    search.value = '';
+    applyFilter();
+    search.focus();
+  });
+  search.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { search.value = ''; applyFilter(); }
+    if (e.key === 'Enter') {
+      var first = nav.querySelector('.nav-chapter:not([hidden]) .nav-item:not([hidden])');
+      if (first) goTo(first.dataset.target);
+    }
+  });
+
+  // ── 滚动时同步高亮当前章节 + 展开 ──
+  // ⚠️ 别用 el.offsetTop —— 它相对 offsetParent，而 #content/.wrap 都没设 position，
+  //    于是 offsetParent 落到 body（视口高度固定）→ offsetTop 不随滚动变化，
+  //    高亮会卡在中间某章（实测：滚到底部仍显示「12. 设置与快捷键」）。
+  //    改用 getBoundingClientRect 相对滚动容器顶部计算，与 offsetParent 无关。
+  function relTop(el) {
+    return el.getBoundingClientRect().top - content.getBoundingClientRect().top;
+  }
+  var chapters = [].slice.call(document.querySelectorAll('.chapter'));
+  var navChapters = [].slice.call(nav.querySelectorAll('.nav-chapter'));
+  var ticking = false;
+  content.addEventListener('scroll', function () {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(function () {
+      ticking = false;
+      var MARK = 80;                       // 判定线：距容器顶部 80px 以内算"当前"
+      var idx = 0;
+      for (var i = 0; i < chapters.length; i++) {
+        if (relTop(chapters[i]) <= MARK) idx = i;
+      }
+      // 到底部时直接把最后一章设为当前（否则最后一个章节若不满一屏永远不会命中）
+      if (content.scrollTop + content.clientHeight >= content.scrollHeight - 4) {
+        idx = chapters.length - 1;
+      }
+      navChapters.forEach(function (n, i) {
+        n.classList.toggle('active', i === idx);
+      });
+      var items = chapters[idx] ? chapters[idx].querySelectorAll('.item') : [];
+      var curId = null;
+      for (var k = 0; k < items.length; k++) {
+        if (relTop(items[k]) <= MARK + 24) curId = items[k].id;
+      }
+      nav.querySelectorAll('.nav-item').forEach(function (n) {
+        n.classList.toggle('cur', n.dataset.target === curId);
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

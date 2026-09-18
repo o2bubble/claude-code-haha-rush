@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>GUI 功能手册</title>
+<style>
+  :root {
+    --bg: #20242f; --bg2: #161a23; --bg3: #1a1f2b;
+    --fg: #e6e9f0; --fg-muted: #8b93a7; --fg-dim: #6b7285;
+    --border: #2c3547; --accent: #5aa8ff; --accent-subtle: rgba(90,168,255,.14);
+    --mark: rgba(255,214,0,.28);
+  }
+  html.theme-light {
+    --bg: #f3f5f9; --bg2: #ffffff; --bg3: #f8f9fc;
+    --fg: #1f2430; --fg-muted: #5b6474; --fg-dim: #8a92a3;
+    --border: #d8dee8; --accent: #2563eb; --accent-subtle: rgba(37,99,235,.10);
+    --mark: rgba(255,214,0,.45);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: flex; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.65 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+
+  /* ── 侧栏 ── */
+  aside {
+    width: 240px; flex: 0 0 240px; height: 100vh;
+    display: flex; flex-direction: column;
+    background: var(--bg2); border-right: 1px solid var(--border);
+  }
+  .search-wrap { padding: 10px 10px 6px; position: relative; }
+  #search {
+    width: 100%; padding: 7px 26px 7px 9px;
+    background: var(--bg3); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 12.5px; outline: none;
+  }
+  #search:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-subtle); }
+  #search::placeholder { color: var(--fg-dim); }
+  /* 隐藏浏览器给 type=search 的原生清除按钮（我们有自己的 ×，否则会并排两个） */
+  #search::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
+  #clear {
+    position: absolute; right: 17px; top: 50%; transform: translateY(-50%);
+    width: 18px; height: 18px; border: 0; border-radius: 50%;
+    background: transparent; color: var(--fg-muted); cursor: pointer;
+    font-size: 14px; line-height: 1; padding: 0; display: none;
+  }
+  #clear:hover { background: var(--accent-subtle); color: var(--fg); }
+  #clear.on { display: block; }
+  .meta {
+    padding: 0 12px 8px; font-size: 11px; color: var(--fg-dim);
+    border-bottom: 1px solid var(--border);
+  }
+  #nav { flex: 1; overflow-y: auto; padding: 6px 0 20px; }
+  #nav::-webkit-scrollbar, #content::-webkit-scrollbar { width: 9px; }
+  #nav::-webkit-scrollbar-thumb, #content::-webkit-scrollbar-thumb {
+    background: var(--border); border-radius: 5px;
+  }
+  #nav::-webkit-scrollbar-thumb:hover, #content::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }
+
+  .nav-ch {
+    display: block; padding: 7px 12px 5px; color: var(--fg);
+    font-weight: 600; font-size: 12.5px; text-decoration: none;
+    border-left: 2px solid transparent;
+  }
+  .nav-ch:hover { color: var(--accent); }
+  .nav-chapter.active .nav-ch { color: var(--accent); border-left-color: var(--accent); }
+  .nav-items { display: none; padding-bottom: 4px; }
+  .nav-chapter.expanded .nav-items, .nav-chapter.active .nav-items { display: block; }
+  .nav-item {
+    display: block; padding: 3px 12px 3px 24px;
+    color: var(--fg-muted); font-size: 12px; text-decoration: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .nav-item:hover { color: var(--fg); background: var(--accent-subtle); }
+  .nav-item.cur { color: var(--accent); background: var(--accent-subtle); }
+  .nav-item.hit-title { color: var(--fg); font-weight: 600; }
+  .nav-item.hit-title::before { content: "› "; color: var(--accent); }
+  .no-hit { padding: 14px 12px; color: var(--fg-dim); font-size: 12px; display: none; }
+  .no-hit.on { display: block; }
+
+  /* ── 内容区 ── */
+  main { flex: 1; height: 100vh; overflow-y: auto; scroll-behavior: smooth; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 26px 34px 80px; }
+
+  h2 {
+    margin: 34px 0 14px; padding-bottom: 8px; font-size: 19px;
+    border-bottom: 1px solid var(--border);
+  }
+  h2:first-child { margin-top: 4px; }
+  h3 { margin: 22px 0 8px; font-size: 14.5px; color: var(--fg); }
+  article.item {
+    padding: 2px 0 14px 13px; margin-bottom: 6px;
+    border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
+  }
+  article.item.flash {
+    border-left-color: var(--accent);
+    background: var(--accent-subtle);
+    transition: background .25s;
+  }
+  p { margin: 5px 0; }
+  ul { margin: 5px 0; padding-left: 20px; }
+  li { margin: 3px 0; }
+  ul ul { margin: 2px 0; }
+  code {
+    padding: 1.5px 5px; border-radius: 4px; font-size: 12px;
+    background: var(--bg3); border: 1px solid var(--border);
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  strong { color: var(--fg); font-weight: 600; }
+  a { color: var(--accent); }
+  blockquote {
+    margin: 8px 0; padding: 6px 12px; color: var(--fg-muted);
+    border-left: 3px solid var(--border); background: var(--bg3);
+  }
+  table { border-collapse: collapse; margin: 8px 0; font-size: 12.5px; width: 100%; }
+  th, td { padding: 5px 9px; border: 1px solid var(--border); text-align: left; }
+  th { background: var(--bg3); font-weight: 600; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 22px 0; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; }
+</style>
+</head>
+<body>
+  <aside>
+    <div class="search-wrap">
+      <input id="search" type="search" placeholder="搜索功能…（如：快捷键、工作区）" autocomplete="off" />
+      <button id="clear" title="清空">×</button>
+    </div>
+    <div class="meta">共 17 章 · 78 个功能点</div>
+    <nav id="nav"><div class="nav-chapter" data-ch="0">
+      <a class="nav-ch" href="#ch-0" data-target="ch-0">1. 启动、工作区与窗口</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-0-0" data-target="fn-0-0">1.1 首次启动向导</a><a class="nav-item" href="#fn-0-1" data-target="fn-0-1">1.2 选择 / 切换工作区</a><a class="nav-item" href="#fn-0-2" data-target="fn-0-2">1.3 打开新 GUI 实例（新窗口）</a><a class="nav-item" href="#fn-0-3" data-target="fn-0-3">1.4 窗口控制（Windows 自绘标题栏）</a><a class="nav-item" href="#fn-0-4" data-target="fn-0-4">1.5 主题、语言、界面字号</a></div>
+    </div><div class="nav-chapter" data-ch="1">
+      <a class="nav-ch" href="#ch-1" data-target="ch-1">2. 界面布局</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-1-0" data-target="fn-1-0">2.1 四区布局与三侧栏开关</a><a class="nav-item" href="#fn-1-1" data-target="fn-1-1">2.2 面板开关（面板下拉）</a><a class="nav-item" href="#fn-1-2" data-target="fn-1-2">2.3 拖动分割线调整大小</a><a class="nav-item" href="#fn-1-3" data-target="fn-1-3">2.4 布局预设</a><a class="nav-item" href="#fn-1-4" data-target="fn-1-4">2.5 布局编辑模式</a><a class="nav-item" href="#fn-1-5" data-target="fn-1-5">2.6 标签页右键菜单与拖拽</a><a class="nav-item" href="#fn-1-6" data-target="fn-1-6">2.7 浮动窗口（面板浮出 / 停靠回主窗口）</a><a class="nav-item" href="#fn-1-7" data-target="fn-1-7">2.8 布局持久化</a><a class="nav-item" href="#fn-1-8" data-target="fn-1-8">2.9 面板清单（24 个）</a></div>
+    </div><div class="nav-chapter" data-ch="2">
+      <a class="nav-ch" href="#ch-2" data-target="ch-2">3. 聊天与对话</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-2-0" data-target="fn-2-0">3.1 发送消息</a><a class="nav-item" href="#fn-2-1" data-target="fn-2-1">3.2 引用芯片（@ref）：把文件 / 长文本 / 图片"塞"给 AI</a><a class="nav-item" href="#fn-2-2" data-target="fn-2-2">3.3 从各处「发送到聊天」</a><a class="nav-item" href="#fn-2-3" data-target="fn-2-3">3.4 斜杠命令</a><a class="nav-item" href="#fn-2-4" data-target="fn-2-4">3.5 消息队列</a><a class="nav-item" href="#fn-2-5" data-target="fn-2-5">3.6 权限确认弹窗</a><a class="nav-item" href="#fn-2-6" data-target="fn-2-6">3.7 AI 提问面板（AskUserQuestion）</a><a class="nav-item" href="#fn-2-7" data-target="fn-2-7">3.8 状态条、上下文进度与压缩</a><a class="nav-item" href="#fn-2-8" data-target="fn-2-8">3.9 流卡死决策条</a><a class="nav-item" href="#fn-2-9" data-target="fn-2-9">3.10 消息操作</a><a class="nav-item" href="#fn-2-10" data-target="fn-2-10">3.11 搜索消息 / 只看我的消息</a><a class="nav-item" href="#fn-2-11" data-target="fn-2-11">3.12 消息时间线</a><a class="nav-item" href="#fn-2-12" data-target="fn-2-12">3.13 消息划词工具栏</a><a class="nav-item" href="#fn-2-13" data-target="fn-2-13">3.14 任务列表（后台任务）</a></div>
+    </div><div class="nav-chapter" data-ch="3">
+      <a class="nav-ch" href="#ch-3" data-target="ch-3">4. 会话管理</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-3-0" data-target="fn-3-0">4.1 新建 / 切换 / 重命名 / 删除</a><a class="nav-item" href="#fn-3-1" data-target="fn-3-1">4.2 收藏</a><a class="nav-item" href="#fn-3-2" data-target="fn-3-2">4.3 会话文件夹（需开启）</a><a class="nav-item" href="#fn-3-3" data-target="fn-3-3">4.4 分叉会话</a><a class="nav-item" href="#fn-3-4" data-target="fn-3-4">4.5 在新窗口打开</a><a class="nav-item" href="#fn-3-5" data-target="fn-3-5">4.6 会话状态与打断保护</a></div>
+    </div><div class="nav-chapter" data-ch="4">
+      <a class="nav-ch" href="#ch-4" data-target="ch-4">5. 文件浏览器、编辑器与终端</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-4-0" data-target="fn-4-0">5.1 文件树</a><a class="nav-item" href="#fn-4-1" data-target="fn-4-1">5.2 文件树右键菜单</a><a class="nav-item" href="#fn-4-2" data-target="fn-4-2">5.3 打开文件：编辑器 / 预览</a><a class="nav-item" href="#fn-4-3" data-target="fn-4-3">5.4 编辑器</a><a class="nav-item" href="#fn-4-4" data-target="fn-4-4">5.5 编辑器标签右键菜单</a><a class="nav-item" href="#fn-4-5" data-target="fn-4-5">5.6 图片预览</a><a class="nav-item" href="#fn-4-6" data-target="fn-4-6">5.7 终端面板</a><a class="nav-item" href="#fn-4-7" data-target="fn-4-7">5.8 系统终端</a></div>
+    </div><div class="nav-chapter" data-ch="5">
+      <a class="nav-ch" href="#ch-5" data-target="ch-5">6. 超级桌面（无限画布）</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-5-0" data-target="fn-5-0">6.1 桌面标签页</a><a class="nav-item" href="#fn-5-1" data-target="fn-5-1">6.2 画布导航</a><a class="nav-item" href="#fn-5-2" data-target="fn-5-2">6.3 内容块（用户可创建 5 种 + 拖入 3 种 + AI 1 种）</a><a class="nav-item" href="#fn-5-3" data-target="fn-5-3">6.4 项目操作（拖动 / 缩放 / 折叠 / 删除）</a><a class="nav-item" href="#fn-5-4" data-target="fn-5-4">6.5 连线</a><a class="nav-item" href="#fn-5-5" data-target="fn-5-5">6.6 拖入文件 / 粘贴</a><a class="nav-item" href="#fn-5-6" data-target="fn-5-6">6.7 内容块的缩放与内容缩放</a><a class="nav-item" href="#fn-5-7" data-target="fn-5-7">6.8 让 AI 操作画布</a></div>
+    </div><div class="nav-chapter" data-ch="6">
+      <a class="nav-ch" href="#ch-6" data-target="ch-6">7. 笔记</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-6-0" data-target="fn-6-0">7.1 浏览、搜索、筛选、排序</a><a class="nav-item" href="#fn-6-1" data-target="fn-6-1">7.2 编辑</a><a class="nav-item" href="#fn-6-2" data-target="fn-6-2">7.3 关联</a><a class="nav-item" href="#fn-6-3" data-target="fn-6-3">7.4 发送到聊天 / 桌面</a><a class="nav-item" href="#fn-6-4" data-target="fn-6-4">7.5 多选批量删除</a></div>
+    </div><div class="nav-chapter" data-ch="7">
+      <a class="nav-ch" href="#ch-7" data-target="ch-7">8. 技能与插件</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-7-0" data-target="fn-7-0">8.1 技能面板</a><a class="nav-item" href="#fn-7-1" data-target="fn-7-1">8.2 技能描述翻译</a><a class="nav-item" href="#fn-7-2" data-target="fn-7-2">8.3 插件市场</a><a class="nav-item" href="#fn-7-3" data-target="fn-7-3">8.4 插件设置</a><a class="nav-item" href="#fn-7-4" data-target="fn-7-4">8.5 插件带来的能力（取决于装了哪个插件）</a></div>
+    </div><div class="nav-chapter" data-ch="8">
+      <a class="nav-ch" href="#ch-8" data-target="ch-8">9. 计划 / 子代理 / 工作进程</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-8-0" data-target="fn-8-0">9.1 计划面板</a><a class="nav-item" href="#fn-8-1" data-target="fn-8-1">9.2 子代理面板</a><a class="nav-item" href="#fn-8-2" data-target="fn-8-2">9.3 工作进程面板</a></div>
+    </div><div class="nav-chapter" data-ch="9">
+      <a class="nav-ch" href="#ch-9" data-target="ch-9">10. 快捷提示</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-9-0" data-target="fn-9-0">10.1 快捷提示（提示词模板）</a></div>
+    </div><div class="nav-chapter" data-ch="10">
+      <a class="nav-ch" href="#ch-10" data-target="ch-10">11. 模型、Profile 与权限</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-10-0" data-target="fn-10-0">11.1 模型下拉（工具栏）</a><a class="nav-item" href="#fn-10-1" data-target="fn-10-1">11.2 Profile 管理</a><a class="nav-item" href="#fn-10-2" data-target="fn-10-2">11.3 权限模式</a></div>
+    </div><div class="nav-chapter" data-ch="11">
+      <a class="nav-ch" href="#ch-11" data-target="ch-11">12. 设置与快捷键</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-11-0" data-target="fn-11-0">12.1 设置面板</a><a class="nav-item" href="#fn-11-1" data-target="fn-11-1">12.2 设置项一览</a><a class="nav-item" href="#fn-11-2" data-target="fn-11-2">12.3 快捷键设置</a></div>
+    </div><div class="nav-chapter" data-ch="12">
+      <a class="nav-ch" href="#ch-12" data-target="ch-12">13. 运行环境诊断、更新、反馈</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-12-0" data-target="fn-12-0">13.1 运行环境诊断</a><a class="nav-item" href="#fn-12-1" data-target="fn-12-1">13.2 更新</a><a class="nav-item" href="#fn-12-2" data-target="fn-12-2">13.3 反馈</a></div>
+    </div><div class="nav-chapter" data-ch="13">
+      <a class="nav-ch" href="#ch-13" data-target="ch-13">14. 命令面板与帮助</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-13-0" data-target="fn-13-0">14.1 命令面板（F1 / Ctrl+Shift+P）</a><a class="nav-item" href="#fn-13-1" data-target="fn-13-1">14.2 帮助面板</a></div>
+    </div><div class="nav-chapter" data-ch="14">
+      <a class="nav-ch" href="#ch-14" data-target="ch-14">15. 其他交互</a>
+      <div class="nav-items"><a class="nav-item" href="#fn-14-0" data-target="fn-14-0">15.1 外部链接怎么打开</a><a class="nav-item" href="#fn-14-1" data-target="fn-14-1">15.2 通知与消息记录</a><a class="nav-item" href="#fn-14-2" data-target="fn-14-2">15.3 无人值守守护模式</a></div>
+    </div><div class="nav-chapter" data-ch="15">
+      <a class="nav-ch" href="#ch-15" data-target="ch-15">附录 A：状态、快捷键与配置文件去哪查</a>
+      <div class="nav-items"></div>
+    </div><div class="nav-chapter" data-ch="16">
+      <a class="nav-ch" href="#ch-16" data-target="ch-16">附录 B：本文未覆盖 / 需确认的点</a>
+      <div class="nav-items"></div>
+    </div><div class="no-hit" id="noHit">没有匹配的功能</div></nav>
+  </aside>
+  <main id="content"><div class="wrap">
+    <section class="chapter" id="ch-0">
+      <h2>1. 启动、工作区与窗口</h2>
+      
+      <article class="item" id="fn-0-0">
+        <h3>1.1 首次启动向导</h3>
+        <ul>
+<li><strong>是什么</strong>：第一次打开 GUI 时的分步设置向导，依次问语言 → 界面字号 → 模型配置（Profile）→ 强制中文思考 → 面板布局介绍 → 服务区域（内网/公网服务器）。</li>
+<li><strong>怎么用</strong>：首次启动自动弹出，按「下一步」逐步走完；最后一步可勾选「自动进入最近的工作区」。之后不会再出现，设置项随时可在「设置」里改。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/WelcomeWizard.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-0-1">
+        <h3>1.2 选择 / 切换工作区</h3>
+        <ul>
+<li><strong>是什么</strong>：工作区 = 一个项目目录（Claude Code 的工作路径）。每个工作区有独立的后端进程、会话库、布局与桌面数据。</li>
+<li><strong>怎么用</strong>：<ul>
+<li>启动时若未开启「自动进入最近工作区」，会先出全屏选择页：点卡片选中 → 点「启动工作区」或<strong>双击卡片</strong>直接进入；「新建工作区」输入路径或点「浏览」；卡片右上角有删除按钮；顶部有搜索框。</li>
+<li>已进入后想换：点工具栏最左侧的<strong>工作区按钮</strong>（文件夹图标 + 当前目录名），会重新打开选择页。</li>
+<li>设置里有「自动进入最近的工作区」开关，开启后启动跳过选择页。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/WorkspaceSelector.tsx</code>、<code>gui/src/components/Toolbar.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-0-2">
+        <h3>1.3 打开新 GUI 实例（新窗口）</h3>
+        <ul>
+<li><strong>是什么</strong>：再启动一个完整的 GUI 窗口（可同时开多个工作区），新窗口是独立实例。</li>
+<li><strong>怎么用</strong>：点工具栏上的「新实例」（带文字标签的那个按钮）；窗口较窄时它也不会被折叠。</li>
+<li><strong>来源</strong>：<code>gui/src/components/Toolbar.tsx</code>（<code>spawnNewInstance</code>，Rust <code>spawn_gui_instance</code>）</li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-0-3">
+        <h3>1.4 窗口控制（Windows 自绘标题栏）</h3>
+        <ul>
+<li><strong>是什么</strong>：Windows 上标题栏是自绘的，与工具栏合并成一条 36px 的横条；右上角是 最小化 / 最大化(还原) / 关闭 三个按钮。macOS 保留系统原生标题栏。</li>
+<li><strong>怎么用</strong>：拖动标题栏空白处移动窗口；<strong>双击标题栏空白处</strong>最大化/还原（框架内置）；边缘可拖拽缩放。工作区选择页与欢迎向导这类全屏覆盖层也各自在右上角挂了窗口按钮。</li>
+<li><strong>来源</strong>：<code>gui/src/components/TitleBar.tsx</code>、<code>gui/src/components/Toolbar.tsx</code>；实现说明见 <a href="./window-chrome.md"><code>window-chrome.md</code></a></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-0-4">
+        <h3>1.5 主题、语言、界面字号</h3>
+        <ul>
+<li><strong>是什么</strong>：整套界面配色（浅色 / 深色 / 深蓝专业 / 高级深灰）、界面语言（中文 / English）、全局 UI 字体缩放（70%~150%）。</li>
+<li><strong>怎么用</strong>：主题在 设置 → 基础 → 界面主题 选，或在应用菜单里点「切换到亮色/暗色主题」；语言在 设置 → 基础 → 语言；字号用 设置 → 基础 → 界面字体大小 拖动滑块（<strong>松开后生效</strong>）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SettingsPanel.tsx</code>、<code>gui/src/components/Toolbar.tsx</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-1">
+      <h2>2. 界面布局</h2>
+      
+      <article class="item" id="fn-1-0">
+        <h3>2.1 四区布局与三侧栏开关</h3>
+        <ul>
+<li><strong>是什么</strong>：左侧边栏（导航面板）+ 中央（编辑器 / 超级桌面）+ 右侧聊天（消息 + 输入）+ 底部（终端）。</li>
+<li><strong>怎么用</strong>：工具栏最左边三个按钮分别切换 <strong>左侧栏 / 右侧聊天区 / 底部终端</strong> 的显示隐藏。</li>
+<li><strong>来源</strong>：<code>gui/src/components/Toolbar.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-1-1">
+        <h3>2.2 面板开关（面板下拉）</h3>
+        <ul>
+<li><strong>是什么</strong>：列出所有可由用户管理（<code>userManaged</code>）的面板，点一下开、再点一下关；已打开的面板排在前面并带 ✓。</li>
+<li><strong>怎么用</strong>：点工具栏「面板」下拉（图标 + 已开数量），点任意面板名切换。也可在命令面板（F1）里搜面板名。</li>
+<li><strong>来源</strong>：<code>gui/src/components/Toolbar.tsx</code>（<code>PanelDropdown</code>）、<code>gui/src/services/panelDefs.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-1-2">
+        <h3>2.3 拖动分割线调整大小</h3>
+        <ul>
+<li><strong>是什么</strong>：不需要进任何模式，直接拖动面板之间的分割线即可调整左/右/底部面板的宽高。</li>
+<li><strong>怎么用</strong>：把鼠标移到两个面板之间的边界上，光标变成拖拽形态时按住拖动。</li>
+<li><strong>来源</strong>：<code>gui/src/components/LayoutRenderer.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-1-3">
+        <h3>2.4 布局预设</h3>
+        <ul>
+<li><strong>是什么</strong>：一键切换整套排布的三套预设：默认布局 / 以聊天为主 / 信息密度最高（附迷你示意图）。</li>
+<li><strong>怎么用</strong>：点工具栏「布局预设」按钮 → 点一张预览卡 → 确认框里点「应用」。<strong>会覆盖当前布局（含浮动窗口），不可撤销</strong>。</li>
+<li><strong>来源</strong>：<code>gui/src/components/Toolbar.tsx</code>（<code>LayoutPresetDropdown</code>）、<code>gui/src/stores/layoutStore.ts</code>（<code>LAYOUT_PRESETS</code>）</li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-1-4">
+        <h3>2.5 布局编辑模式</h3>
+        <ul>
+<li><strong>是什么</strong>：进入后每个面板顶部出现操作手柄，可自由拖拽、分割、浮动、换图标；顶部有绿色横幅提示，右下角是「完成布局」。</li>
+<li><strong>怎么用</strong>：点工具栏「布局编辑模式」按钮（或在应用菜单里点）。每个面板顶部出现一排小按钮（顶部横幅把它们写作 <code>≡</code> <code>⇄</code> <code>⧉</code>）：<ul>
+<li>拖动把手 <code>≡</code>：按住拖动换位置（拖到别的面板边缘 = 分割落位）</li>
+<li>分割 <code>⇄</code>：点开选 向左/向右/向上/向下分割</li>
+<li>浮动 <code>⧉</code>：浮动为窗口</li>
+<li><code>✕</code>：关闭（固定分组上是「隐藏」）</li>
+<li><code>⋯</code> 更多：其余操作（含「更换图标」等标签页菜单项）</li>
+<li>按 <code>Esc</code> 或点右下角「完成布局」退出，退出后保持你的排布。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/LayoutRenderer.tsx</code>、<code>gui/src/stores/layoutMode.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-1-5">
+        <h3>2.6 标签页右键菜单与拖拽</h3>
+        <ul>
+<li><strong>是什么</strong>：每个面板标签支持右键菜单和在分组间拖拽合并/移动。</li>
+<li><strong>怎么用</strong>：<ul>
+<li>右键面板标签（布局层）：浮动标签 / 在新窗口打开 / 关闭标签；如果它是「分组」标签（一个标签里叠了多个面板），菜单里另有 解散分组 / 更换图标。<strong>编辑器标签</strong>另有一套菜单（关闭其他/关闭未修改的/关闭全部/复制路径…），见 5.5。</li>
+<li>直接<strong>拖动标签</strong>到另一个面板的标签栏上即可合并成一组；拖到空分组的提示区（「拖拽标签页到此处」）可放入。</li>
+<li>标签过多时右侧出现「更多面板」溢出按钮。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/LayoutRenderer.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-1-6">
+        <h3>2.7 浮动窗口（面板浮出 / 停靠回主窗口）</h3>
+        <ul>
+<li><strong>是什么</strong>：可以把任意面板浮成主窗口内的浮动卡片（可拖动、可调大小、可置顶），或进一步成为独立的系统窗口；独立窗口可拖回主窗口停靠。</li>
+<li><strong>怎么用</strong>：<ul>
+<li>浮动卡片：标签右键 →「浮动标签」，或布局模式里点 <code>⧉</code>。</li>
+<li>独立窗口：标签右键 →「在新窗口打开」，或浮动卡片标题栏上的「在新窗口打开」。</li>
+<li>停靠回来：把独立窗口拖到主窗口上（提示「拖入主窗口」）→ 松手停靠。</li>
+<li>关闭：卡片右上角 ×。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/FloatingRenderer.tsx</code>、<code>gui/src/FloatingApp.tsx</code>、<code>gui/src/stores/layoutStore.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-1-7">
+        <h3>2.8 布局持久化</h3>
+        <ul>
+<li><strong>是什么</strong>：布局按工作区自动保存，下次进入该工作区自动恢复（含浮动窗口）。设置里另有开关可把布局同时写入全局，作为新工作区的默认。</li>
+<li><strong>怎么用</strong>：不用操作，改动即保存；需要「新工作区也套用这套布局」时，去 设置 → 基础 → 打开「保存布局到全局」。</li>
+<li><strong>来源</strong>：<code>gui/src/stores/layoutStore.ts</code>、<code>gui/src/components/chat/SettingsPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-1-8">
+        <h3>2.9 面板清单（24 个）</h3>
+        <ul>
+<li><strong>是什么</strong>：GUI 注册的全部面板。14 个是<strong>用户管理面板</strong>（会持久化，可在「面板」下拉里开关，也能进命令面板搜索），10 个是<strong>系统面板</strong>（只在相关时机出现、不持久化）。</li>
+<li><strong>怎么用</strong>：用户管理面板 —— 编辑器、工作进程、计划、子代理、消息、输入、技能、会话、文件、笔记、终端、超级桌面、快捷提示、插件市场。
+系统面板 —— 设置、技能详情（<code>skill-dialog</code>）、插件详情、提问、桌面项目、Profile 管理、反馈、更新、帮助、运行环境诊断。</li>
+<li><strong>来源</strong>：<code>gui/src/services/panelDefs.tsx</code>（<code>ALL_PANEL_DEFS</code>）</li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-2">
+      <h2>3. 聊天与对话</h2>
+      
+      <article class="item" id="fn-2-0">
+        <h3>3.1 发送消息</h3>
+        <ul>
+<li><strong>是什么</strong>：底部输入框发消息给 AI；AI 正在思考时按钮变成「停止」。</li>
+<li><strong>怎么用</strong>：默认 <code>Enter</code> 发送、<code>Shift+Enter</code> 换行；可在 设置 → 聊天 → Enter 键 改成「Enter 换行、Ctrl+Enter 发送」。输入框内左下角会实时显示当前键位提示。AI 思考中时发送按钮变「停止」，点它中断本次生成。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/InputArea.tsx</code>、<code>gui/src/components/chat/SettingsPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-1">
+        <h3>3.2 引用芯片（@ref）：把文件 / 长文本 / 图片&quot;塞&quot;给 AI</h3>
+        <ul>
+<li><strong>是什么</strong>：粘贴或发送的内容会自动变成带图标的<strong>引用芯片</strong>（如 <code>📄 main.ts</code>），鼠标点芯片可删除；AI 能直接读到被引用的原始资源。</li>
+<li><strong>怎么用</strong>：在输入框 <code>Ctrl+V</code>，粘贴内容会被自动判定——<ul>
+<li>剪贴板里是<strong>文件 / 文件夹</strong>（在资源管理器里 Ctrl+C，过来粘贴）→ 文件引用 / 文件夹引用芯片；</li>
+<li>是<strong>图片</strong>或剪贴板里的文件对象 → 先存到工作区，再变成文件引用芯片；</li>
+<li>是<strong>文本</strong>、且内容正好是一个<strong>真实存在的路径</strong> → 变成对应文件/文件夹的引用芯片；</li>
+<li>是<strong>长文本</strong>（超过 120 字符）→ 变成 <code>paste</code> 引用芯片（AI 仍能拿到全文）；</li>
+<li>是短文本 → 按普通文本插入光标处。</li>
+<li>从各处菜单「发送到聊天」也会插入芯片（见 3.3）；芯片点一下即可删除，也可在输入框里直接手写 <code>@ref{file:...}</code>，发送时自动转成芯片。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/InputArea.tsx</code>、<code>gui/src/services/clipboardService.ts</code>、<code>gui/src/utils/referenceParser.ts</code>；语法见 <a href="./ref-system.md"><code>ref-system.md</code></a></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-2">
+        <h3>3.3 从各处「发送到聊天」</h3>
+        <ul>
+<li><strong>是什么</strong>：多个面板都能把内容作为引用塞进聊天输入框，省去手打路径。</li>
+<li><strong>怎么用</strong>：<ul>
+<li>文件树：右键文件 →「发送到聊天」，或按 <code>Ctrl+C</code>（复制文件路径，文件面板内生效）。</li>
+<li>编辑器：右键 →「发送到聊天」（带当前行号/选区行范围）。</li>
+<li>消息：选中文字 → 划词工具栏 →「发送到聊天框」；消息底部也有复制/发送到桌面。</li>
+<li>笔记：笔记上右键 →「发送到聊天」。</li>
+<li>超级桌面：项目右键 →「发送给 Agent」（可多选批量发送）。</li>
+<li>消息里的内联引用链接（<code>@ref{...}</code> 芯片）点击可直接打开对应资源。<ul>
+<li>⚠️ 其中 <code>@ref{panel:xxx}</code> <strong>只有该面板已经打开时才会切过去</strong>；没打开会提示 <code>Panel &quot;xxx&quot; not found</code> —— 想让 AI 用引用指向某个面板，先自己把那个面板打开。</li>
+</ul>
+</li>
+<li><code>@ref{dir:...}</code> 目前只弹一条状态消息提示路径，<strong>不会</strong>在文件树里定位（尚未实现）。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/FileTree.tsx</code>、<code>gui/src/components/Editor.tsx</code>、<code>gui/src/components/chat/NotesPanel.tsx</code>、<code>gui/src/components/desktop/SuperDesktopCanvas.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-3">
+        <h3>3.4 斜杠命令</h3>
+        <ul>
+<li><strong>是什么</strong>：输入 <code>/</code> 弹出命令下拉（AI 命令 + 技能），键盘上下选、Enter 确认；部分命令在 GUI 里有特殊去处。</li>
+<li><strong>怎么用</strong>：在输入框敲 <code>/</code>，下拉里继续输入可过滤；<code>↑</code>/<code>↓</code> 选择、<code>Enter</code> 或点击插入、<code>Esc</code> 关闭。发送后 GUI 会自动分流：<ul>
+<li><code>/plan</code>、<code>/desktop</code>、<code>/diff</code>（→ 编辑器）等 → 直接打开对应面板，不发给后端；<code>/tasks</code>、<code>/model</code> 也走这条路由，但目标面板当前不存在，会提示「面板 xxx 未打开，请使用面板菜单添加」；</li>
+<li><code>/config</code>、<code>/memory</code>、<code>/doctor</code>、<code>/plugins</code>、<code>/hooks</code> 等 → 打开系统终端执行（Windows 优先 Git Bash，缺失时用命令提示符并提示）；</li>
+<li><code>/exit</code>、<code>/login</code>、<code>/logout</code>、<code>/upgrade</code> 等在 GUI 里不可用，会提示「此命令在 GUI 中不可用」；</li>
+<li>其余按普通消息发给 AI。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SlashCommandDropdown.tsx</code>、<code>gui/src/utils/commandRouter.ts</code>、<code>gui/src/components/chat/ChatInputPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-4">
+        <h3>3.5 消息队列</h3>
+        <ul>
+<li><strong>是什么</strong>：AI 忙的时候（思考/执行中）发送的消息不会丢，进入队列，等这一回合结束后自动逐条发出；队列可暂停、编辑、调序、立即插队。</li>
+<li><strong>怎么用</strong>：正常发送即可入队。队列条显示「N 条排队中」，按钮有：<ul>
+<li>「自动 / 暂停」切换自动发送；</li>
+<li>每条右侧：⚡ 立即发送（提到队首）、↑↓ 上下移、✎ 编辑（弹窗改文字）、✕ 移除；</li>
+<li>表头：🗑 全部清空、切换「输入框上方 / 聊天右侧」位置、展开/收起。</li>
+<li>位置与上限在 设置 → 聊天 →「消息队列位置 / 消息队列上限」（默认 20 条）。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/MsgQueuePanel.tsx</code>、<code>gui/src/stores/msgQueueStore.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-5">
+        <h3>3.6 权限确认弹窗</h3>
+        <ul>
+<li><strong>是什么</strong>：AI 要执行敏感操作（改文件、跑命令）时弹出确认，可选「拒绝 / 始终允许 / 允许」。</li>
+<li><strong>怎么用</strong>：弹窗出现在输入面板上方，点按钮即可；「始终允许」表示本会话内同类操作不再追问。整体授权级别用工具栏的<strong>权限模式下拉</strong>调整：默认 / 接受编辑 / 计划模式 / 绕过 / 不再询问。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/ChatInputPanel.tsx</code>、<code>gui/src/components/Toolbar.tsx</code>（<code>PermModeDropdown</code>）</li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-6">
+        <h3>3.7 AI 提问面板（AskUserQuestion）</h3>
+        <ul>
+<li><strong>是什么</strong>：AI 反过来问你问题时，会浮出一个提问面板：选项按钮（可多选）+ 可选备注（annotations）。</li>
+<li><strong>怎么用</strong>：AI 提问时自动浮出（浮动窗），选好选项后可填备注，点「提交」；或点「跳过」让 AI 自己决定。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/AskQuestionOverlay.tsx</code>、<code>gui/src/components/chat/AskQuestionFloating.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-7">
+        <h3>3.8 状态条、上下文进度与压缩</h3>
+        <ul>
+<li><strong>是什么</strong>：输入框下方一条状态栏：连接状态圆点（已连接/思考中/未连接）、无响应秒数、<code>ctx 已用/窗口</code> token 数、上下文占用进度条与百分比、「压缩」按钮。</li>
+<li><strong>怎么用</strong>：<ul>
+<li>鼠标悬停 token 数字看明细（input/output/cache read/cache create）。</li>
+<li>点「压缩」按钮压缩当前会话上下文。</li>
+<li>上下文占用超过阈值（默认 90%）会弹浮动告警，可点「去设置」直达阈值配置，或 ✕ 关掉。</li>
+<li>阈值与开关在 设置 → 聊天 →「上下文告警 / 告警阈值 (%)」。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/ChatInputPanel.tsx</code>（<code>ChatStatusBar</code>）、<code>gui/src/utils/contextWarning.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-8">
+        <h3>3.9 流卡死决策条</h3>
+        <ul>
+<li><strong>是什么</strong>：模型流长时间无响应时（默认 30s 起提示），除了状态栏显示「已 N 秒无响应」，还会弹出一条决策条，让你裁量而不是干等。</li>
+<li><strong>怎么用</strong>：在决策条上选「继续等」/「重新唤醒」（中断并发送接力提示词，让 AI 接着之前的内容继续）/「中断」。若一直不选，超时后会自动中断；冷却机制防止「唤醒 → 又卡 → 又唤醒」死循环。接力提示词可在 设置 → 聊天 →「唤醒提示词」自定义。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/StreamStallDecisionBar.tsx</code>、<code>gui/src/utils/streamStallDecision.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-9">
+        <h3>3.10 消息操作</h3>
+        <ul>
+<li><strong>是什么</strong>：每条 AI 消息下/工具栏上的操作，以及工具调用卡片的展开折叠。</li>
+<li><strong>怎么用</strong>：<ul>
+<li>消息底部：「复制」；「→ 桌面」把该条消息作为一个文本块发送到某个超级桌面（选择目标桌面）。</li>
+<li>工具调用卡片：点击标题行展开/收起完整输出；输出很长时显示「输出（N 行）」；运行中/出错有状态点。</li>
+<li>文件路径在消息里是可点的，点击打开文件。</li>
+<li>长文本消息有「▼ 显示全部（N 字符）/ ▲ 收起」。</li>
+<li>消息列表右下角有「回到底部」按钮（向上翻阅后出现）。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/MessageItem.tsx</code>、<code>gui/src/components/chat/MessageList.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-10">
+        <h3>3.11 搜索消息 / 只看我的消息</h3>
+        <ul>
+<li><strong>是什么</strong>：消息区右上角两个浮动按钮：搜索、只显示用户消息。</li>
+<li><strong>怎么用</strong>：点 🔍 打开搜索框，输入关键词，用上下箭头在匹配处之间跳转（显示「N 处匹配」/「无匹配结果」），Esc 或 ✕ 关闭；点 👤 切换「只显示我发送的消息 / 显示全部消息」。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/ChatMessagesPanel.tsx</code>、<code>gui/src/components/chat/MessageSearchDialog.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-11">
+        <h3>3.12 消息时间线</h3>
+        <ul>
+<li><strong>是什么</strong>：聊天区左侧的一条竖向时间线，按时间定位消息；用户提问处有刻度，悬停/拖动时浮层显示该提问的预览。</li>
+<li><strong>怎么用</strong>：在时间线上<strong>按住拖动</strong>即可跳到对应时刻的消息；靠近用户提问刻度时会吸附并显示预览。默认开启，可在 设置 → 聊天 →「消息时间线」关闭。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/TimeLineBar.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-12">
+        <h3>3.13 消息划词工具栏</h3>
+        <ul>
+<li><strong>是什么</strong>：在消息列表里选中一段文字，会浮出一个小工具栏。</li>
+<li><strong>怎么用</strong>：选中文字后点「发送到聊天框」（追加到输入框末尾）/「回复」（把原文复制到输入框并补上引号与结尾括号，光标停在中间）/「复制」；若选中内容里有文件路径，还会出现「📂 在资源管理器中打开 (N)」下拉（路径不存在时提示）。可在 设置 → 聊天 →「消息划词工具栏」关闭。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SelectionToolbar.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-2-13">
+        <h3>3.14 任务列表（后台任务）</h3>
+        <ul>
+<li><strong>是什么</strong>：AI 启动的后台任务（Bash 后台命令、子代理等）会列在输入框上方，显示状态、工具数、token 数。</li>
+<li><strong>怎么用</strong>：运行中的任务右侧有 ✕「终止任务」按钮；任务列表为空时该区域不显示。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/TasksPanel.tsx</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-3">
+      <h2>4. 会话管理</h2>
+      
+      <article class="item" id="fn-3-0">
+        <h3>4.1 新建 / 切换 / 重命名 / 删除</h3>
+        <ul>
+<li><strong>是什么</strong>：会话面板保存所有历史对话；每工作区独立。</li>
+<li><strong>怎么用</strong>（面板顶部一排按钮）：↻ 刷新、＋ 新建会话、☑ 选择（进入多选模式，可批量删除）。<ul>
+<li>点任意会话切换；会话名右侧 ✎ 就地重命名。</li>
+<li>悬停会话行右侧出现 ☆ 收藏、⋯ 更多操作（复制名称 / 分叉会话 / 重命名 / 移动到文件夹 / 在新窗口打开 / 删除）。</li>
+<li>删除有二次确认；多选模式底部有「删除选中 (N)」。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SessionPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-3-1">
+        <h3>4.2 收藏</h3>
+        <ul>
+<li><strong>是什么</strong>：把常用会话钉在列表顶部「收藏」分组，跨列表位置始终可见。</li>
+<li><strong>怎么用</strong>：点会话行的 ☆ 收藏/取消；收藏区里若会话已不存在，显示「已失效（会话不存在）」并可移除。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SessionPanel.tsx</code>（<code>sessionFavorites.ts</code>）</li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-3-2">
+        <h3>4.3 会话文件夹（需开启）</h3>
+        <ul>
+<li><strong>是什么</strong>：按文件夹（支持嵌套树）组织会话，未归类的会话放在「未归类」。</li>
+<li><strong>怎么用</strong>：先在 设置 → 会话 → 打开「会话文件夹」，面板里才会出现文件夹区：「新建文件夹」、文件夹行上的 ＋（新建子文件夹）/ 移动 / 重命名 / 删除；会话右键「移动到文件夹」（支持批量移动）。删除文件夹只把会话移出，不会删会话。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SessionPanel.tsx</code>（<code>sessionFolders.ts</code>）</li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-3-3">
+        <h3>4.4 分叉会话</h3>
+        <ul>
+<li><strong>是什么</strong>：从当前会话复制出一条新会话（保留已有对话），用于「从这里换个方向继续试」。</li>
+<li><strong>怎么用</strong>：会话行 ⋯ 菜单 →「分叉会话」，成功后提示「已创建分叉会话」。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SessionPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-3-4">
+        <h3>4.5 在新窗口打开</h3>
+        <ul>
+<li><strong>是什么</strong>：把某个会话丢到另一个 GUI 窗口中打开（新实例/已有实例），方便并排对比两条线。</li>
+<li><strong>怎么用</strong>：会话行 ⋯ 菜单 →「在新窗口打开」。若该会话正被另一实例使用，会先弹「会话已被另一窗口打开」确认。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SessionPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-3-5">
+        <h3>4.6 会话状态与打断保护</h3>
+        <ul>
+<li><strong>是什么</strong>：当前会话行有状态标识：工作中 / 空闲；被其他窗口占用时显示「会话已被另一窗口打开」。</li>
+<li><strong>怎么用</strong>：切到一个<strong>正在工作</strong>的会话时会弹「当前会话正在工作中」确认，说明切换会打断它，可选「仍要切换」。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SessionPanel.tsx</code>（<code>sessionSwitchGuard.ts</code>、<code>stores/sessionStatusStore.ts</code>）</li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-4">
+      <h2>5. 文件浏览器、编辑器与终端</h2>
+      
+      <article class="item" id="fn-4-0">
+        <h3>5.1 文件树</h3>
+        <ul>
+<li><strong>是什么</strong>：当前工作区的文件树，支持新建、重命名、删除、刷新、排序、显示隐藏文件。</li>
+<li><strong>怎么用</strong>：面板顶部三个按钮：新建文件 / 新建文件夹 / 刷新（新建后在行内输入名字，Enter 确认）。单击选中、双击打开。排序与隐藏文件在 设置 → 文件管理（按名称/日期/类型，目录始终优先；显示以 <code>.</code> 开头的文件）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/FileTree.tsx</code>、<code>gui/src/components/chat/SettingsPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-4-1">
+        <h3>5.2 文件树右键菜单</h3>
+        <ul>
+<li><strong>是什么</strong>：对文件/文件夹的一组操作。</li>
+<li><strong>怎么用</strong>：右键条目 →「复制（绝对路径）/ 复制文件名 / 复制相对路径 / 复制绝对路径 / 在资源管理器中打开 / 在终端中打开 / 粘贴文件（仅文件夹）/ 发送到超级桌面 / 重命名 / 发送到聊天 / 删除」；空白处右键 →「新建文件 / 新建文件夹 / 粘贴文件 / 刷新」。<ul>
+<li>「发送到超级桌面」：文件变成 @ref 引用块，文件夹变成文件组块（需已打开至少一个桌面）。</li>
+<li>「在终端中打开」：对该目录打开系统终端。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/FileTree.tsx</code>、<code>gui/src/components/ContextMenu.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-4-2">
+        <h3>5.3 打开文件：编辑器 / 预览</h3>
+        <ul>
+<li><strong>是什么</strong>：文本文件用 Monaco 编辑器打开（多标签页、语法高亮、行号）；Markdown 可切换预览；<code>png/jpg/jpeg/gif/webp/bmp/ico/svg/pdf</code> 自动走预览视图。</li>
+<li><strong>怎么用</strong>：双击文件树里的文件，或点消息里的路径/<code>@ref</code> 链接。Markdown 文件在编辑区右上角有一个「预览 / 编辑」浮动胶囊可来回切；编辑器底部状态条显示完整路径与语言；磁盘上的文件被外部改动时，标签上会提示「磁盘已更新 — 点击刷新」（有未保存修改时先确认是否放弃本地修改）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/EditorPanel.tsx</code>、<code>gui/src/components/Editor.tsx</code>、<code>gui/src/components/FilePreview.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-4-3">
+        <h3>5.4 编辑器</h3>
+        <ul>
+<li><strong>是什么</strong>：完整 Monaco 编辑器（VS Code 同款内核），支持右键菜单、多光标、查找替换等。</li>
+<li><strong>怎么用</strong>：<code>Ctrl+S</code> 保存；<code>F1</code> / <code>Ctrl+Shift+P</code> 打开统一命令面板（编辑器内时编辑器命令置顶，如撤销/重做/多光标/行操作/查找替换）；右键菜单里有「保存文件 / 发送到聊天 / 定位目录树」。字体大小、Tab 宽度、自动换行在 设置 → 编辑器。</li>
+<li><strong>来源</strong>：<code>gui/src/components/Editor.tsx</code>、<code>gui/src/utils/editorCommands.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-4-4">
+        <h3>5.5 编辑器标签右键菜单</h3>
+        <ul>
+<li><strong>是什么</strong>：多标签页的管理菜单。</li>
+<li><strong>怎么用</strong>：右键标签 →「关闭标签 / 关闭其他 / 关闭未修改的 / 关闭全部 / 复制路径 / 定位目录树」。文件不在当前工作区时，「定位目录树」回退为在资源管理器中打开。</li>
+<li><strong>来源</strong>：<code>gui/src/components/EditorPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-4-5">
+        <h3>5.6 图片预览</h3>
+        <ul>
+<li><strong>是什么</strong>：图片/SVG/PDF 的预览视图，带缩放、平移；图片还带取色器。</li>
+<li><strong>怎么用</strong>：滚轮缩放、拖拽平移、双击「适应窗口」；工具栏有 −/+、<code>1:1</code>（原始大小）、「适应」、🎨 取色（<strong>仅图片</strong>：点图上任意位置取色，弹出色值卡片，点击复制色值）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/FilePreview.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-4-6">
+        <h3>5.7 终端面板</h3>
+        <ul>
+<li><strong>是什么</strong>：显示 AI 执行的每条命令及其输出（xterm.js 渲染），按命令分标签。</li>
+<li><strong>怎么用</strong>：每个标签 = 一条 AI 命令（悬停看命令原文），标签上 ✕ 关闭；右上角「清空全部」。想自己敲命令请用系统终端（见 5.8）。历史条数上限与字体大小在 设置 → 终端。</li>
+<li><strong>来源</strong>：<code>gui/src/components/TerminalPanel.tsx</code>、<code>gui/src/stores/terminalStore.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-4-7">
+        <h3>5.8 系统终端</h3>
+        <ul>
+<li><strong>是什么</strong>：打开一个<strong>真正的系统终端窗口</strong>（在工作区目录下），用于自己跑命令。</li>
+<li><strong>怎么用</strong>：点工具栏的终端下拉按钮 → 选 <code>Command Prompt</code> / <code>PowerShell</code> / <code>Git Bash</code>（macOS 只有 <code>Terminal</code>）。打不开时状态栏会显示具体错误。</li>
+<li><strong>来源</strong>：<code>gui/src/components/Toolbar.tsx</code>（<code>TerminalDropdown</code>）</li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-5">
+      <h2>6. 超级桌面（无限画布）</h2>
+      
+      <article class="item" id="fn-5-0">
+        <h3>6.1 桌面标签页</h3>
+        <ul>
+<li><strong>是什么</strong>：可创建多个「桌面」（各自的画布与内容），顶部标签切换。</li>
+<li><strong>怎么用</strong>：顶部 ＋ 新建桌面（默认名「桌面 N」）；双击标签<strong>重命名</strong>；标签上的删除按钮删桌面。</li>
+<li><strong>来源</strong>：<code>gui/src/components/desktop/DesktopTabs.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-5-1">
+        <h3>6.2 画布导航</h3>
+        <ul>
+<li><strong>是什么</strong>：无限画布，可平移、缩放、显示网格、吸附对齐。</li>
+<li><strong>怎么用</strong>：<ul>
+<li>平移：<strong>按住空格拖拽</strong>，或<strong>鼠标中键拖拽</strong>；</li>
+<li>缩放：工具栏 −/+（中间显示当前百分比）与「重置」；「适应」= 缩放到能看到全部内容；</li>
+<li>「定位」= 把视图平移到当前选中的块；</li>
+<li>网格 / 吸附 是工具栏上的开关按钮；</li>
+<li>撤销 / 重做（↶ ↷）；</li>
+<li>工具栏右端的搜索框按标签或内容过滤，<strong>不匹配的块会变暗</strong>（✕ 清空搜索）；</li>
+<li>「清空」需<strong>再次点击确认</strong>（按钮变成「确认清空」）。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/desktop/CanvasToolbar.tsx</code>、<code>gui/src/components/desktop/SuperDesktopCanvas.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-5-2">
+        <h3>6.3 内容块（用户可创建 5 种 + 拖入 3 种 + AI 1 种）</h3>
+        <ul>
+<li><strong>是什么</strong>：画布上的卡片。用户在工具栏可直接新建：<strong>文本（+ 文本）/ 表格（+ 表格）/ 表单（+ 表单）/ 绘图（+ 绘图）/ 图形（+ 图形，输入 Mermaid）</strong>；拖入或粘贴文件得到 <strong>图片 / 文件组 / @引用</strong>；<strong>图表目前只能由 AI 创建</strong>（工具栏无图表按钮）。</li>
+<li><strong>怎么用</strong>：<ul>
+<li>点工具栏对应按钮，新块落在视口中央；空白处右键也能新建（文本/表单/绘图）或「重置视图」。</li>
+<li>文本块：双击编辑，右上角「格式」下拉可切 纯文本 / Markdown / 代码语言。</li>
+<li>表格块：点单元格直接编辑，<code>+ 行</code> 加行、表头 <code>+</code> 加列、双击列名改名、列头 ✕ 删列。</li>
+<li>表单块：<code>+ 添加字段</code> 选类型（文本/多行文本/数字/复选框/下拉/日期/开关/单选/颜色/滑块），⚙ 配置（必填、最大长度、行数、min/max/step、选项），字段可拖拽排序、双击改名、× 删除；填完值可「发送给 Agent」。</li>
+<li>绘图块：工具 画笔/矩形/圆/直线/箭头/文字/橡皮，调颜色、线宽、填充、透明度，↩↪ 撤销重做，✕ 清空，「完成」退出编辑。</li>
+<li>图形块：双击可打开 Mermaid 编辑弹窗（粘贴/编辑 Mermaid 代码，预览后保存）。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/desktop/CanvasToolbar.tsx</code>、<code>TextItem.tsx</code>、<code>TableItem.tsx</code>、<code>FormItem.tsx</code>、<code>DrawItem.tsx</code>、<code>GraphicItem.tsx</code>、<code>MermaidDialog.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-5-3">
+        <h3>6.4 项目操作（拖动 / 缩放 / 折叠 / 删除）</h3>
+        <ul>
+<li><strong>是什么</strong>：每个内容块有标题栏与右下角缩放手柄。</li>
+<li><strong>怎么用</strong>：拖标题栏移动（可多选一起移）；拖右下角改大小；标题栏 ⊟/⊞ 折叠展开；× 删除；双击标题<strong>改标签</strong>；右键菜单：发送给 Agent / 在浮动标签打开 / 在新窗口打开 / 置顶 / 删除项目。多选（空白处框选，或 <code>Ctrl/⌘ + 点击</code> 加减选中）后可<strong>整组拖动</strong>、按 <code>Delete</code>/<code>Backspace</code> 批量删除，或右键批量删除 / 批量发送给 Agent / 置顶。</li>
+<li><strong>来源</strong>：<code>gui/src/components/desktop/DesktopItemView.tsx</code>、<code>SuperDesktopCanvas.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-5-4">
+        <h3>6.5 连线</h3>
+        <ul>
+<li><strong>是什么</strong>：在块与块之间画关系线（带锚点吸附）。</li>
+<li><strong>怎么用</strong>：鼠标悬停到块上，四周出现黄色锚点 → <strong>从锚点拖到另一个块的锚点</strong>即可连线（拖动中顶部有提示「拖到另一个项目的锚点上即可连线 · 按 Esc 取消」）。右键连线可「添加/编辑标签」或「删除连线」。</li>
+<li><strong>来源</strong>：<code>gui/src/components/desktop/ConnectionOverlay.tsx</code>、<code>SuperDesktopCanvas.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-5-5">
+        <h3>6.6 拖入文件 / 粘贴</h3>
+        <ul>
+<li><strong>是什么</strong>：把文件拖进画布或直接粘贴，会按类型生成对应的块。</li>
+<li><strong>怎么用</strong>：从资源管理器拖文件/文件夹到画布上松手（图片 → 图片块；其余文件与文件夹 → 文件组块，支持多选一次拖入）；或在画布上 <code>Ctrl+V</code>（图片 → 图片块；文件/文件夹路径/长文本 → 文件组块；短文本 → 文本块）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/desktop/SuperDesktopCanvas.tsx</code>、<code>FileGroupItem.tsx</code>、<code>ImageItem.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-5-6">
+        <h3>6.7 内容块的缩放与内容缩放</h3>
+        <ul>
+<li><strong>是什么</strong>：图片/图形等内容有自己的缩放，与画布缩放互不干扰。</li>
+<li><strong>怎么用</strong>：在块内容上 <code>Ctrl/⌘ + 滚轮</code> 缩放内容、拖拽平移、双击复位（提示文字见块内）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/desktop/useContentZoom.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-5-7">
+        <h3>6.8 让 AI 操作画布</h3>
+        <ul>
+<li><strong>是什么</strong>：AI 可以读写超级桌面（建表格、画图表、写笔记、连线），也能读你发过去的块内容。</li>
+<li><strong>怎么用</strong>：直接说需求（如「在超级桌面画一个近 5 月费用统计表」）；或右键把块「发送给 Agent」。AI 的 MCP 工具清单见 <a href="./gui-agent-guide.md"><code>gui-agent-guide.md</code></a>。</li>
+<li><strong>来源</strong>：<code>gui/src/services/mcpBridge.ts</code>、<code>gui/src/services/desktopSummary.ts</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-6">
+      <h2>7. 笔记</h2>
+      
+      <article class="item" id="fn-6-0">
+        <h3>7.1 浏览、搜索、筛选、排序</h3>
+        <ul>
+<li><strong>是什么</strong>：个人知识库（Markdown），<strong>跨工作区共享</strong>（用户级）。</li>
+<li><strong>怎么用</strong>：顶部「+ 新建笔记」；搜索框即时过滤；漏斗按钮打开筛选弹层（作用域 / 标签 / 排序：最近更新、标题 A-Z）；列表显示笔记数、更新时间（刚刚 / N 分钟前…）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/NotesPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-6-1">
+        <h3>7.2 编辑</h3>
+        <ul>
+<li><strong>是什么</strong>：所见即所得编辑器（默认）与 Markdown 源码模式可切换，自动保存。</li>
+<li><strong>怎么用</strong>：编辑标题、标签（<code>+ 标签</code> 回车添加，标签上 × 移除）、作用域（如 <code>global</code>、<code>domain:rust</code>）；工具栏按钮：粗体/斜体/删除线/内联代码、H1-H3、无序/有序列表、引用、代码块、表格（弹出选行列数后插入）、分割线；右上角 <code>MD</code> 按钮切换「所见即所得 ↔ Markdown 源码」；底部显示「已自动保存 / 保存中…」，保存失败可点击重试。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/NoteEditor.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-6-2">
+        <h3>7.3 关联</h3>
+        <ul>
+<li><strong>是什么</strong>：笔记之间的关联（相关 / 派生 / 冲突 / 支持），显示在编辑区下方「关联 N 篇」，展开可跳转。</li>
+<li><strong>怎么用</strong>：<strong>关联由 AI 通过 MCP 工具创建</strong>（<code>note_associate</code>）；界面上可查看、点标题跳转。同一关系只需建一次（两端都能看到）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/NoteEditor.tsx</code>、<code>gui/src/services/mcpBridge.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-6-3">
+        <h3>7.4 发送到聊天 / 桌面</h3>
+        <ul>
+<li><strong>是什么</strong>：把笔记作为引用发给 AI，或作为文本块放到超级桌面。</li>
+<li><strong>怎么用</strong>：笔记行右键 →「发送到聊天 / 发送到超级桌面 / 删除笔记」；在编辑器里选中文字后右键 →「发送选中文字到聊天」。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/NotesPanel.tsx</code>、<code>NoteEditor.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-6-4">
+        <h3>7.5 多选批量删除</h3>
+        <ul>
+<li><strong>是什么</strong>：笔记列表支持多选后批量删除。</li>
+<li><strong>怎么用</strong>：点「多选」进入选择模式（或用 Ctrl/⌘ 点行），底部出现「已选 N 项 / 删除 / 取消」。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/NotesPanel.tsx</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-7">
+      <h2>8. 技能与插件</h2>
+      
+      <article class="item" id="fn-7-0">
+        <h3>8.1 技能面板</h3>
+        <ul>
+<li><strong>是什么</strong>：AI 的「专项能力包」管理：本地已安装 + 在线技能库两个标签页。</li>
+<li><strong>怎么用</strong>：切换「已安装 / 在线库」；搜索框过滤；在线库条目点「安装」（或「安装全部」）；已安装条目可删除；技能条目点开详情弹窗（可收藏 ☆、填参数后发送，<code>Enter</code> 换行 / <code>Shift+Enter</code> 发送）。<ul>
+<li>装好后技能会出现在 AI 可调用的工具/命令列表中（<strong>会话启动时扫描，新装技能需新开会话才生效</strong>）。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SkillsPanel.tsx</code>、<code>SkillDialog.tsx</code>、<code>gui/src/services/skillMarketplace.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-7-1">
+        <h3>8.2 技能描述翻译</h3>
+        <ul>
+<li><strong>是什么</strong>：把技能描述翻译成中文（通过 CLI 调用模型，约 1–2 分钟）。</li>
+<li><strong>怎么用</strong>：面板头部的「翻译 / 重新翻译」按钮，翻译结果缓存复用；未翻译的条目显示「(未翻译)」。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SkillsPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-7-2">
+        <h3>8.3 插件市场</h3>
+        <ul>
+<li><strong>是什么</strong>：浏览、安装、更新、卸载 GUI 插件（插件可带来新面板、命令、快捷键、后台进程甚至桌面控制能力）。</li>
+<li><strong>怎么用</strong>：<ul>
+<li>左侧列表（可搜、按分类筛：全部/组件/工具/指导/集成），右侧详情（README、作者、版本、下载量、依赖）。</li>
+<li>卡片按钮按状态变化：安装 / 更新（有新版时带「可更新」角标）/ 卸载 / 禁用 / 启用。</li>
+<li>卸载有二次确认，会删除插件文件并移除其面板与命令；若插件声明「卸载后需重启」，会问你是否现在重启；清理没跑完会如实告知。</li>
+<li>缺依赖时安装会问「是否一并安装依赖」；依赖已装但环境未就绪也如实提示。</li>
+<li>未签名插件（「未受信任」）与不支持当前平台的插件都有角标提示；未受信任插件<strong>只能走「AI 安装」</strong>。</li>
+<li>「AI 安装 / AI 卸载」：把安装/卸载任务交给 AI 执行（需要在聊天里有可用会话）。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/PluginMarketPanel.tsx</code>、<code>PluginMarketDetailPanel.tsx</code>、<code>gui/src/services/pluginRegistry.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-7-3">
+        <h3>8.4 插件设置</h3>
+        <ul>
+<li><strong>是什么</strong>：插件自己声明的设置项，集中显示在 设置 → 插件；没有设置项的插件不出现。</li>
+<li><strong>怎么用</strong>：设置 → 插件 → 选择「保存范围（全局 / 工作区）」，改完即存。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SettingsPanel.tsx</code>（<code>PluginSettingsPanel</code>）、<code>gui/src/services/pluginSettingsStore.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-7-4">
+        <h3>8.5 插件带来的能力（取决于装了哪个插件）</h3>
+        <ul>
+<li><strong>是什么</strong>：插件可往 GUI 里加<strong>面板、命令（进命令面板，可带快捷键）、后台进程（工作进程面板可见）、覆盖层与置顶小浮标</strong>；有些插件还会贡献技能、或给 AI 提供新工具（如浏览器自动化、截屏、鼠标键盘控制、只读 git 查看）。</li>
+<li><strong>怎么用</strong>：装完插件后，其面板出现在「面板」下拉里、命令出现在命令面板（F1）里；是否需要重启、是否缺少运行环境，插件市场与 AI 都会明确告诉你。<strong>判断某个能力能不能用，先看「工作进程」面板与命令面板里有没有它。</strong></li>
+<li><strong>来源</strong>：<code>gui/src/services/pluginRegistry.ts</code>、<code>pluginPanelBridge.tsx</code>、<code>pluginCommandBridge.ts</code>、<code>pluginProcessBridge.ts</code>；插件进程的宿主窗口见 <code>gui/src-tauri/src/lib.rs</code>（<code>open_plugin_overlay</code> / <code>open_plugin_indicator</code>）</li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-8">
+      <h2>9. 计划 / 子代理 / 工作进程</h2>
+      
+      <article class="item" id="fn-8-0">
+        <h3>9.1 计划面板</h3>
+        <ul>
+<li><strong>是什么</strong>：展示 AI 用 TodoWrite 建立的任务清单与完成状态；下方是「历史计划」（按会话保存的历史记录）。</li>
+<li><strong>怎么用</strong>：AI 调用 TodoWrite 后自动出现；展开「历史计划」可看往期计划，点会话名查看。没有计划时显示空态提示。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/PlanPanel.tsx</code>、<code>gui/src/stores/planHistoryStore.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-8-1">
+        <h3>9.2 子代理面板</h3>
+        <ul>
+<li><strong>是什么</strong>：并行子任务（Agent 工具）的列表与完整对话记录。</li>
+<li><strong>怎么用</strong>：列表显示「N 运行中 / M 总计」与每个子代理的状态（运行中/已完成/失败/已终止）；点条目展开记录（<strong>按需加载</strong>，可「加载更早消息」）；右键有「终止任务 / 复制任务 ID / 复制 Agent ID」。消息里的工具卡片带「子代理」角标，提示可在本面板看完整过程。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SubAgentPanel.tsx</code>、<code>gui/src/stores/subAgentStore.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-8-2">
+        <h3>9.3 工作进程面板</h3>
+        <ul>
+<li><strong>是什么</strong>：后台进程总览：IDE Backend、MCP Server、GUI Server 的状态与端口，以及<strong>插件进程</strong>列表；下方还有后台任务（运行中与已完成）。</li>
+<li><strong>怎么用</strong>：每个服务旁有「重启」按钮（重启后端 / 重启 GUI server）；插件进程有「终止 / 重启」按钮；任务行的 ✕ 可终止。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/WorkerPanel.tsx</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-9">
+      <h2>10. 快捷提示</h2>
+      
+      <article class="item" id="fn-9-0">
+        <h3>10.1 快捷提示（提示词模板）</h3>
+        <ul>
+<li><strong>是什么</strong>：把常用指令存成模板，一键发送或插入。</li>
+<li><strong>怎么用</strong>：面板里「新建」填标题 + 提示词内容（如 <code>/code-review 检查这个文件</code>）保存；条目右键（或悬停按钮）：「直接发送 / 插入到输入框 / 编辑 / 删除」。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/QuickPromptPanel.tsx</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-10">
+      <h2>11. 模型、Profile 与权限</h2>
+      
+      <article class="item" id="fn-10-0">
+        <h3>11.1 模型下拉（工具栏）</h3>
+        <ul>
+<li><strong>是什么</strong>：模型相关设置的统一入口——模型列表、思考模式、Effort 档位、Profile 管理。</li>
+<li><strong>怎么用</strong>：点工具栏的模型名按钮：<ul>
+<li>点某个 Profile 即切换（切换中显示「切换中…」，成功/失败有状态消息）；</li>
+<li>「思考模式」开/关（仅当模型支持 thinking/reasoning 时出现）；</li>
+<li>「Effort 强度」低/中/高/最大（仅支持的模型出现；不同模型可用档位不同）；</li>
+<li>底部「Profile 管理」打开管理面板。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/Toolbar.tsx</code>（<code>ModelDropdown</code>、<code>ModelTuningSections</code>）</li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-10-1">
+        <h3>11.2 Profile 管理</h3>
+        <ul>
+<li><strong>是什么</strong>：模型配置文件（用哪个服务、哪个模型、API Key、超时、上下文窗口、能力勾选）。</li>
+<li><strong>怎么用</strong>：工具栏模型下拉 →「Profile 管理」，或在应用菜单里进。列表里每条可「切换 / 设为默认 / 编辑 / 删除（二次确认，会删对应 .env 文件）」；「新建 Profile」选服务商（或自定义）→ 填名称、API Key/Token、模型、MAX_TOKENS、上下文窗口、超时 → 「创建」。<ul>
+<li>「模型能力」勾选决定后端发哪些请求参数（thinking / adaptive / effort / 最大 effort / reasoning），<strong>不确定就留空</strong>（按模型名默认判断），勾错可能导致请求参数发错。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/ProfileDialog.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-10-2">
+        <h3>11.3 权限模式</h3>
+        <ul>
+<li><strong>是什么</strong>：控制 AI 执行操作的授权级别。</li>
+<li><strong>怎么用</strong>：点工具栏的权限下拉，选：默认（仅危险操作询问）/ 接受编辑（自动批准文件编辑）/ 计划模式（先规划再执行）/ 绕过（自动批准所有）/ 不再询问（记住上次选择）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/Toolbar.tsx</code>（<code>PermModeDropdown</code>）</li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-11">
+      <h2>12. 设置与快捷键</h2>
+      
+      <article class="item" id="fn-11-0">
+        <h3>12.1 设置面板</h3>
+        <ul>
+<li><strong>是什么</strong>：所有可配置项的集中地，左侧分类导航、右侧表单、底部保存栏。</li>
+<li><strong>怎么用</strong>：工具栏齿轮按钮打开（浮窗）。<strong>底部「保存到：全局 / 当前工作区」决定写哪份配置</strong>——多数字段改完要按「保存」；快捷键、服务器地址是改完即存。部分字段由命令面板/告警跳进来时会自动定位并高亮。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SettingsPanel.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-11-1">
+        <h3>12.2 设置项一览</h3>
+        <ul>
+<li><strong>基础</strong>：语言、界面主题、界面字体大小、自动进入最近的工作区、保存布局到全局、服务器地址（内网 96 / 公网云 / 自定义）。</li>
+<li><strong>文件管理</strong>：显示隐藏文件、排序方式（名称/日期/类型）。</li>
+<li><strong>终端</strong>：历史条目上限、终端字体大小。</li>
+<li><strong>编辑器</strong>：字体大小、Tab 宽度、自动换行。</li>
+<li><strong>聊天</strong>：Enter 键行为、自动加载最近会话、强制中文思考、消息队列位置与上限、消息划词工具栏、消息时间线、上下文告警（开关 + 阈值）、自定义压缩提示词（开关/追加或替换/预设/提取脚本）、唤醒提示词。</li>
+<li><strong>会话</strong>：会话文件夹（开关）。</li>
+<li><strong>超级桌面</strong>：暂无可配置项（代码里显示空态）。</li>
+<li><strong>快捷键</strong>：见 12.3。</li>
+<li><strong>插件</strong>：插件声明的设置项。</li>
+<li><strong>技能</strong>：此分类当前为空。</li>
+<li><strong>关于</strong>：版本号、技术栈、源码仓库链接（Gitee 主仓库 / GitHub 镜像，打不开时自动复制到剪贴板）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/SettingsPanel.tsx</code>（<code>CATEGORIES</code> / <code>CategoryContent</code>）</li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-11-2">
+        <h3>12.3 快捷键设置</h3>
+        <ul>
+<li><strong>是什么</strong>：改键界面，含冲突提示与「局部交互键」说明。</li>
+<li><strong>怎么用</strong>：设置 → 快捷键 → 点某条键位 → 按下新组合（<code>Esc</code> 取消）；「恢复默认 / 全部恢复默认」；紫色虚线框的条目是<strong>上下文条件型</strong>（只在特定面板生效，不可修改）。<ul>
+<li>冲突是<strong>软冲突</strong>：允许重复，但顶部提示「N 组键位冲突（按列表顺序，靠前者优先）」。</li>
+<li>插件声明的快捷键也出现在这里，带「（全局，窗口不在前台也生效）」角标的表示注册为 <strong>OS 级全局热键</strong>；被其它软件占用或已被另一个 GUI 实例占用时会给出对应提示与「重新检测」。</li>
+<li>完整键位表与规则见 <a href="./shortcuts.md"><code>shortcuts.md</code></a>。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/ShortcutsPanel.tsx</code>、<code>gui/src/services/shortcuts.ts</code>、<code>gui/src/services/globalShortcutService.ts</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-12">
+      <h2>13. 运行环境诊断、更新、反馈</h2>
+      
+      <article class="item" id="fn-12-0">
+        <h3>13.1 运行环境诊断</h3>
+        <ul>
+<li><strong>是什么</strong>：一键体检：安装环境变量、Profile 配置、网络连通（更新/注册服务器、云服务器、MCP 服务、API BaseURL）、后端服务（进程/端口/WebSocket）、工作区（绑定、局部设置、会话数据库）。每个失败项给出修复建议。</li>
+<li><strong>怎么用</strong>：应用菜单里点「运行环境诊断」。底部按钮：重新检测 / 复制报告（报告复制到剪贴板）/ 切换到云服务器（内网不可达时）；失败分类上会出现一键修复按钮（「重启 IDE 后台」「修复环境与 Profile」「修复（补可执行权限，macOS）」），修复需要系统授权时会明确告诉你。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/DiagnosticPanel.tsx</code>、<code>gui/src/services/diagnosticsService.ts</code>、<code>gui/src-tauri/src/diagnostics.rs</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-12-1">
+        <h3>13.2 更新</h3>
+        <ul>
+<li><strong>是什么</strong>：检查并安装应用与组件的更新。组件包括 GUI、Claude CLI、Bun、CLI 工具、Python 环境、Git &amp; Bash、IDE 扩展、更新器。</li>
+<li><strong>怎么用</strong>：应用菜单 →「更新」（有新版本时菜单项与 AppMark 上带红点）。点「检查更新」→ 看更新说明 → 勾选要更新的组件 →「更新所选 / 安装所选」（未安装组件默认不勾选，可手动勾选安装）；下载中显示进度与速度；完成后按提示「重启以完成更新」。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/UpdatePanel.tsx</code>、<code>gui/src/services/updateService.ts</code>、<code>gui/src-tauri/src/update.rs</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-12-2">
+        <h3>13.3 反馈</h3>
+        <ul>
+<li><strong>是什么</strong>：把问题或建议发给开发者（可带截图）。</li>
+<li><strong>怎么用</strong>：应用菜单 →「反馈」。选类型（问题反馈 / 改进建议）→ 填描述 →（可选）添加截图（可多张、可移除）→「提交反馈」。「浏览反馈」可打开反馈列表页。<ul>
+<li>⚠️ 提交前请给截图里的敏感信息打码；反馈数据是公开的；提交完全匿名。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/FeedbackDialog.tsx</code>、<code>gui/src/services/feedbackService.ts</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-13">
+      <h2>14. 命令面板与帮助</h2>
+      
+      <article class="item" id="fn-13-0">
+        <h3>14.1 命令面板（F1 / Ctrl+Shift+P）</h3>
+        <ul>
+<li><strong>是什么</strong>：全局搜索入口，一个框里搜六类东西。</li>
+<li><strong>怎么用</strong>：<code>F1</code> 或 <code>Ctrl+Shift+P</code> 打开（编辑器内时编辑器命令置顶）；输入关键词过滤（匹配名称与副标题），<code>↑</code>/<code>↓</code> 选择、<code>Enter</code> 执行、<code>Esc</code> 关闭。六组：<ul>
+<li><strong>面板</strong> —— 开/关面板（按最近使用排序）；</li>
+<li><strong>AI 命令</strong> —— 技能与提示命令，选中后插入输入框（不自动发送）；</li>
+<li><strong>会话</strong> —— 切换会话；</li>
+<li><strong>设置</strong> —— 打开设置并<strong>直接跳到对应分类</strong>；</li>
+<li><strong>插件命令</strong> —— 插件声明的命令；</li>
+<li><strong>编辑器命令</strong> —— 撤销/重做、多光标、查找替换等 Monaco 命令（当前有打开的编辑器时才有）。</li>
+</ul>
+</li>
+<li><strong>来源</strong>：<code>gui/src/components/CommandPalette.tsx</code>、<code>gui/src/components/useCommandPalette.ts</code>、<code>gui/src/utils/commandPaletteLogic.ts</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-13-1">
+        <h3>14.2 帮助面板</h3>
+        <ul>
+<li><strong>是什么</strong>：内置图文 + 动画教程：界面布局讲解、工具栏每个按钮的作用、各面板介绍、四段核心流程（AI Agent 对话是什么 / 权限确认 / 工作区与会话 / Profile 与 API Key）、布局系统、Office 三件套、超级桌面与笔记的示例动画。</li>
+<li><strong>怎么用</strong>：应用菜单 →「帮助」（首启时也有入口）。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/HelpPanel.tsx</code>、<code>gui/src/components/chat/help/</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-14">
+      <h2>15. 其他交互</h2>
+      
+      <article class="item" id="fn-14-0">
+        <h3>15.1 外部链接怎么打开</h3>
+        <ul>
+<li><strong>是什么</strong>：界面里的 http(s) 链接有统一的打开策略（防止把 GUI 页面本身导航走）。</li>
+<li><strong>怎么用</strong>：<strong>左键</strong> = 在应用内置的原生窗口里打开；<strong>Ctrl/⌘ + 左键</strong>或<strong>鼠标中键</strong> = 用系统默认浏览器打开；<strong>右键</strong> = 菜单（内置窗口打开 / 在系统浏览器打开 / 复制链接）。</li>
+<li><strong>来源</strong>：<code>gui/src/utils/linkOpen.ts</code>、<code>gui/src/App.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-14-1">
+        <h3>15.2 通知与消息记录</h3>
+        <ul>
+<li><strong>是什么</strong>：操作结果以<strong>右下角 Toast</strong>（成功 3s 自动消失、警告 6s、错误常驻可关）告知；同时所有消息被记录，左下角的<strong>胶囊</strong>（圆点 + 条数）在 5 秒内自动展开显示最新一条（悬停暂停收回），点它打开完整「消息记录」列表（倒序，可「清空」）。</li>
+<li><strong>怎么用</strong>：不用刻意操作；出错时看右下角或左下角。</li>
+<li><strong>来源</strong>：<code>gui/src/components/ToastContainer.tsx</code>、<code>gui/src/components/StatusBar.tsx</code></li>
+</ul>
+
+      </article>
+      <article class="item" id="fn-14-2">
+        <h3>15.3 无人值守守护模式</h3>
+        <ul>
+<li><strong>是什么</strong>：实验性「撒手模式」：每个回合结束后自动验收任务，未完成自动续做，队列任务仅在验收通过后放行，全部完成自动退出。</li>
+<li><strong>怎么用</strong>：点工具栏的盾牌按钮 → 阅读风险清单（模型自评不可靠 / 无轮数上限持续耗 token / 非 bypass 权限下会挂起 / 格式不合规会暂停 / AI 将自主连续执行多回合）→「进入无人值守(自担风险)」。运行中盾牌带状态色点（回合观察中 / 验收等待中 / 已暂停(异常)）；再点一次即停止。</li>
+<li><strong>来源</strong>：<code>gui/src/components/chat/GuardButton.tsx</code>、<code>gui/src/services/guardBridge.ts</code>、<code>gui/src-tauri/src/guard.rs</code></li>
+</ul>
+<hr>
+
+      </article>
+    </section>
+    <section class="chapter" id="ch-15">
+      <h2>附录 A：状态、快捷键与配置文件去哪查</h2>
+      <table>
+<thead>
+<tr>
+<th>想查</th>
+<th>去哪</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>所有快捷键、改键规则、冲突策略</td>
+<td><a href="./shortcuts.md"><code>shortcuts.md</code></a></td>
+</tr>
+<tr>
+<td><code>@ref{...}</code> 引用语法（文件/面板/会话/桌面块/笔记）</td>
+<td><a href="./ref-system.md"><code>ref-system.md</code></a></td>
+</tr>
+<tr>
+<td>配置写在哪（settings.json / settings.local.json / plugins-settings …）</td>
+<td><a href="./config-files.md"><code>config-files.md</code></a></td>
+</tr>
+<tr>
+<td>Windows 自绘标题栏、拖拽区行为</td>
+<td><a href="./window-chrome.md"><code>window-chrome.md</code></a></td>
+</tr>
+<tr>
+<td>面板 ID、<code>@ref{panel:...}</code> 可用值、AI 侧 MCP 工具</td>
+<td><a href="./gui-agent-guide.md"><code>gui-agent-guide.md</code></a></td>
+</tr>
+<tr>
+<td>整体架构</td>
+<td><a href="../ARCHITECTURE.md"><code>../ARCHITECTURE.md</code></a></td>
+</tr>
+</tbody></table>
+
+    </section>
+    <section class="chapter" id="ch-16">
+      <h2>附录 B：本文未覆盖 / 需确认的点</h2>
+      <ul>
+<li>画布上的<strong>图表（chart）块</strong>：<strong>确认</strong> —— 只有 AI 能创建。
+画布右键菜单只提供 添加文本 / 添加表单 / 添加绘图（<code>SuperDesktopCanvas.tsx</code> 的 <code>addItem</code> 调用），
+全仓组件里没有创建 <code>type: &quot;chart&quot;</code> 的路径；AI 侧经 MCP <code>desktop_create_item</code> 可建。</li>
+<li><strong>超级桌面</strong>设置分类当前是空态「暂无可配置项」——不是缺失，是还没有设置项。</li>
+<li><strong>技能</strong>设置分类当前为空。</li>
+<li><code>settings.workDirectory</code>、<code>settings.browse</code>、<code>settings.switchWorkspace</code> 三条中文文案存在但<strong>代码里没有任何引用</strong>——工作目录的切换已由「工作区选择器」承担（见 1.2）。</li>
+<li>插件能贡献的**覆盖层（overlay）与置顶小浮标（indicator）**是宿主能力，具体形态由插件决定（如截屏插件用覆盖层、鼠标键盘插件用浮标）；未逐一核对每个插件的表现。</li>
+</ul>
+
+    </section></div></main>
+
+<script>
+(function () {
+  // ── 主题跟随（与 git-viewer 同一套：初始 URL 参数 + 宿主 postMessage 推送）──
+  function applyTheme(t) {
+    document.documentElement.classList.toggle('theme-light', t === 'light');
+  }
+  var params = new URLSearchParams(location.search);
+  applyTheme(params.get('theme'));
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (d && d.source === 'plugin:host' && d.kind === 'theme' && d.payload) applyTheme(d.payload.theme);
+  });
+
+  var INDEX = [{"ch":0,"id":"fn-0-0","chapter":"1. 启动、工作区与窗口","title":"1.1 首次启动向导","text":"是什么：第一次打开 GUI 时的分步设置向导，依次问语言 → 界面字号 → 模型配置（Profile）→ 强制中文思考 → 面板布局介绍 → 服务区域（内网/公网服务器）。 - 怎么用：首次启动自动弹出，按「下一步」逐步走完；最后一步可勾选「自动进入最近的工作区」。之后不会再出现，设置项随时可在「设置」里改。 - 来源：gui/src/components/chat/WelcomeWizard.tsx"},{"ch":0,"id":"fn-0-1","chapter":"1. 启动、工作区与窗口","title":"1.2 选择 / 切换工作区","text":"是什么：工作区 = 一个项目目录（Claude Code 的工作路径）。每个工作区有独立的后端进程、会话库、布局与桌面数据。 - 怎么用： - 启动时若未开启「自动进入最近工作区」，会先出全屏选择页：点卡片选中 → 点「启动工作区」或双击卡片直接进入；「新建工作区」输入路径或点「浏览」；卡片右上角有删除按钮；顶部有搜索框。 - 已进入后想换：点工具栏最左侧的工作区按钮（文件夹图标 + 当前目录名），会重新打开选择页。 - 设置里有「自动进入最近的工作区」开关，开启后启动跳过选择页。 - 来源：gui/src/components/chat/WorkspaceSelector.tsx、gui/src/components/Toolbar.tsx"},{"ch":0,"id":"fn-0-2","chapter":"1. 启动、工作区与窗口","title":"1.3 打开新 GUI 实例（新窗口）","text":"是什么：再启动一个完整的 GUI 窗口（可同时开多个工作区），新窗口是独立实例。 - 怎么用：点工具栏上的「新实例」（带文字标签的那个按钮）；窗口较窄时它也不会被折叠。 - 来源：gui/src/components/Toolbar.tsx（spawnNewInstance，Rust spawn_gui_instance）"},{"ch":0,"id":"fn-0-3","chapter":"1. 启动、工作区与窗口","title":"1.4 窗口控制（Windows 自绘标题栏）","text":"是什么：Windows 上标题栏是自绘的，与工具栏合并成一条 36px 的横条；右上角是 最小化 / 最大化(还原) / 关闭 三个按钮。macOS 保留系统原生标题栏。 - 怎么用：拖动标题栏空白处移动窗口；双击标题栏空白处最大化/还原（框架内置）；边缘可拖拽缩放。工作区选择页与欢迎向导这类全屏覆盖层也各自在右上角挂了窗口按钮。 - 来源：gui/src/components/TitleBar.tsx、gui/src/components/Toolbar.tsx；实现说明见 window-chrome.md"},{"ch":0,"id":"fn-0-4","chapter":"1. 启动、工作区与窗口","title":"1.5 主题、语言、界面字号","text":"是什么：整套界面配色（浅色 / 深色 / 深蓝专业 / 高级深灰）、界面语言（中文 / English）、全局 UI 字体缩放（70%~150%）。 - 怎么用：主题在 设置 → 基础 → 界面主题 选，或在应用菜单里点「切换到亮色/暗色主题」；语言在 设置 → 基础 → 语言；字号用 设置 → 基础 → 界面字体大小 拖动滑块（松开后生效）。 - 来源：gui/src/components/chat/SettingsPanel.tsx、gui/src/components/Toolbar.tsx ---"},{"ch":1,"id":"fn-1-0","chapter":"2. 界面布局","title":"2.1 四区布局与三侧栏开关","text":"是什么：左侧边栏（导航面板）+ 中央（编辑器 / 超级桌面）+ 右侧聊天（消息 + 输入）+ 底部（终端）。 - 怎么用：工具栏最左边三个按钮分别切换 左侧栏 / 右侧聊天区 / 底部终端 的显示隐藏。 - 来源：gui/src/components/Toolbar.tsx"},{"ch":1,"id":"fn-1-1","chapter":"2. 界面布局","title":"2.2 面板开关（面板下拉）","text":"是什么：列出所有可由用户管理（userManaged）的面板，点一下开、再点一下关；已打开的面板排在前面并带 ✓。 - 怎么用：点工具栏「面板」下拉（图标 + 已开数量），点任意面板名切换。也可在命令面板（F1）里搜面板名。 - 来源：gui/src/components/Toolbar.tsx（PanelDropdown）、gui/src/services/panelDefs.tsx"},{"ch":1,"id":"fn-1-2","chapter":"2. 界面布局","title":"2.3 拖动分割线调整大小","text":"是什么：不需要进任何模式，直接拖动面板之间的分割线即可调整左/右/底部面板的宽高。 - 怎么用：把鼠标移到两个面板之间的边界上，光标变成拖拽形态时按住拖动。 - 来源：gui/src/components/LayoutRenderer.tsx"},{"ch":1,"id":"fn-1-3","chapter":"2. 界面布局","title":"2.4 布局预设","text":"是什么：一键切换整套排布的三套预设：默认布局 / 以聊天为主 / 信息密度最高（附迷你示意图）。 - 怎么用：点工具栏「布局预设」按钮 → 点一张预览卡 → 确认框里点「应用」。会覆盖当前布局（含浮动窗口），不可撤销。 - 来源：gui/src/components/Toolbar.tsx（LayoutPresetDropdown）、gui/src/stores/layoutStore.ts（LAYOUT_PRESETS）"},{"ch":1,"id":"fn-1-4","chapter":"2. 界面布局","title":"2.5 布局编辑模式","text":"是什么：进入后每个面板顶部出现操作手柄，可自由拖拽、分割、浮动、换图标；顶部有绿色横幅提示，右下角是「完成布局」。 - 怎么用：点工具栏「布局编辑模式」按钮（或在应用菜单里点）。每个面板顶部出现一排小按钮（顶部横幅把它们写作 ≡ ⇄ ⧉）： - 拖动把手 ≡：按住拖动换位置（拖到别的面板边缘 = 分割落位） - 分割 ⇄：点开选 向左/向右/向上/向下分割 - 浮动 ⧉：浮动为窗口 - ✕：关闭（固定分组上是「隐藏」） - ⋯ 更多：其余操作（含「更换图标」等标签页菜单项） - 按 Esc 或点右下角「完成布局」退出，退出后保持你的排布。 - 来源：gui/src/components/LayoutRenderer.tsx、gui/src/stores/layoutMode.ts"},{"ch":1,"id":"fn-1-5","chapter":"2. 界面布局","title":"2.6 标签页右键菜单与拖拽","text":"是什么：每个面板标签支持右键菜单和在分组间拖拽合并/移动。 - 怎么用： - 右键面板标签（布局层）：浮动标签 / 在新窗口打开 / 关闭标签；如果它是「分组」标签（一个标签里叠了多个面板），菜单里另有 解散分组 / 更换图标。编辑器标签另有一套菜单（关闭其他/关闭未修改的/关闭全部/复制路径…），见 5.5。 - 直接拖动标签到另一个面板的标签栏上即可合并成一组；拖到空分组的提示区（「拖拽标签页到此处」）可放入。 - 标签过多时右侧出现「更多面板」溢出按钮。 - 来源：gui/src/components/LayoutRenderer.tsx"},{"ch":1,"id":"fn-1-6","chapter":"2. 界面布局","title":"2.7 浮动窗口（面板浮出 / 停靠回主窗口）","text":"是什么：可以把任意面板浮成主窗口内的浮动卡片（可拖动、可调大小、可置顶），或进一步成为独立的系统窗口；独立窗口可拖回主窗口停靠。 - 怎么用： - 浮动卡片：标签右键 →「浮动标签」，或布局模式里点 ⧉。 - 独立窗口：标签右键 →「在新窗口打开」，或浮动卡片标题栏上的「在新窗口打开」。 - 停靠回来：把独立窗口拖到主窗口上（提示「拖入主窗口」）→ 松手停靠。 - 关闭：卡片右上角 ×。 - 来源：gui/src/components/FloatingRenderer.tsx、gui/src/FloatingApp.tsx、gui/src/stores/layoutStore.ts"},{"ch":1,"id":"fn-1-7","chapter":"2. 界面布局","title":"2.8 布局持久化","text":"是什么：布局按工作区自动保存，下次进入该工作区自动恢复（含浮动窗口）。设置里另有开关可把布局同时写入全局，作为新工作区的默认。 - 怎么用：不用操作，改动即保存；需要「新工作区也套用这套布局」时，去 设置 → 基础 → 打开「保存布局到全局」。 - 来源：gui/src/stores/layoutStore.ts、gui/src/components/chat/SettingsPanel.tsx"},{"ch":1,"id":"fn-1-8","chapter":"2. 界面布局","title":"2.9 面板清单（24 个）","text":"是什么：GUI 注册的全部面板。14 个是用户管理面板（会持久化，可在「面板」下拉里开关，也能进命令面板搜索），10 个是系统面板（只在相关时机出现、不持久化）。 - 怎么用：用户管理面板 —— 编辑器、工作进程、计划、子代理、消息、输入、技能、会话、文件、笔记、终端、超级桌面、快捷提示、插件市场。 系统面板 —— 设置、技能详情（skill-dialog）、插件详情、提问、桌面项目、Profile 管理、反馈、更新、帮助、运行环境诊断。 - 来源：gui/src/services/panelDefs.tsx（ALL_PANEL_DEFS） ---"},{"ch":2,"id":"fn-2-0","chapter":"3. 聊天与对话","title":"3.1 发送消息","text":"是什么：底部输入框发消息给 AI；AI 正在思考时按钮变成「停止」。 - 怎么用：默认 Enter 发送、Shift+Enter 换行；可在 设置 → 聊天 → Enter 键 改成「Enter 换行、Ctrl+Enter 发送」。输入框内左下角会实时显示当前键位提示。AI 思考中时发送按钮变「停止」，点它中断本次生成。 - 来源：gui/src/components/chat/InputArea.tsx、gui/src/components/chat/SettingsPanel.tsx"},{"ch":2,"id":"fn-2-1","chapter":"3. 聊天与对话","title":"3.2 引用芯片（@ref）：把文件 / 长文本 / 图片\"塞\"给 AI","text":"是什么：粘贴或发送的内容会自动变成带图标的引用芯片（如 📄 main.ts），鼠标点芯片可删除；AI 能直接读到被引用的原始资源。 - 怎么用：在输入框 Ctrl+V，粘贴内容会被自动判定—— - 剪贴板里是文件 / 文件夹（在资源管理器里 Ctrl+C，过来粘贴）→ 文件引用 / 文件夹引用芯片； - 是图片或剪贴板里的文件对象 → 先存到工作区，再变成文件引用芯片； - 是文本、且内容正好是一个真实存在的路径 → 变成对应文件/文件夹的引用芯片； - 是长文本（超过 120 字符）→ 变成 paste 引用芯片（AI 仍能拿到全文）； - 是短文本 → 按普通文本插入光标处。 - 从各处菜单「发送到聊天」也会插入芯片（见 3.3）；芯片点一下即可删除，也可在输入框里直接手写 @ref{file:...}，发送时自动转成芯片。 - 来源：gui/src/components/chat/"},{"ch":2,"id":"fn-2-2","chapter":"3. 聊天与对话","title":"3.3 从各处「发送到聊天」","text":"是什么：多个面板都能把内容作为引用塞进聊天输入框，省去手打路径。 - 怎么用： - 文件树：右键文件 →「发送到聊天」，或按 Ctrl+C（复制文件路径，文件面板内生效）。 - 编辑器：右键 →「发送到聊天」（带当前行号/选区行范围）。 - 消息：选中文字 → 划词工具栏 →「发送到聊天框」；消息底部也有复制/发送到桌面。 - 笔记：笔记上右键 →「发送到聊天」。 - 超级桌面：项目右键 →「发送给 Agent」（可多选批量发送）。 - 消息里的内联引用链接（@ref{...} 芯片）点击可直接打开对应资源。 - ⚠️ 其中 @ref{panel:xxx} 只有该面板已经打开时才会切过去；没打开会提示 Panel \"xxx\" not found —— 想让 AI 用引用指向某个面板，先自己把那个面板打开。 - @ref{dir:...} 目前只弹一条状态消息提示路径，不会在文件树里定位（尚"},{"ch":2,"id":"fn-2-3","chapter":"3. 聊天与对话","title":"3.4 斜杠命令","text":"是什么：输入 / 弹出命令下拉（AI 命令 + 技能），键盘上下选、Enter 确认；部分命令在 GUI 里有特殊去处。 - 怎么用：在输入框敲 /，下拉里继续输入可过滤；↑/↓ 选择、Enter 或点击插入、Esc 关闭。发送后 GUI 会自动分流： - /plan、/desktop、/diff（→ 编辑器）等 → 直接打开对应面板，不发给后端；/tasks、/model 也走这条路由，但目标面板当前不存在，会提示「面板 xxx 未打开，请使用面板菜单添加」； - /config、/memory、/doctor、/plugins、/hooks 等 → 打开系统终端执行（Windows 优先 Git Bash，缺失时用命令提示符并提示）； - /exit、/login、/logout、/upgrade 等在 GUI 里不可用，会提示「此命令在 GUI 中不可用」； - 其余按普通消息发给 "},{"ch":2,"id":"fn-2-4","chapter":"3. 聊天与对话","title":"3.5 消息队列","text":"是什么：AI 忙的时候（思考/执行中）发送的消息不会丢，进入队列，等这一回合结束后自动逐条发出；队列可暂停、编辑、调序、立即插队。 - 怎么用：正常发送即可入队。队列条显示「N 条排队中」，按钮有： - 「自动 / 暂停」切换自动发送； - 每条右侧：⚡ 立即发送（提到队首）、↑↓ 上下移、✎ 编辑（弹窗改文字）、✕ 移除； - 表头：🗑 全部清空、切换「输入框上方 / 聊天右侧」位置、展开/收起。 - 位置与上限在 设置 → 聊天 →「消息队列位置 / 消息队列上限」（默认 20 条）。 - 来源：gui/src/components/chat/MsgQueuePanel.tsx、gui/src/stores/msgQueueStore.ts"},{"ch":2,"id":"fn-2-5","chapter":"3. 聊天与对话","title":"3.6 权限确认弹窗","text":"是什么：AI 要执行敏感操作（改文件、跑命令）时弹出确认，可选「拒绝 / 始终允许 / 允许」。 - 怎么用：弹窗出现在输入面板上方，点按钮即可；「始终允许」表示本会话内同类操作不再追问。整体授权级别用工具栏的权限模式下拉调整：默认 / 接受编辑 / 计划模式 / 绕过 / 不再询问。 - 来源：gui/src/components/chat/ChatInputPanel.tsx、gui/src/components/Toolbar.tsx（PermModeDropdown）"},{"ch":2,"id":"fn-2-6","chapter":"3. 聊天与对话","title":"3.7 AI 提问面板（AskUserQuestion）","text":"是什么：AI 反过来问你问题时，会浮出一个提问面板：选项按钮（可多选）+ 可选备注（annotations）。 - 怎么用：AI 提问时自动浮出（浮动窗），选好选项后可填备注，点「提交」；或点「跳过」让 AI 自己决定。 - 来源：gui/src/components/chat/AskQuestionOverlay.tsx、gui/src/components/chat/AskQuestionFloating.tsx"},{"ch":2,"id":"fn-2-7","chapter":"3. 聊天与对话","title":"3.8 状态条、上下文进度与压缩","text":"是什么：输入框下方一条状态栏：连接状态圆点（已连接/思考中/未连接）、无响应秒数、ctx 已用/窗口 token 数、上下文占用进度条与百分比、「压缩」按钮。 - 怎么用： - 鼠标悬停 token 数字看明细（input/output/cache read/cache create）。 - 点「压缩」按钮压缩当前会话上下文。 - 上下文占用超过阈值（默认 90%）会弹浮动告警，可点「去设置」直达阈值配置，或 ✕ 关掉。 - 阈值与开关在 设置 → 聊天 →「上下文告警 / 告警阈值 (%)」。 - 来源：gui/src/components/chat/ChatInputPanel.tsx（ChatStatusBar）、gui/src/utils/contextWarning.ts"},{"ch":2,"id":"fn-2-8","chapter":"3. 聊天与对话","title":"3.9 流卡死决策条","text":"是什么：模型流长时间无响应时（默认 30s 起提示），除了状态栏显示「已 N 秒无响应」，还会弹出一条决策条，让你裁量而不是干等。 - 怎么用：在决策条上选「继续等」/「重新唤醒」（中断并发送接力提示词，让 AI 接着之前的内容继续）/「中断」。若一直不选，超时后会自动中断；冷却机制防止「唤醒 → 又卡 → 又唤醒」死循环。接力提示词可在 设置 → 聊天 →「唤醒提示词」自定义。 - 来源：gui/src/components/chat/StreamStallDecisionBar.tsx、gui/src/utils/streamStallDecision.ts"},{"ch":2,"id":"fn-2-9","chapter":"3. 聊天与对话","title":"3.10 消息操作","text":"是什么：每条 AI 消息下/工具栏上的操作，以及工具调用卡片的展开折叠。 - 怎么用： - 消息底部：「复制」；「→ 桌面」把该条消息作为一个文本块发送到某个超级桌面（选择目标桌面）。 - 工具调用卡片：点击标题行展开/收起完整输出；输出很长时显示「输出（N 行）」；运行中/出错有状态点。 - 文件路径在消息里是可点的，点击打开文件。 - 长文本消息有「▼ 显示全部（N 字符）/ ▲ 收起」。 - 消息列表右下角有「回到底部」按钮（向上翻阅后出现）。 - 来源：gui/src/components/chat/MessageItem.tsx、gui/src/components/chat/MessageList.tsx"},{"ch":2,"id":"fn-2-10","chapter":"3. 聊天与对话","title":"3.11 搜索消息 / 只看我的消息","text":"是什么：消息区右上角两个浮动按钮：搜索、只显示用户消息。 - 怎么用：点 🔍 打开搜索框，输入关键词，用上下箭头在匹配处之间跳转（显示「N 处匹配」/「无匹配结果」），Esc 或 ✕ 关闭；点 👤 切换「只显示我发送的消息 / 显示全部消息」。 - 来源：gui/src/components/chat/ChatMessagesPanel.tsx、gui/src/components/chat/MessageSearchDialog.tsx"},{"ch":2,"id":"fn-2-11","chapter":"3. 聊天与对话","title":"3.12 消息时间线","text":"是什么：聊天区左侧的一条竖向时间线，按时间定位消息；用户提问处有刻度，悬停/拖动时浮层显示该提问的预览。 - 怎么用：在时间线上按住拖动即可跳到对应时刻的消息；靠近用户提问刻度时会吸附并显示预览。默认开启，可在 设置 → 聊天 →「消息时间线」关闭。 - 来源：gui/src/components/chat/TimeLineBar.tsx"},{"ch":2,"id":"fn-2-12","chapter":"3. 聊天与对话","title":"3.13 消息划词工具栏","text":"是什么：在消息列表里选中一段文字，会浮出一个小工具栏。 - 怎么用：选中文字后点「发送到聊天框」（追加到输入框末尾）/「回复」（把原文复制到输入框并补上引号与结尾括号，光标停在中间）/「复制」；若选中内容里有文件路径，还会出现「📂 在资源管理器中打开 (N)」下拉（路径不存在时提示）。可在 设置 → 聊天 →「消息划词工具栏」关闭。 - 来源：gui/src/components/chat/SelectionToolbar.tsx"},{"ch":2,"id":"fn-2-13","chapter":"3. 聊天与对话","title":"3.14 任务列表（后台任务）","text":"是什么：AI 启动的后台任务（Bash 后台命令、子代理等）会列在输入框上方，显示状态、工具数、token 数。 - 怎么用：运行中的任务右侧有 ✕「终止任务」按钮；任务列表为空时该区域不显示。 - 来源：gui/src/components/chat/TasksPanel.tsx ---"},{"ch":3,"id":"fn-3-0","chapter":"4. 会话管理","title":"4.1 新建 / 切换 / 重命名 / 删除","text":"是什么：会话面板保存所有历史对话；每工作区独立。 - 怎么用（面板顶部一排按钮）：↻ 刷新、＋ 新建会话、☑ 选择（进入多选模式，可批量删除）。 - 点任意会话切换；会话名右侧 ✎ 就地重命名。 - 悬停会话行右侧出现 ☆ 收藏、⋯ 更多操作（复制名称 / 分叉会话 / 重命名 / 移动到文件夹 / 在新窗口打开 / 删除）。 - 删除有二次确认；多选模式底部有「删除选中 (N)」。 - 来源：gui/src/components/chat/SessionPanel.tsx"},{"ch":3,"id":"fn-3-1","chapter":"4. 会话管理","title":"4.2 收藏","text":"是什么：把常用会话钉在列表顶部「收藏」分组，跨列表位置始终可见。 - 怎么用：点会话行的 ☆ 收藏/取消；收藏区里若会话已不存在，显示「已失效（会话不存在）」并可移除。 - 来源：gui/src/components/chat/SessionPanel.tsx（sessionFavorites.ts）"},{"ch":3,"id":"fn-3-2","chapter":"4. 会话管理","title":"4.3 会话文件夹（需开启）","text":"是什么：按文件夹（支持嵌套树）组织会话，未归类的会话放在「未归类」。 - 怎么用：先在 设置 → 会话 → 打开「会话文件夹」，面板里才会出现文件夹区：「新建文件夹」、文件夹行上的 ＋（新建子文件夹）/ 移动 / 重命名 / 删除；会话右键「移动到文件夹」（支持批量移动）。删除文件夹只把会话移出，不会删会话。 - 来源：gui/src/components/chat/SessionPanel.tsx（sessionFolders.ts）"},{"ch":3,"id":"fn-3-3","chapter":"4. 会话管理","title":"4.4 分叉会话","text":"是什么：从当前会话复制出一条新会话（保留已有对话），用于「从这里换个方向继续试」。 - 怎么用：会话行 ⋯ 菜单 →「分叉会话」，成功后提示「已创建分叉会话」。 - 来源：gui/src/components/chat/SessionPanel.tsx"},{"ch":3,"id":"fn-3-4","chapter":"4. 会话管理","title":"4.5 在新窗口打开","text":"是什么：把某个会话丢到另一个 GUI 窗口中打开（新实例/已有实例），方便并排对比两条线。 - 怎么用：会话行 ⋯ 菜单 →「在新窗口打开」。若该会话正被另一实例使用，会先弹「会话已被另一窗口打开」确认。 - 来源：gui/src/components/chat/SessionPanel.tsx"},{"ch":3,"id":"fn-3-5","chapter":"4. 会话管理","title":"4.6 会话状态与打断保护","text":"是什么：当前会话行有状态标识：工作中 / 空闲；被其他窗口占用时显示「会话已被另一窗口打开」。 - 怎么用：切到一个正在工作的会话时会弹「当前会话正在工作中」确认，说明切换会打断它，可选「仍要切换」。 - 来源：gui/src/components/chat/SessionPanel.tsx（sessionSwitchGuard.ts、stores/sessionStatusStore.ts） ---"},{"ch":4,"id":"fn-4-0","chapter":"5. 文件浏览器、编辑器与终端","title":"5.1 文件树","text":"是什么：当前工作区的文件树，支持新建、重命名、删除、刷新、排序、显示隐藏文件。 - 怎么用：面板顶部三个按钮：新建文件 / 新建文件夹 / 刷新（新建后在行内输入名字，Enter 确认）。单击选中、双击打开。排序与隐藏文件在 设置 → 文件管理（按名称/日期/类型，目录始终优先；显示以 . 开头的文件）。 - 来源：gui/src/components/FileTree.tsx、gui/src/components/chat/SettingsPanel.tsx"},{"ch":4,"id":"fn-4-1","chapter":"5. 文件浏览器、编辑器与终端","title":"5.2 文件树右键菜单","text":"是什么：对文件/文件夹的一组操作。 - 怎么用：右键条目 →「复制（绝对路径）/ 复制文件名 / 复制相对路径 / 复制绝对路径 / 在资源管理器中打开 / 在终端中打开 / 粘贴文件（仅文件夹）/ 发送到超级桌面 / 重命名 / 发送到聊天 / 删除」；空白处右键 →「新建文件 / 新建文件夹 / 粘贴文件 / 刷新」。 - 「发送到超级桌面」：文件变成 @ref 引用块，文件夹变成文件组块（需已打开至少一个桌面）。 - 「在终端中打开」：对该目录打开系统终端。 - 来源：gui/src/components/FileTree.tsx、gui/src/components/ContextMenu.tsx"},{"ch":4,"id":"fn-4-2","chapter":"5. 文件浏览器、编辑器与终端","title":"5.3 打开文件：编辑器 / 预览","text":"是什么：文本文件用 Monaco 编辑器打开（多标签页、语法高亮、行号）；Markdown 可切换预览；png/jpg/jpeg/gif/webp/bmp/ico/svg/pdf 自动走预览视图。 - 怎么用：双击文件树里的文件，或点消息里的路径/@ref 链接。Markdown 文件在编辑区右上角有一个「预览 / 编辑」浮动胶囊可来回切；编辑器底部状态条显示完整路径与语言；磁盘上的文件被外部改动时，标签上会提示「磁盘已更新 — 点击刷新」（有未保存修改时先确认是否放弃本地修改）。 - 来源：gui/src/components/EditorPanel.tsx、gui/src/components/Editor.tsx、gui/src/components/FilePreview.tsx"},{"ch":4,"id":"fn-4-3","chapter":"5. 文件浏览器、编辑器与终端","title":"5.4 编辑器","text":"是什么：完整 Monaco 编辑器（VS Code 同款内核），支持右键菜单、多光标、查找替换等。 - 怎么用：Ctrl+S 保存；F1 / Ctrl+Shift+P 打开统一命令面板（编辑器内时编辑器命令置顶，如撤销/重做/多光标/行操作/查找替换）；右键菜单里有「保存文件 / 发送到聊天 / 定位目录树」。字体大小、Tab 宽度、自动换行在 设置 → 编辑器。 - 来源：gui/src/components/Editor.tsx、gui/src/utils/editorCommands.ts"},{"ch":4,"id":"fn-4-4","chapter":"5. 文件浏览器、编辑器与终端","title":"5.5 编辑器标签右键菜单","text":"是什么：多标签页的管理菜单。 - 怎么用：右键标签 →「关闭标签 / 关闭其他 / 关闭未修改的 / 关闭全部 / 复制路径 / 定位目录树」。文件不在当前工作区时，「定位目录树」回退为在资源管理器中打开。 - 来源：gui/src/components/EditorPanel.tsx"},{"ch":4,"id":"fn-4-5","chapter":"5. 文件浏览器、编辑器与终端","title":"5.6 图片预览","text":"是什么：图片/SVG/PDF 的预览视图，带缩放、平移；图片还带取色器。 - 怎么用：滚轮缩放、拖拽平移、双击「适应窗口」；工具栏有 −/+、1:1（原始大小）、「适应」、🎨 取色（仅图片：点图上任意位置取色，弹出色值卡片，点击复制色值）。 - 来源：gui/src/components/FilePreview.tsx"},{"ch":4,"id":"fn-4-6","chapter":"5. 文件浏览器、编辑器与终端","title":"5.7 终端面板","text":"是什么：显示 AI 执行的每条命令及其输出（xterm.js 渲染），按命令分标签。 - 怎么用：每个标签 = 一条 AI 命令（悬停看命令原文），标签上 ✕ 关闭；右上角「清空全部」。想自己敲命令请用系统终端（见 5.8）。历史条数上限与字体大小在 设置 → 终端。 - 来源：gui/src/components/TerminalPanel.tsx、gui/src/stores/terminalStore.ts"},{"ch":4,"id":"fn-4-7","chapter":"5. 文件浏览器、编辑器与终端","title":"5.8 系统终端","text":"是什么：打开一个真正的系统终端窗口（在工作区目录下），用于自己跑命令。 - 怎么用：点工具栏的终端下拉按钮 → 选 Command Prompt / PowerShell / Git Bash（macOS 只有 Terminal）。打不开时状态栏会显示具体错误。 - 来源：gui/src/components/Toolbar.tsx（TerminalDropdown） ---"},{"ch":5,"id":"fn-5-0","chapter":"6. 超级桌面（无限画布）","title":"6.1 桌面标签页","text":"是什么：可创建多个「桌面」（各自的画布与内容），顶部标签切换。 - 怎么用：顶部 ＋ 新建桌面（默认名「桌面 N」）；双击标签重命名；标签上的删除按钮删桌面。 - 来源：gui/src/components/desktop/DesktopTabs.tsx"},{"ch":5,"id":"fn-5-1","chapter":"6. 超级桌面（无限画布）","title":"6.2 画布导航","text":"是什么：无限画布，可平移、缩放、显示网格、吸附对齐。 - 怎么用： - 平移：按住空格拖拽，或鼠标中键拖拽； - 缩放：工具栏 −/+（中间显示当前百分比）与「重置」；「适应」= 缩放到能看到全部内容； - 「定位」= 把视图平移到当前选中的块； - 网格 / 吸附 是工具栏上的开关按钮； - 撤销 / 重做（↶ ↷）； - 工具栏右端的搜索框按标签或内容过滤，不匹配的块会变暗（✕ 清空搜索）； - 「清空」需再次点击确认（按钮变成「确认清空」）。 - 来源：gui/src/components/desktop/CanvasToolbar.tsx、gui/src/components/desktop/SuperDesktopCanvas.tsx"},{"ch":5,"id":"fn-5-2","chapter":"6. 超级桌面（无限画布）","title":"6.3 内容块（用户可创建 5 种 + 拖入 3 种 + AI 1 种）","text":"是什么：画布上的卡片。用户在工具栏可直接新建：文本（+ 文本）/ 表格（+ 表格）/ 表单（+ 表单）/ 绘图（+ 绘图）/ 图形（+ 图形，输入 Mermaid）；拖入或粘贴文件得到 图片 / 文件组 / @引用；图表目前只能由 AI 创建（工具栏无图表按钮）。 - 怎么用： - 点工具栏对应按钮，新块落在视口中央；空白处右键也能新建（文本/表单/绘图）或「重置视图」。 - 文本块：双击编辑，右上角「格式」下拉可切 纯文本 / Markdown / 代码语言。 - 表格块：点单元格直接编辑，+ 行 加行、表头 + 加列、双击列名改名、列头 ✕ 删列。 - 表单块：+ 添加字段 选类型（文本/多行文本/数字/复选框/下拉/日期/开关/单选/颜色/滑块），⚙ 配置（必填、最大长度、行数、min/max/step、选项），字段可拖拽排序、双击改名、× 删除；填完值可「发送给 Agent」。 -"},{"ch":5,"id":"fn-5-3","chapter":"6. 超级桌面（无限画布）","title":"6.4 项目操作（拖动 / 缩放 / 折叠 / 删除）","text":"是什么：每个内容块有标题栏与右下角缩放手柄。 - 怎么用：拖标题栏移动（可多选一起移）；拖右下角改大小；标题栏 ⊟/⊞ 折叠展开；× 删除；双击标题改标签；右键菜单：发送给 Agent / 在浮动标签打开 / 在新窗口打开 / 置顶 / 删除项目。多选（空白处框选，或 Ctrl/⌘ + 点击 加减选中）后可整组拖动、按 Delete/Backspace 批量删除，或右键批量删除 / 批量发送给 Agent / 置顶。 - 来源：gui/src/components/desktop/DesktopItemView.tsx、SuperDesktopCanvas.tsx"},{"ch":5,"id":"fn-5-4","chapter":"6. 超级桌面（无限画布）","title":"6.5 连线","text":"是什么：在块与块之间画关系线（带锚点吸附）。 - 怎么用：鼠标悬停到块上，四周出现黄色锚点 → 从锚点拖到另一个块的锚点即可连线（拖动中顶部有提示「拖到另一个项目的锚点上即可连线 · 按 Esc 取消」）。右键连线可「添加/编辑标签」或「删除连线」。 - 来源：gui/src/components/desktop/ConnectionOverlay.tsx、SuperDesktopCanvas.tsx"},{"ch":5,"id":"fn-5-5","chapter":"6. 超级桌面（无限画布）","title":"6.6 拖入文件 / 粘贴","text":"是什么：把文件拖进画布或直接粘贴，会按类型生成对应的块。 - 怎么用：从资源管理器拖文件/文件夹到画布上松手（图片 → 图片块；其余文件与文件夹 → 文件组块，支持多选一次拖入）；或在画布上 Ctrl+V（图片 → 图片块；文件/文件夹路径/长文本 → 文件组块；短文本 → 文本块）。 - 来源：gui/src/components/desktop/SuperDesktopCanvas.tsx、FileGroupItem.tsx、ImageItem.tsx"},{"ch":5,"id":"fn-5-6","chapter":"6. 超级桌面（无限画布）","title":"6.7 内容块的缩放与内容缩放","text":"是什么：图片/图形等内容有自己的缩放，与画布缩放互不干扰。 - 怎么用：在块内容上 Ctrl/⌘ + 滚轮 缩放内容、拖拽平移、双击复位（提示文字见块内）。 - 来源：gui/src/components/desktop/useContentZoom.ts"},{"ch":5,"id":"fn-5-7","chapter":"6. 超级桌面（无限画布）","title":"6.8 让 AI 操作画布","text":"是什么：AI 可以读写超级桌面（建表格、画图表、写笔记、连线），也能读你发过去的块内容。 - 怎么用：直接说需求（如「在超级桌面画一个近 5 月费用统计表」）；或右键把块「发送给 Agent」。AI 的 MCP 工具清单见 gui-agent-guide.md。 - 来源：gui/src/services/mcpBridge.ts、gui/src/services/desktopSummary.ts ---"},{"ch":6,"id":"fn-6-0","chapter":"7. 笔记","title":"7.1 浏览、搜索、筛选、排序","text":"是什么：个人知识库（Markdown），跨工作区共享（用户级）。 - 怎么用：顶部「+ 新建笔记」；搜索框即时过滤；漏斗按钮打开筛选弹层（作用域 / 标签 / 排序：最近更新、标题 A-Z）；列表显示笔记数、更新时间（刚刚 / N 分钟前…）。 - 来源：gui/src/components/chat/NotesPanel.tsx"},{"ch":6,"id":"fn-6-1","chapter":"7. 笔记","title":"7.2 编辑","text":"是什么：所见即所得编辑器（默认）与 Markdown 源码模式可切换，自动保存。 - 怎么用：编辑标题、标签（+ 标签 回车添加，标签上 × 移除）、作用域（如 global、domain:rust）；工具栏按钮：粗体/斜体/删除线/内联代码、H1-H3、无序/有序列表、引用、代码块、表格（弹出选行列数后插入）、分割线；右上角 MD 按钮切换「所见即所得 ↔ Markdown 源码」；底部显示「已自动保存 / 保存中…」，保存失败可点击重试。 - 来源：gui/src/components/chat/NoteEditor.tsx"},{"ch":6,"id":"fn-6-2","chapter":"7. 笔记","title":"7.3 关联","text":"是什么：笔记之间的关联（相关 / 派生 / 冲突 / 支持），显示在编辑区下方「关联 N 篇」，展开可跳转。 - 怎么用：关联由 AI 通过 MCP 工具创建（note_associate）；界面上可查看、点标题跳转。同一关系只需建一次（两端都能看到）。 - 来源：gui/src/components/chat/NoteEditor.tsx、gui/src/services/mcpBridge.ts"},{"ch":6,"id":"fn-6-3","chapter":"7. 笔记","title":"7.4 发送到聊天 / 桌面","text":"是什么：把笔记作为引用发给 AI，或作为文本块放到超级桌面。 - 怎么用：笔记行右键 →「发送到聊天 / 发送到超级桌面 / 删除笔记」；在编辑器里选中文字后右键 →「发送选中文字到聊天」。 - 来源：gui/src/components/chat/NotesPanel.tsx、NoteEditor.tsx"},{"ch":6,"id":"fn-6-4","chapter":"7. 笔记","title":"7.5 多选批量删除","text":"是什么：笔记列表支持多选后批量删除。 - 怎么用：点「多选」进入选择模式（或用 Ctrl/⌘ 点行），底部出现「已选 N 项 / 删除 / 取消」。 - 来源：gui/src/components/chat/NotesPanel.tsx ---"},{"ch":7,"id":"fn-7-0","chapter":"8. 技能与插件","title":"8.1 技能面板","text":"是什么：AI 的「专项能力包」管理：本地已安装 + 在线技能库两个标签页。 - 怎么用：切换「已安装 / 在线库」；搜索框过滤；在线库条目点「安装」（或「安装全部」）；已安装条目可删除；技能条目点开详情弹窗（可收藏 ☆、填参数后发送，Enter 换行 / Shift+Enter 发送）。 - 装好后技能会出现在 AI 可调用的工具/命令列表中（会话启动时扫描，新装技能需新开会话才生效）。 - 来源：gui/src/components/chat/SkillsPanel.tsx、SkillDialog.tsx、gui/src/services/skillMarketplace.ts"},{"ch":7,"id":"fn-7-1","chapter":"8. 技能与插件","title":"8.2 技能描述翻译","text":"是什么：把技能描述翻译成中文（通过 CLI 调用模型，约 1–2 分钟）。 - 怎么用：面板头部的「翻译 / 重新翻译」按钮，翻译结果缓存复用；未翻译的条目显示「(未翻译)」。 - 来源：gui/src/components/chat/SkillsPanel.tsx"},{"ch":7,"id":"fn-7-2","chapter":"8. 技能与插件","title":"8.3 插件市场","text":"是什么：浏览、安装、更新、卸载 GUI 插件（插件可带来新面板、命令、快捷键、后台进程甚至桌面控制能力）。 - 怎么用： - 左侧列表（可搜、按分类筛：全部/组件/工具/指导/集成），右侧详情（README、作者、版本、下载量、依赖）。 - 卡片按钮按状态变化：安装 / 更新（有新版时带「可更新」角标）/ 卸载 / 禁用 / 启用。 - 卸载有二次确认，会删除插件文件并移除其面板与命令；若插件声明「卸载后需重启」，会问你是否现在重启；清理没跑完会如实告知。 - 缺依赖时安装会问「是否一并安装依赖」；依赖已装但环境未就绪也如实提示。 - 未签名插件（「未受信任」）与不支持当前平台的插件都有角标提示；未受信任插件只能走「AI 安装」。 - 「AI 安装 / AI 卸载」：把安装/卸载任务交给 AI 执行（需要在聊天里有可用会话）。 - 来源：gui/src/components/chat/Pl"},{"ch":7,"id":"fn-7-3","chapter":"8. 技能与插件","title":"8.4 插件设置","text":"是什么：插件自己声明的设置项，集中显示在 设置 → 插件；没有设置项的插件不出现。 - 怎么用：设置 → 插件 → 选择「保存范围（全局 / 工作区）」，改完即存。 - 来源：gui/src/components/chat/SettingsPanel.tsx（PluginSettingsPanel）、gui/src/services/pluginSettingsStore.ts"},{"ch":7,"id":"fn-7-4","chapter":"8. 技能与插件","title":"8.5 插件带来的能力（取决于装了哪个插件）","text":"是什么：插件可往 GUI 里加面板、命令（进命令面板，可带快捷键）、后台进程（工作进程面板可见）、覆盖层与置顶小浮标；有些插件还会贡献技能、或给 AI 提供新工具（如浏览器自动化、截屏、鼠标键盘控制、只读 git 查看）。 - 怎么用：装完插件后，其面板出现在「面板」下拉里、命令出现在命令面板（F1）里；是否需要重启、是否缺少运行环境，插件市场与 AI 都会明确告诉你。判断某个能力能不能用，先看「工作进程」面板与命令面板里有没有它。 - 来源：gui/src/services/pluginRegistry.ts、pluginPanelBridge.tsx、pluginCommandBridge.ts、pluginProcessBridge.ts；插件进程的宿主窗口见 gui/src-tauri/src/lib.rs（open_plugin_overlay / open_plugin_ind"},{"ch":8,"id":"fn-8-0","chapter":"9. 计划 / 子代理 / 工作进程","title":"9.1 计划面板","text":"是什么：展示 AI 用 TodoWrite 建立的任务清单与完成状态；下方是「历史计划」（按会话保存的历史记录）。 - 怎么用：AI 调用 TodoWrite 后自动出现；展开「历史计划」可看往期计划，点会话名查看。没有计划时显示空态提示。 - 来源：gui/src/components/chat/PlanPanel.tsx、gui/src/stores/planHistoryStore.ts"},{"ch":8,"id":"fn-8-1","chapter":"9. 计划 / 子代理 / 工作进程","title":"9.2 子代理面板","text":"是什么：并行子任务（Agent 工具）的列表与完整对话记录。 - 怎么用：列表显示「N 运行中 / M 总计」与每个子代理的状态（运行中/已完成/失败/已终止）；点条目展开记录（按需加载，可「加载更早消息」）；右键有「终止任务 / 复制任务 ID / 复制 Agent ID」。消息里的工具卡片带「子代理」角标，提示可在本面板看完整过程。 - 来源：gui/src/components/chat/SubAgentPanel.tsx、gui/src/stores/subAgentStore.ts"},{"ch":8,"id":"fn-8-2","chapter":"9. 计划 / 子代理 / 工作进程","title":"9.3 工作进程面板","text":"是什么：后台进程总览：IDE Backend、MCP Server、GUI Server 的状态与端口，以及插件进程列表；下方还有后台任务（运行中与已完成）。 - 怎么用：每个服务旁有「重启」按钮（重启后端 / 重启 GUI server）；插件进程有「终止 / 重启」按钮；任务行的 ✕ 可终止。 - 来源：gui/src/components/chat/WorkerPanel.tsx ---"},{"ch":9,"id":"fn-9-0","chapter":"10. 快捷提示","title":"10.1 快捷提示（提示词模板）","text":"是什么：把常用指令存成模板，一键发送或插入。 - 怎么用：面板里「新建」填标题 + 提示词内容（如 /code-review 检查这个文件）保存；条目右键（或悬停按钮）：「直接发送 / 插入到输入框 / 编辑 / 删除」。 - 来源：gui/src/components/chat/QuickPromptPanel.tsx ---"},{"ch":10,"id":"fn-10-0","chapter":"11. 模型、Profile 与权限","title":"11.1 模型下拉（工具栏）","text":"是什么：模型相关设置的统一入口——模型列表、思考模式、Effort 档位、Profile 管理。 - 怎么用：点工具栏的模型名按钮： - 点某个 Profile 即切换（切换中显示「切换中…」，成功/失败有状态消息）； - 「思考模式」开/关（仅当模型支持 thinking/reasoning 时出现）； - 「Effort 强度」低/中/高/最大（仅支持的模型出现；不同模型可用档位不同）； - 底部「Profile 管理」打开管理面板。 - 来源：gui/src/components/Toolbar.tsx（ModelDropdown、ModelTuningSections）"},{"ch":10,"id":"fn-10-1","chapter":"11. 模型、Profile 与权限","title":"11.2 Profile 管理","text":"是什么：模型配置文件（用哪个服务、哪个模型、API Key、超时、上下文窗口、能力勾选）。 - 怎么用：工具栏模型下拉 →「Profile 管理」，或在应用菜单里进。列表里每条可「切换 / 设为默认 / 编辑 / 删除（二次确认，会删对应 .env 文件）」；「新建 Profile」选服务商（或自定义）→ 填名称、API Key/Token、模型、MAX_TOKENS、上下文窗口、超时 → 「创建」。 - 「模型能力」勾选决定后端发哪些请求参数（thinking / adaptive / effort / 最大 effort / reasoning），不确定就留空（按模型名默认判断），勾错可能导致请求参数发错。 - 来源：gui/src/components/chat/ProfileDialog.tsx"},{"ch":10,"id":"fn-10-2","chapter":"11. 模型、Profile 与权限","title":"11.3 权限模式","text":"是什么：控制 AI 执行操作的授权级别。 - 怎么用：点工具栏的权限下拉，选：默认（仅危险操作询问）/ 接受编辑（自动批准文件编辑）/ 计划模式（先规划再执行）/ 绕过（自动批准所有）/ 不再询问（记住上次选择）。 - 来源：gui/src/components/Toolbar.tsx（PermModeDropdown） ---"},{"ch":11,"id":"fn-11-0","chapter":"12. 设置与快捷键","title":"12.1 设置面板","text":"是什么：所有可配置项的集中地，左侧分类导航、右侧表单、底部保存栏。 - 怎么用：工具栏齿轮按钮打开（浮窗）。底部「保存到：全局 / 当前工作区」决定写哪份配置——多数字段改完要按「保存」；快捷键、服务器地址是改完即存。部分字段由命令面板/告警跳进来时会自动定位并高亮。 - 来源：gui/src/components/chat/SettingsPanel.tsx"},{"ch":11,"id":"fn-11-1","chapter":"12. 设置与快捷键","title":"12.2 设置项一览","text":"基础：语言、界面主题、界面字体大小、自动进入最近的工作区、保存布局到全局、服务器地址（内网 96 / 公网云 / 自定义）。 - 文件管理：显示隐藏文件、排序方式（名称/日期/类型）。 - 终端：历史条目上限、终端字体大小。 - 编辑器：字体大小、Tab 宽度、自动换行。 - 聊天：Enter 键行为、自动加载最近会话、强制中文思考、消息队列位置与上限、消息划词工具栏、消息时间线、上下文告警（开关 + 阈值）、自定义压缩提示词（开关/追加或替换/预设/提取脚本）、唤醒提示词。 - 会话：会话文件夹（开关）。 - 超级桌面：暂无可配置项（代码里显示空态）。 - 快捷键：见 12.3。 - 插件：插件声明的设置项。 - 技能：此分类当前为空。 - 关于：版本号、技术栈、源码仓库链接（Gitee 主仓库 / GitHub 镜像，打不开时自动复制到剪贴板）。 - 来源：gui/src/compon"},{"ch":11,"id":"fn-11-2","chapter":"12. 设置与快捷键","title":"12.3 快捷键设置","text":"是什么：改键界面，含冲突提示与「局部交互键」说明。 - 怎么用：设置 → 快捷键 → 点某条键位 → 按下新组合（Esc 取消）；「恢复默认 / 全部恢复默认」；紫色虚线框的条目是上下文条件型（只在特定面板生效，不可修改）。 - 冲突是软冲突：允许重复，但顶部提示「N 组键位冲突（按列表顺序，靠前者优先）」。 - 插件声明的快捷键也出现在这里，带「（全局，窗口不在前台也生效）」角标的表示注册为 OS 级全局热键；被其它软件占用或已被另一个 GUI 实例占用时会给出对应提示与「重新检测」。 - 完整键位表与规则见 shortcuts.md。 - 来源：gui/src/components/chat/ShortcutsPanel.tsx、gui/src/services/shortcuts.ts、gui/src/services/globalShortcutService.ts ---"},{"ch":12,"id":"fn-12-0","chapter":"13. 运行环境诊断、更新、反馈","title":"13.1 运行环境诊断","text":"是什么：一键体检：安装环境变量、Profile 配置、网络连通（更新/注册服务器、云服务器、MCP 服务、API BaseURL）、后端服务（进程/端口/WebSocket）、工作区（绑定、局部设置、会话数据库）。每个失败项给出修复建议。 - 怎么用：应用菜单里点「运行环境诊断」。底部按钮：重新检测 / 复制报告（报告复制到剪贴板）/ 切换到云服务器（内网不可达时）；失败分类上会出现一键修复按钮（「重启 IDE 后台」「修复环境与 Profile」「修复（补可执行权限，macOS）」），修复需要系统授权时会明确告诉你。 - 来源：gui/src/components/chat/DiagnosticPanel.tsx、gui/src/services/diagnosticsService.ts、gui/src-tauri/src/diagnostics.rs"},{"ch":12,"id":"fn-12-1","chapter":"13. 运行环境诊断、更新、反馈","title":"13.2 更新","text":"是什么：检查并安装应用与组件的更新。组件包括 GUI、Claude CLI、Bun、CLI 工具、Python 环境、Git & Bash、IDE 扩展、更新器。 - 怎么用：应用菜单 →「更新」（有新版本时菜单项与 AppMark 上带红点）。点「检查更新」→ 看更新说明 → 勾选要更新的组件 →「更新所选 / 安装所选」（未安装组件默认不勾选，可手动勾选安装）；下载中显示进度与速度；完成后按提示「重启以完成更新」。 - 来源：gui/src/components/chat/UpdatePanel.tsx、gui/src/services/updateService.ts、gui/src-tauri/src/update.rs"},{"ch":12,"id":"fn-12-2","chapter":"13. 运行环境诊断、更新、反馈","title":"13.3 反馈","text":"是什么：把问题或建议发给开发者（可带截图）。 - 怎么用：应用菜单 →「反馈」。选类型（问题反馈 / 改进建议）→ 填描述 →（可选）添加截图（可多张、可移除）→「提交反馈」。「浏览反馈」可打开反馈列表页。 - ⚠️ 提交前请给截图里的敏感信息打码；反馈数据是公开的；提交完全匿名。 - 来源：gui/src/components/chat/FeedbackDialog.tsx、gui/src/services/feedbackService.ts ---"},{"ch":13,"id":"fn-13-0","chapter":"14. 命令面板与帮助","title":"14.1 命令面板（F1 / Ctrl+Shift+P）","text":"是什么：全局搜索入口，一个框里搜六类东西。 - 怎么用：F1 或 Ctrl+Shift+P 打开（编辑器内时编辑器命令置顶）；输入关键词过滤（匹配名称与副标题），↑/↓ 选择、Enter 执行、Esc 关闭。六组： - 面板 —— 开/关面板（按最近使用排序）； - AI 命令 —— 技能与提示命令，选中后插入输入框（不自动发送）； - 会话 —— 切换会话； - 设置 —— 打开设置并直接跳到对应分类； - 插件命令 —— 插件声明的命令； - 编辑器命令 —— 撤销/重做、多光标、查找替换等 Monaco 命令（当前有打开的编辑器时才有）。 - 来源：gui/src/components/CommandPalette.tsx、gui/src/components/useCommandPalette.ts、gui/src/utils/commandPaletteLogic.ts"},{"ch":13,"id":"fn-13-1","chapter":"14. 命令面板与帮助","title":"14.2 帮助面板","text":"是什么：内置图文 + 动画教程：界面布局讲解、工具栏每个按钮的作用、各面板介绍、四段核心流程（AI Agent 对话是什么 / 权限确认 / 工作区与会话 / Profile 与 API Key）、布局系统、Office 三件套、超级桌面与笔记的示例动画。 - 怎么用：应用菜单 →「帮助」（首启时也有入口）。 - 来源：gui/src/components/chat/HelpPanel.tsx、gui/src/components/chat/help/ ---"},{"ch":14,"id":"fn-14-0","chapter":"15. 其他交互","title":"15.1 外部链接怎么打开","text":"是什么：界面里的 http(s) 链接有统一的打开策略（防止把 GUI 页面本身导航走）。 - 怎么用：左键 = 在应用内置的原生窗口里打开；Ctrl/⌘ + 左键或鼠标中键 = 用系统默认浏览器打开；右键 = 菜单（内置窗口打开 / 在系统浏览器打开 / 复制链接）。 - 来源：gui/src/utils/linkOpen.ts、gui/src/App.tsx"},{"ch":14,"id":"fn-14-1","chapter":"15. 其他交互","title":"15.2 通知与消息记录","text":"是什么：操作结果以右下角 Toast（成功 3s 自动消失、警告 6s、错误常驻可关）告知；同时所有消息被记录，左下角的胶囊（圆点 + 条数）在 5 秒内自动展开显示最新一条（悬停暂停收回），点它打开完整「消息记录」列表（倒序，可「清空」）。 - 怎么用：不用刻意操作；出错时看右下角或左下角。 - 来源：gui/src/components/ToastContainer.tsx、gui/src/components/StatusBar.tsx"},{"ch":14,"id":"fn-14-2","chapter":"15. 其他交互","title":"15.3 无人值守守护模式","text":"是什么：实验性「撒手模式」：每个回合结束后自动验收任务，未完成自动续做，队列任务仅在验收通过后放行，全部完成自动退出。 - 怎么用：点工具栏的盾牌按钮 → 阅读风险清单（模型自评不可靠 / 无轮数上限持续耗 token / 非 bypass 权限下会挂起 / 格式不合规会暂停 / AI 将自主连续执行多回合）→「进入无人值守(自担风险)」。运行中盾牌带状态色点（回合观察中 / 验收等待中 / 已暂停(异常)）；再点一次即停止。 - 来源：gui/src/components/chat/GuardButton.tsx、gui/src/services/guardBridge.ts、gui/src-tauri/src/guard.rs ---"}];
+  var nav = document.getElementById('nav');
+  var content = document.getElementById('content');
+  var search = document.getElementById('search');
+  var clearBtn = document.getElementById('clear');
+  var noHit = document.getElementById('noHit');
+  var byId = {};
+  INDEX.forEach(function (x) { byId[x.id] = x; });
+
+  // ── 跳转 + 闪烁提示 ──
+  function goTo(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    el.classList.add('flash');
+    setTimeout(function () { el.classList.remove('flash'); }, 1400);
+    nav.querySelectorAll('.nav-item.cur').forEach(function (n) { n.classList.remove('cur'); });
+    var link = nav.querySelector('.nav-item[data-target="' + id + '"]');
+    if (link) link.classList.add('cur');
+  }
+  nav.addEventListener('click', function (e) {
+    var a = e.target.closest('a[data-target]');
+    if (!a) return;
+    e.preventDefault();
+    goTo(a.dataset.target);
+  });
+
+  // ── 搜索：过滤导航（章节标题命中 → 整章；否则列出命中的功能点）──
+  function applyFilter() {
+    var q = search.value.trim().toLowerCase();
+    clearBtn.classList.toggle('on', !!q);
+    var any = false;
+    nav.querySelectorAll('.nav-chapter').forEach(function (ch) {
+      var chTitle = ch.querySelector('.nav-ch').textContent.toLowerCase();
+      var chHit = q && chTitle.indexOf(q) >= 0;
+      var itemAny = false;
+      ch.querySelectorAll('.nav-item').forEach(function (it) {
+        var rec = byId[it.dataset.target];
+        var hitTitle = !!(rec && rec.title.toLowerCase().indexOf(q) >= 0);
+        var hit = !q || chHit || hitTitle ||
+          (rec && rec.text.toLowerCase().indexOf(q) >= 0);
+        it.hidden = !hit;
+        // 标题命中要突出（否则「设置与快捷键」会被「插件市场」这类正文提及的挤在后面）
+        it.classList.toggle('hit-title', !!q && hitTitle);
+        if (hit) itemAny = true;
+      });
+      ch.hidden = q ? !(itemAny || chHit) : false;
+      if (itemAny) any = true;
+      // 搜索时自动展开命中章节
+      ch.classList.toggle('expanded', !!q && (itemAny || chHit));
+      if (q && chHit) ch.querySelectorAll('.nav-item').forEach(function (i) { i.hidden = false; });
+    });
+    noHit.classList.toggle('on', !!q && !any);
+  }
+  search.addEventListener('input', applyFilter);
+  clearBtn.addEventListener('click', function () {
+    search.value = '';
+    applyFilter();
+    search.focus();
+  });
+  search.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { search.value = ''; applyFilter(); }
+    if (e.key === 'Enter') {
+      var first = nav.querySelector('.nav-chapter:not([hidden]) .nav-item:not([hidden])');
+      if (first) goTo(first.dataset.target);
+    }
+  });
+
+  // ── 滚动时同步高亮当前章节 + 展开 ──
+  // ⚠️ 别用 el.offsetTop —— 它相对 offsetParent，而 #content/.wrap 都没设 position，
+  //    于是 offsetParent 落到 body（视口高度固定）→ offsetTop 不随滚动变化，
+  //    高亮会卡在中间某章（实测：滚到底部仍显示「12. 设置与快捷键」）。
+  //    改用 getBoundingClientRect 相对滚动容器顶部计算，与 offsetParent 无关。
+  function relTop(el) {
+    return el.getBoundingClientRect().top - content.getBoundingClientRect().top;
+  }
+  var chapters = [].slice.call(document.querySelectorAll('.chapter'));
+  var navChapters = [].slice.call(nav.querySelectorAll('.nav-chapter'));
+  var ticking = false;
+  content.addEventListener('scroll', function () {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(function () {
+      ticking = false;
+      var MARK = 80;                       // 判定线：距容器顶部 80px 以内算"当前"
+      var idx = 0;
+      for (var i = 0; i < chapters.length; i++) {
+        if (relTop(chapters[i]) <= MARK) idx = i;
+      }
+      // 到底部时直接把最后一章设为当前（否则最后一个章节若不满一屏永远不会命中）
+      if (content.scrollTop + content.clientHeight >= content.scrollHeight - 4) {
+        idx = chapters.length - 1;
+      }
+      navChapters.forEach(function (n, i) {
+        n.classList.toggle('active', i === idx);
+      });
+      var items = chapters[idx] ? chapters[idx].querySelectorAll('.item') : [];
+      var curId = null;
+      for (var k = 0; k < items.length; k++) {
+        if (relTop(items[k]) <= MARK + 24) curId = items[k].id;
+      }
+      nav.querySelectorAll('.nav-item').forEach(function (n) {
+        n.classList.toggle('cur', n.dataset.target === curId);
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
