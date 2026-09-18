@@ -57,5 +57,15 @@ manifest 的 `processes` 声明是 `"command": "node"` + `"args": ["git-viewer-s
 
 ## MCP 工具
 
-`git_view_diff` / `git_history` / `git_branches` —— 从 GUI 进程 store 取 port,
-经由进程 HTTP API 转接读数据并呈现给用户审阅（AI 不经面板直读）。
+三个只读工具 **由本插件声明**（`contributes.mcpTools`）。AI 拿到的完整名是
+**`plugin_git-viewer_view_diff`** / `plugin_git-viewer_history` / `plugin_git-viewer_branches`
+（前缀 `plugin_<插件名>_` 由宿主加；**pluginName 里的连字符保留**）。
+
+- **⚠️ 工具只在本插件装了且启用时才出现** —— 2026-09-18 从宿主搬来（此前写死在宿主里，
+  卸载后工具仍残留于 AI 的工具列表，只在调用时才报「进程未运行」）。
+  若 AI 看不到这些工具，先查本插件是否已装 / 被启用。
+- 走进程 HTTP 的 **`POST /__mcp`**（与其它插件同一契约：`{tool, args, settings}` → `{ok, ...}`），
+  **要求 `git-viewer-server` 进程在跑**（工作区绑定时自动启动）。
+- `view_diff` 的返回在**插件侧截断**到 40K 字符（AI 上下文保护，附注记）——
+  AI 可用更小的 `context` 参数再看片段。
+- 旧名（`git_view_diff` / `git_history` / `git_branches`）**自 0.2.0 起不存在**。

@@ -112,26 +112,12 @@ function extractToolName(method: string, params?: Record<string, unknown>): stri
   return "";
 }
 
-// ── git-viewer 工具 helpers ──
-
-/** git-viewer 插件进程端口 —— 从插件进程 store 找正在运行的 port（进程 id 裸名）。
- *  无 port = 进程未运行/未启动 → 返回 undefined, 调用方报明确错误。 */
-async function getGitViewerPort(): Promise<number | undefined> {
-  try {
-    const { getPluginProcesses } = await import("./pluginProcessBridge");
-    const p = getPluginProcesses().find((x) => x.processId === "git-viewer-server");
-    return typeof p?.port === "number" ? p.port : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** MCP 数值参数 clamp（可选 number, 非数字/超界落到默认） */
-function clampMcpInt(v: unknown, def: number, min: number, max: number): number {
-  const n = typeof v === "number" ? v : NaN;
-  if (Number.isNaN(n)) return def;
-  return Math.max(min, Math.min(max, Math.round(n)));
-}
+// ── 注：git-viewer 的 3 个工具已改为**插件侧声明**（contributes.mcpTools）──
+// 2026-09-18 从宿主搬走：原先写死在这里，导致**插件卸载后工具仍出现在 AI 列表里**
+// （调用才报"进程未运行"）。搬迁后未装/禁用 → 工具不出现；转发走通用
+// `callPluginMcpTool`（找进程、报错、/__mcp 契约都一致）。diff 截断（40K 上下文
+// 保护）也随之下放到插件 —— 由它决定返回给 AI 的体量更合适。
+// （`clampMcpInt` 随之删除 —— 它只服务 git_history，已随工具搬到插件侧。）
 
 // ── 插件贡献的 MCP 工具（contributes.mcpTools）──
 
@@ -354,13 +340,6 @@ async function runCliPrintForJson<T extends object>(
   return value as T;
 }
 
-/** diff 截断: AI 上下文预算保护 —— 超 40K 字符截断并注记（可调 context 再看） */
-const DIFF_LIMIT = 40_000;
-function truncateDiff(diff: string): string {
-  if (diff.length <= DIFF_LIMIT) return diff;
-  return diff.slice(0, DIFF_LIMIT) + `\n… [diff 已截断: ${diff.length} 字符, 超出 ${DIFF_LIMIT} 上限]\n(可用 git_view_diff(file, context=较小编号) 看更小片段)`;
-}
-
 async function dispatchTool(name: string, params: Record<string, unknown>): Promise<unknown> {
   switch (name) {
     case "initialize":
@@ -407,10 +386,6 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
           { name: "plugin_install", description: "Install a GUI plugin from the marketplace by slug (downloads zip, extracts, rescans — panels/commands become live). Only for standard plugins; ai-guided plugins have no runtime — read their docs and perform the guided steps yourself instead. Returns {installed, pluginName} or dependency error.", inputSchema: { type: "object", properties: { slug: { type: "string" } }, required: ["slug"] } },
           { name: "plugin_uninstall", description: "Uninstall a GUI plugin by pluginName. DANGEROUS — only call with confirm:true AFTER the user explicitly agreed in conversation. Refused when other installed plugins depend on it (uninstall them first). Kills the plugin's processes and deletes its directory (for ai-guided runtime plugins this also removes the downloaded runtime). ai-guided plugins: follow their uninstall guidance instead when applicable.", inputSchema: { type: "object", properties: { name: { type: "string" }, confirm: { type: "boolean" } }, required: ["name", "confirm"] } },
           { name: "plugin_set_status", description: "Report an AI-verified environment status for an ai-guided plugin (e.g. after manually installing a runtime per its AI_NOTES guidance). status: ready | not_ready | error. In-memory only (cleared on GUI restart — re-verify then). Reference info for later debugging: plugin_list/plugin_get expose it as aiStatus; the GUI does not act on it.", inputSchema: { type: "object", properties: { name: { type: "string" }, status: { type: "string", enum: ["ready", "not_ready", "error"] }, detail: { type: "object", description: "Optional free-form details: version, verify command output, error reason, etc." } }, required: ["name", "status"] } },
-          // ── git-viewer 只读工具（经插件进程 HTTP API 转接; AI 不经过面板直读）──
-          { name: "git_view_diff", description: "Read the diff of a working-tree file (uncommitted changes) for the bound workspace repo. Read-only; the git-viewer plugin process must be running (auto-starts on workspace bind). Pass file as repo-relative path (e.g. 'gui/src/App.tsx'). Optional context: lines of context around changes (default 3, max 60).", inputSchema: { type: "object", properties: { file: { type: "string" }, context: { type: "number" } }, required: ["file"] } },
-          { name: "git_history", description: "Read the recent commit history (git log, read-only) for the bound workspace repo. Optional limit: max commits to return (default 20, max 200).", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
-          { name: "git_branches", description: "Read the branch list (git branch, read-only) for the bound workspace repo.", inputSchema: { type: "object", properties: {} } },
           { name: "app_relaunch", description: "Restart the GUI application (spawns a fresh instance, then exits — the current AI session ends with it). DANGEROUS: only call with confirm:true AFTER the user explicitly agreed in conversation. Use as the LAST step of an installation flow (e.g. after an ai-guided plugin registered an MCP server that needs a session reload). All unsaved session state is preserved on disk by the backend; the new instance starts fresh.", inputSchema: { type: "object", properties: { confirm: { type: "boolean" } }, required: ["confirm"] } },
           { name: "chat_send_command", description: "Pre-fill a command or prompt (e.g. a slash command like '/mcp-refresh') into the chat input box for the user to review and send with one keystroke — the user stays in control (this is the confirmation itself: nothing is sent automatically). Use when a GUI-side action needs the user to trigger a slash command but you want to spare them typing it. The text is placed at the start of the input box and highlighted by focus; tell the user to press Enter to send.", inputSchema: { type: "object", properties: { text: { type: "string", description: "Command/prompt text to pre-fill (e.g. '/mcp-refresh')" } }, required: ["text"] } },
         ],
@@ -731,45 +706,9 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
 
     // ── git-viewer 只读工具（经插件进程 HTTP API 转接; MCP 响应 = AI 呈现给用户）──
 
-    case "git_view_diff": {
-      const file = params.file as string | undefined;
-      if (!file) throw new Error("file is required");
-      const port = await getGitViewerPort();
-      if (!port) throw new Error("git-viewer 进程未运行（没有端口）。插件进程在工作区绑定时自动启动——等待或检查 Worker 面板状态。");
-      const url = `http://127.0.0.1:${port}/api/diff?file=${encodeURIComponent(file)}${params.context ? `&context=${params.context}` : ""}`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => "");
-        throw new Error(`git_view_diff 失败 (HTTP ${resp.status}): ${err.slice(0, 300)}`);
-      }
-      const body = await resp.json();
-      return { file, diff: truncateDiff(body.diff ?? "") };
-    }
-
-    case "git_history": {
-      const port = await getGitViewerPort();
-      if (!port) throw new Error("git-viewer 进程未运行（没有端口）。插件进程在工作区绑定时自动启动——等待或检查 Worker 面板状态。");
-      const limit = clampMcpInt(params.limit, 20, 1, 200);
-      const resp = await fetch(`http://127.0.0.1:${port}/api/log?limit=${limit}`);
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => "");
-        throw new Error(`git_history 失败 (HTTP ${resp.status}): ${err.slice(0, 300)}`);
-      }
-      const body = await resp.json();
-      return { commits: body.commits ?? [] };
-    }
-
-    case "git_branches": {
-      const port = await getGitViewerPort();
-      if (!port) throw new Error("git-viewer 进程未运行（没有端口）。插件进程在工作区绑定时自动启动——等待或检查 Worker 面板状态。");
-      const resp = await fetch(`http://127.0.0.1:${port}/api/branches`);
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => "");
-        throw new Error(`git_branches 失败 (HTTP ${resp.status}): ${err.slice(0, 300)}`);
-      }
-      const body = await resp.json();
-      return { branches: body.branches ?? [] };
-    }
+    // 注：`git_view_diff` / `git_history` / `git_branches` 三个 case 已于 2026-09-18
+    // **搬迁到插件侧**（contributes.mcpTools + 插件进程的 /__mcp 端点）。宿主的
+    // `callPluginMcpTool` 会处理转发、进程未运行时给出明确错误 —— 与其它插件一致。
 
     case "plugin_install": {
       const slug = params.slug as string;

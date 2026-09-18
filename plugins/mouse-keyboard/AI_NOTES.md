@@ -4,7 +4,7 @@
 
 ## 概览
 
-- **贡献**：1 个面板（状态/急停/测试区）、1 个 MCP 工具 `plugin_mouse_keyboard_control`、
+- **贡献**：1 个面板（状态/急停/测试区）、1 个 MCP 工具 `plugin_mouse-keyboard_control`、
   1 个后台进程 `mouse-keyboard-server`（Node，`server.cjs`）
 - **原生依赖**：`vendor/win32-x64/` 里两个预编译 `.node`（robotjs / koffi），
   **直接 `require` 二进制文件**，不走 npm、不需要 node_modules

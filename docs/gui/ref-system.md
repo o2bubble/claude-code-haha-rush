@@ -101,9 +101,9 @@ The `@ref{...}` syntax is the GUI's universal resource locator. Users send refer
 
 **Action**: Activates the Super Desktop panel, focuses and pans to the target item (blue glow animation 3s pulse). The item UUID comes from `desktop_get_items` MCP tool output.
 
-Content types in path: `text`, `chart`, `graphic`, `ref`, `filegroup`, `image`, `form`, `drawing`.
+Content types in path: `text`, `table`, `chart`, `graphic`, `ref`, `filegroup`, `image`, `form`, `drawing`.
 
-**To read/write desktop items**: See `~/.claude/gui-agent-guide.md` — MCP tools section for full API (16 tools: create, update, delete, move, resize, connect, undo/redo, etc.).
+**To read/write desktop items**: See `~/.claude/gui-agent-guide.md` — MCP tools section for full API (15 tools: create, update, delete, move, resize, connect, undo/redo, etc.).
 
 ### note — Open a note in the Notes panel
 

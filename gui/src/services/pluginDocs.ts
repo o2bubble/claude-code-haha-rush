@@ -4,7 +4,8 @@
 
 export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
 
-面向 AI 的插件开发/安装/排查参考。人类向教程见插件市场 demo-widget 的 README。
+面向 AI 的插件开发/安装/排查参考。人类向教程见插件市场里任一官方插件的 README
+（或本仓库 \`plugins/_template/README.template.md\`）。
 
 ## 目录布局
 
@@ -71,11 +72,12 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
   \`dependencies\` 管的是「依赖是否可用」而不是「能力授予」
 - \`platforms\`: \`["windows","macos","linux"]\` —— 缺省/空 = 全平台
 - \`category\`: \`tool\` | \`integration\` | 自定义非空字符串（市场筛选用）
-- \`icon\`: 必须是合法 IconKey（见 gui/src/types/layout.ts）；**写非法值不报错、
+- \`icon\`: 必须是合法 IconKey（源码见 \`gui/src/types/layout.ts\`）；**写非法值不报错、
   静默兜底成 grid3x3**（曾见插件写 "compass" 显示成九宫格）。常用 "package"。
   ⚠️ **新插件要挑一个没被别的插件用过的** —— 拿现有插件的 manifest 当模板时最容易
   漏改这一项，结果是两个插件图标一模一样（用户一眼就看出来）。
-  查已用：\`grep '"icon"' plugins/*/plugin.json\`
+  查已用：逐个 \`plugin_get\` 看已装插件的 icon（**别跑 \`grep plugins/*/plugin.json\`** ——
+  用户环境只有安装目录、没有源码仓库）
 - \`settings\`: 插件设置声明（轻量 JSON Schema：type/title/default/options 等），
   设置面板按插件分组渲染
 
@@ -84,13 +86,30 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
 - 安装: 市场一键装（zip 下载解压校验）或手动放目录 → 重扫即活（无需重启）
 - 重扫: 扫描 plugins/ → 解析 plugin.json（容错，坏文件跳过）→ 过滤禁用列表 →
   注销消失插件的面板/进程 → 注册面板/命令/事件转发 → 启动 startOn=workspace_bound
-  的进程（幂等: 已在跑的不动; 未绑定工作区时留到绑定后）
+  的进程（幂等: 已在跑的不动; 未绑定工作区时留到绑定后）→
+  **同步插件贡献的 skill 链接**（见下）
 - 禁用: settings.disabledPlugins 记 pluginName，目录不动；面板/命令注销 + 后台进程停
-  （启用即恢复, 进程随之拉起）
+  （启用即恢复, 进程随之拉起）；**该插件的 skill 链接也会被摘掉**（禁用 = 技能不可用）
 - 卸载: **跑 beforeUninstall hook（若声明）** → 杀插件进程 → 删 plugins/<pluginName>/ →
   清宿主侧残留（plugins-settings/<name>.json 全局+工作区、plugins-data/<name>/）→ 重扫
   → 插件若声明了 needsRestart 则**由前端提示用户**（可拒绝）
 - GUI 退出: 杀全部插件进程（无孤儿）
+
+### 技能链接同步（\`contributes.skills\`）
+
+**每次重扫都会跑一遍幂等同步**（不是"安装时建一次"）：
+
+| 情况 | 行为 |
+|---|---|
+| 插件在、链接不在 | 建（**缺了补**） |
+| 链接指向错了（插件被挪过） | 重建 |
+| 插件已卸载/禁用 | **摘掉链接**（含悬空的） |
+| 链接已正确 | 不动（省一次系统调用，也避免目录抖动） |
+
+- 链接**指向插件目录** → 插件目录是唯一来源：改插件里的技能文件立刻生效
+- 只动**指向插件目录**的链接：用户自己建的（如指向 \`~/.agents/skills\`）不碰
+- 失败**不阻断**插件加载（只写诊断），所以"插件正常但技能没出现"是可能的
+  —— 排查见下方清单第 8 条
 
 ### 卸载/清理 hook（\`beforeUninstall\`）—— 声明式脚本
 
@@ -136,6 +155,26 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
 6. **命令没进调色板?** commands[].id 会加前缀 plugin:<name>:<id>；onInvoke 是触发名
 7. **改了 plugin.json 没生效?** 重扫由安装/启停触发；手动改文件后需触发重扫（重装或
    禁用再启用）
+8. **技能没出现（\`contributes.skills\` 声明的）?** 按序查：
+   1. 插件**在列且启用**（禁用的插件技能会被摘掉）
+   2. 目标目录有 \`SKILL.md\`，且 \`path\` 是插件内相对路径
+   3. 宿主有没有真的建链 —— 看
+      \`%APPDATA%/com.claudecode.gui/skill-diag.json\`（每次重扫写一次：
+      \`result.linked\` 是成功清单、\`result.errors\` 是失败原因）。
+      ⚠️ 这个文件是**故意保留**的诊断输出 —— 前端 \`console.*\` **不进 GUI 日志**，
+      所以失败信息只在这里能看到
+   4. **技能在会话启动时扫描** —— 装完/修完要**新开会话**才看得到（与面板/命令
+      "立刻可见"不同）
+   5. 手工验证：\`dir %USERPROFILE%\\.claude\\skills\` 看有没有以该技能名命名的
+      \`<JUNCTION>\` 条目；**删它要用 \`rmdir\`**（或 Node 的 \`fs.rmdirSync\`）——
+      资源管理器/ \`rd /s\` 会**连带删掉插件目录里的真实文件**
+9. **"功能没生效"但代码明明写对了?** 先证伪「跑的是旧二进制」再读代码：
+   - 用户装的 GUI 可能**低于该功能发布的版本**（本项目开发循环是
+     改代码 → 构建 → 发版 → 用户装，中间有多个断点）
+   - **别用"搜 exe 里的前端字符串"来判断** —— 前端资源是压缩嵌入的，
+     字符串可能搜不到（**只能是假阴性**，搜到=有，搜不到≠没有）
+   - 可靠的判据：**行为**。挑一个该功能独有的可见副作用（如它写的诊断文件、
+     它建的链接、它发的日志），看它有没有发生
 
 ## 请求宿主动作（host actions）
 
@@ -166,10 +205,23 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
 
 ## MCP 工具
 
-- plugin_list: 已装插件 + enabled/disabled + manifest 摘要
-- plugin_get: 单插件完整 manifest JSON
-- plugin_docs: 本文档
-- 安装/卸载/禁用属用户操作（市场面板），AI 不直接执行删除
+**安装/卸载 AI 可以直接做**（不是"只能用户操作"）—— 各有自己的门禁：
+
+| 工具 | 用途 | 门禁 |
+|---|---|---|
+| \`plugin_list\` | 已装插件 + enabled/disabled + manifest 摘要 + \`aiStatus\` | — |
+| \`plugin_get\` | 单插件完整 manifest JSON | — |
+| \`plugin_docs\` | 本文档；传 \`name\` 返回该插件的 AI_NOTES.md | — |
+| \`plugin_install\` | 从市场按 slug 安装（**仅 standard** —— ai-guided 会拒绝并让你按文档自己装） | 先**依赖校验**（未装/未就绪都会拒绝并说明） |
+| \`plugin_uninstall\` | 卸载插件 | ⚠️ **必须在对话里得到用户明确同意**后才可传 \`confirm:true\`；有依赖方时拒绝 |
+| \`plugin_set_status\` | 上报 ai-guided 插件的环境状态（\`ready\`/\`not_ready\`/\`error\`） | 内存态，GUI 重启即清空 → 需重新验证再报 |
+
+**禁用**仍是纯用户操作（设置里的 disabledPlugins），AI 无对应工具。
+
+**卸载的收尾**：返回里可能带 \`needsRestart\`（该插件声明了"卸载后需重启"）与
+\`hookWarning\`（\`beforeUninstall\` 没跑成 —— 卸载已完成但清理可能不完整）。
+**这两个都要转告用户**：前者问他要不要现在重启（用户同意才调 \`app_relaunch\`），
+后者如实说明。
 
 ## 市场发布（服务端）
 

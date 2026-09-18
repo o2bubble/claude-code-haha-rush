@@ -1,7 +1,7 @@
 {
   "pluginName": "git-viewer",
   "displayName": "Git 查看器",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "apiVersion": "1.0",
   "description": "只读 git 查看工具：工作区改动 diff / 提交历史 / 分支列表。纯查看，不做任何写操作（无 commit/push/rebase）。依赖 nodejs 运行时；git 由 GUI 安装包自带。",
   "icon": "gitBranch",
@@ -36,13 +36,61 @@
       }
     ],
     "commands": [],
-    "events": []
+    "events": [],
+    "mcpTools": [
+      {
+        "name": "view_diff",
+        "process": "git-viewer-server",
+        "description": "Read the diff of a working-tree file (uncommitted changes) for the bound workspace repo. Read-only. Pass file as repo-relative path (e.g. 'gui/src/App.tsx'). Optional context: lines of context around changes (default 3, max 60).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Repo-relative path"
+            },
+            "context": {
+              "type": "number",
+              "description": "Lines of context (default 3, max 60)"
+            }
+          },
+          "required": [
+            "file"
+          ]
+        }
+      },
+      {
+        "name": "history",
+        "process": "git-viewer-server",
+        "description": "Read the recent commit history (git log, read-only) for the bound workspace repo. Optional limit: max commits to return (default 20, max 200).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "number",
+              "description": "Max commits (default 20, max 200)"
+            }
+          }
+        }
+      },
+      {
+        "name": "branches",
+        "process": "git-viewer-server",
+        "description": "Read the branch list (git branch, read-only) for the bound workspace repo.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ]
   },
   "processes": [
     {
       "id": "git-viewer-server",
       "command": "node",
-      "args": ["git-viewer-server.cjs"],
+      "args": [
+        "git-viewer-server.cjs"
+      ],
       "env": {
         "CLAUDE_PLUGIN_WORKSPACE": "${workspace}"
       },

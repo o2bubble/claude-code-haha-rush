@@ -6,7 +6,7 @@
 
 ## 能做什么
 
-AI 拿到**一个工具** `plugin_mouse_keyboard_control`，用 `action` 参数区分操作：
+AI 拿到**一个工具** `plugin_mouse-keyboard_control`，用 `action` 参数区分操作：
 
 | action | 作用 |
 |---|---|

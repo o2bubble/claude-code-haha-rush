@@ -4,7 +4,7 @@
 
 | 坐标系 | 谁用它 | 原点 |
 |---|---|---|
-| **虚拟桌面绝对** | `plugin_mouse_keyboard_control` 的 `x`/`y` | **整个虚拟桌面**的左上角（多屏拼接后的原点） |
+| **虚拟桌面绝对** | `plugin_mouse-keyboard_control` 的 `x`/`y` | **整个虚拟桌面**的左上角（多屏拼接后的原点） |
 | **显示器相对** | `plugin_screenshot_region` 的 `region.x/y` | **那块显示器**的左上角 |
 | **图内像素** | 你在截图里看到的 | 那张图的左上角 |
 
@@ -92,6 +92,6 @@
 
 ## 拿不准时
 
-- **想要所有显示器布局** → `plugin_mouse_keyboard_control { "action": "screen_info" }`
+- **想要所有显示器布局** → `plugin_mouse-keyboard_control { "action": "screen_info" }`
 - **想知道鼠标现在在哪** → 同一个调用的 `mouse` 字段
 - **目标很小看不清** → 用 `region` 截目标周围 200×200，坐标立刻清楚

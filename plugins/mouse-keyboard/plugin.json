@@ -1,7 +1,7 @@
 {
   "pluginName": "mouse-keyboard",
   "displayName": "鼠标键盘",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "apiVersion": "1.0",
   "description": "让 AI 能模拟鼠标与键盘操作电脑（点击、拖拽、滚动、按键、输入文字）。内置急停与安全防护。",
   "icon": "input",

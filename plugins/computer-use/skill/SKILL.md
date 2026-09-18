@@ -10,7 +10,7 @@ description: "Reliably drive a Windows desktop with the mouse-keyboard and scree
 | 能力 | 工具 | 说明 |
 |---|---|---|
 | **看** | `plugin_screenshot_fullscreen` / `plugin_screenshot_region` | 截屏返回图片，**你能直接看到** |
-| **做** | `plugin_mouse_keyboard_control` | 移动/点击/拖拽/滚动/按键/输入中文，支持批量 |
+| **做** | `plugin_mouse-keyboard_control` | 移动/点击/拖拽/滚动/按键/输入中文，支持批量 |
 
 它们是**分开的两个插件**，但只有配合起来才可靠。本技能讲的就是怎么配合。
 
@@ -75,7 +75,7 @@ description: "Reliably drive a Windows desktop with the mouse-keyboard and scree
 ### 先校准，再操作
 
 需要**所有显示器的布局**时（如"把窗口拖到另一个屏幕"、跨屏操作），
-用 `plugin_mouse_keyboard_control { "action": "screen_info" }`：
+用 `plugin_mouse-keyboard_control { "action": "screen_info" }`：
 
 ```jsonc
 {

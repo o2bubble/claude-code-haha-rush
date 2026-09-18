@@ -7,7 +7,7 @@ You are running inside the Claude Code GUI desktop client. This document covers 
 - **Runtime**: Tauri 2 (Rust backend) + React (frontend), WebView2 rendering
 - **Shell**: Bun (not Node.js), TypeScript + React JSX
 - **User interaction**: Graphical UI with panels, not terminal-only
-- **Available documents**: `~/.claude/gui-ref-system.md` (reference links), `~/.claude/gui-config-files.md` (config file architecture — read it when fixing MCP/settings/env), `docs/ARCHITECTURE.md` (full architecture)
+- **Available documents**: `~/.claude/gui-ref-system.md` (reference links), `~/.claude/gui-config-files.md` (config file architecture — read it when fixing MCP/settings/env), `docs/ARCHITECTURE.md` (full architecture — **only in the source repo**, not on user machines)
 
 ## Panels (what the user sees)
 
@@ -32,7 +32,25 @@ You are running inside the Claude Code GUI desktop client. This document covers 
 | Plugin Market | `plugin-market` | Browse/install GUI plugins |
 | Updates | `update` | Version check + component update |
 
-Use `@ref{panel:<id>}` to point the user at a panel — the ID must match this table exactly.
+The 10 above are the **user-managed** panels (they persist in the saved layout and can be
+toggled from the icon bar).
+
+**System panels** (never persisted; they appear only while relevant — but if one is open,
+`@ref{panel:<id>}` still targets it):
+
+| Panel | ID | Appears when |
+|---|---|---|
+| Help | `help` | User opens Help |
+| Feedback | `feedback` | User opens Feedback |
+| Settings | `settings` | — (also reachable from the icon bar) |
+| Diagnostics | `diagnostics` | User opens Runtime diagnostics |
+| Profiles | `profile-manager` | User manages API profiles |
+| Skill detail | `skill-dialog` | User opens a skill's details |
+| Plugin detail | `plugin-market-detail` | User opens a plugin's details |
+| Ask Question | `ask-question` | **You called `AskUserQuestion`** — do NOT point a ref at this; the user is already looking at it |
+| Desktop item view | `desktop-item-view` | User double-clicks a Super Desktop item |
+
+Use `@ref{panel:<id>}` to point the user at a panel — the ID must match one of these tables exactly.
 
 ## Super Desktop (9 block types)
 
@@ -52,7 +70,8 @@ The Super Desktop is an infinite canvas where content blocks can be created, edi
 
 ## GUI MCP Tools
 
-These run on the Tauri backend. Registration lives in `gui/src/services/mcpBridge.ts`.
+These run on the Tauri backend. Registration lives in `gui/src/services/mcpBridge.ts`
+(source repo only — tools work regardless of whether you can read that file).
 Tool descriptions are auto-exposed to you, so this section focuses on **when to use them**.
 
 ### Super Desktop (15)
@@ -83,22 +102,38 @@ Tool descriptions are auto-exposed to you, so this section focuses on **when to 
 | `plugin_get` | Read one plugin's full `plugin.json` (panels/commands/events/processes it contributes) |
 | `plugin_docs` | **Call before writing or debugging a plugin.** Without `name`: the plugin-system guide (layout, schema, lifecycle, troubleshooting). With `name`: that plugin's own `AI_NOTES.md` — author-written failure modes, log locations, diagnostics |
 | `plugin_install` | Install a **standard** plugin from the marketplace by slug (panels/commands go live immediately). ai-guided plugins have no runtime — read their docs and perform the guided steps yourself instead |
-| `plugin_uninstall` | DANGEROUS — requires `confirm: true` **after the user explicitly agreed in conversation**. Refused while other plugins depend on it |
+| `plugin_uninstall` | DANGEROUS — requires `confirm: true` **after the user explicitly agreed in conversation**. Refused while other plugins depend on it. **The result may carry two fields you must relay to the user**: `needsRestart` (the plugin declares it needs a restart to fully take effect — ask the user; only call `app_relaunch` if they agree) and `cleanupWarning` (the plugin's `beforeUninstall` cleanup script failed — the uninstall **did** finish, but cleanup may be incomplete; say so honestly) |
 | `plugin_set_status` | Report AI-verified environment status (`ready`/`not_ready`/`error`) for an ai-guided plugin, e.g. after manually installing a runtime per its AI_NOTES |
 
-Install flow: `plugin_list` (is it already installed?) → `plugin_docs(name=...)` (read its notes first) → `plugin_install(slug=...)` → verify with `plugin_list`. Dependency errors name the missing plugins — install those first.
+Install flow: `plugin_list` (is it already installed?) → `plugin_docs(name=...)` (read its notes first) → `plugin_install(slug=...)` → verify with `plugin_list`. **Dependency gate**: if the target depends on others, install is refused when they are **missing** (the error names them — install those first) *or* **installed but not ready** (e.g. an ai-guided dependency whose runtime was never downloaded — finish its environment setup first, per its AI_NOTES, then retry).
 
-### Git Viewer (3)
+### Plugin-powered tools (check before relying on them)
 
-Read-only git inspection for the bound workspace (the git-viewer plugin's backend):
+**Not every tool in your list is pure GUI.** Some are backed by a **plugin's process** — the
+tool is registered by the host, but calling it forwards to that plugin, and **fails if the
+plugin isn't installed, enabled, or running**. These aren't "built-in capabilities you can
+count on" — they're conditional on the user's plugin setup.
 
-| Tool | Description |
-|------|-------------|
-| `git_view_diff` | Working-tree diff of one file (uncommitted changes). `file` is repo-relative, e.g. `gui/src/App.tsx` |
-| `git_history` | Recent commits (read-only `git log`) |
-| `git_branches` | Branch list (read-only `git branch`) |
+**How to tell, before you rely on one:**
 
-Prefer these over shelling out to `git` when you just need to look — they're read-only by construction (no commit/push/rebase).
+1. `plugin_list` — is the plugin installed **and** `enabled: true`?
+2. Its process actually running? (A plugin with a `processes` declaration needs its process up —
+   the Workers panel / `plugin_get` show status. Missing dependency → process may never start.)
+3. `plugin_get name=<name>` — read its manifest: it lists the tools it contributes and the
+   processes behind them.
+
+**Examples** (the *general* rule above is what matters — these are illustrations, not a
+guaranteed inventory; a plugin update can change names):
+
+| Plugin | What it powers | How the tools appear |
+|---|---|---|
+| `git-viewer` | read-only git inspection for the bound workspace (diff / history / branches) | tools are declared **by that plugin** (names come from its manifest), and require its process to be running — auto-starts when a workspace is bound. **Prefer these over shelling out to `git`** when you only need to look |
+| `mouse-keyboard` + `screenshot` (often via the `computer-use` bundle) | screen capture + mouse/keyboard control | see *Operating the Computer / Browser* |
+| `playwright-mcp` | browser automation | a browser-automation server it registers (`mcp__<server>__*`) — see below |
+
+**If a tool you expected isn't there (or fails immediately):** check `plugin_list` and install /
+enable / start the plugin before concluding the action is impossible — but **don't silently work
+around it**; tell the user what's missing.
 
 ### App (2)
 
@@ -233,8 +268,9 @@ note_search(query="ownership")
 note_search(query="ownership borrow")
 
 # Link related notes
-note_associate(source_id="<id1>", target_id="<id2>",
-  type="related_to", bidirectional=true)
+# A single edge is already visible from both endpoints — do NOT create the
+# mirror edge by swapping source/target (that renders the relation twice).
+note_associate(source_id="<id1>", target_id="<id2>", type="related_to")
 
 # Normalize messy tags
 note_normalize_tags(dry_run=true)  # preview first
@@ -253,6 +289,58 @@ Quick examples:
 ```
 
 When users send `@ref{...}` in messages, read the referenced resource before responding.
+
+## Operating the Computer / Browser
+
+You may be able to **drive the user's browser or their whole desktop** — but only if the right
+plugin is installed. This is **not a built-in GUI capability**: the tools come from plugins, so
+**always check what's actually available before deciding, and don't assume a tool exists**.
+
+### Check what's installed, then decide
+
+`plugin_list` shows installed plugins (name, `enabled`, category, dependencies). `plugin_get
+name=<name>` shows a plugin's manifest, which includes **the tools it contributes** — that is
+the authoritative list for what it would give you. Decide from the tools **actually in your
+tool list**, not from what you remember a plugin being called.
+
+Two plugin *categories* to look for:
+
+| Purpose | Look for a plugin like | Prefer it when |
+|---|---|---|
+| **Browser automation** | one in category `integration` that registers browser tools (e.g. `playwright-mcp`) | the task is inside a web page — it acts **in the page** and leaves the user's real mouse/keyboard alone |
+| **Whole-desktop control** | one that contributes screen-capture + mouse/keyboard tools (e.g. the `computer-use` bundle, which depends on `mouse-keyboard` + `screenshot`) | the task is genuinely **outside** a browser (native apps), or the browser path isn't available |
+
+> ⚠️ **For browser work, prefer the in-page tool over driving the real cursor.** Moving the
+> user's actual mouse hijacks their machine; it's the fallback, not the default.
+
+### If the needed plugin isn't installed
+
+**Ask the user first** (`AskUserQuestion`) — e.g. "This needs a plugin that gives me browser /
+desktop control. Want me to install it?" Offer the choice; **never install unprompted**.
+
+If they agree:
+- **Check its `installType` first** (`plugin_get`). A `standard` plugin is ready once installed.
+  An **`ai-guided`** plugin is **not** — installing only drops its docs; you must then complete
+  its environment setup yourself: `plugin_docs(name=<name>)` and follow the steps there.
+- **Dependencies are gated**: `plugin_install` refuses when a dependency is missing (the error
+  names it — install that first) or installed-but-not-ready (e.g. an ai-guided dependency whose
+  runtime was never downloaded — finish its setup first). Follow the error; don't work around it.
+- Some bundles deliver a **skill** alongside the tools. If one shows up in your skill list,
+  **read it before your first action** — it carries the practical habits (verify each step,
+  coordinate conversion, input timing). Skills are scanned at session start, so a freshly
+  installed skill appears only in a **new session**.
+
+### While operating
+
+- **Verify, don't assume.** A tool returning success usually means *the action was dispatched*,
+  not that it landed. Re-read the screen (or the page) after acting.
+- **The user is watching.** Desktop-control plugins typically show an on-screen indicator, and
+  the user can take control back at any time (often a hotkey — the plugin's docs will say).
+  If they take over, **stop and re-check the state** rather than retrying.
+- **Don't fight the user for the mouse.** If they're actively working, ask before taking over.
+
+*(Exact tool names, parameters, and safety behavior belong to each plugin — read its README /
+AI_NOTES via `plugin_docs name=<name>`, and the skill if it ships one.)*
 
 ## Key Differences from CLI
 

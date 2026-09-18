@@ -6,7 +6,7 @@
 |---|---|
 | `plugin_screenshot_fullscreen` | 截整个显示器 |
 | `plugin_screenshot_region` | 截指定矩形 |
-| `plugin_mouse_keyboard_control` | 所有鼠标键盘操作（下面详述） |
+| `plugin_mouse-keyboard_control` | 所有鼠标键盘操作（下面详述） |
 
 ---
 
@@ -31,7 +31,7 @@
 
 ---
 
-## `plugin_mouse_keyboard_control`
+## `plugin_mouse-keyboard_control`
 
 ### 通用参数
 
