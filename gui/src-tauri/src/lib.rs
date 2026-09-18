@@ -2270,24 +2270,17 @@ const OVERLAY_SHOW_FALLBACK_MS: u64 = 1200;
 /// 固定短延迟即可，不必像 overlay 那样要前端回报就绪。
 const INDICATOR_SHOW_DELAY_MS: u64 = 250;
 
-/// 给 overlay 窗口设置两个「特殊形态」位：透明 / 鼠标穿透。
+/// 给 overlay 窗口设置「鼠标穿透」（教鞭不该挡住用户点击下面真正要点的东西）。
 ///
-/// 🔴 **两个都必须绕开 tao 的实现**，各有各的坑：
+/// **透明**不在这里处理 —— 它由 vendored 的 `tauri-runtime-wry` 在**建窗时**完成
+/// （`WS_EX_NOREDIRECTIONBITMAP` + 跳过 softbuffer 底色，见 `Cargo.toml` 的
+/// `[patch.crates-io]` 说明）。这里只补穿透。
 ///
-/// **① 透明** —— tao 只调 `DwmEnableBlurBehindWindow`（Vista/Win7 时代的毛玻璃方案），
-/// **在 Windows 11 上不再产生透明效果**；而且它整库**从不调用
-/// `SetLayeredWindowAttributes`**（grep 过 tao 0.35.3 与 wry 0.55.1，零命中）。
-/// Win10/11 上让 WebView2 窗口真正透明的组合是
-/// `WS_EX_LAYERED` + `SetLayeredWindowAttributes(alpha=255)` ——
-/// 有了它 DWM 才会按图层合成窗口，wry 已经设好的 WebView2 透明背景
-/// （`SetDefaultBackgroundColor(0,0,0,0)`）才能真正透出后面的内容。
-///
-/// **② 穿透** —— **不能用 `set_ignore_cursor_events`**：tao 那个分支
-/// （`window_state.rs:285`）是 `style_ex |= WS_EX_TRANSPARENT | WS_EX_LAYERED`，
-/// **顺带加了 LAYERED 却不设属性** → 窗口的 layered 状态未定义 → 整个窗口
-/// （含 WebView 内容）什么都不画 = **全黑**（实测 2026-09-18：用户被迫强制重启电脑）。
-///
-/// 两处修改合并在**同一次 exstyle 读-改-写**里，避免互相覆盖。
+/// 为什么不在这里设 `WS_EX_LAYERED`：透明窗口现在走 **DComp 合成**路径，
+/// 再叠一个经典 layered 位是两套合成机制的混合，行为不可预期；
+/// 而光有 `WS_EX_TRANSPARENT` 就足以表达"鼠标穿透"。
+/// （另注：**绝不能用 tao 的 `set_ignore_cursor_events`** —— 它会顺带加
+/// `WS_EX_LAYERED` 却不设属性，导致整个窗口不绘制 = 全黑，实测踩过。）
 #[cfg(windows)]
 fn setup_overlay_window_bits(
     win: &tauri::WebviewWindow,
@@ -2295,23 +2288,14 @@ fn setup_overlay_window_bits(
     click_through: bool,
 ) -> tauri::Result<()> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
-        WS_EX_LAYERED, WS_EX_TRANSPARENT,
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TRANSPARENT,
     };
-    let hwnd = win.hwnd()?.0 as *mut core::ffi::c_void;
-    unsafe {
-        let mut ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        if click_through {
-            ex |= WS_EX_TRANSPARENT as isize;
-        }
-        if transparent {
-            ex |= WS_EX_LAYERED as isize;
-        }
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
-        if transparent {
-            // 关键：补上 tao 从不调用的这一环。alpha=255 = 窗口本身完全可见，
-            // 最终的透明度由 WebView2 内容的**逐像素 alpha** 决定。
-            SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+    let _ = transparent;   // 透明已由 patched runtime 在建窗时处理
+    if click_through {
+        let hwnd = win.hwnd()?.0 as *mut core::ffi::c_void;
+        unsafe {
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT as isize);
         }
     }
     Ok(())
@@ -2468,6 +2452,25 @@ fn open_plugin_overlay(
                     }
                     #[cfg(not(windows))]
                     let _ = (want_transparent, want_click_through);
+
+                    // 诊断：透明是否真的走到 DComp 路径。排查"覆盖层不透明"时先看这条 ——
+                    //   NOREDIR=1 表示 patched runtime 生效（透明的前提）
+                    //   TRANSPARENT=1 表示鼠标穿透已设
+                    // 没有这行就只能靠肉眼判断透明，而 GDI 截图对这类窗口会渲染成黑（有误导性）。
+                    #[cfg(windows)]
+                    if let Ok(h) = win.hwnd() {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{
+                            GetWindowLongPtrW, GWL_EXSTYLE,
+                        };
+                        let ex =
+                            unsafe { GetWindowLongPtrW(h.0 as *mut core::ffi::c_void, GWL_EXSTYLE) }
+                                as u32;
+                        log::info!(
+                            "[Rust] overlay {label} bits: exstyle=0x{ex:08x} NOREDIR={} CLICKTHRU={}",
+                            ex & 0x0020_0000 != 0,
+                            ex & 0x0000_0020 != 0
+                        );
+                    }
 
                     // 🛡 硬超时兜底（防"关不掉的覆盖层把用户屏幕锁死"）。
                     // 为什么必须有：覆盖层的正常关闭依赖**它自己页面里的 JS 能跑起来**

@@ -46,3 +46,16 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# ── 本地 patch：覆盖层透明所需的依赖修复 ──
+#
+# 为什么 patch：覆盖层（overlay）要真正透明，需要两件事同时成立 ——
+#   ① 窗口带 WS_EX_NOREDIRECTIONBITMAP（走 DComp 合成，WebView2 透明背景才生效）
+#      ⚠️ 该标志只能在**创建时**设，运行时补设被系统忽略
+#   ② 不能再用 softbuffer 给透明窗口铺"防闪烁底色"（XRGB 无 alpha，会把透明盖成实心）
+# 上游 tauri-runtime-wry 2.11.4 两点都没做，且 Tauri 未暴露相应配置，
+# 故 vendor 一份源码打两处补丁（改动处均有 `PATCH(gui:overlay-transparency)` 标注）。
+#
+# 升级 Tauri 时：把 vendor/ 换成新版本源码，重新应用那两处补丁。
+[patch.crates-io]
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
