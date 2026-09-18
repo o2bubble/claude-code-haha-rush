@@ -572,7 +572,11 @@ e81ba5a fix(api): thinking-only 消息被剥离后成空数组 → 400 卡死会
 ### Memory 服务（96）
 - 容器 `claude-memory`，镜像 `192.168.186.96:5000/claude-memory:20260914-auth`
 - 端口 `14020`→容器 8080(MCP) / `40021`(Web+REST)；96 宿主库 `/data/claude-memory/claude-memory.db`（云为 `/data/memory/claude-memory.db`，挂载路径两边不同）
-- 数据 **300 条**（记忆整理后；原 303，删 7 条时效流水 + 合并 1 对 + 加经验）；标签 818 / 关联边 239
+数据 **379 条**（2026-09-18 同步时更新；09-14 整理后曾是 300 条）
+云端 **234 条**（同日对账补齐 project scope 后）—— ⚠️ 两端是**分歧关系不是从属**，
+云有 96 没有的记忆（当时 27 条），同步时**不要单向覆盖**
+**两端同步方法**见记忆「记忆服务两端同步方法（96 ↔ 云）」；脚本 `temp/mem-sync-*.py`
+（temp 被 gitignore；三个坑：保 ID / 两阶段导入 / 跨 scope 依赖闭包）
 - ⚠️ **96 与云的 memory token 不同值**（两套独立部署），见 GUI 笔记「账号密码」
 - 部署前备份：`claude-memory.db.bak.20260911` / `.20260914`
 
