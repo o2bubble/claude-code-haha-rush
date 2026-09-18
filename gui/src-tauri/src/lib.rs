@@ -2270,31 +2270,48 @@ const OVERLAY_SHOW_FALLBACK_MS: u64 = 1200;
 /// 固定短延迟即可，不必像 overlay 那样要前端回报就绪。
 const INDICATOR_SHOW_DELAY_MS: u64 = 250;
 
-/// 给 overlay 窗口开"鼠标穿透"（指示器不挡用户点击下面真正要点的东西）。
+/// 给 overlay 窗口设置两个「特殊形态」位：透明 / 鼠标穿透。
 ///
-/// 🔴 **绝对不能用 `WebviewWindow::set_ignore_cursor_events`** —— tao 的实现是
-/// （`window_state.rs` 的 `WindowFlags::IGNORE_CURSOR_EVENT` 分支）：
-/// ```text
-/// if flags.contains(IGNORE_CURSOR_EVENT) { style_ex |= WS_EX_TRANSPARENT | WS_EX_LAYERED; }
-/// ```
-/// 它**顺带加了 `WS_EX_LAYERED`，却从不调用 `SetLayeredWindowAttributes`** ——
-/// 窗口的 layered 属性处于未定义状态 → **整个窗口（含 WebView 内容）什么都不画**。
-/// 实测（2026-09-18）：屏幕全黑、连开始菜单都看不见，用户只能强制重启电脑。
-/// 而 tao 的**透明**走的是另一条路（`DwmEnableBlurBehindWindow` + 空区域），
-/// 与此无关 —— 所以"透明"对、"穿透"把它搞黑了。
+/// 🔴 **两个都必须绕开 tao 的实现**，各有各的坑：
 ///
-/// 这里只设 `WS_EX_TRANSPARENT`（**绝不碰 LAYERED**），那才是穿透的语义。
+/// **① 透明** —— tao 只调 `DwmEnableBlurBehindWindow`（Vista/Win7 时代的毛玻璃方案），
+/// **在 Windows 11 上不再产生透明效果**；而且它整库**从不调用
+/// `SetLayeredWindowAttributes`**（grep 过 tao 0.35.3 与 wry 0.55.1，零命中）。
+/// Win10/11 上让 WebView2 窗口真正透明的组合是
+/// `WS_EX_LAYERED` + `SetLayeredWindowAttributes(alpha=255)` ——
+/// 有了它 DWM 才会按图层合成窗口，wry 已经设好的 WebView2 透明背景
+/// （`SetDefaultBackgroundColor(0,0,0,0)`）才能真正透出后面的内容。
+///
+/// **② 穿透** —— **不能用 `set_ignore_cursor_events`**：tao 那个分支
+/// （`window_state.rs:285`）是 `style_ex |= WS_EX_TRANSPARENT | WS_EX_LAYERED`，
+/// **顺带加了 LAYERED 却不设属性** → 窗口的 layered 状态未定义 → 整个窗口
+/// （含 WebView 内容）什么都不画 = **全黑**（实测 2026-09-18：用户被迫强制重启电脑）。
+///
+/// 两处修改合并在**同一次 exstyle 读-改-写**里，避免互相覆盖。
 #[cfg(windows)]
-fn set_overlay_click_through(win: &tauri::WebviewWindow) -> tauri::Result<()> {
+fn setup_overlay_window_bits(
+    win: &tauri::WebviewWindow,
+    transparent: bool,
+    click_through: bool,
+) -> tauri::Result<()> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TRANSPARENT,
+        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
     let hwnd = win.hwnd()?.0 as *mut core::ffi::c_void;
     unsafe {
-        let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let next = cur | WS_EX_TRANSPARENT as isize;
-        if next != cur {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+        let mut ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if click_through {
+            ex |= WS_EX_TRANSPARENT as isize;
+        }
+        if transparent {
+            ex |= WS_EX_LAYERED as isize;
+        }
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+        if transparent {
+            // 关键：补上 tao 从不调用的这一环。alpha=255 = 窗口本身完全可见，
+            // 最终的透明度由 WebView2 内容的**逐像素 alpha** 决定。
+            SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
         }
     }
     Ok(())
@@ -2438,18 +2455,19 @@ fn open_plugin_overlay(
 
             match built {
                 Ok(win) => {
-                    // 点击穿透：鼠标事件落到 overlay **下面**的窗口。
-                    // ⚠️ 用自写的 Win32 版本，**不能用 tao 的 set_ignore_cursor_events**
-                    //    （它会加 WS_EX_LAYERED 导致窗口整体不绘制 —— 见函数注释）。
+                    // 透明 + 穿透：都走自写的 Win32 版本 —— tao 的两条实现都有致命问题
+                    // （透明在 Win11 失效 / 穿透会加 LAYERED 导致全黑）。详见函数注释。
                     // 建窗后立刻设（show 之前也行 —— 这是窗口样式位，与可见性无关）。
                     #[cfg(windows)]
-                    if want_click_through {
-                        if let Err(e) = set_overlay_click_through(&win) {
-                            log::error!("[Rust] overlay click-through failed: {e}");
+                    if want_transparent || want_click_through {
+                        if let Err(e) =
+                            setup_overlay_window_bits(&win, want_transparent, want_click_through)
+                        {
+                            log::error!("[Rust] overlay window bits failed: {e}");
                         }
                     }
                     #[cfg(not(windows))]
-                    let _ = want_click_through;
+                    let _ = (want_transparent, want_click_through);
 
                     // 🛡 硬超时兜底（防"关不掉的覆盖层把用户屏幕锁死"）。
                     // 为什么必须有：覆盖层的正常关闭依赖**它自己页面里的 JS 能跑起来**
