@@ -187,7 +187,19 @@ unsafe fn read_process_strings(h: HANDLE) -> Option<(String, String)> {
     {
         return None;
     }
-    let peb = read_ptr(h, pbi.as_ptr() as usize + 0x08)?;
+    // 🔴 PebBaseAddress 就在**本地 buffer** 里（NtQueryInformationProcess 刚写进去的），
+    // **必须直接取** —— 不能拿 `pbi.as_ptr()` 当"目标进程里的地址"去 read_ptr：
+    // 那是**本进程的栈地址**，在目标进程里无效。
+    //
+    // 这个 bug 极其隐蔽（2026-09-18 定位）：读**自己**时，那个栈地址在本进程里
+    // 恰好就是它本身 → 成功；读**别的进程**则几乎必然失败。实测：321 个进程里
+    // OpenProcess 成功 304 个，而 PEB 读取只成功 **1** 个（自己）。
+    // 后果是所有依赖它的清理逻辑全部静默失效 —— 孤儿插件进程清扫、卸载/更新的
+    // cwd 扫杀、`--ide-mode` 后端的命令行判定（见文件头注释）。
+    let peb = usize::from_le_bytes(pbi[0x08..0x10].try_into().ok()?);
+    if peb == 0 {
+        return None;
+    }
     let params = read_ptr(h, peb + 0x20)?;
     // RTL_USER_PROCESS_PARAMETERS (x64): CurrentDirectory @0x38 (CURDIR =
     // UNICODE_STRING DosPath + HANDLE), CommandLine @0x70.
@@ -627,5 +639,204 @@ mod tests {
         assert!(child.starts_with(&base), "nested dir must match");
         let itself = norm_dir(r"C:\p\plugins\git-viewer");
         assert!(itself.starts_with(&base));
+    }
+}
+
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    /// 🔴 **回归测试（2026-09-18）**：`snapshot_processes()` 必须能读到**别的**进程。
+    ///
+    /// 真 bug：`read_process_strings` 里用 `read_ptr(h, pbi.as_ptr() as usize + 0x08)`
+    /// 取 PebBaseAddress —— 把**本进程的栈地址**当成"目标进程里的地址"去读。
+    /// 读**自己**时那个地址恰好有效 → 成功；读**别人**几乎必然失败。
+    /// 实测 321 个进程里只有 1 个（自己）能读出来，导致所有清理逻辑静默失效
+    /// （孤儿插件进程清扫 / 卸载与更新的 cwd 扫杀 / `--ide-mode` 命令行判定）。
+    ///
+    /// 这个断言抓的正是那个特征："只读得到自己"。
+    #[test]
+    fn snapshot_reads_other_processes() {
+        let procs = snapshot_processes();
+        let others = procs
+            .iter()
+            .filter(|(pid, _, _, _)| *pid != std::process::id())
+            .count();
+        assert!(
+            others >= 10,
+            "snapshot_processes 只读到 {} 个别的进程（共 {} 个）—— PebBaseAddress 的读取可能又坏了",
+            others,
+            procs.len()
+        );
+    }
+
+    /// 读到的 cwd **内容正确**（不只是"非空"）—— 用自己当靶子比对一个已知值。
+    #[test]
+    fn snapshot_reads_own_cwd_correctly() {
+        let procs = snapshot_processes();
+        let me = procs
+            .iter()
+            .find(|(pid, _, _, _)| *pid == std::process::id())
+            .expect("应能在快照里找到自己");
+        let expect = std::env::current_dir()
+            .expect("current_dir 应可用")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(
+            norm_dir(&me.3),
+            norm_dir(&expect),
+            "读到的 cwd 与 current_dir 不符（读到 {:?}，实际 {:?}）",
+            me.3,
+            expect
+        );
+    }
+
+    /// 命令行里应能认出自己（`read_ustring` 走通了、偏移没写错）。
+    #[test]
+    fn snapshot_reads_own_command_line() {
+        let procs = snapshot_processes();
+        let me = procs
+            .iter()
+            .find(|(pid, _, _, _)| *pid == std::process::id())
+            .expect("应能在快照里找到自己");
+        assert!(
+            me.2.to_ascii_lowercase().contains("prockill") || me.2.to_ascii_lowercase().contains("claude_code_gui"),
+            "自己的命令行读出来是 {:?} —— 看起来不像本测试进程",
+            me.2
+        );
+    }
+}
+
+#[cfg(test)]
+mod diag_tests {
+    use super::*;
+
+    /// 诊断：`snapshot_processes()` 在本机到底能读到什么？
+    ///
+    /// 背景（2026-09-18）：用户的插件更新报 os error 32，18 个孤儿插件进程
+    /// 钉住了插件目录 —— 而启动清扫（依赖本函数）**一个都没杀掉**。
+    /// 同样的判定逻辑用 Python（独立进程）跑能正确识别 18 个 → 怀疑
+    /// **PEB 读取在 GUI/测试进程内失败**（注释里 2026-09-17 已有同类观察）。
+    ///
+    /// 手动跑：cargo test --lib diag_snapshot -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diag_snapshot() {
+        let procs = snapshot_processes();
+        println!("snapshot 返回 {} 个进程", procs.len());
+        let with_cwd = procs.iter().filter(|(_, _, _, c)| !c.is_empty()).count();
+        let with_cmd = procs.iter().filter(|(_, _, c, _)| !c.is_empty()).count();
+        println!("  读到 cwd 的: {} 个", with_cwd);
+        println!("  读到 cmd 的: {} 个", with_cmd);
+
+        println!("
+-- 命令行含 server.cjs / git-viewer 的（即插件进程）--");
+        let mut n = 0;
+        for (pid, ppid, cmd, cwd) in &procs {
+            if cmd.contains("server.cjs") || cmd.contains("git-viewer-server") {
+                n += 1;
+                println!("  pid={:<6} ppid={:<6} cwd={:?}", pid, ppid, cwd);
+            }
+        }
+        println!("  共 {} 个", n);
+
+        println!("
+-- GUI 进程（gui_pids 的来源）--");
+        let needle = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_ascii_lowercase()))
+            .unwrap_or_default();
+        println!("  needle = {:?}", needle);
+        for (pid, _, cmd, _) in &procs {
+            if is_gui_process(cmd, &needle) {
+                println!("  pid={} cmd={}", pid, &cmd[..cmd.len().min(80)]);
+            }
+        }
+    }
+
+    /// 诊断 2：把 `snapshot_processes` 的每一步拆开打印 —— 定位是
+    /// 「枚举」失败还是「OpenProcess」失败还是「读 PEB」失败。
+    #[test]
+    #[ignore]
+    fn diag_snapshot_steps() {
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+        };
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            println!("CreateToolhelp32Snapshot -> {:?}", snap);
+            println!("  INVALID_HANDLE_VALUE    -> {:?}", INVALID_HANDLE_VALUE);
+            if snap == INVALID_HANDLE_VALUE {
+                println!("  ** 快照创建失败 ** err={}", GetLastError());
+                return;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            println!("  sizeof(PROCESSENTRY32W) = {}", entry.dwSize);
+
+            let mut total = 0u32;
+            let mut open_ok = 0u32;
+            let mut read_ok = 0u32;
+            let mut ok = Process32FirstW(snap, &mut entry);
+            println!("  Process32FirstW 返回 {} err={}", ok, GetLastError());
+            let mut i = 0;
+            while ok != 0 {
+                total += 1;
+                let pid = entry.th32ProcessID;
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
+                let detail = if h.is_null() {
+                    format!("OpenProcess 失败 err={}", GetLastError())
+                } else {
+                    open_ok += 1;
+                    let r = read_process_strings(h);
+                    if r.is_some() { read_ok += 1; }
+                    CloseHandle(h);
+                    if r.is_some() { "Open+读取 OK".to_string() } else { "Open OK 但读取失败".to_string() }
+                };
+                if i < 6 || pid == std::process::id() {
+                    println!("    [{}] pid={:<6} ppid={:<6} {}", i, pid, entry.th32ParentProcessID, detail);
+                }
+                i += 1;
+                ok = Process32NextW(snap, &mut entry);
+                if ok == 0 {
+                    println!("  Process32NextW 结束（第 {} 次后）err={}", i, GetLastError());
+                }
+            }
+            CloseHandle(snap);
+            println!();
+            println!("  枚举到 {} 个 | OpenProcess 成功 {} | PEB 读取成功 {}", total, open_ok, read_ok);
+        }
+    }
+
+    /// 诊断：cwd 读取对**指定 PID**能不能成功（逐个试权限组合）
+    #[test]
+    #[ignore]
+    fn diag_cwd_probe() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let procs = snapshot_processes();
+        for (pid, _, cmd, _) in procs.iter().take(400) {
+            if !cmd.contains("server.cjs") && !cmd.contains("git-viewer-server") {
+                continue;
+            }
+            unsafe {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | 0x0010, 0, *pid);
+                if h.is_null() {
+                    println!("  pid={} OpenProcess 失败 (err={})", pid, std::io::Error::last_os_error());
+                } else {
+                    let r = read_process_strings(h);
+                    match r {
+                        Some((c, cw)) => println!("  pid={} OK cmd={:?} cwd={:?}", pid, &c[..c.len().min(40)], cw),
+                        None => println!("  pid={} 打开了但 read_process_strings 返回 None", pid),
+                    }
+                    CloseHandle(h);
+                }
+            }
+        }
     }
 }
