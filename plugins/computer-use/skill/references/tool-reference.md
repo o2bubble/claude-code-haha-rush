@@ -50,7 +50,7 @@
 | `drag` | `fromX,fromY,toX,toY`；`button` `duration` | 按下→平滑移动→松开；`duration` 毫秒（默认 400） |
 | `scroll` | `dx,dy`（**正 dy = 向下**） | 一格 = 120 单位，工具已换算 |
 | `key` | `key`；`modifiers[]`；`hold` | 如 `{key:"a", modifiers:["ctrl"]}`、`{key:"shift", hold:true}` |
-| `type` | `text`；`delayMs` | 支持中文；`delayMs` **默认 4、上限 100** |
+| `type` | `text`；`delayMs` | 含**非 ASCII**（中文/emoji/全角）时**必须传 `delayMs: 100`**（60 实测会丢字）。⚠️ 返回的 `chars` **不是实际落屏数** —— 必须截图核对 |
 | `sequence` | `steps[]`；`stepDelayMs` | 批量，见下 |
 | `move_indicator` | `x,y` | 把"AI 操作中"小浮标挪走（它挡住目标时用） |
 | `abort` | — | 自己喊停（之后需用户在面板解除） |
