@@ -15,7 +15,17 @@
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `monitor` | number | 显示器索引，**0 = 主屏**（默认）。多屏时按 `screen_info` 的 `displays` 顺序 |
-| `clearScreen` | boolean | 截图前把本应用窗口最小化让开（避免挡着画面）。不传 = 用设置里的默认 |
+| `clearScreen` | boolean | 截图前把本应用窗口最小化让开（避免挡着画面）。**不传 = 用设置里的默认，而默认是让开** —— 见下 |
+
+> 🔴 **要截 GUI 自己时必须显式传 `clearScreen: false`**
+>
+> 不传时走设置默认（**会让开**）→ 你会把用户的窗口最小化掉，然后截到"没有 GUI 的桌面"，
+> 还以为 GUI 不在屏幕上。用户视角是"我一截图我的窗口就没了"。
+>
+> **传 false 的场景**：用户问「XX 面板在哪」「这个按钮在哪」—— 你要看的就是 GUI 本身。
+> **传 true（或让开）的场景**：要截 GUI **后面**的东西（别的应用、桌面）。
+>
+> 不确定时：**传 false**（不打扰用户是更安全的默认）。
 
 返回：`{ path, name, meta: { width, height, monitorOrigin, monitorIndex, region } }` + 图片本体。
 
@@ -25,6 +35,7 @@
 |---|---|---|
 | `region` | `{x, y, w, h}` | **必填**。坐标**相对该显示器左上角**（不是虚拟桌面）；`w`/`h` 必须 ≥ 1 |
 | `monitor` | number | 同上，默认 0 |
+| `clearScreen` | boolean | 同上 —— ⚠️ **本工具同样支持，规则同上**（要截 GUI 自己就传 `false`）|
 | `clearScreen` | boolean | 同上 |
 
 返回同 fullscreen，但 `meta.region` 是**实际生效的矩形**（越界部分会被裁到显示范围内）。

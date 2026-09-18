@@ -2270,6 +2270,36 @@ const OVERLAY_SHOW_FALLBACK_MS: u64 = 1200;
 /// 固定短延迟即可，不必像 overlay 那样要前端回报就绪。
 const INDICATOR_SHOW_DELAY_MS: u64 = 250;
 
+/// 给 overlay 窗口开"鼠标穿透"（指示器不挡用户点击下面真正要点的东西）。
+///
+/// 🔴 **绝对不能用 `WebviewWindow::set_ignore_cursor_events`** —— tao 的实现是
+/// （`window_state.rs` 的 `WindowFlags::IGNORE_CURSOR_EVENT` 分支）：
+/// ```text
+/// if flags.contains(IGNORE_CURSOR_EVENT) { style_ex |= WS_EX_TRANSPARENT | WS_EX_LAYERED; }
+/// ```
+/// 它**顺带加了 `WS_EX_LAYERED`，却从不调用 `SetLayeredWindowAttributes`** ——
+/// 窗口的 layered 属性处于未定义状态 → **整个窗口（含 WebView 内容）什么都不画**。
+/// 实测（2026-09-18）：屏幕全黑、连开始菜单都看不见，用户只能强制重启电脑。
+/// 而 tao 的**透明**走的是另一条路（`DwmEnableBlurBehindWindow` + 空区域），
+/// 与此无关 —— 所以"透明"对、"穿透"把它搞黑了。
+///
+/// 这里只设 `WS_EX_TRANSPARENT`（**绝不碰 LAYERED**），那才是穿透的语义。
+#[cfg(windows)]
+fn set_overlay_click_through(win: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TRANSPARENT,
+    };
+    let hwnd = win.hwnd()?.0 as *mut core::ffi::c_void;
+    unsafe {
+        let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let next = cur | WS_EX_TRANSPARENT as isize;
+        if next != cur {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+        }
+    }
+    Ok(())
+}
+
 /// overlay 窗口 label 前缀 —— open / close 共用同一份，保证两边对得上。
 /// Tauri 的 label 只允许 `[A-Za-z0-9-/:_.]`，而插件名是自由字符串，故净化一次。
 fn overlay_label_prefix(plugin: &str) -> String {
@@ -2310,6 +2340,11 @@ fn open_plugin_overlay(
     //                    启用后 overlay 自身收不到点击（正常 —— 它只是画给人看的）。
     transparent: Option<bool>,
     click_through: Option<bool>,
+    // 🛡 硬超时（秒）：到点无条件关窗 —— 防"覆盖层关不掉把屏幕锁死"。
+    // 正常关闭依赖覆盖层自己的 JS 跑起来（到期上报 close）；页面没渲染出来时
+    // 没有任何 JS 可依赖，这条是唯一的兜底。None/0 = 不设（如框选类 overlay
+    // 要等用户操作，靠用户自己按 Esc）。
+    hard_ttl_sec: Option<u64>,
 ) -> Result<Vec<usize>, String> {
     let want_transparent = transparent.unwrap_or(false);
     let want_click_through = click_through.unwrap_or(false);
@@ -2341,9 +2376,39 @@ fn open_plugin_overlay(
         let (px, py, sw, sh) = (pos.x, pos.y, size.width, size.height);
         let label = format!("{prefix}{idx}");
 
-        // 幂等：同名 overlay 已存在则先关掉（可能换了 src / 尺寸变了）
+        // 幂等：
+        //   ① 已存在且**几何一致** → 直接复用（show + 返回），不重建。
+        //      重建会让覆盖层重新加载 → 屏幕上闪一下；连续标注（如"先点这、再点那"）
+        //      尤其明显。复用时插件侧的数据更新由覆盖层自己的轮询拿（无需宿主参与）。
+        //   ② 几何不一致（换显示器/分辨率变了）→ 关掉重建。
+        //
+        // 🔴 ② 必须**等窗口真的销毁**再 build：`close()` 是异步的（发关闭请求，
+        //    实际销毁在事件循环里），紧接着 build 同 label 会报
+        //    `a webview with label ... already exists`（实测踩过：第二次调用静默失败，
+        //    用户看到的是"什么都没画"）。
         if let Some(w) = app.get_webview_window(&label) {
+            let geom_matches = w
+                .outer_position()
+                .map(|p| p.x == px && p.y == py)
+                .unwrap_or(false)
+                && w
+                    .outer_size()
+                    .map(|s| s.width == sw && s.height == sh)
+                    .unwrap_or(false);
+            if geom_matches {
+                let _ = w.show();
+                log::info!("[Rust] overlay reused: {label}");
+                opened.push(idx);
+                continue;
+            }
             let _ = w.close();
+            // 等它从窗口表里消失（最多 ~1.5s；正常几毫秒）
+            for _ in 0..75 {
+                if app.get_webview_window(&label).is_none() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
         }
 
         let label2 = label.clone();
@@ -2374,11 +2439,34 @@ fn open_plugin_overlay(
             match built {
                 Ok(win) => {
                     // 点击穿透：鼠标事件落到 overlay **下面**的窗口。
+                    // ⚠️ 用自写的 Win32 版本，**不能用 tao 的 set_ignore_cursor_events**
+                    //    （它会加 WS_EX_LAYERED 导致窗口整体不绘制 —— 见函数注释）。
                     // 建窗后立刻设（show 之前也行 —— 这是窗口样式位，与可见性无关）。
-                    // 失败不致命：退回"能看但会挡住点击"，记日志便于排查。
+                    #[cfg(windows)]
                     if want_click_through {
-                        if let Err(e) = win.set_ignore_cursor_events(true) {
-                            log::error!("[Rust] overlay set_ignore_cursor_events failed: {e}");
+                        if let Err(e) = set_overlay_click_through(&win) {
+                            log::error!("[Rust] overlay click-through failed: {e}");
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    let _ = want_click_through;
+
+                    // 🛡 硬超时兜底（防"关不掉的覆盖层把用户屏幕锁死"）。
+                    // 为什么必须有：覆盖层的正常关闭依赖**它自己页面里的 JS 能跑起来**
+                    // （到期 → 上报 close）。若页面根本没渲染（加载失败 / WebView 异常），
+                    // 就没有任何 JS 去关它 —— 用户面对一个盖满屏幕、又不响应任何操作的窗口。
+                    // 实测（2026-09-18）：用户被迫强制重启电脑。
+                    if let Some(ttl) = hard_ttl_sec {
+                        if ttl > 0 {
+                            let win_t = win.clone();
+                            let label_t = label.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_secs(ttl));
+                                if win_t.is_visible().unwrap_or(false) {
+                                    log::warn!("[Rust] overlay hard TTL ({ttl}s) fired, closing {label_t}");
+                                    let _ = win_t.close();
+                                }
+                            });
                         }
                     }
                     if let Err(e) = win.set_position(tauri::PhysicalPosition::new(px, py)) {

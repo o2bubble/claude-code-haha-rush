@@ -260,6 +260,7 @@ export function sanitizeOverlayRequest(
   hostPort?: number;
   transparent?: boolean;
   clickThrough?: boolean;
+  hardTtlSec?: number;
 } | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -274,11 +275,18 @@ export function sanitizeOverlayRequest(
     hostPort?: number;
     transparent?: boolean;
     clickThrough?: boolean;
+    hardTtlSec?: number;
   } = { src };
   // 标注/教鞭类 overlay：透明背景 + 点击穿透（语义见 Rust 侧 open_plugin_overlay）。
   // 只认严格 true —— 传别的值一律当 false（即保持原有"不透明、收点击"行为）。
   if (r.transparent === true) out.transparent = true;
   if (r.clickThrough === true) out.clickThrough = true;
+  // 🛡 硬超时（秒）：到点宿主无条件关窗 —— 覆盖层的 JS 没跑起来时的唯一兜底
+  // （页面没渲染 = 没有任何 JS 会去关它 = 屏幕被锁死，实测踩过）。范围收窄防滥用。
+  if (typeof r.hardTtlSec === "number" && Number.isFinite(r.hardTtlSec)
+      && r.hardTtlSec > 0 && r.hardTtlSec <= 3600) {
+    out.hardTtlSec = Math.floor(r.hardTtlSec);
+  }
   if (typeof r.monitor === "number" && Number.isInteger(r.monitor) && r.monitor >= 0) {
     out.monitor = r.monitor;
   }
@@ -326,6 +334,7 @@ async function openPluginOverlay(pluginName: string, raw: unknown): Promise<void
     params: req.params ?? null,
     transparent: req.transparent ?? false,
     clickThrough: req.clickThrough ?? false,
+    hardTtlSec: req.hardTtlSec ?? null,
   });
 }
 

@@ -108,6 +108,15 @@ function handlePoint(args) {
   const clear = a.clear === true;
 
   if (clear) {
+    // ⚠️ 与形状参数同时传 → **报错**，而不是静默只清。
+    // 静默丢弃形状会让调用方以为"清掉重画了"，实际屏幕上什么都没有（实测踩过）。
+    const alsoHasShapes = SHAPE_KEYS.some((k) => Array.isArray(a[k]) && a[k].length > 0);
+    if (alsoHasShapes) {
+      return {
+        ok: false,
+        error: "clear 与形状参数不能同时传：clear:true 只做清除。想重画请分两次调用（先 clear，再画）。",
+      };
+    }
     state = { ...state, arrows: [], rects: [], circles: [], labels: [], rev: state.rev + 1 };
     // 清空后如果窗口还开着，让 overlay 自己淡出（它看到空数据即可）；
     // 不主动关窗 —— overlay 侧发现"空 + 已过期"会自己收尾并 /bye。
@@ -135,6 +144,12 @@ function handlePoint(args) {
   if (overlayOpen) return { ok: true, count: total, reopened: false };
 
   const monitor = num(a.monitor, -1);
+  // 🛡 硬超时：到点**宿主无条件关窗**。
+  // 为什么需要它：正常关闭靠覆盖层页面自己的 JS（到期 → 上报 close）。若页面
+  // 根本没渲染（加载失败 / WebView 异常），就没有任何 JS 会去关它 —— 用户面对一个
+  // 盖满屏幕、又不响应任何操作的窗口，只能强制重启电脑（实测踩过，2026-09-18）。
+  // duration>0 → 留 15 秒余量给它自己淡出；duration=0（要一直留着）→ 5 分钟上限。
+  const hardTtlSec = duration > 0 ? duration + 15 : 300;
   return {
     ok: true,
     count: total,
@@ -147,6 +162,7 @@ function handlePoint(args) {
         // 教鞭形态的关键两参数：透明背景 + 点击穿透（见宿主 open_plugin_overlay）
         transparent: true,
         clickThrough: true,
+        hardTtlSec,
         ...(monitor >= 0 ? { monitor } : {}),
       },
     }],

@@ -45,7 +45,11 @@
   var params = new URLSearchParams(location.search);
   var PORT = params.get("port");
   var API = PORT ? "http://127.0.0.1:" + PORT : "";
-  var SOURCE = "plugin:pointer";
+  // ⚠️ 格式必须是 plugin:viewer:<插件名> —— 宿主 PluginOverlayApp 按这个过滤：
+//    `if (d.source !== \`) return;`
+// 我最初凭印象写成 "plugin:pointer" → 所有上行消息（含 close-overlay）被丢弃
+// → 指示器关不掉（用户被迫重启）。照 screenshot 的写法来。
+  var SOURCE = "plugin:viewer:pointer";
 
   /** 上报给宿主（overlay 窗口的父级是宿主壳，postMessage 直接可达） */
   function toHost(kind, payload) {
