@@ -344,8 +344,12 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
      客户端永远拿不到），还白挤掉了 `.14.5`
 - **macOS 云端版本**: **`2026.09.15.6`**（6 组件齐全；含 `.15.5` 的更新 bug 修复 + `.15.6` 的 MCP/终端 PATH 注入）
   —— 更早的 `.15.1` 曾被误删致 macos 404，见「续②」；**构建：GitHub Actions（免费，push 自动触发）或 Codemagic（快，付费）**
-- **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；300 条记忆；**已加 bearer 鉴权**
-- **Memory 服务（云）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web
+- **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；**379 条**；**已加 bearer 鉴权**
+- **Memory 服务（云）**: 端口 `8080` MCP / `40021` Web；**234 条**（2026-09-18 与 96 对账补齐 project scope 后）
+  - **两端同步方法**（含三个坑：保 ID / 两阶段导入 / 跨 scope 依赖闭包）见记忆
+    「记忆服务两端同步方法（96 ↔ 云）」；脚本在 `temp/mem-sync-*.py`（temp 被 gitignore，方法在记忆里可重建）
+  - ⚠️ **同步是持续性的**：本机存的记忆进 96，**云会落后** —— 需要时重跑那套脚本
+  - ⚠️ 两端是**分歧关系不是从属**：2026-09-18 对账时云有 27 条 96 没有的（**故意保留，未单向覆盖**）
 - **release-platform（云）**: 镜像 **`claude-release-platform:20260914`**（compose 已从 `build: .` 改为 `image:`）
 - ⚠️ **本机 memory MCP 指向的是 96**（`~/.claude.json` → `http://192.168.186.96:14020/mcp`）——**不是云**
 - **凭据**: 云更新服务 key 已于 2026-09-14 轮换；发布脚本读环境变量
