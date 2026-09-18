@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Pointer overlay</title>
+<style>
+  /* ⚠️ 透明窗口的前提：html/body 都不能有背景色。
+     宿主侧已给窗口设了 transparent(true) + ignore_cursor_events(true)，
+     这里只需保证页面"真的什么都不画"的区域是透明的。 */
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent;
+    overflow: hidden;
+    /* 双保险：窗口已点击穿透，页面再声明一次 pointer-events:none，
+       保证没有任何元素能截获鼠标（教鞭绝不能挡住用户要点的东西）。 */
+    pointer-events: none;
+    user-select: none;
+    cursor: none;
+  }
+  /* ⚠️ 必须显式给 width/height:100% —— 别用 `inset: 0`：
+     `<svg>` 有**内在尺寸**（默认 300×150），`inset` 不会像普通 div 那样把它撑开，
+     结果只有左上角一小块被绘制、其余全裁掉（实测踩过：DOM 里元素齐全、
+     querySelectorAll 全绿，但屏幕上只有角落一小块 —— DOM 断言测不出视觉裁剪）。 */
+  #stage {
+    position: fixed; left: 0; top: 0;
+    width: 100%; height: 100%;
+    display: block;
+    opacity: 1; transition: opacity .35s ease;
+  }
+  #stage.fading { opacity: 0; }
+
+  /* 出现动画：轻微的"弹出来"，让人注意到 */
+  .pop { animation: pop .28s cubic-bezier(.2,.9,.3,1.4) both; }
+  @keyframes pop {
+    from { opacity: 0; transform: scale(.86); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+</style>
+</head>
+<body>
+  <svg id="stage" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"></svg>
+
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var PORT = params.get("port");
+  var API = PORT ? "http://127.0.0.1:" + PORT : "";
+  var SOURCE = "plugin:pointer";
+
+  /** 上报给宿主（overlay 窗口的父级是宿主壳，postMessage 直接可达） */
+  function toHost(kind, payload) {
+    try { parent.postMessage({ source: SOURCE, kind: kind, payload: payload }, "*"); } catch (e) {}
+  }
+
+  var stage = document.getElementById("stage");
+  var lastRev = -1;
+  var gone = false;
+  var byeSent = false;
+
+  // ── 坐标换算 ──
+  // AI 给的坐标是**该显示器内的物理像素**（与截图工具同坐标系，见 plugin.json 描述）。
+  // 而 overlay 窗口铺满整块显示器，页面 CSS 用的是**逻辑像素** → 除以 devicePixelRatio。
+  var DPR = window.devicePixelRatio || 1;
+  function px(v) { return v / DPR; }
+
+  // ── 绘制 ──
+  var NS = "http://www.w3.org/2000/svg";
+
+  function el(name, attrs) {
+    var n = document.createElementNS(NS, name);
+    for (var k in attrs) if (attrs[k] !== undefined && attrs[k] !== null) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+
+  /** 带白描边的"在任何背景上都看得清"的主色 */
+  var ACCENT = "#ff3b30";
+  var HALO = "rgba(255,255,255,.92)";
+
+  function drawArrow(g, a) {
+    var x1 = px(a.fromX), y1 = px(a.fromY), x2 = px(a.toX), y2 = px(a.toY);
+    var ang = Math.atan2(y2 - y1, x2 - x1);
+    var head = 22;                                  // 箭头大小（CSS px）
+    var back = ang + Math.PI;
+    // 线画到"箭头根部"一点，避免线头戳出箭头尖
+    var bx = x2 - Math.cos(ang) * head * 0.72;
+    var by = y2 - Math.sin(ang) * head * 0.72;
+    var p1x = x2 + Math.cos(back - 0.42) * head;
+    var p1y = y2 + Math.sin(back - 0.42) * head;
+    var p2x = x2 + Math.cos(back + 0.42) * head;
+    var p2y = y2 + Math.sin(back + 0.42) * head;
+
+    var grp = el("g", { class: "pop" });
+    // 白描边打底（先粗白后红，形成 halo）
+    grp.appendChild(el("line", { x1: x1, y1: y1, x2: bx, y2: by, stroke: HALO, "stroke-width": 9, "stroke-linecap": "round" }));
+    grp.appendChild(el("polygon", { points: [x2 + "," + y2, p1x + "," + p1y, p2x + "," + p2y].join(" "), fill: HALO, stroke: HALO, "stroke-width": 7, "stroke-linejoin": "round" }));
+    grp.appendChild(el("line", { x1: x1, y1: y1, x2: bx, y2: by, stroke: ACCENT, "stroke-width": 4.5, "stroke-linecap": "round" }));
+    grp.appendChild(el("polygon", { points: [x2 + "," + y2, p1x + "," + p1y, p2x + "," + p2y].join(" "), fill: ACCENT }));
+    g.appendChild(grp);
+  }
+
+  function badge(g, x, y, text) {
+    if (!text) return;
+    var r = 13;
+    var cx = x - r + 2, cy = y - r + 2;
+    var grp = el("g", { class: "pop" });
+    grp.appendChild(el("circle", { cx: cx, cy: cy, r: r + 2.5, fill: HALO }));
+    grp.appendChild(el("circle", { cx: cx, cy: cy, r: r, fill: ACCENT }));
+    var t = el("text", {
+      x: cx, y: cy + 0.5, fill: "#fff", "font-size": 14, "font-weight": "700",
+      "text-anchor": "middle", "dominant-baseline": "middle",
+      "font-family": "-apple-system, Segoe UI, Microsoft YaHei, sans-serif",
+    });
+    t.textContent = text;
+    grp.appendChild(t);
+    g.appendChild(grp);
+  }
+
+  function drawRect(g, r) {
+    var x = px(r.x), y = px(r.y), w = px(r.w), h = px(r.h);
+    var grp = el("g", { class: "pop" });
+    grp.appendChild(el("rect", { x: x, y: y, width: w, height: h, rx: 8, fill: "none", stroke: HALO, "stroke-width": 9 }));
+    grp.appendChild(el("rect", { x: x, y: y, width: w, height: h, rx: 8, fill: "none", stroke: ACCENT, "stroke-width": 4 }));
+    g.appendChild(grp);
+    badge(g, x, y, r.label);
+  }
+
+  function drawCircle(g, c) {
+    var cx = px(c.x), cy = px(c.y), r = px(c.r);
+    var grp = el("g", { class: "pop" });
+    grp.appendChild(el("circle", { cx: cx, cy: cy, r: r, fill: "none", stroke: HALO, "stroke-width": 9 }));
+    grp.appendChild(el("circle", { cx: cx, cy: cy, r: r, fill: "none", stroke: ACCENT, "stroke-width": 4 }));
+    g.appendChild(grp);
+    badge(g, cx - r * 0.707, cy - r * 0.707, c.label);
+  }
+
+  function drawLabel(g, l) {
+    var x = px(l.x), y = px(l.y);
+    var pad = 9, fs = 15;
+    var grp = el("g", { class: "pop" });
+    var t = el("text", {
+      x: x, y: y, fill: "#fff", "font-size": fs, "font-weight": "600",
+      "dominant-baseline": "middle",
+      "font-family": "-apple-system, Segoe UI, Microsoft YaHei, sans-serif",
+    });
+    t.textContent = l.text;
+    grp.appendChild(t);
+    // 量出文字宽度再补背景气泡（插进 DOM 才能量）
+    g.appendChild(grp);
+    var bbox;
+    try { bbox = t.getBBox(); } catch (e) { return; }
+    var bg = el("rect", {
+      x: bbox.x - pad, y: bbox.y - pad * 0.6,
+      width: bbox.width + pad * 2, height: bbox.height + pad * 1.2,
+      rx: 7, fill: "rgba(20,24,32,.88)", stroke: ACCENT, "stroke-width": 2,
+    });
+    grp.insertBefore(bg, t);
+  }
+
+  /** 暗幕：全屏压暗，但**指示区域挖空**（那里保持原样亮着，视线自然被引过去） */
+  function drawDim(g, st) {
+    var defs = el("defs");
+    var mask = el("mask", { id: "dimMask" });
+    var W = window.innerWidth, H = window.innerHeight;
+    mask.appendChild(el("rect", { x: 0, y: 0, width: W, height: H, fill: "#fff" }));
+    function hole(x, y, w, h, r) {
+      mask.appendChild(el("rect", { x: x, y: y, width: w, height: h, rx: r === undefined ? 10 : r, fill: "#000" }));
+    }
+    (st.rects || []).forEach(function (r) { hole(px(r.x) - 6, px(r.y) - 6, px(r.w) + 12, px(r.h) + 12); });
+    (st.circles || []).forEach(function (c) { hole(px(c.x) - px(c.r) - 6, px(c.y) - px(c.r) - 6, px(c.r) * 2 + 12, px(c.r) * 2 + 12, px(c.r) + 6); });
+    defs.appendChild(mask);
+    g.appendChild(defs);
+    g.appendChild(el("rect", { x: 0, y: 0, width: W, height: H, fill: "rgba(8,10,16,.42)", mask: "url(#dimMask)" }));
+  }
+
+  function render(st) {
+    while (stage.firstChild) stage.removeChild(stage.firstChild);
+    var g = el("g");
+    // ⚠️ **先挂到文档再画** —— drawLabel 要用 getBBox() 量文字宽度，
+    // 而该方法只对**在渲染树里**的元素有效；挂在游离的 <g> 上会抛异常
+    // （实测踩过：文字画出来了、背景气泡静默缺失，因为 catch 直接 return）。
+    stage.appendChild(g);
+    if (st.dim !== false) drawDim(g, st);
+    (st.arrows || []).forEach(function (a) { drawArrow(g, a); });
+    (st.rects || []).forEach(function (r) { drawRect(g, r); });
+    (st.circles || []).forEach(function (c) { drawCircle(g, c); });
+    (st.labels || []).forEach(function (l) { drawLabel(g, l); });
+  }
+
+  function fadeOutAndClose() {
+    if (byeSent) return;
+    byeSent = true;
+    stage.classList.add("fading");
+    fetch(API + "/bye").catch(function () {});
+    setTimeout(function () { toHost("close-overlay"); }, 380);   // 等淡出动画走完
+  }
+
+  // ── 轮询状态 ──
+  function tick() {
+    fetch(API + "/state")
+      .then(function (r) { return r.json(); })
+      .then(function (st) {
+        if (st.gone) {                    // 已清空 / 已到期 → 淡出收尾
+          if (!gone) { gone = true; fadeOutAndClose(); }
+          return;
+        }
+        gone = false;
+        if (st.rev !== lastRev) { lastRev = st.rev; render(st); }
+      })
+      .catch(function () { /* 进程没了：overlay 没有意义，收尾 */ fadeOutAndClose(); });
+  }
+
+  // 告诉进程"窗口开了"（进程据此决定后续调用要不要再请求开窗）
+  fetch(API + "/hello").then(function () {
+    toHost("ready");                      // 宿主据此把窗口 show 出来（避免白闪）
+    tick();
+    setInterval(tick, 250);
+  }).catch(function () {
+    toHost("ready");                      // 进程不可达也得显示，否则窗口永远不出现
+  });
+
+  // 窗口尺寸变化（换显示器分辨率）时重绘
+  window.addEventListener("resize", function () { lastRev = -1; });
+})();
+</script>
+</body>
+</html>

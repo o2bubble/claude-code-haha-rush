@@ -253,14 +253,32 @@ async function sendPluginViewerChip(d: { kind: string; payload?: { file?: string
  *  `params` 是不透明查询串（宿主不解释，只透传）—— 长度设上限防滥用。 */
 export function sanitizeOverlayRequest(
   raw: unknown,
-): { src: string; monitor?: number; params?: string; hostPort?: number } | null {
+): {
+  src: string;
+  monitor?: number;
+  params?: string;
+  hostPort?: number;
+  transparent?: boolean;
+  clickThrough?: boolean;
+} | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const src = typeof r.src === "string" ? r.src.trim() : "";
   if (!src) return null;
   if (src.startsWith("/") || src.includes("\\") || src.includes("..")) return null;
   if (/^[a-zA-Z]:/.test(src)) return null;
-  const out: { src: string; monitor?: number; params?: string; hostPort?: number } = { src };
+  const out: {
+    src: string;
+    monitor?: number;
+    params?: string;
+    hostPort?: number;
+    transparent?: boolean;
+    clickThrough?: boolean;
+  } = { src };
+  // 标注/教鞭类 overlay：透明背景 + 点击穿透（语义见 Rust 侧 open_plugin_overlay）。
+  // 只认严格 true —— 传别的值一律当 false（即保持原有"不透明、收点击"行为）。
+  if (r.transparent === true) out.transparent = true;
+  if (r.clickThrough === true) out.clickThrough = true;
   if (typeof r.monitor === "number" && Number.isInteger(r.monitor) && r.monitor >= 0) {
     out.monitor = r.monitor;
   }
@@ -306,6 +324,8 @@ async function openPluginOverlay(pluginName: string, raw: unknown): Promise<void
     src: req.src,
     monitor: req.monitor ?? null,
     params: req.params ?? null,
+    transparent: req.transparent ?? false,
+    clickThrough: req.clickThrough ?? false,
   });
 }
 

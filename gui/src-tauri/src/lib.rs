@@ -2302,7 +2302,17 @@ fn open_plugin_overlay(
     // 不透明透传参数（宿主不解释，只拼进 iframe URL 的 query）—— 插件常用它把
     // 后台进程端口带进 overlay。形如 `key=value&key2=value2`。
     params: Option<String>,
+    // 🆕 「标注/教鞭」类 overlay 的两个开关（默认 false = 保持原有行为，
+    // 如截图插件的区域框选：不透明 + 要接收点击）：
+    //   transparent   —— 窗口背景透明（页面用 CSS 自己画半透明遮罩/图形）
+    //   click_through —— 鼠标事件**穿透**到底下窗口。这是教鞭的关键：
+    //                    指示器不该挡住用户真正想点的东西。
+    //                    启用后 overlay 自身收不到点击（正常 —— 它只是画给人看的）。
+    transparent: Option<bool>,
+    click_through: Option<bool>,
 ) -> Result<Vec<usize>, String> {
+    let want_transparent = transparent.unwrap_or(false);
+    let want_click_through = click_through.unwrap_or(false);
     let monitors = app.available_monitors().map_err(|e| format!("枚举显示器失败: {e}"))?;
     if monitors.is_empty() {
         return Err("没有可用显示器".into());
@@ -2356,11 +2366,21 @@ fn open_plugin_overlay(
             .resizable(false)
             .shadow(false)
             .visible(false)
+            // 透明与穿透见 open_plugin_overlay 的参数说明。默认 false → 截图插件行为不变。
+            .transparent(want_transparent)
             .data_directory(webview_data_dir(&app2))
             .build();
 
             match built {
                 Ok(win) => {
+                    // 点击穿透：鼠标事件落到 overlay **下面**的窗口。
+                    // 建窗后立刻设（show 之前也行 —— 这是窗口样式位，与可见性无关）。
+                    // 失败不致命：退回"能看但会挡住点击"，记日志便于排查。
+                    if want_click_through {
+                        if let Err(e) = win.set_ignore_cursor_events(true) {
+                            log::error!("[Rust] overlay set_ignore_cursor_events failed: {e}");
+                        }
+                    }
                     if let Err(e) = win.set_position(tauri::PhysicalPosition::new(px, py)) {
                         log::error!("[Rust] overlay set_position failed: {e}");
                     }
