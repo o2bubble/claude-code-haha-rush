@@ -1,7 +1,83 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-16（main @ec65bd9）
+# Handoff — Claude Code GUI 开发 · 2026-09-18（main @9c24a08）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
+
+## 🆕 2026-09-18：pointer 插件「覆盖层透明」**未攻克**（中断，留待下次）
+
+用户要「教鞭」形态的屏幕指示器（pointer 插件）。**功能本体已可用**（画箭头/框/圈/文字、
+点击穿透、自动关闭、硬超时兜底），**只差最后一件事：覆盖层透明** ——
+当前是不透明底色盖住整个屏幕（用户原话："覆盖层不透明，折叠了其他内容"）。
+
+### ✅ 已确认的事实（下次**不用重查**）
+
+1. **窗口层已就绪**：`WS_EX_NOREDIRECTIONBITMAP`（DComp 合成路径）是 WebView2 透明的**必要前提**；
+   宿主日志 + 外部复核均确认 `exstyle=0x00240118`、`NOREDIR=true`、`LAYERED=false` ✓
+   - ⚠️ 该标志**只能在建窗时设**，运行时 `SetWindowLongPtrW` 补设**无效**（实测写入后读回未变）
+   - Tauri 未暴露它 → 已 **vendor + patch** `tauri-runtime-wry`（`gui/src-tauri/vendor/`，
+     改动处标 `PATCH(gui:overlay-transparency)`，共 3 处；升级 Tauri 需重新打）
+2. **`tauri-runtime-wry` 会给透明窗口画一层不透明底色**（softbuffer，**XRGB 无 alpha**，
+   `map(|(r,g,b,_)|...)` 把 alpha 丢了）→ 已 patch 掉（不再创建 surface）
+3. **这台机器支持透明** —— 纯 Win32 对照实验（`temp/probe_layered.py`）里
+   **用户亲眼确认**"蓝色方块是半透明的" ✓
+4. **裸 wry 隔离实验里 `j-noredirect` 方案透明成功**（`temp/wry-probe`，截图可见下层内容）
+   ⚠️ 但**用户未亲口确认过**，只有我的截图判断 —— 下次可先复现一次让用户确认
+
+### ❌ 当前卡点
+
+宿主（Tauri）打完两处 patch 后，**用户实测仍是黑屏**（全屏黑 + 红框箭头可见）。
+两个技术指标都已 ✅（与成功的 `j-noredirect` 一致）→ 说明**还有一处差异没找到**。
+
+**下一步方向（按可能性排序）**：
+
+1. **给 `SetDefaultBackgroundColor` 那条路径加日志**。wry 里设 WebView2 透明背景走的是
+   `ICoreWebView2Environment10` + `ICoreWebView2ControllerOptions3`，且是
+   **`if let Ok(...)` —— 拿不到接口就静默跳过、不报错**（源码在 vendored 目录里，可直接插日志）。
+   裸 wry 与 Tauri 传入的参数组合可能不同 → 这是最可疑的差异点。
+2. **对比 Tauri 与裸 wry 的 webview 创建参数**（`WebviewBuilder` 的 transparent /
+   background_color 各自是否真的传到底）。
+3. **让用户描述"黑"的形态**：纯黑？还是带暗幕的偏黑？
+   （GDI 截图对这类窗口会渲染成黑，**不能作为判据** —— 本项目已被这个假象骗过）
+
+### 🔬 已试过且**无效**的方案（**别再走弯路**）
+
+`tao transparent 建窗` ／ `WS_EX_LAYERED + SetLayeredWindowAttributes` ／
+`SetWindowCompositionAttribute` ／ `DwmEnableBlurBehindWindow`（空区域与整窗口两种）／
+`with_background_color(0,0,0,0)` ／ `--disable-gpu-compositing` —— **全部是"白"**；
+**完全空白页面**（决定性对照）→ **纯白 → 白来自 WebView2 内容层**。
+
+### 🧰 可复用排查工具（都在 `temp/`）
+
+| 文件 | 用途 |
+|---|---|
+| `temp/wry-probe/` | 裸 tao+wry 最小实验工程（**与宿主同版本**），多方案一键跑：`cargo run -- <方案名>` |
+| `temp/probe_layered.py` | 纯 Win32 layered 对照（**证明系统支持透明**） |
+| `temp/probe_auto.py` | 自动读像素验证（⚠️ 必须跑消息泵，否则窗口不绘制） |
+| `temp/probe_native_pointer.py` | **原生绘制教鞭**（PIL 抗锯齿 + `UpdateLayeredWindow`）—— 备选路线，已验证能画出箭头/中文/暗幕 |
+| `temp/activate_gui.py` · `activate_window.py` | 截图前把目标窗口切到前台 |
+
+### 🔀 备选路线：**原生绘制**（用户评价："其实非常完美"）
+
+`temp/probe_native_pointer.py` 已验证可行 —— 完全**绕开 WebView2**：
+PIL 画图（2x 超采样抗锯齿）+ `UpdateLayeredWindow` 逐像素 alpha 上屏。
+代价：绘制从 HTML 移到宿主侧 + 自己管窗口生命周期。**这不是退路，是并列选项。**
+
+### 📌 本批已发布
+
+- **GUI `2026.09.18.5`**（两端）：vendor patch + 硬超时 + 诊断日志
+- **pointer 插件 `0.1.1`**（两端）：修 source 拼写（曾致窗口关不掉）+ clear 语义 + hardTtlSec
+  ⚠️ **插件功能尚不完整**（覆盖层不透明会遮屏）—— 用户装了会踩坑，**考虑先下架或标注**
+
+### 💡 方法论教训（已写入记忆）
+
+1. **不熟的技术先查资料，别闷头穷举** —— 这个答案（"WebView2 透明需走 DComp 合成路径"）
+   **有现成文档**；我闷头试了 10 种方案 + 反复打断用户看屏幕，而**用户一搜就给出了关键思路**。
+   → 记忆：`feedback_search_before_brute_force`（试 2~3 次没头绪 = 硬刹车点）
+2. **不要用 GDI 截图判断透明** —— 对 layered/DComp 窗口会把透明区渲染成黑，**会得出反向结论**
+   （本项目被骗过一次）。要看窗口状态就直接读 `exstyle`。
+3. **对照实验一刀劈开问题** —— "完全空白页面"那次直接把嫌疑锁死在 WebView2 内容层。
+
+---
 
 ## 🆕 2026-09-16 续③：插件系统能力扩展 + 首个自研插件（截屏）
 
@@ -255,12 +331,16 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 
 ## 当前状态
 
-- **分支**: `main`（`ec65bd9`）；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
-- **本批主题**: **插件系统能力扩展（overlay/快捷键/全局热键/投递）+ 首个自研插件「截屏」** + 桌面切换回弹修复
-- **Windows 版本**: **两端均 `2026.09.16.2`**
-  —— 内容 = 插件系统 5 项通用能力 + 截屏插件 + 桌面切换回弹修复（只重建 gui）
-  —— 截屏插件需本版 GUI 才能跑（宿主缺那些能力时插件起不来）
-  ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 孤儿版本（号比用户已发的低，
+- **分支**: `main`（`9c24a08`）；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
+- **本批主题**: **pointer 插件（屏幕指示器）+ 覆盖层透明排查（未攻克，见上）**
+- **Windows 版本**: **两端均 `2026.09.18.5`**
+  —— 本轮连续五个版本（`.18.1`~`.18.5`）都在改覆盖层：全黑 → 关不掉 → 仍不透明 → **仍不透明（未攻克）**
+  —— 可用能力：覆盖层点击穿透、自动关闭、**硬超时兜底**（`hardTtlSec`，防"关不掉锁死屏幕"）
+  —— ⚠️ 覆盖层**仍不透明**：目前的 pointer 插件会遮住屏幕，`duration` 到了才自动消失
+- **pointer 插件**: **`0.1.1`**（两端）；⚠️ 功能不完整（覆盖层不透明）—— **考虑先下架或标注**
+- **⚠️ 依赖已 vendor + patch**: `gui/src-tauri/vendor/tauri-runtime-wry`（改动标 `PATCH(gui:overlay-transparency)`）
+  —— **升级 Tauri 时必须重新应用那 3 处补丁**，否则 transparent 窗口会退化成白色实心
+- ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 孤儿版本（号比用户已发的低，
      客户端永远拿不到），还白挤掉了 `.14.5`
 - **macOS 云端版本**: **`2026.09.15.6`**（6 组件齐全；含 `.15.5` 的更新 bug 修复 + `.15.6` 的 MCP/终端 PATH 注入）
   —— 更早的 `.15.1` 曾被误删致 macos 404，见「续②」；**构建：GitHub Actions（免费，push 自动触发）或 Codemagic（快，付费）**
