@@ -3847,19 +3847,35 @@ fn create_dir_link(link: &std::path::Path, target: &std::path::Path) -> Result<(
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        // ⚠️ 用 `mklink /J` 而不是 `std::os::windows::fs::symlink_dir`：
-        // 后者建的是**真 symlink**，要管理员或开发者模式；junction 不要。
+        // 🔴 **必须先把正斜杠换成反斜杠** —— `mklink` 是 cmd 的**内置命令**，
+        // 而 cmd 把 `/` 当作**参数开关前缀**。传 `C:/Users/...` 时 cmd 会看到
+        // `/Users` 这个"开关" → 报 `无效参数 - "Users"`（实测复现）。
+        //
+        // 这个坑的来源：前端拼路径用 `/` 是**合理**的（跨平台心智，Windows 上也
+        // 能正常工作 —— Rust 的 std::fs 两种都吃），所以转换放在这"最后一公里"
+        // 是对的位置：**只有外部命令 mklink 有这个限制**。
+        // （`std::fs` 的 read_link/remove_dir 等不受影响，不必转换。）
+        let link_w = link.to_string_lossy().replace('/', "\\");
+        let target_w = target.to_string_lossy().replace('/', "\\");
         let out = Command::new("cmd")
             .arg("/c")
             .arg("mklink")
             .arg("/J")
-            .arg(link)
-            .arg(target)
+            .arg(&link_w)
+            .arg(&target_w)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(|e| format!("mklink 启动失败: {e}"))?;
         if !out.status.success() {
-            return Err(format!("mklink /J 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            // stderr 是**控制台代码页（中文 Windows = GBK）**，不是 UTF-8 ——
+            // 直接 from_utf8_lossy 会得到乱码。尽力解码，解不出就给出退出码，
+            // 至少让排查者知道"失败了"而不是看到一串 `�`。
+            let raw = out.stderr;
+            let msg = String::from_utf8(raw.clone())
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("exit {} (stderr 非 UTF-8，原始 {} 字节)", out.status, raw.len()));
+            return Err(format!("mklink /J 失败: {msg}"));
         }
         Ok(())
     }
@@ -5327,5 +5343,101 @@ mod uninstall_hook_tests {
         for s in ["cleanup.sh", "cleanup.bat", "cleanup.exe", "cleanup", "cleanup.txt", "cleanup.cmd"] {
             assert!(pick_hook_interpreter(dir, s).is_none(), "{s} 不该被接受");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod skill_link_tests {
+    use super::{create_dir_link, remove_dir_link};
+
+    /// 🔴 **建链走的到底是哪条路** —— 手工验证时我用的是 PowerShell 的
+    /// `New-Item -ItemType Junction`，**而代码里用的是 `cmd /c mklink /J`**
+    /// —— 两条完全不同的实现。这个测试直接测**代码里那条**。
+    #[test]
+    fn skill_link_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("skilllink_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let target = tmp.join("plugin").join("skill");
+        let link = tmp.join("skills").join("computer-use");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(target.join("SKILL.md"), b"---
+name: t
+---
+").unwrap();
+
+        // ① 建链（代码里那条路：cmd /c mklink /J）
+        create_dir_link(&link, &target).expect("create_dir_link 应成功");
+
+        // ② 链接存在，且**通过它能读到文件**（这是 Node 侧 loader 的行为）
+        let meta = link.symlink_metadata().expect("链接应存在");
+        assert!(meta.file_type().is_symlink(), "必须是 reparse point（Node isSymbolicLink 依赖它）");
+        assert!(link.join("SKILL.md").exists(), "通过链接应能读到 SKILL.md");
+
+        // ③ 幂等：再建一次（先删后建）不应报错
+        create_dir_link(&link, &target).expect("重复建链应成功（幂等）");
+        assert!(link.join("SKILL.md").exists());
+
+        // ④ 删链**不能误删目标**
+        remove_dir_link(&link).expect("remove_dir_link 应成功");
+        assert!(link.symlink_metadata().is_err(), "链接应已移除");
+        assert!(target.join("SKILL.md").exists(), "🔴 目标被误删了！");
+
+        // ⑤ 防御：对**真目录**调 remove_dir_link 应拒绝（不递归删用户数据）
+        let real_dir = tmp.join("real-dir");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        assert!(remove_dir_link(&real_dir).is_err(), "对真目录应拒绝删除");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 🔴 **回归测试（2026-09-18）**：source 用**正斜杠**时也必须能建链。
+    ///
+    /// 实测事故：前端拼路径用 `/`（`C:/Users/.../plugins/computer-use/skill`），
+    /// 而 `mklink` 是 cmd 内置命令、**把 `/` 当参数开关** → 报
+    /// `无效参数 - "Users"`（cmd 把 `/Users` 当成了开关）。
+    ///
+    /// 这个测试用**正斜杠 target** 建链 —— 若有人把 Rust 侧的斜杠转换去掉，
+    /// 它会立刻变红。
+    #[test]
+    fn skill_link_accepts_forward_slash_source() {
+        let tmp = std::env::temp_dir().join(format!("skilllink_fwd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let target = tmp.join("com.claudecode.gui").join("plugins").join("computer-use").join("skill");
+        let link = tmp.join(".claude").join("skills").join("computer-use");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(target.join("SKILL.md"), b"x").unwrap();
+
+        // 模拟前端传来的形态：**正斜杠**
+        let target_fwd = std::path::PathBuf::from(target.to_string_lossy().replace('\\', "/"));
+        assert!(target_fwd.to_string_lossy().contains('/'), "前提：路径确实是正斜杠");
+
+        create_dir_link(&link, &target_fwd)
+            .expect("🔴 正斜杠路径建链失败 —— mklink 需要反斜杠（见 create_dir_link 注释）");
+        assert!(link.join("SKILL.md").exists(), "通过链接应能读到文件");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 路径含空格时仍能建链 —— `cmd /c` 的引号处理是著名坑点。
+    /// 本机 `%APPDATA%` 无空格所以现网没暴露，但别的机器可能踩。
+    #[test]
+    fn skill_link_works_with_spaces_in_path() {
+        let tmp = std::env::temp_dir().join(format!("skill link test {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let target = tmp.join("my plugin").join("skill dir");
+        let link = tmp.join("skills").join("some skill");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(target.join("SKILL.md"), b"x").unwrap();
+
+        let r = create_dir_link(&link, &target);
+        if let Err(e) = &r {
+            panic!("含空格路径建链失败（cmd /c 引号问题？）: {e}");
+        }
+        assert!(link.join("SKILL.md").exists(), "含空格路径下应能通过链接读到文件");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

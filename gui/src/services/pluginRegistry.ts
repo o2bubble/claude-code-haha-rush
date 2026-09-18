@@ -850,11 +850,48 @@ export async function uninstallPlugin(pluginName: string): Promise<UninstallResu
  * 失败只 `console.warn`：skill 不可用不该影响插件本身可用。
  */
 async function syncPluginSkillLinks(manifests: PluginManifest[]): Promise<void> {
+  // 诊断记录 —— 本函数有**三个静默失败点**（base 为空 / invoke reject / 返回 errors），
+  // 而前端 `console.*` **不进 GUI 日志**（实测：日志里查不到任何前端输出，
+  // Tauri 侧也没有 webview console 转发的机制）。所以排查只能靠"自己写文件"。
+  //
+  // 写入位置：`<appdata>/plugins-settings/__skill_diag.json`（复用 save_plugin_settings）。
+  // 排查完可删掉这个文件。**这不是临时调试代码** —— 前端无日志是长期事实，
+  // 保留它能省掉下次同样的"零线索排查"。
+  const diag: Record<string, unknown> = { at: new Date().toISOString(), steps: [] as string[] };
+  const note = (s: string) => (diag.steps as string[]).push(s);
+  const flushDiag = async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const text = JSON.stringify(diag, null, 2);
+    // 主路径：`<appdata>/skill-diag.json` —— 我（排查者）能直接读。
+    // ⚠️ 用 `save_file` 而不是 `save_plugin_settings`：后者 `scope` 缺省是
+    // `"workspace"`，而 workspace scope 在**未绑定工作区时会直接报错** ——
+    // 诊断工具本身不能有这么脆的前置条件。
+    try {
+      const base = await invoke<string>("get_plugins_base_dir");
+      const appdata = String(base).replace(/[\\/]plugins[\\/]?$/, "");
+      await invoke("save_file", { path: `${appdata}/skill-diag.json`, content: text });
+      return;
+    } catch { /* 落到下面的兜底 */ }
+    // 兜底：插件设置目录（显式 global scope）
+    try {
+      await invoke("save_plugin_settings", { plugin: "__skill_diag", patch: diag, scope: "global" });
+    } catch { /* 诊断自身失败就算了 */ }
+  };
+
   try {
     const { invoke } = await import("@tauri-apps/api/core");
+    diag.manifestCount = manifests.length;
+    diag.manifestsWithSkills = manifests
+      .filter((m) => (m.contributes?.skills?.length ?? 0) > 0)
+      .map((m) => `${m.pluginName}:${m.contributes.skills.map((s) => s.name).join(",")}`);
+
     // 插件根目录（`get_plugins_base_dir`）——Rust 侧的最终防线也要求 source 在此之下
-    const base = await invoke<string>("get_plugins_base_dir").catch(() => "");
-    if (!base) return;
+    const base = await invoke<string>("get_plugins_base_dir").catch((e) => {
+      note(`get_plugins_base_dir 失败: ${e}`);
+      return "";
+    });
+    diag.base = base;
+    if (!base) { note("base 为空 → 提前返回"); await flushDiag(); return; }
     const baseClean = base.replace(/[\\/]+$/, "").replace(/\\/g, "/");
 
     const specs: Array<{ name: string; source: string }> = [];
@@ -865,21 +902,23 @@ async function syncPluginSkillLinks(manifests: PluginManifest[]): Promise<void> 
         specs.push({ name: sk.name, source: `${baseClean}/${m.pluginName}/${rel}` });
       }
     }
-    if (specs.length === 0) {
-      // 没有 skill 贡献也要调一次：让 Rust 清理"插件已卸载但链接还在"的残留
-      await invoke("sync_plugin_skill_links", { specs: [] }).catch(() => {});
-      return;
-    }
+    diag.specs = specs;
+
     const out = await invoke<{ linked: string[]; errors: string[] }>(
       "sync_plugin_skill_links",
       { specs },
-    );
+    ).catch((e) => {
+      note(`sync_plugin_skill_links 失败: ${e}`);
+      return null;
+    });
+    diag.result = out;
+    if (out?.errors?.length) note(`Rust 返回 ${out.errors.length} 个错误`);
     for (const e of out?.errors ?? []) console.warn("[plugin] skill link:", e);
-    if (out?.linked?.length) {
-      console.debug("[plugin] skill links synced:", out.linked.join(", "));
-    }
   } catch (e) {
+    note(`异常: ${e}`);
     console.warn("[plugin] syncPluginSkillLinks 失败（skill 可能不可用）:", e);
+  } finally {
+    await flushDiag();
   }
 }
 
@@ -895,7 +934,19 @@ async function syncPluginSkillLinks(manifests: PluginManifest[]): Promise<void> 
 let _reloading = false;
 
 export async function reloadPlugins(): Promise<void> {
-  if (_reloading) return; // 防重入: PANEL_REGISTRY_CHANGED → FloatingApp reload 触发的连锁
+  if (_reloading) {
+    // ⚠️ 防重入的**静默跳过**是排查黑洞：外部看到的是"插件装了但效果没出现"。
+    // 记一笔到诊断文件（见 syncPluginSkillLinks 的说明），否则无从区分
+    // "没跑" 与 "跑了但被跳过"。
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("save_plugin_settings", {
+        plugin: "__skill_diag",
+        patch: { at: new Date().toISOString(), skipped: "reloadPlugins 被防重入跳过（另一次重扫在进行）" },
+      });
+    } catch { /* 诊断自身失败就算了 */ }
+    return;
+  }
   _reloading = true;
   try {
     const { invoke } = await import("@tauri-apps/api/core");
