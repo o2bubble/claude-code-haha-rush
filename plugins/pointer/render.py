@@ -136,13 +136,112 @@ user32.DispatchMessageW.restype = LRESULT
 user32.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
 
-# 逻辑像素 → 物理像素的换算由这个调用关掉：设为 DPI aware 后，GetSystemMetrics
-# 与窗口坐标都是**物理像素**，与 AI 看到的截图坐标系一致（不做这步会被系统缩放，
-# 画出来整体偏移 —— 探针阶段就踩过）。
-try:
-    ctypes.WinDLL("shcore").SetProcessDpiAwareness(2)   # PROCESS_PER_MONITOR_DPI_AWARE
-except Exception:
-    user32.SetProcessDPIAware()
+# ── DPI 感知（**坐标正确的前提**）──
+#
+# 若进程是 DPI **unaware**，Windows 会对窗口坐标做虚拟化缩放：我们传入物理像素，
+# 系统按 1/scale 缩小后落点 → 画出来系统性偏移（实测：整体被放大 1.5 倍错位）。
+#
+# ⚠️ 两个坑（都踩过）：
+#   1. `SetProcessDpiAwareness` **失败时返回非 0 而不抛异常** —— 用 try/except 包它
+#      等于没检查，静默留在 unaware 状态。必须**看返回值**。
+#   2. **子进程继承父进程的 DPI 感知**（Win10 1607+）。本脚本由 GUI（宿主 node）
+#      spawn，若父进程是 unaware，我们**已经是** unaware，此时任何 Set 调用都会
+#      返回 E_ACCESSDENIED 且**无法改变** → 只能退而求其次：**读实际缩放比，
+#      自己把坐标换算回去**。
+#
+# 所以这里：先尝试设 aware（校验返回值），再**无条件检测真实状态** —— 因为
+# 设成功与失败都要知道当前 scale 是多少。
+
+def _try_set_dpi_aware():
+    """尝试把自己设成 DPI aware。返回是否成功（**返回值要校验**）。
+
+    ⚠️ `SetProcessDpiAwareness` 失败时**返回非 0 而不抛异常** —— 用 try/except
+    包起来等于没检查。这里显式比对返回值。
+    另：**子进程继承父进程的 DPI 感知**（Win10 1607+），若父进程已是 unaware
+    并被锁定，这几次调用都会失败 —— 那种情况由 `_dpi_scale()` 的补偿兜住。
+    """
+    try:
+        ctx = ctypes.WinDLL("user32").SetProcessDpiAwarenessContext
+        ctx.restype = wt.BOOL
+        ctx.argtypes = [ctypes.c_void_p]
+        # PER_MONITOR_AWARE_V2 = -4（其余：-3 per-monitor, -2 system aware）
+        if ctx(ctypes.c_void_p((-4) & 0xFFFFFFFFFFFFFFFF)):
+            return True
+    except Exception:
+        pass
+    try:
+        sh = ctypes.WinDLL("shcore")
+        sh.SetProcessDpiAwareness.restype = ctypes.c_int
+        sh.SetProcessDpiAwareness.argtypes = [ctypes.c_int]
+        if sh.SetProcessDpiAwareness(2) == 0:    # 0 = S_OK
+            return True
+    except Exception:
+        pass
+    try:
+        if user32.SetProcessDPIAware():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _dpi_scale():
+    """返回「AI 给的物理坐标 → 本进程窗口坐标」的换算系数（= 系统缩放比）。
+
+    ## 为什么是系统缩放比（2026-09-20 实测定论）
+    本进程由 GUI（宿主 node）spawn，**建窗时被系统按 1.5 倍虚拟化**：
+    我们按 2560 建窗、系统把它放大成 3840 物理像素 → 我们画在窗口内 x=1280 的
+    内容落到物理 1920。实测确认：传 `(1280,800)` 落在截图 `(1280,795)`，而
+    截图 1707 宽 ↔ 物理 2560 → 落点 = 输入 × 1.5。
+
+    所以要**除以**这个系数才能落到 AI 期望的位置。
+
+    ## ⚠️ 两个错误判据（都试过，都不行）
+    - `GetSystemMetrics` vs `dmPelsWidth` 比较：本机两者都报 2560（进程看似
+      aware），得出 1.0 → **错**。该比较不可靠，别再用。
+    - `GetDeviceCaps(LOGPIXELSX)`：被虚拟化，unaware 时恒 96 → 不可用。
+
+    可靠来源：`EnumDisplaySettings` 的 `dmLogPixels` —— 读的是显示模式本身，
+    与调用进程的感知状态无关（实测稳定给 144）。
+    """
+    class DEVMODEW(ctypes.Structure):
+        _fields_ = [
+            ("dmDeviceName", wt.WCHAR * 32), ("dmSpecVersion", wt.WORD),
+            ("dmDriverVersion", wt.WORD), ("dmSize", wt.WORD), ("dmDriverExtra", wt.WORD),
+            ("dmFields", wt.DWORD), ("dmPositionX", ctypes.c_long),
+            ("dmPositionY", ctypes.c_long), ("dmDisplayOrientation", wt.DWORD),
+            ("dmDisplayFixedOutput", wt.DWORD), ("dmColor", ctypes.c_short),
+            ("dmDuplex", ctypes.c_short), ("dmYResolution", ctypes.c_short),
+            ("dmTTOption", ctypes.c_short), ("dmCollate", ctypes.c_short),
+            ("dmFormName", wt.WCHAR * 32), ("dmLogPixels", wt.WORD),
+            ("dmBitsPerPel", wt.DWORD), ("dmPelsWidth", wt.DWORD),
+            ("dmPelsHeight", wt.DWORD), ("dmDisplayFlags", wt.DWORD),
+            ("dmDisplayFrequency", wt.DWORD), ("dmICMMethod", wt.DWORD),
+            ("dmICMIntent", wt.DWORD), ("dmMediaType", wt.DWORD),
+            ("dmDitherType", wt.DWORD), ("dmReserved1", wt.DWORD),
+            ("dmReserved2", wt.DWORD), ("dmPanningWidth", wt.DWORD),
+            ("dmPanningHeight", wt.DWORD),
+        ]
+
+    user32.EnumDisplaySettingsW.restype = wt.BOOL
+    user32.EnumDisplaySettingsW.argtypes = [wt.LPCWSTR, wt.DWORD, ctypes.POINTER(DEVMODEW)]
+    dm = DEVMODEW()
+    dm.dmSize = ctypes.sizeof(DEVMODEW)
+    if user32.EnumDisplaySettingsW(None, 0xFFFFFFFF, ctypes.byref(dm)) and dm.dmLogPixels > 0:
+        return dm.dmLogPixels / 96.0
+    return 1.0
+
+
+_set_dpi_aware_ok = _try_set_dpi_aware()
+SCALE = _dpi_scale()
+# =1.0 → 进程是 aware，窗口坐标就是物理像素，直接用
+# >1.0 → 进程仍是 unaware（Set 失败，通常因为**父进程已是 unaware 且被子进程继承**），
+#        窗口坐标被虚拟化，传物理像素会被系统按 1/SCALE 缩小 → 必须**除以** SCALE
+VIRTUALIZED = SCALE > 1.01
+
+if VIRTUALIZED:
+    print(f"[pointer] DPI 虚拟化检测到 scale={SCALE}（set_aware_ok={_set_dpi_aware_ok}）"
+          f" → 坐标将按 1/{SCALE} 补偿", file=sys.stderr)
 
 
 def _monitors():
@@ -280,8 +379,19 @@ class Canvas:
         return img.tobytes("raw", "BGRA")
 
 
-def render_state(st, monitor_rect):
-    """把 /state 画成位图字节。坐标是屏幕绝对物理像素 → 减去本显示器原点。"""
+def render_state(st, monitor_rect, scale=1.0):
+    """把 /state 画成位图字节。
+
+    ## 坐标系（容易搞错，2026-09-20 踩过）
+    - `st` 里的坐标是**屏幕绝对物理像素**（AI 从截图算出来的，与截图工具同坐标系）
+    - `monitor_rect` 来自 `_monitors()`，是**窗口坐标系**的——进程 DPI unaware 时
+      它是被虚拟化过的值（如 1707×1067 而非 2560×1600）
+    - 位图按 monitor_rect 的尺寸建，最终由 `UpdateLayeredWindow` 铺满屏幕，
+      **单位是窗口坐标**
+
+    所以物理坐标要**除以 scale** 才落到位图的正确位置。不除就是系统性放大
+    （实测 scale=1.5 时整体偏到 1.5 倍处 —— 圈画到了搜索框上而不是标签上）。
+    """
     ox, oy, w, h = monitor_rect
     sh = st.get("shapes") or {}
     arrows = sh.get("arrows") or []
@@ -290,28 +400,31 @@ def render_state(st, monitor_rect):
     labels = sh.get("labels") or []
 
     def loc(x, y):
-        return (x - ox, y - oy)
+        """物理像素 → 位图坐标（先除以 scale，再减本显示器原点）"""
+        return (x / scale - ox, y / scale - oy)
 
     cv = Canvas(w, h)
     if st.get("dim") is not False:
         holes = []
         for r in rects:
             x, y = loc(r["x"], r["y"])
-            holes.append((x - 6, y - 6, r["w"] + 12, r["h"] + 12, 10))
+            holes.append((x - 6, y - 6, r["w"] / scale + 12, r["h"] / scale + 12, 10))
         for c in circles:
             x, y = loc(c["x"], c["y"])
-            rr = c["r"] + 6
-            holes.append((x - rr, y - rr, rr * 2, rr * 2, c["r"] + 6))
+            rr = c["r"] / scale + 6
+            holes.append((x - rr, y - rr, rr * 2, rr * 2, c["r"] / scale + 6))
         cv.dim(holes)
     for a in arrows:
-        cv.arrow({"fromX": a["fromX"] - ox, "fromY": a["fromY"] - oy,
-                  "toX": a["toX"] - ox, "toY": a["toY"] - oy})
+        p1 = loc(a["fromX"], a["fromY"])
+        p2 = loc(a["toX"], a["toY"])
+        cv.arrow({"fromX": p1[0], "fromY": p1[1], "toX": p2[0], "toY": p2[1]})
     for r in rects:
         x, y = loc(r["x"], r["y"])
-        cv.rect({"x": x, "y": y, "w": r["w"], "h": r["h"], "label": r.get("label")})
+        cv.rect({"x": x, "y": y, "w": r["w"] / scale, "h": r["h"] / scale,
+                 "label": r.get("label")})
     for c in circles:
         x, y = loc(c["x"], c["y"])
-        cv.circle({"x": x, "y": y, "r": c["r"], "label": c.get("label")})
+        cv.circle({"x": x, "y": y, "r": c["r"] / scale, "label": c.get("label")})
     for l in labels:
         x, y = loc(l["x"], l["y"])
         cv.label({"x": x, "y": y, "text": l["text"]})
@@ -410,6 +523,20 @@ def main():
         return 1
     idx = args.monitor if 0 <= args.monitor < len(mons) else 0
     rect = mons[idx]
+
+    # 诊断落盘 —— 被 GUI spawn 时 stdio 是 ignore（stderr 看不到），
+    # 排查"坐标偏移"必须先知道进程的真实 DPI 状态。文件：`%TEMP%/pointer-dpi.txt`
+    try:
+        import os as _os
+        _diag = _os.path.join(_os.environ.get("TEMP", "."), "pointer-dpi.txt")
+        with open(_diag, "a", encoding="utf-8") as _f:
+            _f.write(
+                f"scale={SCALE} virtualized={VIRTUALIZED} aware_ok={_set_dpi_aware_ok} "
+                f"SM={user32.GetSystemMetrics(0)}x{user32.GetSystemMetrics(1)} "
+                f"monitors={mons} picked={rect}\n"
+            )
+    except Exception:
+        pass
     base = f"http://127.0.0.1:{args.port}"
 
     def get(path):
@@ -437,7 +564,7 @@ def main():
             if st.get("gone"):
                 break
             if st.get("rev") != last_rev:
-                ov.push(render_state(st, rect))
+                ov.push(render_state(st, rect, SCALE))
                 if last_rev < 0:
                     ov.show()               # 首帧才 show，避免闪一下空白
                 last_rev = st["rev"]

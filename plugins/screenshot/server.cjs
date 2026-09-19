@@ -268,6 +268,34 @@ $idx = -1`;
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
+
+# 🔴 必须先设 DPI aware，**再**读 Screen.Bounds —— 顺序错了等于没设。
+#
+# 为什么：powershell.exe 默认是 DPI **unaware** 的，此时
+#   · [Screen]::Bounds 返回**逻辑**尺寸（150% 缩放下 2560→1707）
+#   · CopyFromScreen 也只按那个尺寸抓
+# 结果：图是缩小版、且与物理坐标差了缩放比 → **所有"截图定位再点击"的坐标全偏**
+# （实测：图 1707x1067 而 meta.monitorOrigin 报物理值，两套数据来源不一致；
+#   AI 按图内坐标点击会点偏 ~1.5 倍）。
+#
+# 设成 aware 后 Bounds 与 CopyFromScreen 都用**物理像素**，与 mouse-keyboard
+# 插件的 coordinateSpace="virtual-desktop-absolute" 一致 —— 三个插件统一到物理空间。
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class DpiAware {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int v);
+  // 返回是否已是 aware（用于诊断；失败不致命 —— 老系统没有 shcore）
+  public static bool Enable() {
+    try { if (SetProcessDpiAwareness(2) == 0) return true; } catch {}
+    try { return SetProcessDPIAware(); } catch {}
+    return false;
+  }
+}
+'@
+[DpiAware]::Enable() | Out-Null
+
 ${pickBounds}
 $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -462,15 +490,20 @@ function imageSize(file) {
 // ── 裁剪 ─────────────────────────────────────────────────────────────
 
 /** Windows：用 System.Drawing 裁一个矩形出来（无需额外图像库）。 */
-async function cropWindows(src, dst, x, y, w, h) {
+async function cropWindows(src, dst, x, y, w, h, outW = 0, outH = 0) {
+  // outW/outH > 0 时把裁出来的图缩到该尺寸（保持内容不变）。用于压到 API 的
+  // 2000×2000 图片上限以下 —— 坐标由调用方用 meta.pixelRatio 还原，不受影响。
+  const tw = outW > 0 ? outW : w;
+  const th = outH > 0 ? outH : h;
   const script = `
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Drawing
 $src = [System.Drawing.Image]::FromFile('${src.replace(/'/g, "''")}')
 $rect = New-Object System.Drawing.Rectangle(${x}, ${y}, ${w}, ${h})
-$crop = New-Object System.Drawing.Bitmap(${w}, ${h})
+$crop = New-Object System.Drawing.Bitmap(${tw}, ${th})
 $g = [System.Drawing.Graphics]::FromImage($crop)
-$g.DrawImage($src, (New-Object System.Drawing.Rectangle(0,0,${w},${h})), $rect, [System.Drawing.GraphicsUnit]::Pixel)
+$g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+$g.DrawImage($src, (New-Object System.Drawing.Rectangle(0,0,${tw},${th})), $rect, [System.Drawing.GraphicsUnit]::Pixel)
 $crop.Save('${dst.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)
 $g.Dispose(); $crop.Dispose(); $src.Dispose()
 `;
@@ -826,6 +859,31 @@ async function mcpCapture(args = {}) {
     applied = r;
   }
 
+  // ── 超大图降采样（坐标不受影响，见 meta.pixelRatio）──
+  //
+  // Claude API 的图片上限是 2000×2000。150% 缩放的 2560×1600 屏抓整屏就会超
+  // → 直接传会被后端拒绝（"dimensions exceed the 2000x2000px limit"）。
+  //
+  // 修法：**只缩图、不动坐标语义** —— 缩完在 meta 里给出还原系数。这样
+  //   ① 图能传上去  ② 坐标仍是精确的物理像素（AI 乘一下系数即可）
+  // 两条都成立才是自洽的；只做①会让坐标变糊，只做②传不上去。
+  //
+  // region 裁出来的图通常很小（几百像素），自然不会触发，pixelRatio = 1。
+  const MAX_DIM = 2000;
+  let pixelRatio = 1;
+  if (!IS_MAC && (final.width > MAX_DIM || final.height > MAX_DIM)) {
+    const shrink = MAX_DIM / Math.max(final.width, final.height);
+    const outW = Math.max(1, Math.floor(final.width * shrink));
+    const outH = Math.max(1, Math.floor(final.height * shrink));
+    const scaled = uniquePath(targetDir(), stampName());
+    await cropWindows(final.path, scaled, 0, 0, final.width, final.height, outW, outH);
+    try { fs.unlinkSync(final.path); } catch {}
+    // ⚠️ pixelRatio 用**实际**输出尺寸反算（不是理论 shrink）—— floor 会引入
+    // 微小偏差，用实际值才能保证 AI 换算回去是准的
+    pixelRatio = final.width / outW;
+    final = { ...final, path: scaled, width: outW, height: outH };
+  }
+
   if (settings.copyToClipboard !== false) void toClipboard(final.path);
 
   // base64 给 AI 看图；path 给它后续引用
@@ -845,6 +903,11 @@ async function mcpCapture(args = {}) {
       monitorIndex: idx,
       // 是否裁过区域（null = 整块显示器）
       region: applied,
+      // 🔴 图内像素 → **物理像素** 的换算系数（1 = 图即物理尺寸，无需换算）。
+      //    超大图被降采样时会 > 1。**这是坐标换算唯一的正确入口**：
+      //      物理坐标 = monitorOrigin + 图内像素 × pixelRatio
+      //    mouse-keyboard / pointer 都用物理像素，所以换算完直接就能传。
+      pixelRatio: Number(pixelRatio.toFixed(6)),
     },
   };
 }

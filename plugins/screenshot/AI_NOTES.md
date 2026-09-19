@@ -162,8 +162,24 @@ document 上，**不用改**）；`draggable="false"` + `-webkit-user-drag: none
 
 **坐标约定**：`region` 是**物理像素、相对目标显示器左上角**（不是虚拟桌面绝对坐标）。
 返回值里 `meta.monitorOrigin` 是这张图在虚拟桌面中的绝对原点，需要换算时用。
-`meta.width/height` 是截图的实际像素尺寸 —— AI 若先截全屏再据此估区域，注意客户端可能
-把大图 downsample（超 2000px 会缩），**别拿看到的图像尺寸当物理像素用**。
+
+🔴 **换算必须带上 `meta.pixelRatio`**：
+
+```
+物理坐标 = monitorOrigin + 图内像素 × pixelRatio
+```
+
+`pixelRatio` = **图内像素 → 物理像素**的系数。`1` 表示图就是物理尺寸
+（region 截图、小屏全屏都这样）；**> 1 表示图被降采样过** ——
+抓整屏在 150% 缩放屏上会得到 2560×1600，超过 Claude API 的 2000×2000
+图片上限，所以插件自动缩小并在 meta 里给出这个系数。
+
+⚠️ **漏掉它会系统性偏小**（例：2560×1600 全屏 → 图 2000×1250、`pixelRatio=1.28`，
+图内 x=1000 实际是物理 1280）。**别拿看到的图像尺寸当物理像素用。**
+
+**抓屏进程已设 DPI aware**（`captureWindows` 脚本头部 P/Invoke 调
+`SetProcessDpiAwareness`）—— 之前的图是逻辑尺寸（1707×1067），与
+`mouse-keyboard`/`pointer` 的物理像素不一致，导致点击系统偏 1.5 倍。
 
 **返回值为什么分两块**：图片走 MCP image content（模型能直看），元数据走 text 块。
 **base64 绝不能同时出现在 text 里** —— 1920×1080 的 PNG base64 约 30 万字符 ≈ 数十万
