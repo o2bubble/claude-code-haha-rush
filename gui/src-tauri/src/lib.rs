@@ -2276,9 +2276,16 @@ const INDICATOR_SHOW_DELAY_MS: u64 = 250;
 /// （`WS_EX_NOREDIRECTIONBITMAP` + 跳过 softbuffer 底色，见 `Cargo.toml` 的
 /// `[patch.crates-io]` 说明）。这里只补穿透。
 ///
-/// 为什么不在这里设 `WS_EX_LAYERED`：透明窗口现在走 **DComp 合成**路径，
-/// 再叠一个经典 layered 位是两套合成机制的混合，行为不可预期；
-/// 而光有 `WS_EX_TRANSPARENT` 就足以表达"鼠标穿透"。
+/// ⚠️ **不要在这里加 `WS_EX_LAYERED`** —— 2026-09-19 试过（含成对的
+/// `SetLayeredWindowAttributes`），**实测全黑，已撤回**。
+///
+/// 排查时曾被 `probe_layered.py` 的"半透明色块可见"误导：那证明的是
+/// **整窗统一 alpha** 可用，与覆盖层需要的 **WebView2 逐像素透明**是两套机制 ——
+///   · `WS_EX_LAYERED` + `SetLayeredWindowAttributes` = 整窗**一个** alpha 值
+///   · `WS_EX_NOREDIRECTIONBITMAP`（DComp）= **逐像素** alpha，由 WebView2 内容提供
+/// 而且两者语义冲突：NOREDIR 意为"无重定向位图"，而 layered 合成**需要**位图
+/// → 叠加后全黑。**别把这两种透明的实验结论互相套用。**
+///
 /// （另注：**绝不能用 tao 的 `set_ignore_cursor_events`** —— 它会顺带加
 /// `WS_EX_LAYERED` 却不设属性，导致整个窗口不绘制 = 全黑，实测踩过。）
 #[cfg(windows)]
