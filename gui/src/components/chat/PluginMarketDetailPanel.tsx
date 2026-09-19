@@ -81,9 +81,11 @@ export default function PluginMarketDetailPanel() {
     if (!confirm(i18nT("pluginMarket.uninstallConfirm", { name: installedName }))) return;
     try {
       const { uninstallPlugin } = await import("../../services/pluginRegistry");
-      await uninstallPlugin(installedName);
+      const { handleUninstallResult } = await import("../../services/pluginUninstallFlow");
+      const result = await uninstallPlugin(installedName);
       addStatusMessage(i18nT("pluginMarket.uninstallSuccess"), "success");
       refreshInstalled();
+      await handleUninstallResult(result, i18nT, addStatusMessage);
     } catch (e: any) {
       addStatusMessage(`${i18nT("pluginMarket.uninstallFailed")}: ${e}`, "error");
     }

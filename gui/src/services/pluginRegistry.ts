@@ -6,6 +6,9 @@
 // ⚠️ 本模块不 import node fs —— webview 运行时无 fs。目录读取由 Tauri(Rust/plugin-fs)
 // 完成，把「插件名 → plugin.json 内容」的条目列表传给 scanPlugins(纯逻辑, 可测)。
 
+// 类型专用导入（shortcuts 不反向依赖本模块，无环）
+import type { PluginHotkeyDecl } from "./shortcuts";
+
 // ─── 类型（PRD §5 plugin.json）───
 
 export type PanelKind = "in-main" | "floating";
@@ -41,6 +44,12 @@ export interface PluginCommand {
   id: string;
   title: string;
   onInvoke?: string;
+  /** 建议的默认键位（未归一化，如 `"mod+shift+a"`）。只是默认值，用户可改/可解绑。 */
+  hotkey?: string;
+  /** 键位作用域：`app`（默认，GUI 有焦点才生效）| `os`（全局热键，失焦也生效） */
+  scope?: "app" | "os";
+  /** 平台限定（`os` 作用域下可选）：只在该平台注册 */
+  os?: "win" | "mac";
 }
 
 export interface PluginProcess {
@@ -56,6 +65,46 @@ export interface PluginContributes {
   panels: PluginPanel[];
   commands: PluginCommand[];
   events: string[];
+  mcpTools: PluginMcpTool[];
+  /** 插件附带的 skill（链接进 ~/.claude/skills，见 sync_plugin_skill_links）。 */
+  skills: PluginSkillDecl[];
+}
+
+/**
+ * 插件贡献的 skill —— 只是"把插件里某个目录链接进技能目录"，**没有任何注册机制**
+ * （skill 就是 `SKILL.md` + 附属文件的目录，AI 侧只扫 `~/.claude/skills`）。
+ *
+ * 宿主把 `path` 拼成绝对路径后交给 Rust 建链接，于是**插件目录是唯一来源**：
+ * 改插件里的 skill 文件立刻生效，不会出现"技能目录里还是旧副本"。
+ */
+export interface PluginSkillDecl {
+  /** 目标目录名：`~/.claude/skills/<name>`（须含 SKILL.md 的目录会链到那里） */
+  name: string;
+  /** 插件目录内的相对路径（如 `"skill"`） */
+  path: string;
+}
+
+/**
+ * 插件贡献的 MCP 工具 —— 让 GUI 里的 AI 能直接调用插件能力（无 UI）。
+ *
+ * 调用契约**固定**，插件不能自定义 endpoint / method：宿主一律
+ * `POST http://127.0.0.1:<插件进程端口>/__mcp`，body `{ tool, args, settings }`。
+ * 不让插件填 URL 是为了收窄攻击面（路径拼接、SSRF）—— 与 `/__command` 同心智，
+ * 但**不复用** `/__command`（那个返回的是 host actions 语义）。
+ *
+ * AI 看到的工具名是 `plugin_<pluginName>_<name>`（宿主拼），插件无法覆盖宿主工具。
+ */
+export interface PluginMcpTool {
+  /** 工具短名（插件内唯一）。完整名由宿主加命名空间前缀。 */
+  name: string;
+  description: string;
+  /** JSON Schema（会被白名单化：只放行 type/properties/required/enum/items/description）。 */
+  inputSchema: Record<string, unknown>;
+  /** 处理它的后台进程 id（必须在本插件 processes[] 里声明过）。缺省 = 该插件唯一进程。 */
+  process?: string;
+  /** 结果形态。`image` = 端点会返回图片，宿主据此注入 image content 块
+   *  （而不是把 base64 当文本塞进上下文 —— 那会白白烧掉几十万 token）。 */
+  resultKind?: "text" | "image";
 }
 
 /** 内置分类（稳定展示+翻译）。作者可声明任意自定义分类字符串——原样透传,
@@ -95,6 +144,24 @@ export interface PluginManifest {
   platforms: string[];
   /** 插件设置声明——设置面板按插件分组渲染。缺省 {} = 无设置。 */
   settings: PluginSettingsDecl;
+  /**
+   * 卸载前要执行的清理脚本（相对插件根的路径，如 "cleanup.cjs"）。
+   *
+   * 用途：插件在**插件目录之外**留下的东西（外部数据、系统资源、要通知的外部服务）
+   * 宿主无从知晓，只能由插件自己声明怎么清。
+   *
+   * 由宿主执行（插件进程那时可能已经死了）：`.js/.cjs/.mjs` 用 **bun**、
+   * `.py` 用 **python** —— 两者都是 GUI 安装包自带的运行时（零前置条件）。
+   * 参数经环境变量传入（`CLAUDE_PLUGIN_NAME` / `_DIR` / `_DATA_DIR` / `_WORKSPACE`）。
+   *
+   * ⚠️ **失败绝不阻断卸载**（只记 warn 并在结果里回报）—— 不能让 hook 写错就卸不掉。
+   */
+  beforeUninstall?: string;
+  /**
+   * 卸载后是否需要重启 GUI 才完全生效（如 hook 改了 PATH/环境变量、清了宿主进程
+   * 已加载的资源）。**只有声明了才提示用户** —— 大多数插件不需要，别打扰。
+   */
+  needsRestart?: boolean;
 }
 
 export type ParseResult = { ok: true; manifest: PluginManifest } | { ok: false; error: string };
@@ -183,20 +250,9 @@ export function parsePluginManifest(json: string, sourceDir: string): ParseResul
   const description = asString(raw.description);
   const icon = asString(raw.icon);
 
-  // contributes：缺省时归一化为空
-  const contributesRaw = isRecord(raw.contributes) ? raw.contributes : {};
-  const panels = parsePanels(contributesRaw.panels);
-  if (panels === null) return { ok: false, error: `[${pluginName}] contributes.panels 含非法 panel（id/title/panelKind）` };
-  const contributes: PluginContributes = {
-    panels,
-    commands: parseCommands(contributesRaw.commands),
-    events: Array.isArray(contributesRaw.events)
-      ? (contributesRaw.events as unknown[]).filter((e): e is string => typeof e === "string")
-      : [],
-  };
-
   // processes：缺 id/command 的 process 跳过（parse 层严格——坏 manifest 不静默生效）。
   // env 只保留字符串值（数字/数组等非 string 丢弃，避免 spawn 时脏数据）。
+  // ⚠️ 必须在 contributes 之前解析：mcpTools 要拿它校验 process 声明是否存在。
   const processes: PluginProcess[] = Array.isArray(raw.processes)
     ? (raw.processes as unknown[]).filter(isRecord).flatMap((p) => {
         const id = asString(p.id);
@@ -216,6 +272,20 @@ export function parsePluginManifest(json: string, sourceDir: string): ParseResul
       })
     : [];
 
+  // contributes：缺省时归一化为空
+  const contributesRaw = isRecord(raw.contributes) ? raw.contributes : {};
+  const panels = parsePanels(contributesRaw.panels);
+  if (panels === null) return { ok: false, error: `[${pluginName}] contributes.panels 含非法 panel（id/title/panelKind）` };
+  const contributes: PluginContributes = {
+    panels,
+    commands: parseCommands(contributesRaw.commands),
+    events: Array.isArray(contributesRaw.events)
+      ? (contributesRaw.events as unknown[]).filter((e): e is string => typeof e === "string")
+      : [],
+    mcpTools: parseMcpTools(contributesRaw.mcpTools, processes),
+    skills: parsePluginSkills(contributesRaw.skills),
+  };
+
   // 可选扩展字段（T8）: 分类/依赖/安装形态——容错解析, 缺省回落默认。
   // category 作者可自定义: 任意非空字符串原样透传(市场筛选 chips 动态并入);
   // 空/缺失才回落 "tool"（不设枚举白名单——避免作者自定义被静默吞掉）。
@@ -232,10 +302,18 @@ export function parsePluginManifest(json: string, sourceDir: string): ParseResul
     : [];
   // 插件设置声明（VS Code contributes.configuration 心智, 设置面板按插件分组渲染）
   const settings = parsePluginSettings(raw.settings);
+  // 卸载 hook：只认"相对路径且不含 .. 穿越"的脚本名（与 runtimes.path 同款校验）。
+  // 非字符串/空/绝对路径/穿越 → 忽略（宁可不跑，也不让 manifest 指向插件目录之外）。
+  const rawHook = asString(raw.beforeUninstall);
+  const looksAbsolute =
+    !!rawHook && (rawHook.startsWith("/") || rawHook.startsWith("\\") || /^[a-zA-Z]:/.test(rawHook));
+  const hasTraversal = !!rawHook && rawHook.split(/[/\\]/).includes("..");
+  const beforeUninstall = rawHook && !looksAbsolute && !hasTraversal ? rawHook : undefined;
+  const needsRestart = raw.needsRestart === true;
 
   return {
     ok: true,
-    manifest: { pluginName, displayName, version, apiVersion, description, icon, contributes, processes, category, dependencies, installType, runtimes, platforms, settings },
+    manifest: { pluginName, displayName, version, apiVersion, description, icon, contributes, processes, category, dependencies, installType, runtimes, platforms, settings, beforeUninstall, needsRestart },
   };
 }
 
@@ -309,12 +387,155 @@ function parseCommands(raw: unknown): PluginCommand[] {
   return (raw as unknown[]).filter(isRecord).flatMap((c) => {
     const id = asString(c.id);
     if (!id) return []; // 缺 id 的坏 command 跳过（可选贡献，不拖垮 manifest）
+    const scope = c.scope === "os" ? "os" : c.scope === "app" ? "app" : undefined;
+    const os = c.os === "win" || c.os === "mac" ? c.os : undefined;
     return [{
       id,
       title: String(c.title ?? ""),
       onInvoke: asString(c.onInvoke),
+      hotkey: asString(c.hotkey),
+      scope,
+      os,
     }];
   });
+}
+
+/** inputSchema 允许保留的键 —— 白名单，防止插件塞 `$ref`/`$defs` 之类
+ *  让 AI 或校验方去解析外部引用的结构。schema 会被原样交给模型，故收窄。 */
+const SCHEMA_KEY_WHITELIST = new Set([
+  "type", "properties", "required", "description", "enum", "items", "default",
+]);
+
+/** 递归白名单化 JSON Schema（只留简单结构，深度也限一层嵌套）。
+ *  返回值**总是**带 type —— 没有类型的 schema 对模型没有意义（它据此判断参数形状）。 */
+function sanitizeSchema(raw: unknown, depth = 0): Record<string, unknown> {
+  if (!isRecord(raw) || depth > 4) return { type: "object" };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!SCHEMA_KEY_WHITELIST.has(k)) continue;
+    if (k === "properties" && isRecord(v)) {
+      // properties 的值是「字段名 → 子 schema」，**字段名本身不受白名单约束**
+      const props: Record<string, unknown> = {};
+      for (const [pk, pv] of Object.entries(v)) props[pk] = sanitizeSchema(pv, depth + 1);
+      out.properties = props;
+    } else if (k === "items") {
+      out.items = sanitizeSchema(v, depth + 1);
+    } else {
+      out[k] = v;
+    }
+  }
+  // 没有 type 的 schema 对模型没有意义，补一个 object 兜底
+  if (!("type" in out)) out.type = "object";
+  return out;
+}
+
+/** 工具名 / 进程 id 允许的字符 —— 它们会被拼进工具名与 URL，收窄到安全集。 */
+const SAFE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+/**
+ * 解析 `contributes.mcpTools`。
+ *
+ * 容错策略与 parseCommands 一致：**坏条目跳过而非拖垮整个 manifest**（可选贡献）。
+ * 但下面这些是**硬性拒绝**（跳过该条 + 记 warning），因为它们要么会造成工具名
+ * 劫持/歧义，要么让宿主无法定位进程：
+ *   · name 缺失 / 含非法字符
+ *   · name 与宿主已有工具同名（宿主工具**永远优先**，插件不得覆盖）
+ *   · process 声明了但不在本插件 processes[] 内（拼不出来就是死工具）
+ *
+ * 注：插件**之间**的重名在聚合层处理（需要看到全部插件，见 collectPluginMcpTools）。
+ */
+/**
+ * 解析 `contributes.skills`。
+ * 容错：非数组/元素非法（缺 name 或 path、名字含非法字符、path 绝对或穿越）→ 跳过该条，
+ * 不整个 manifest 失败（与 parseMcpTools / parseRuntimes 同心智）。
+ */
+export function parsePluginSkills(raw: unknown): PluginSkillDecl[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: PluginSkillDecl[] = [];
+  for (const s of raw as unknown[]) {
+    if (!isRecord(s)) continue;
+    const name = asString(s.name);
+    const path = asString(s.path);
+    // 名字：只允许字母/数字/-/_/.（与 Rust 侧 sanitize_skill_name 同规则；
+    // 两边都校验 —— 前端挡住明显错的，Rust 是最终防线）
+    if (!name || !/^[A-Za-z0-9._-]{1,64}$/.test(name) || name === "." || name === "..") {
+      console.warn("[plugin] skills: 跳过非法 name", name);
+      continue;
+    }
+    if (seen.has(name)) {
+      console.warn(`[plugin] skills: 跳过重复 name "${name}"`);
+      continue;
+    }
+    // path：插件内相对路径，禁绝对与穿越。
+    // ⚠️ 拆成两个布尔量而不是写成一长串条件 —— 那个路径分隔符字符类
+    // （`[/\\]` 形态）在多层转义里极易被写坏，而且写坏后看起来仍像对的。
+    const pathAbsolute =
+      !!path && (path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:/.test(path));
+    const pathTraversal = !!path && path.split(/[/\\]/).includes("..");
+    if (!path || pathAbsolute || pathTraversal) {
+      console.warn(`[plugin] skills: 跳过非法 path "${path}"（${name}）`);
+      continue;
+    }
+    seen.add(name);
+    out.push({ name, path });
+  }
+  return out;
+}
+
+export function parseMcpTools(raw: unknown, processes: PluginProcess[]): PluginMcpTool[] {
+  if (!Array.isArray(raw)) return [];
+  const processIds = new Set(processes.map((p) => p.id));
+  const seen = new Set<string>();
+  const out: PluginMcpTool[] = [];
+  for (const t of raw as unknown[]) {
+    if (!isRecord(t)) continue;
+    const name = asString(t.name);
+    if (!name || !SAFE_ID_RE.test(name)) {
+      console.warn("[plugin] mcpTools: 跳过非法 name", name);
+      continue;
+    }
+    if (seen.has(name)) {
+      console.warn(`[plugin] mcpTools: 跳过重复 name "${name}"`);
+      continue;
+    }
+    const description = asString(t.description);
+    if (!description) {
+      console.warn(`[plugin] mcpTools: "${name}" 缺 description，跳过（模型需要它判断何时调用）`);
+      continue;
+    }
+    const proc = asString(t.process);
+    if (proc && !processIds.has(proc)) {
+      console.warn(`[plugin] mcpTools: "${name}" 声明的 process "${proc}" 不在本插件 processes[] 内，跳过`);
+      continue;
+    }
+    seen.add(name);
+    out.push({
+      name,
+      description,
+      inputSchema: sanitizeSchema(t.inputSchema),
+      ...(proc ? { process: proc } : {}),
+      ...(t.resultKind === "image" ? { resultKind: "image" as const } : {}),
+    });
+  }
+  return out;
+}
+
+/** 收集活动插件声明的快捷键（供 `buildPluginShortcutEntries` 转成条目）。
+ *  独立成函数是因为它被两处消费：快捷键分发器（运行时）与设置面板（展示）。 */
+export function collectPluginHotkeys(manifests: PluginManifest[]): PluginHotkeyDecl[] {
+  return manifests.flatMap((m) =>
+    (m.contributes?.commands ?? [])
+      .filter((c) => c.hotkey?.trim())
+      .map((c) => ({
+        pluginName: m.pluginName,
+        commandId: c.id,
+        title: c.title || c.id,
+        hotkey: c.hotkey!,
+        scope: c.scope,
+        os: c.os,
+      })),
+  );
 }
 
 // ─── scanPlugins — 处理插件目录条目（纯逻辑，容错）───
@@ -367,6 +588,76 @@ export async function getGuiPlatform(): Promise<GuiPlatform> {
 export function pluginSupportsPlatform(platforms: string[], platform: GuiPlatform): boolean {
   if (!platforms || platforms.length === 0) return true;
   return platforms.includes(platform);
+}
+
+// ─── 插件 MCP 工具（contributes.mcpTools）───
+
+/** 插件 MCP 工具在 AI 侧的名字前缀（`plugin_<插件名>_<工具名>`）。 */
+export const PLUGIN_MCP_PREFIX = "plugin_";
+
+/** 聚合后的插件 MCP 工具 —— 带上归属与进程定位信息，供 mcpBridge 转发用。 */
+export interface CollectedMcpTool extends PluginMcpTool {
+  pluginName: string;
+  /** AI 看到的完整工具名（含命名空间）。 */
+  fullName: string;
+  /** 处理它的进程 id（`process` 缺省时由宿主补为该插件唯一进程）。 */
+  processId: string;
+}
+
+/**
+ * 汇总所有**启用**插件贡献的 MCP 工具。
+ *
+ * 调用方传进来的 `manifests` 已经过滤掉禁用插件（见 `getActiveManifests`），
+ * 这里再做两道收口：
+ *
+ * 1. **平台过滤** —— 插件声明了 platforms 且不含当前平台 → 它的工具不暴露
+ *    （否则 AI 会看到一个注定失败的工具）。
+ * 2. **命名空间 + 冲突消解** —— 工具名一律加 `plugin_` 前缀，插件**结构上**
+ *    无法覆盖宿主工具（否则插件声明个 `note_delete` 就能劫持）。插件之间重名时
+ *    后者让位并记 warning。
+ *
+ * `process` 缺省 = 该插件唯一进程；声明了多个进程又没指明 → 跳过（宿主无法定位，
+ * 暴露出去只会是死工具）。
+ *
+ * ⚠️ 本函数**不抛异常**（逐插件 try/catch）：聚合失败会让整个 tools/list 失败，
+ * 而 claude 遇到 tools/list 失败会判定该 server 损坏 → **宿主全部工具一起消失**。
+ * 单个插件坏掉最多丢它自己的工具。
+ */
+export function collectPluginMcpTools(
+  manifests: PluginManifest[],
+  platform: GuiPlatform,
+): CollectedMcpTool[] {
+  const out: CollectedMcpTool[] = [];
+  const taken = new Set<string>();
+  for (const m of manifests) {
+    try {
+      const tools = m.contributes?.mcpTools ?? [];
+      if (tools.length === 0) continue;
+      if (!pluginSupportsPlatform(m.platforms, platform)) continue;
+
+      const procIds = m.processes.map((p) => p.id);
+      for (const t of tools) {
+        let processId = t.process;
+        if (!processId) {
+          if (procIds.length !== 1) {
+            console.warn(`[plugin] ${m.pluginName}/${t.name}: 未指明 process 且本插件有 ${procIds.length} 个进程，跳过`);
+            continue;
+          }
+          processId = procIds[0];
+        }
+        const fullName = `${PLUGIN_MCP_PREFIX}${m.pluginName}_${t.name}`;
+        if (taken.has(fullName)) {
+          console.warn(`[plugin] MCP 工具名冲突，跳过 ${fullName}`);
+          continue;
+        }
+        taken.add(fullName);
+        out.push({ ...t, processId, pluginName: m.pluginName, fullName });
+      }
+    } catch (e) {
+      console.warn(`[plugin] ${m.pluginName} 的 MCP 工具聚合失败，已跳过`, e);
+    }
+  }
+  return out;
 }
 
 /** semver 比较（≥ 返回 true）——插件版本号(0.1.0/0.1.1, 可带 v 前缀/预发布)。纯函数可测。
@@ -513,7 +804,16 @@ export function pluginEventTopic(pluginName: string, event: string): string {
  * 面板/MCP plugin_uninstall）必须走本函数，保证反查判定单一。
  * @throws Error 反查命中时（message 列出 dependents），调用方按普通失败展示
  */
-export async function uninstallPlugin(pluginName: string): Promise<void> {
+/** 卸载结果 —— 调用方据此决定是否提示"需要重启"。 */
+export interface UninstallResult {
+  removed: boolean;
+  /** 插件声明了 needsRestart → 提示用户（用户可以拒绝，那就下次自己重启） */
+  needsRestart: boolean;
+  /** beforeUninstall hook 没跑成（不阻断卸载，但要如实告诉用户"清理可能不完整"） */
+  hookWarning?: string;
+}
+
+export async function uninstallPlugin(pluginName: string): Promise<UninstallResult> {
   const { getSettings } = await import("../stores/settingsStore");
   const disabled = new Set(getSettings().disabledPlugins ?? []);
   const dependents = activeManifests
@@ -529,8 +829,97 @@ export async function uninstallPlugin(pluginName: string): Promise<void> {
   // 否则 node 进程持有文件句柄 → Windows「另一个程序正在使用此文件」删目录失败（用户实测）。
   const manifest = activeManifests.find((m) => m.pluginName === pluginName);
   const processIds = (manifest?.processes ?? []).map((p) => p.id);
-  await invoke("uninstall_plugin", { pluginName, processIds });
+  // 两个声明由前端从 manifest 读出后传给 Rust（Rust 不解析 manifest —— 那时目录即将被删）
+  const out = await invoke<UninstallResult>("uninstall_plugin", {
+    pluginName,
+    processIds,
+    beforeUninstallHook: manifest?.beforeUninstall ?? null,
+    needsRestart: manifest?.needsRestart ?? false,
+  });
   await reloadPlugins();
+  return out ?? { removed: true, needsRestart: false };
+}
+
+/**
+ * 把插件声明的 skill 链接进 `~/.claude/skills/`，并清掉不再需要的链接。
+ *
+ * 为什么要**每次重扫都同步**（而不是安装时做一次）：
+ * 链接是外部状态，会漂 —— 用户手删了、插件被手工挪走、卸载后留下悬空链接。
+ * 幂等同步能让这些情况在下次重扫时自愈；一次性动作则漂了就没人管。
+ *
+ * 失败只 `console.warn`：skill 不可用不该影响插件本身可用。
+ */
+async function syncPluginSkillLinks(manifests: PluginManifest[]): Promise<void> {
+  // 诊断记录 —— 本函数有**三个静默失败点**（base 为空 / invoke reject / 返回 errors），
+  // 而前端 `console.*` **不进 GUI 日志**（实测：日志里查不到任何前端输出，
+  // Tauri 侧也没有 webview console 转发的机制）。所以排查只能靠"自己写文件"。
+  //
+  // 写入位置：`<appdata>/plugins-settings/__skill_diag.json`（复用 save_plugin_settings）。
+  // 排查完可删掉这个文件。**这不是临时调试代码** —— 前端无日志是长期事实，
+  // 保留它能省掉下次同样的"零线索排查"。
+  const diag: Record<string, unknown> = { at: new Date().toISOString(), steps: [] as string[] };
+  const note = (s: string) => (diag.steps as string[]).push(s);
+  const flushDiag = async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const text = JSON.stringify(diag, null, 2);
+    // 主路径：`<appdata>/skill-diag.json` —— 我（排查者）能直接读。
+    // ⚠️ 用 `save_file` 而不是 `save_plugin_settings`：后者 `scope` 缺省是
+    // `"workspace"`，而 workspace scope 在**未绑定工作区时会直接报错** ——
+    // 诊断工具本身不能有这么脆的前置条件。
+    try {
+      const base = await invoke<string>("get_plugins_base_dir");
+      const appdata = String(base).replace(/[\\/]plugins[\\/]?$/, "");
+      await invoke("save_file", { path: `${appdata}/skill-diag.json`, content: text });
+      return;
+    } catch { /* 落到下面的兜底 */ }
+    // 兜底：插件设置目录（显式 global scope）
+    try {
+      await invoke("save_plugin_settings", { plugin: "__skill_diag", patch: diag, scope: "global" });
+    } catch { /* 诊断自身失败就算了 */ }
+  };
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    diag.manifestCount = manifests.length;
+    diag.manifestsWithSkills = manifests
+      .filter((m) => (m.contributes?.skills?.length ?? 0) > 0)
+      .map((m) => `${m.pluginName}:${m.contributes.skills.map((s) => s.name).join(",")}`);
+
+    // 插件根目录（`get_plugins_base_dir`）——Rust 侧的最终防线也要求 source 在此之下
+    const base = await invoke<string>("get_plugins_base_dir").catch((e) => {
+      note(`get_plugins_base_dir 失败: ${e}`);
+      return "";
+    });
+    diag.base = base;
+    if (!base) { note("base 为空 → 提前返回"); await flushDiag(); return; }
+    const baseClean = base.replace(/[\\/]+$/, "").replace(/\\/g, "/");
+
+    const specs: Array<{ name: string; source: string }> = [];
+    for (const m of manifests) {
+      for (const sk of m.contributes?.skills ?? []) {
+        // 拼绝对路径交给 Rust（宿主不解析插件 manifest，与其它 contributes 一致）
+        const rel = sk.path.replace(/\\/g, "/").replace(/^\/+/, "");
+        specs.push({ name: sk.name, source: `${baseClean}/${m.pluginName}/${rel}` });
+      }
+    }
+    diag.specs = specs;
+
+    const out = await invoke<{ linked: string[]; errors: string[] }>(
+      "sync_plugin_skill_links",
+      { specs },
+    ).catch((e) => {
+      note(`sync_plugin_skill_links 失败: ${e}`);
+      return null;
+    });
+    diag.result = out;
+    if (out?.errors?.length) note(`Rust 返回 ${out.errors.length} 个错误`);
+    for (const e of out?.errors ?? []) console.warn("[plugin] skill link:", e);
+  } catch (e) {
+    note(`异常: ${e}`);
+    console.warn("[plugin] syncPluginSkillLinks 失败（skill 可能不可用）:", e);
+  } finally {
+    await flushDiag();
+  }
 }
 
 // ─── reloadPlugins — 插件重扫单一入口（App / FloatingApp / 插件市场共用）───
@@ -545,7 +934,19 @@ export async function uninstallPlugin(pluginName: string): Promise<void> {
 let _reloading = false;
 
 export async function reloadPlugins(): Promise<void> {
-  if (_reloading) return; // 防重入: PANEL_REGISTRY_CHANGED → FloatingApp reload 触发的连锁
+  if (_reloading) {
+    // ⚠️ 防重入的**静默跳过**是排查黑洞：外部看到的是"插件装了但效果没出现"。
+    // 记一笔到诊断文件（见 syncPluginSkillLinks 的说明），否则无从区分
+    // "没跑" 与 "跑了但被跳过"。
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("save_plugin_settings", {
+        plugin: "__skill_diag",
+        patch: { at: new Date().toISOString(), skipped: "reloadPlugins 被防重入跳过（另一次重扫在进行）" },
+      });
+    } catch { /* 诊断自身失败就算了 */ }
+    return;
+  }
   _reloading = true;
   try {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -567,9 +968,18 @@ export async function reloadPlugins(): Promise<void> {
     }
     const { registerPluginPanels } = await import("./pluginPanelBridge");
     registerPluginPanels(manifests);
-    const { stopPluginEventForwarding, startPluginEventForwarding } = await import("./pluginCommandBridge");
+    // 插件贡献的 skill → 链接进 ~/.claude/skills（**幂等**：缺了补、悬空清）。
+    // 放在每次重扫里而不是"安装时建一次"—— 用户手删了链接、插件被手工挪走，
+    // 下次重扫都会自愈。失败只告警：skill 不可用不该阻断插件本身。
+    await syncPluginSkillLinks(manifests);
+    const {
+      stopPluginEventForwarding, startPluginEventForwarding, registerPluginCommands,
+    } = await import("./pluginCommandBridge");
     stopPluginEventForwarding();
     startPluginEventForwarding();
+    // 命令注册必须跟着重扫走：否则卸载/禁用的插件会留下幽灵命令（快捷键仍能触发
+    // 一个已不存在的插件），而新装的插件命令绑了键也点不动。
+    registerPluginCommands();
     const { refreshPluginProcesses, syncPluginProcesses, stopPluginProcessesFor } = await import("./pluginProcessBridge");
     await refreshPluginProcesses();
     // 消失(卸载/禁用)的插件: 其后台进程要停——它们在活动清单里已不存在, 不处理会

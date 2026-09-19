@@ -20,7 +20,7 @@ vi.mock("../services/statusMsgStore", () => ({
 
 import {
   loadDesktops, resetDesktopsLoad, createDesktop, setActiveDesktop,
-  addItem, removeItem, forceSaveDesktop,
+  addItem, removeItem, forceSaveDesktop, reloadDesktops, getActiveDesktopId,
 } from "./desktopStore";
 import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
@@ -46,11 +46,18 @@ describe("desktopStore dirty-set persistence", () => {
   it("saves exactly the mutated desktops (create_item 假成功回归)", async () => {
     await seedDesktops();
 
-    // ── 阶段 0：setActiveDesktop 的 notify 已把 d-a 标脏 → 保存 d-a 快照（合法：任何变更最终落盘）──
+    // 先清掉 seed 阶段留下的脏：`fetchDesktops` 收尾的 notify 会标脏激活桌面，
+    // 不清掉就分不出下面这次写盘到底是谁触发的。
+    await forceSaveDesktop();
+    invokeMock.mockClear();
+
+    // ── 阶段 0：setActiveDesktop **不落盘** ──
+    // 选中态是本地交互态：`desktopToRecord` 没有这个字段，DB 里也没这一列 ——
+    // 写盘存不下任何东西，却会产生一次 db_changed 广播，害得别的 GUI 实例
+    // 无谓 refetch（多开时表现为"我这儿切个标签，那边跟着抖"）。
     setActiveDesktop("d-a");
     await forceSaveDesktop();
-    expect(saves()).toHaveLength(1);
-    expect((saves()[0]![1] as { desktop: { id: string } }).desktop.id).toBe("d-a");
+    expect(saves()).toHaveLength(0);
     invokeMock.mockClear();
 
     // ── 阶段 1：变更非激活桌面 d-b → 保存的是 d-b（含新条目），不是激活的 d-a ──
@@ -91,5 +98,41 @@ describe("desktopStore dirty-set persistence", () => {
     await forceSaveDesktop();
     expect(saves()).toHaveLength(1);
     expect((saves()[0]![1] as { desktop: { id: string } }).desktop.id).toBe("d-a");
+  });
+});
+
+// ── 激活桌面在 refetch 中保持 ──
+//
+// Bug（多桌面切换回弹）：`fetchDesktops` 无条件 `activeDesktopId = desktops[0].id`，
+// 于是任何一次 refetch 都会把用户选的桌面打回第一张。触发路径很常见 ——
+// 跨 GUI 同步（`server:data-changed{desktop}` → reloadDesktops）：**另一个实例**
+// 只要动了桌面数据，本窗口的选中就会跳回去，表现为"点了桌面 2 又自己回到桌面 1"。
+//
+// 同一函数里作者已经为 pan/zoom 等视图态做了保留（注释明说"无条件用服务端 view
+// 重建会让用户刚做的缩放/平移闪回"），**只是漏了选中态**——它同样是本地交互态。
+describe("activeDesktopId survives refetch", () => {
+  it("refetch 保留用户的选中；仅当该桌面已消失才回退第一张", async () => {
+    await seedDesktops();
+    invokeMock.mockClear();
+
+    // 用户点第二张
+    setActiveDesktop("d-b");
+    expect(getActiveDesktopId()).toBe("d-b");
+
+    // 一次跨实例同步引发的 refetch —— 修复前这里会变回 "d-a"
+    await reloadDesktops();
+    expect(getActiveDesktopId()).toBe("d-b");
+
+    // 连续多次（多实例频繁改动时会连发）
+    await reloadDesktops();
+    expect(getActiveDesktopId()).toBe("d-b");
+
+    // 边界：选中的那张真的没了 → 才回退到第一张（兜底不能丢）
+    setActiveDesktop("d-b");
+    invokeMock.mockResolvedValue([
+      { id: "d-a", name: "A", pan_x: 0, pan_y: 0, zoom: 1, show_grid: true, grid_size: 20, snap_to_grid: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), items: [], connections: [] },
+    ]);
+    await reloadDesktops();
+    expect(getActiveDesktopId()).toBe("d-a");
   });
 });

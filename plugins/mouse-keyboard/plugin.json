@@ -1,0 +1,210 @@
+{
+  "pluginName": "mouse-keyboard",
+  "displayName": "鼠标键盘",
+  "version": "0.3.2",
+  "apiVersion": "1.0",
+  "description": "让 AI 能模拟鼠标与键盘操作电脑（点击、拖拽、滚动、按键、输入文字）。内置急停与安全防护。",
+  "icon": "input",
+  "category": "tool",
+  "installType": "standard",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "鼠标键盘",
+        "panelKind": "in-main",
+        "userManaged": true,
+        "content": {
+          "type": "html",
+          "src": "panel.html"
+        },
+        "process": "mouse-keyboard-server"
+      }
+    ],
+    "commands": [],
+    "events": [],
+    "mcpTools": [
+      {
+        "name": "control",
+        "description": "Control the user's mouse and keyboard to operate the computer. Use this when the user asks you to click, type, drag, or otherwise drive another application.\n\nACTIONS (pass via `action`):\n- `screen_info`: no params. Returns all displays (id/x/y/width/height/isMain) and the current mouse position. CALL THIS FIRST to calibrate coordinates.\n- `move`: x,y (absolute) OR dx,dy (relative to the current position), smooth? (bool).\n- `click`: x,y OR dx,dy (omit both to click wherever the cursor is), button? ('left'|'right'|'middle'), double? (bool).\n- `drag`: fromX, fromY, toX, toY, button?, duration? (ms). Presses at the start point, moves smoothly, releases at the end.\n- `scroll`: dx, dy (positive dy scrolls DOWN, positive dx scrolls RIGHT).\n- `key`: key (e.g. 'enter','tab','escape','f5','a','left'), modifiers? (array, e.g. ['ctrl','shift']), hold? (bool — press and keep held).\n- `type`: text (string). Types the text; Chinese and other Unicode work (sent as unicode key events, bypassing the IME).\n- `sequence`: steps (array of action objects, each with its own `action` and params) — RUN SEVERAL ACTIONS IN ONE CALL.\n- `move_indicator`: x,y (absolute) OR dx,dy (relative). Moves the small \"AI is working\" indicator window the user sees.\n- `abort`: stop immediately. Use it if you realize you are doing something wrong.\n\nTHE INDICATOR WINDOW: while you work, a small always-on-top window shows the user what you are doing, with a stop button. It is a REAL window on the screen — clicking at coordinates that fall on it would hit the window instead of your target, so such actions are REFUSED with an error. When that happens (or whenever you need the area it covers), call `move_indicator` to move it out of the way, then retry. Do not fight it — just move it.\n\nWHY `sequence` MATTERS: each separate tool call costs 1-3 seconds of your own thinking/generation time, so one-by-one actions make multi-step work painfully slow. When you already know the full list of steps, send them as ONE sequence call. Any step may carry `repeat: N` (e.g. press PageDown 10 times) — that is far cheaper than N separate calls.\nDO NOT use `sequence` for exploratory work where you must SEE the result before deciding the next step (e.g. open a menu and check whether an item exists) — those must stay one call per step, so you can look at the outcome in between.\n\nSEQUENCE SEMANTICS: steps run in order. On the FIRST failure it stops (later steps may depend on earlier ones — e.g. if clicking a text field failed, typing a password would send it somewhere else) and returns {executed, failedStep, remaining, results}. If the time budget is nearly used up (the host hard-times-out at 10s) it stops early and returns the unfinished steps. IN BOTH CASES the steps listed in `results` HAVE ALREADY BEEN APPLIED — do NOT resend them; just send the `remaining` steps again.\n\nCOORDINATES are in virtual-desktop absolute pixels. To convert a coordinate you measured in a screenshot from the screenshot plugin: absolute = thatDisplay.(x, y) + coordinateInsideImage.\n\nIMPORTANT LIMITS: (1) You CANNOT operate the GUI app itself — if the GUI window is in the foreground the action is refused, because confirmation dialogs must be handled by the user, not by you. (2) Windows running as administrator cannot be controlled (input is silently blocked); the tool reports when this happens. (3) The user can ALWAYS interrupt you by pressing Ctrl+Q (this is the single, documented escape hatch) — when that happens your current call fails with \"user took over\" and every later call is refused until the user resumes. After an interruption you MUST re-check the screen state (screen_info) and ask the user before continuing, because their desktop may have changed.\n\nEXCLUSIVE INPUT (`lock`): for long/precise operations where a stray user click would ruin the result, pass `lock: true` (or \"keyboard\"/\"mouse\"/\"both\") — the user's physical input is swallowed for the duration (their cursor still moves but clicks/keys are dropped), and a small on-screen indicator tells them Ctrl+Q takes control back. The lock is a LEASE: it expires ~10s after your last action and is renewed automatically while you keep working, so it can never be left on by accident.",
+        "process": "mouse-keyboard-server",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "screen_info",
+                "move",
+                "click",
+                "drag",
+                "scroll",
+                "key",
+                "type",
+                "sequence",
+                "move_indicator",
+                "abort"
+              ],
+              "description": "Which operation to perform."
+            },
+            "steps": {
+              "type": "array",
+              "description": "sequence: the actions to run, in order. Each item is a full action object, e.g. {\"action\":\"click\",\"x\":100,\"y\":200}. Items may also carry `repeat: N` to run that step N times (e.g. {\"action\":\"key\",\"key\":\"pagedown\",\"repeat\":10}). Stops at the first failure; already-executed steps are NOT undone.",
+              "items": {
+                "type": "object"
+              }
+            },
+            "stepDelayMs": {
+              "type": "number",
+              "description": "sequence: pause between steps in ms (default 30)"
+            },
+            "repeat": {
+              "type": "number",
+              "description": "sequence step: run this step N times (max 200)"
+            },
+            "x": {
+              "type": "number",
+              "description": "move/click: target X (virtual-desktop absolute pixels). move_indicator: indicator window X."
+            },
+            "y": {
+              "type": "number",
+              "description": "move/click: target Y. move_indicator: indicator window Y."
+            },
+            "dx": {
+              "type": "number",
+              "description": "move/click: X offset relative to the CURRENT cursor position (use instead of x for small adjustments — saves a screen_info round-trip). scroll: horizontal amount. move_indicator: X offset of the window."
+            },
+            "dy": {
+              "type": "number",
+              "description": "move/click: Y offset relative to the CURRENT cursor position. scroll: vertical amount (positive = down). move_indicator: Y offset of the window."
+            },
+            "smooth": {
+              "type": "boolean",
+              "description": "move: move gradually instead of jumping"
+            },
+            "speed": {
+              "type": "number",
+              "description": "move: smooth-move speed (1-10, default 3; larger = slower)"
+            },
+            "button": {
+              "type": "string",
+              "enum": [
+                "left",
+                "right",
+                "middle"
+              ],
+              "description": "click/drag: mouse button"
+            },
+            "double": {
+              "type": "boolean",
+              "description": "click: double-click"
+            },
+            "fromX": {
+              "type": "number",
+              "description": "drag: press point X"
+            },
+            "fromY": {
+              "type": "number",
+              "description": "drag: press point Y"
+            },
+            "toX": {
+              "type": "number",
+              "description": "drag: release point X"
+            },
+            "toY": {
+              "type": "number",
+              "description": "drag: release point Y"
+            },
+            "duration": {
+              "type": "number",
+              "description": "drag: how long the drag takes in ms (default 400)"
+            },
+            "key": {
+              "type": "string",
+              "description": "key: key name, e.g. enter / tab / escape / f5 / a / left"
+            },
+            "modifiers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "key: modifier keys, e.g. ['ctrl','shift']"
+            },
+            "hold": {
+              "type": "boolean",
+              "description": "key: press and keep held (release with a later call)"
+            },
+            "text": {
+              "type": "string",
+              "description": "type: the text to type"
+            },
+            "delayMs": {
+              "type": "number",
+              "description": "type: delay between characters in ms (default from settings)"
+            },
+            "lock": {
+              "type": "string",
+              "enum": [
+                "keyboard",
+                "mouse",
+                "both"
+              ],
+              "description": "DECLARE EXCLUSIVE CONTROL for this call (pass true as a shorthand for \"both\"). While locked, the USER'S physical input is swallowed (their keystrokes/clicks do not reach any app) so your operation cannot be disturbed. Use it for long or precise sequences where an accidental user click would ruin the result (form filling, drag, repeated keys). Do NOT lock for trivial one-shot actions. ⚠️ The user can ALWAYS break out by pressing Ctrl+Q — when they do, your current operation stops immediately and later calls are refused until the user resumes; also treat their desktop state as CHANGED (re-run screen_info and re-confirm the target before continuing). The lock is a LEASE: it expires ~10s after your last action and is auto-renewed while you keep working, so it can never be left on by accident. Returns a `lock` object with the remaining lease while active."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        }
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "mouse-keyboard-server",
+      "command": "node",
+      "args": [
+        "server.cjs"
+      ],
+      "env": {
+        "CLAUDE_PLUGIN_WORKSPACE": "${workspace}"
+      },
+      "startOn": "workspace_bound"
+    }
+  ],
+  "settings": {
+    "abortHotkey": {
+      "type": "string",
+      "title": "急停快捷键",
+      "description": "AI 操作期间按住这个组合会立即停止（任何时候都有效，不需要本窗口在前台）。默认 ctrl+alt+shift+f12",
+      "default": "ctrl+alt+shift+f12"
+    },
+    "blockHostWindows": {
+      "type": "boolean",
+      "title": "禁止 AI 操作本应用窗口",
+      "description": "开着时，如果本应用窗口在前台，AI 的操作会被拒绝 —— 防止 AI 代替你点「允许」之类的确认框。建议保持开启",
+      "default": true
+    },
+    "smoothMoveMs": {
+      "type": "number",
+      "title": "拖拽默认时长（毫秒）",
+      "description": "AI 拖拽时默认用多久完成，越慢越稳（有些应用跟不上瞬移）",
+      "default": 400
+    },
+    "typeDelayMs": {
+      "type": "number",
+      "title": "输入字符间隔（毫秒）",
+      "description": "每个字符之间的间隔。设 0 会让部分应用丢字，一般 2-8 即可",
+      "default": 4
+    },
+    "showIndicator": {
+      "type": "boolean",
+      "title": "AI 操作时显示浮动指示窗",
+      "description": "在屏幕角落显示一个置顶小窗，能看到 AI 正在做什么、最近几步、累计动作数，并带一个停止按钮（停后自动消失）",
+      "default": true
+    }
+  },
+  "platforms": [
+    "windows"
+  ]
+}

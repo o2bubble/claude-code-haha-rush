@@ -117,9 +117,89 @@ function gitErr(err, stderr) {
   return "git 命令失败: " + detail;
 }
 
+// ── MCP 工具入口（POST /__mcp）──
+//
+// **为什么工具由插件自己提供**（2026-09-18 从宿主 mcpBridge 搬来）：
+// 这三个工具原先写死在宿主里，于是**无论插件装没装、启没启用，都出现在 AI 的工具
+// 列表里** —— 卸载插件后 AI 仍会看到并调用，只在运行时才报「进程未运行」。
+// 搬到插件侧后：插件未装/被禁用 → 工具**根本不出现**，与其它插件行为一致。
+// （历史原因：git-viewer 2026-09-09 诞生，而声明式 mcpTools 机制 2026-09-16 才有。）
+
+/** 单响应 diff 上限 —— AI 上下文预算保护（原在宿主侧，随工具一起搬来） */
+const DIFF_LIMIT = 40_000;
+
+function truncateDiff(diff) {
+  if (diff.length <= DIFF_LIMIT) return diff;
+  return diff.slice(0, DIFF_LIMIT)
+    + `\n… [diff 已截断: ${diff.length} 字符, 超出 ${DIFF_LIMIT} 上限]\n(可用 view_diff(file, context=较小编号) 看更小片段)`;
+}
+
+/** runGit 的 Promise 版 —— /__mcp 走 async（现有 /api/* 保持 callback 不动，降低回归面） */
+function runGitP(args) {
+  return new Promise((resolve, reject) => {
+    runGit(args, (err, stdout, stderr) => {
+      // git diff 退出码 1 = 有差异（不是错误）—— 与 /api/diff 同语义
+      if (err && err.code !== 1) return reject(new Error(gitErr(err, stderr)));
+      resolve(stdout || "");
+    });
+  });
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (c) => {
+      data += c;
+      if (data.length > 1_000_000) { req.destroy(); reject(new Error("请求体过大")); }
+    });
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
+}
+
+/** /__mcp 的三个工具实现。返回 `{ok, ...}`（契约见 gui/src/services/pluginRegistry 的 PluginMcpTool）。 */
+async function handleMcpTool(tool, args) {
+  switch (tool) {
+    // 读取工作区单文件 diff（未提交改动）
+    case "view_diff": {
+      const raw = typeof args.file === "string" ? args.file : "";
+      const file = sanitizeRepoPath(raw);
+      if (!file) return { ok: false, error: "file 非法：需仓库内相对路径（禁绝对路径/`..`/反斜杠）" };
+      const context = clampInt(args.context, 3, 0, 60);
+      const diff = await runGitP(["-c", "color.ui=false", "--no-pager", "diff", "-U" + context, "--", file]);
+      return { ok: true, file: raw, diff: truncateDiff(diff) };
+    }
+    // 读取提交历史
+    case "history": {
+      const limit = clampInt(args.limit, 20, 1, MAX_LOG);
+      const stdout = await runGitP(
+        ["-c", "color.ui=false", "--no-pager", "log", "--format=%h%x09%D%x09%s", "-n", String(limit)],
+      );
+      const commits = stdout.split("\n").filter(Boolean).map((line) => {
+        const [hash, refs, subject] = line.split("\t");
+        return { hash: hash || "", refs: refs || null, subject: (subject || "").slice(0, 500) };
+      });
+      return { ok: true, commits };
+    }
+    // 读取分支列表
+    case "branches": {
+      const stdout = await runGitP(
+        ["-c", "color.ui=false", "--no-pager", "branch", "--format=%(refname:short)%09%(HEAD)"],
+      );
+      const branches = stdout.split("\n").filter(Boolean).map((line) => {
+        const [name, head] = line.split("\t");
+        return { name, current: head === "*" };
+      });
+      return { ok: true, branches };
+    }
+    default:
+      return { ok: false, error: `未知工具: ${tool}（本插件提供 view_diff / history / branches）` };
+  }
+}
+
 // ── 路由（只读白名单）──
 
-function handle(req, res) {
+async function handle(req, res) {
   if (!checkGit()) {
     return jsonErr(res, 503, "未找到 git —— 请先安装 git");
   }
@@ -128,6 +208,23 @@ function handle(req, res) {
   const q = u.searchParams;
 
   switch (route) {
+    // POST /__mcp → 宿主 MCP 工具转发入口（契约固定：{tool, args, settings} → {ok, ...}）
+    case "/__mcp": {
+      if (req.method !== "POST") return jsonErr(res, 405, "仅支持 POST");
+      let body;
+      try {
+        body = JSON.parse((await readBody(req)) || "{}");
+      } catch {
+        return json(res, 200, { ok: false, error: "请求体不是合法 JSON" });
+      }
+      const args = body.args && typeof body.args === "object" ? body.args : {};
+      try {
+        return json(res, 200, await handleMcpTool(body.tool, args));
+      } catch (e) {
+        return json(res, 200, { ok: false, error: String((e && e.message) || e) });
+      }
+    }
+
     // GET /api/health → { ok, repo }（面板/进程探测用）
     case "/api/health":
       return json(res, 200, { ok: true, repo: isRepo() });

@@ -1,7 +1,159 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-16（main @44ed947）
+# Handoff — Claude Code GUI 开发 · 2026-09-18（main @9c24a08）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
+
+## 🆕 2026-09-18：pointer 插件「覆盖层透明」**未攻克**（中断，留待下次）
+
+用户要「教鞭」形态的屏幕指示器（pointer 插件）。**功能本体已可用**（画箭头/框/圈/文字、
+点击穿透、自动关闭、硬超时兜底），**只差最后一件事：覆盖层透明** ——
+当前是不透明底色盖住整个屏幕（用户原话："覆盖层不透明，折叠了其他内容"）。
+
+### ✅ 已确认的事实（下次**不用重查**）
+
+1. **窗口层已就绪**：`WS_EX_NOREDIRECTIONBITMAP`（DComp 合成路径）是 WebView2 透明的**必要前提**；
+   宿主日志 + 外部复核均确认 `exstyle=0x00240118`、`NOREDIR=true`、`LAYERED=false` ✓
+   - ⚠️ 该标志**只能在建窗时设**，运行时 `SetWindowLongPtrW` 补设**无效**（实测写入后读回未变）
+   - Tauri 未暴露它 → 已 **vendor + patch** `tauri-runtime-wry`（`gui/src-tauri/vendor/`，
+     改动处标 `PATCH(gui:overlay-transparency)`，共 3 处；升级 Tauri 需重新打）
+2. **`tauri-runtime-wry` 会给透明窗口画一层不透明底色**（softbuffer，**XRGB 无 alpha**，
+   `map(|(r,g,b,_)|...)` 把 alpha 丢了）→ 已 patch 掉（不再创建 surface）
+3. **这台机器支持透明** —— 纯 Win32 对照实验（`temp/probe_layered.py`）里
+   **用户亲眼确认**"蓝色方块是半透明的" ✓
+4. **裸 wry 隔离实验里 `j-noredirect` 方案透明成功**（`temp/wry-probe`，截图可见下层内容）
+   ⚠️ 但**用户未亲口确认过**，只有我的截图判断 —— 下次可先复现一次让用户确认
+
+### ❌ 当前卡点
+
+宿主（Tauri）打完两处 patch 后，**用户实测仍是黑屏**（全屏黑 + 红框箭头可见）。
+两个技术指标都已 ✅（与成功的 `j-noredirect` 一致）→ 说明**还有一处差异没找到**。
+
+**下一步方向（按可能性排序）**：
+
+1. **给 `SetDefaultBackgroundColor` 那条路径加日志**。wry 里设 WebView2 透明背景走的是
+   `ICoreWebView2Environment10` + `ICoreWebView2ControllerOptions3`，且是
+   **`if let Ok(...)` —— 拿不到接口就静默跳过、不报错**（源码在 vendored 目录里，可直接插日志）。
+   裸 wry 与 Tauri 传入的参数组合可能不同 → 这是最可疑的差异点。
+2. **对比 Tauri 与裸 wry 的 webview 创建参数**（`WebviewBuilder` 的 transparent /
+   background_color 各自是否真的传到底）。
+3. **让用户描述"黑"的形态**：纯黑？还是带暗幕的偏黑？
+   （GDI 截图对这类窗口会渲染成黑，**不能作为判据** —— 本项目已被这个假象骗过）
+
+### 🔬 已试过且**无效**的方案（**别再走弯路**）
+
+`tao transparent 建窗` ／ `WS_EX_LAYERED + SetLayeredWindowAttributes` ／
+`SetWindowCompositionAttribute` ／ `DwmEnableBlurBehindWindow`（空区域与整窗口两种）／
+`with_background_color(0,0,0,0)` ／ `--disable-gpu-compositing` —— **全部是"白"**；
+**完全空白页面**（决定性对照）→ **纯白 → 白来自 WebView2 内容层**。
+
+### 🧰 可复用排查工具（都在 `temp/`）
+
+| 文件 | 用途 |
+|---|---|
+| `temp/wry-probe/` | 裸 tao+wry 最小实验工程（**与宿主同版本**），多方案一键跑：`cargo run -- <方案名>` |
+| `temp/probe_layered.py` | 纯 Win32 layered 对照（**证明系统支持透明**） |
+| `temp/probe_auto.py` | 自动读像素验证（⚠️ 必须跑消息泵，否则窗口不绘制） |
+| `temp/probe_native_pointer.py` | **原生绘制教鞭**（PIL 抗锯齿 + `UpdateLayeredWindow`）—— 备选路线，已验证能画出箭头/中文/暗幕 |
+| `temp/activate_gui.py` · `activate_window.py` | 截图前把目标窗口切到前台 |
+
+### 🔀 备选路线：**原生绘制**（用户评价："其实非常完美"）
+
+`temp/probe_native_pointer.py` 已验证可行 —— 完全**绕开 WebView2**：
+PIL 画图（2x 超采样抗锯齿）+ `UpdateLayeredWindow` 逐像素 alpha 上屏。
+代价：绘制从 HTML 移到宿主侧 + 自己管窗口生命周期。**这不是退路，是并列选项。**
+
+### 📌 本批已发布
+
+- **GUI `2026.09.18.5`**（两端）：vendor patch + 硬超时 + 诊断日志
+- **pointer 插件 `0.1.1`**（两端）：修 source 拼写（曾致窗口关不掉）+ clear 语义 + hardTtlSec
+  ⚠️ **插件功能尚不完整**（覆盖层不透明会遮屏）—— 用户装了会踩坑，**考虑先下架或标注**
+
+### 💡 方法论教训（已写入记忆）
+
+1. **不熟的技术先查资料，别闷头穷举** —— 这个答案（"WebView2 透明需走 DComp 合成路径"）
+   **有现成文档**；我闷头试了 10 种方案 + 反复打断用户看屏幕，而**用户一搜就给出了关键思路**。
+   → 记忆：`feedback_search_before_brute_force`（试 2~3 次没头绪 = 硬刹车点）
+2. **不要用 GDI 截图判断透明** —— 对 layered/DComp 窗口会把透明区渲染成黑，**会得出反向结论**
+   （本项目被骗过一次）。要看窗口状态就直接读 `exstyle`。
+3. **对照实验一刀劈开问题** —— "完全空白页面"那次直接把嫌疑锁死在 WebView2 内容层。
+
+---
+
+## 🆕 2026-09-16 续③：插件系统能力扩展 + 首个自研插件（截屏）
+
+用户要一个**截屏工具**并明确要求**做成真插件**（可独立更新/禁用/上架），接受改造宿主。
+
+### 关键判断：哪些能力必须由宿主提供
+
+截屏是 OS 能力，而插件系统原本**四个硬阻塞**（都卡在宿主侧）：
+
+| 阻塞 | 说明 |
+|---|---|
+| 插件命令绑不了快捷键 | 快捷键表是静态数组，插件命令也从没注册进 `commandRegistry` |
+| 没有全局热键 | 只有 `window.addEventListener("keydown")`（有焦点才生效） |
+| 命令到不了插件 | 只广播给**已挂载的面板 iframe**，面板没开就静默丢弃 |
+| 插件 iframe 上行只有 3 种 | `open-panel`/`float-drag-start`/diff·chip，没有投递能力 |
+
+而**抓屏本身归插件** —— 插件 Node 进程 `Command::new` spawn、**无沙箱无白名单**，
+可自由跑 `powershell.exe` / `screencapture`。
+
+### 宿主新增的 5 项通用能力（非截屏专属）
+
+1. **`open/close_plugin_overlay`** —— 插件可开**铺满某显示器、置顶、无边框**的窗口。
+   ⚠️ 混合 DPI 的关键：builder 的 `position`/`inner_size` 只吃**逻辑**像素，故先隐藏建窗、
+   再用**物理**坐标 `set_position/set_size` 贴合，最后 `show()`。
+2. **插件命令可绑快捷键** —— `commands[]` 加 `hotkey`/`scope`/`os`；补上
+   `registerPluginCommands()`（原来插件命令**从不注册**，`commandRegistry.execute` 是 no-op）。
+3. **全局热键**（`tauri-plugin-global-shortcut`）—— 差集增量更新、失败上报 UI、
+   `reconcile` 串行化（重叠会误报"已被占用"）。
+4. **插件上行投递**：`chat-reference` / `desktop-image` / `write-workspace-file`，
+   全部白名单校验，分支**加在 chip 兜底之前**。
+5. **命令直达插件进程**（`POST /__command`）—— 面板没开时唯一的通路；进程可返回
+   `{host:[动作]}` 请宿主代执行。
+
+### 🔴 排查中发现的三个 bug（都已修）
+
+| bug | 影响 |
+|---|---|
+| **CDP 调试参数破坏所有次级窗口** | `additional_browser_args` 是 **WebView2 environment 级**选项，而一个 user data folder 只允许一个 environment。早先只给主窗加了 `--remote-debugging-port` → 其它窗口 environment 不一致 → **浮窗/overlay/外链窗全部建不出来**（`HRESULT 0x8007139F`）。**只要带 `CCGUI_CDP_PORT` 启动，浮窗就是坏的**。修法 = 抽 `with_debug_args()` 应用到全部 4 个窗口创建点 |
+| 命令送进程时按错前缀匹配 | `PluginProcessInfo.processId` 是**裸 id**，不带 `plugin:<name>:` 前缀 → 静默不匹配、命令永远送不到 |
+| overlay 上行监听重复注册 | 一次拖框往输入框插 **3 个**相同引用（StrictMode/HMR 都会重复注册，且不报错） |
+
+### 截屏插件（`plugins/screenshot/`，v0.1.0，已上架 96 + 云）
+
+- 三种模式：全屏 / 区域 / 窗口。默认 `Ctrl+Shift+X` 区域截图（**全局热键**）
+- 三个去向：插入聊天框 / 发超桌 / 存文件；默认存 `<工作区>/.claude/screenshots/`
+- **区域框选用"冻结位图"**：先抓屏 → 铺满屏幕让用户框选 → 从这张图上裁。
+  好处：所见即所截 + **不需要透明窗口**（避开 transparent + always_on_top + 点击穿透）
+- **分平台不对称是刻意的**：macOS 三种模式全交给系统 `screencapture`（原生体验、零依赖）；
+  Windows 只有全屏走 PowerShell+.NET，区域自绘（系统那条新协议要求 MSIX 打包应用，我们用不了）
+- **只抓光标所在那块显示器** —— 冻结图要显示在只覆盖一块屏的 overlay 里，抓整个虚拟桌面
+  会让多屏坐标错位（静默截错区域）。overlay 也开在同一块屏上
+
+**实测**（真实 WebView2）：全屏 → 投递聊天框 ✅；区域 → 开 overlay → 拖框 500×300 →
+裁剪落盘**精确 500×300** → 投递 → 窗口自关 ✅；裁剪坐标**逐像素正确**；
+全局热键**失焦时触发**成功 ✅
+
+### 顺带修的桌面 bug：切换标签后自己跳回第一张
+
+用户报「点桌面 2 自动切回桌面 1，**我感觉还是同步的问题**」—— 判断准确。
+实测抓到调用栈：`notifyDesktopChanged ← fetchDesktops ← reloadDesktops`。
+
+根因两处，都是**把本地交互态当服务端数据**：
+
+1. `fetchDesktops` 无条件 `activeDesktopId = desktops[0].id`。同函数里作者**已经**为
+   pan/zoom 做了保留（注释明说"无条件重建会让缩放/平移闪回"）—— **只是漏了选中态**。
+2. `setActiveDesktop` 会触发一次**无意义写盘**：`desktopToRecord` 里根本没有选中态字段、
+   DB 也没这一列 → 存不下任何东西，却产生 db_changed 广播，**害得别的实例白刷一次**。
+   多开窗口时这就是"我这儿切标签，那边抖"。已拆出 `notifyDesktopViewChanged()`（只广播不落盘）。
+
+⚠️ **触发条件是开着多个 GUI 实例** —— 自回声过滤本身是对的
+（`server_client.rs`: `change.origin == client_id → continue`），是**另一个实例**的改动引发 refetch。
+
+### 本版发布
+
+**2026.09.16.2** 已上传 96 + 云（只重建 gui；`gui.zip` 两端字节数一致）。
+截屏插件 `screenshot@0.1.0` 已上架两端市场（已签名）。
 
 ## 🆕 2026-09-15 续②：mac 发版被误删（**两个删除点**，已修复 + 通道已恢复）
 
@@ -179,17 +331,25 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 
 ## 当前状态
 
-- **分支**: `main`（`99d3c0e`）；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
-- **本批主题**: CF Tunnel 入口 + 云性能事故修复 + 设置面板三档切换 + **插件浮窗全透明修复**
-- **Windows 版本**: **两端均 `2026.09.15.4`**
-  —— 期间用户自行发过 `.15.2`（WebSearch 重试）/ `.15.3`（浮窗外壳+拖动+会话面板）；
-     `.15.4` 是补发的 color-scheme 修复（`.15.3` 不含该修复）
-  ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 这个孤儿版本（号比用户已发的
-     `.15.2/.15.3` 低，客户端永远拿不到），还白挤掉了 `.14.5`
+- **分支**: `main`（`9c24a08`）；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
+- **本批主题**: **pointer 插件（屏幕指示器）+ 覆盖层透明排查（未攻克，见上）**
+- **Windows 版本**: **两端均 `2026.09.18.5`**
+  —— 本轮连续五个版本（`.18.1`~`.18.5`）都在改覆盖层：全黑 → 关不掉 → 仍不透明 → **仍不透明（未攻克）**
+  —— 可用能力：覆盖层点击穿透、自动关闭、**硬超时兜底**（`hardTtlSec`，防"关不掉锁死屏幕"）
+  —— ⚠️ 覆盖层**仍不透明**：目前的 pointer 插件会遮住屏幕，`duration` 到了才自动消失
+- **pointer 插件**: **`0.1.1`**（两端）；⚠️ 功能不完整（覆盖层不透明）—— **考虑先下架或标注**
+- **⚠️ 依赖已 vendor + patch**: `gui/src-tauri/vendor/tauri-runtime-wry`（改动标 `PATCH(gui:overlay-transparency)`）
+  —— **升级 Tauri 时必须重新应用那 3 处补丁**，否则 transparent 窗口会退化成白色实心
+- ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 孤儿版本（号比用户已发的低，
+     客户端永远拿不到），还白挤掉了 `.14.5`
 - **macOS 云端版本**: **`2026.09.15.6`**（6 组件齐全；含 `.15.5` 的更新 bug 修复 + `.15.6` 的 MCP/终端 PATH 注入）
   —— 更早的 `.15.1` 曾被误删致 macos 404，见「续②」；**构建：GitHub Actions（免费，push 自动触发）或 Codemagic（快，付费）**
-- **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；300 条记忆；**已加 bearer 鉴权**
-- **Memory 服务（云）**: 镜像 `claude-memory:20260912`，端口 `8080` MCP / `40021` Web
+- **Memory 服务（96）**: 容器 `claude-memory`，镜像 **`claude-memory:20260914-auth`**，端口 **`14020`(MCP) / `40021`(Web)**；**379 条**；**已加 bearer 鉴权**
+- **Memory 服务（云）**: 端口 `8080` MCP / `40021` Web；**234 条**（2026-09-18 与 96 对账补齐 project scope 后）
+  - **两端同步方法**（含三个坑：保 ID / 两阶段导入 / 跨 scope 依赖闭包）见记忆
+    「记忆服务两端同步方法（96 ↔ 云）」；脚本在 `temp/mem-sync-*.py`（temp 被 gitignore，方法在记忆里可重建）
+  - ⚠️ **同步是持续性的**：本机存的记忆进 96，**云会落后** —— 需要时重跑那套脚本
+  - ⚠️ 两端是**分歧关系不是从属**：2026-09-18 对账时云有 27 条 96 没有的（**故意保留，未单向覆盖**）
 - **release-platform（云）**: 镜像 **`claude-release-platform:20260914`**（compose 已从 `build: .` 改为 `image:`）
 - ⚠️ **本机 memory MCP 指向的是 96**（`~/.claude.json` → `http://192.168.186.96:14020/mcp`）——**不是云**
 - **凭据**: 云更新服务 key 已于 2026-09-14 轮换；发布脚本读环境变量
@@ -383,15 +543,15 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 ## 热数据
 
 ### Git 状态
-- branch `main`，HEAD `99d3c0e`；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
+- branch `main`，HEAD `ec65bd9`；工作区干净；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
 
 ```text
-99d3c0e fix(mac): release_mac.py 的 verify 必崩 — 非 ASCII 撞 GBK 控制台
-8b2b9a6 fix(release-platform): 覆盖重传不再跨平台 rmtree — mac 被删的直接元凶
-ef43d1d fix(release-platform): 版本清理按平台各算 — mac 版本不再被 windows 发布挤掉
-16a41f3 fix(gui): 暗色下插件浮窗「全透明」失效 — iframe 色系需与内嵌文档对齐
-ea7c947 fix(publish-plugin): 显式声明 UA — 云市场在 Cloudflare 后面会拦 urllib 默认 UA
-6cc1d1a feat(gui): 插件 iframe 浮窗的拖动支持 — postMessage 协议 + 拖动遮罩
+ec65bd9 fix(desktop): 切换桌面后自己跳回第一张 — refetch 无条件重置选中态
+16fa863 feat(plugin): 截屏插件 — 三种模式 + 快捷键 + 三个去向
+23787a1 feat(plugin): overlay 窗口的插件上行能投递到主窗 + 统一上行分派
+26ca8d2 feat(plugin): 全局热键（OS 级）—— 插件快捷键在窗口失焦时也生效
+01d7797 feat(plugin): 插件命令可绑快捷键（含全局热键的注册链路）
+944a4dd feat(plugin): 插件全屏 overlay 窗口能力 + 修快捷键持久化 bug
 41bc9d2 feat(gui): 浮窗外壳可配置 — 支持无标题栏 / 透明的浮动元素
 0e69f7a chore(mac): 发布脚本修正过时说明 + 忽略 manifest 产物
 9144526 fix(websearch): 本地兜底搜索加重试 + 区分失败原因
@@ -412,7 +572,11 @@ e81ba5a fix(api): thinking-only 消息被剥离后成空数组 → 400 卡死会
 ### Memory 服务（96）
 - 容器 `claude-memory`，镜像 `192.168.186.96:5000/claude-memory:20260914-auth`
 - 端口 `14020`→容器 8080(MCP) / `40021`(Web+REST)；96 宿主库 `/data/claude-memory/claude-memory.db`（云为 `/data/memory/claude-memory.db`，挂载路径两边不同）
-- 数据 **300 条**（记忆整理后；原 303，删 7 条时效流水 + 合并 1 对 + 加经验）；标签 818 / 关联边 239
+数据 **379 条**（2026-09-18 同步时更新；09-14 整理后曾是 300 条）
+云端 **234 条**（同日对账补齐 project scope 后）—— ⚠️ 两端是**分歧关系不是从属**，
+云有 96 没有的记忆（当时 27 条），同步时**不要单向覆盖**
+**两端同步方法**见记忆「记忆服务两端同步方法（96 ↔ 云）」；脚本 `temp/mem-sync-*.py`
+（temp 被 gitignore；三个坑：保 ID / 两阶段导入 / 跨 scope 依赖闭包）
 - ⚠️ **96 与云的 memory token 不同值**（两套独立部署），见 GUI 笔记「账号密码」
 - 部署前备份：`claude-memory.db.bak.20260911` / `.20260914`
 
@@ -429,10 +593,21 @@ e81ba5a fix(api): thinking-only 消息被剥离后成空数组 → 400 卡死会
 
 ### 测试基线
 - Memory MCP：`cd extensions/memory && python -m unittest discover -s tests` → **43 passed**
-- GUI 前端：`cd gui && bun run test` → **723 通过**（59 文件）· `bun run build`（含 `tsc`）干净
+- GUI 前端：`cd gui && bun run test` → **794 通过**（62 文件）· `bun run build`（含 `tsc`）干净
+- 引擎侧：`bun test <file>`（根目录，如 `src/utils/*.test.ts`）—— 注意**与 gui/ 的 vitest 是两套**，
+  改 `src/` 下的东西只跑 gui/ 会漏（2026-09-15 PATH 注入修复就因此漏测另一半）
 - Rust：`cargo test --lib`（gui/src-tauri）→ 全部通过（含 `update::tests` 6 项）
 
 ### 发布版本 (dist/release)
+- **2026.09.16.2**（插件系统能力扩展 + 截屏插件 + 桌面切换修复；仅 gui）
+  —— ✅ **两端已上传**，9/9 组件可下载、`gui.zip` 两端一致（`24,360,139`）
+  —— 附带：截屏插件 `screenshot@0.1.0` 上架两端市场（已签名）
+- **2026.09.16.1**（MCP 子进程 PATH 注入 + 插件 runtime 补 `bin/`；仅 gui+claude）
+  —— ✅ **两端都已上传**，9/9 组件可下载、`gui.zip` 两端字节数一致（`24,296,264`）
+  —— gui sha `413e0cd7…`；claude sha `02c33cb3…`；其余 7 组件从 `.15.4` 按 sha 复用
+  —— 🎯 **补发云时顺带验证了跨平台删除修复**：云上 `.15.1` 是 **macos 独占**且为 mac 侧
+     第 3 个版本，上传 windows `.16.1` 触发 prune 后 —— 旧代码会 rmtree 掉整个 `.15.1`
+     （正是 09-15 事故的重演），实测**保住了**，被删的是 windows 侧超额的第 4 个 `.15.2`
 - **2026.09.15.4**（暗色下插件浮窗「全透明」失效修复；仅 gui，其余复用 .15.3）
   —— ✅ **两端已上传**，9/9 组件可下载、`gui.zip` 两端字节数一致（`24,294,167`）
   —— gui sha `8f41aef6…`；claude 与 .15.3 同 sha（`d499e8c6…`）故未重传
@@ -742,7 +917,7 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
       本机 `~/.claude.json` 已同步加 `headers.Authorization`（**需重启会话生效**）。见部署手册 §8
 - [ ] **Web UI 复核** —— 96 `http://192.168.186.96:40021/`（登录框填 token）/
       云 `https://mem.17lumen.cloud`；搜索走新 FTS5 + jieba
-- [ ] **复核 GUI 更新面板** —— 96 + 云均已发 `.15.4`；客户端点「检查更新」应提示更新到该版
+- [ ] **复核 GUI 更新面板** —— 96 已到 `.16.1`；客户端点「检查更新」应提示更新到该版
 - [x] **mac 通道恢复** —— 2026-09-15 完成：两处删除点修好并部署后，用 `~/Downloads`
       的既有产物重发 `2026.09.15.1`，云端 6 组件齐全。见「续②」节
       （构建：GitHub Actions 免费自动触发 / Codemagic 快但付费）

@@ -17,10 +17,16 @@
 // 内存里解析成结构化对象使用。**`mod` 抽象是必需的**：它表示「Ctrl（Win/Linux）
 // 或 Cmd（mac）」，让「切换左面板」这类概念在两平台用同一份配置表达。
 //
-// ## B（OS 级全局热键）的预留
-// 每条带 `scope` 与可选 `os` 字段。将来接 Tauri global-shortcut 时，
-// 筛选 `scope === "os"` 的条目即可直接注册（该插件要的正是「键 + 作用域」）。
-// **本期不实现** —— 只保证数据形状够用。
+// ## 两种作用域（`scope`）
+//   · `app`（默认）—— 窗内分发器处理，**GUI 有焦点才生效**。
+//   · `os` —— 走 OS 级全局热键，**窗口不在前台也生效**（见 globalShortcutService）。
+//     代价：它从**所有应用**手里抢键，故键位校验更严（须有真正的修饰键或功能键，
+//     见 `isGlobalHotkeyBindable`）；且注册可能因被别的软件占用而失败 ——
+//     失败必须上报（设置面板显示徽标），不能静默。
+//     `os?: "win" | "mac"` 可限定平台。
+//
+// ⚠️ 两种作用域**互斥**：窗内分发器会过滤掉 `scope === "os"` 的条目，否则
+// GUI 聚焦时同一次按键会触发两次。
 
 import { Commands } from "./commands";
 
@@ -60,6 +66,14 @@ export interface ShortcutEntry {
   contextual?: boolean;
   /** i18n 键（用于设置面板显示） */
   labelKey: string;
+  /**
+   * 直接显示名 —— 用于**没有 i18n 键**的条目（插件命令）。
+   * 优先级：`label` > `t(labelKey)`。插件是运行时数据，不可能预先有译文；
+   * 若让 `t(labelKey)` 兜底会把键名印在界面上（项目已踩过这个坑）。
+   */
+  label?: string;
+  /** 来源。`plugin` 条目在设置面板里另起一组，且不受内置条目的 i18n 断言约束。 */
+  source?: "builtin" | "plugin";
   /** 分组（设置面板分类显示） */
   group: string;
 }
@@ -360,3 +374,107 @@ export const DEFAULT_SHORTCUTS: ShortcutEntry[] = [
     group: "files",
   },
 ];
+
+// ── 插件快捷键条目 ──
+//
+// 插件在 `plugin.json` 的 `commands[]` 里声明 `hotkey`，运行时转成 ShortcutEntry。
+// **不进 DEFAULT_SHORTCUTS**（那是静态内置表，会打破 i18n 完整性断言）。
+
+/** 插件声明的快捷键（由 pluginRegistry 解析后传入 —— 避免 shortcuts.ts 反向依赖插件层，
+ *  也便于纯函数单测）。 */
+export interface PluginHotkeyDecl {
+  pluginName: string;
+  commandId: string;
+  /** 显示名（插件给的命令标题） */
+  title: string;
+  /** 插件建议的键位（未归一化，构建时归一） */
+  hotkey: string;
+  scope?: ShortcutScope;
+  os?: "win" | "mac";
+}
+
+/**
+ * 把插件命令声明转成快捷键条目。
+ *
+ * ⚠️ **条目 id 必须等于 `commandId`**，且都用 `plugin:<name>:<cmd>` 形式 —— 因为：
+ *  ① id 是用户覆盖配置的 key（`settings.shortcuts[id]`），必须与插件命令一一对应；
+ *  ② `resolveBindings` 的合并方向是 `defaults.map(...)`，插件条目必须出现在
+ *     **defaults 那一侧**，用户给插件改的键才不会被丢弃；
+ *  ③ dispatcher 命中后走 `commandRegistry.execute(commandId)`，故 commandId 必须
+ *     是**已注册进 commandRegistry 的真实命令名**（见 pluginCommandBridge）。
+ */
+export function buildPluginShortcutEntries(decls: PluginHotkeyDecl[]): ShortcutEntry[] {
+  return decls
+    .filter((d) => d.pluginName && d.commandId && d.hotkey?.trim())
+    .map((d) => {
+      const id = `plugin:${d.pluginName}:${d.commandId}`;
+      return {
+        id,
+        keys: normalizeKeys(d.hotkey),
+        commandId: id,
+        scope: d.scope === "os" ? "os" : "app",
+        ...(d.os ? { os: d.os } : {}),
+        // 插件是运行时数据，没有 i18n 键 —— 靠 label 显示（面板侧 `label ?? t(labelKey)`）
+        label: d.title || d.commandId,
+        source: "plugin" as const,
+        labelKey: "",
+        group: "plugins",
+      };
+    });
+}
+
+// ── 全局热键（OS 级）辅助 ──
+
+/**
+ * 该键位能否用作**全局热键**（`scope: "os"`）。
+ *
+ * 比应用级多一条约束：全局热键是从**所有应用**手里抢键 —— 只按 Shift 的组合
+ * （如 `Shift+A`）会把其它应用里的正常输入吃掉，必须要求至少一个真正的修饰键
+ * （mod/ctrl/alt），或功能键（F1…F24，本身不参与文本输入）。
+ */
+export function isGlobalHotkeyBindable(keys: string): boolean {
+  const p = parseKeys(keys);
+  if (!isBindableKeys(keys)) return false;
+  if (p.mod || p.ctrl || p.alt) return true;
+  return /^f([1-9]|1[0-9]|2[0-4])$/.test(p.key);
+}
+
+/** 规范化键名 → accelerator 的按键段（`Code` 枚举名）。
+ *  未收录的键返回 undefined（该条目不注册，而不是注册一个错键）。
+ *
+ *  ⚠️ 键名以 **`parseKeys` 的产物**为准，不是用户写的原文：
+ *  `parseKeys` 只对 `plus` 做了特判（→ 键名 `"+"`，因为 `+` 是分隔符没法直接写），
+ *  其余符号原样留作键名（`"mod+,"` → 键名 `","`）。所以下表的符号键要用
+ *  **字面字符**作 key，写 `comma` 反而永远命中不了。 */
+const KEY_TO_CODE: Record<string, string> = {
+  ...Object.fromEntries("abcdefghijklmnopqrstuvwxyz".split("").map((c) => [c, `Key${c.toUpperCase()}`])),
+  ...Object.fromEntries("0123456789".split("").map((d) => [d, `Digit${d}`])),
+  ...Object.fromEntries(Array.from({ length: 24 }, (_, i) => [`f${i + 1}`, `F${i + 1}`])),
+  arrowup: "ArrowUp", arrowdown: "ArrowDown", arrowleft: "ArrowLeft", arrowright: "ArrowRight",
+  escape: "Escape", tab: "Tab", enter: "Enter", backspace: "Backspace", delete: "Delete",
+  home: "Home", end: "End", pageup: "PageUp", pagedown: "PageDown", insert: "Insert",
+  // 空格：`parseKeys` 不特判，用户可能写 " "（formatKeys 的产物）或 "space"
+  " ": "Space", space: "Space", spacebar: "Space",
+  // 符号：字面字符（见上方注释）
+  "+": "Plus", "-": "Minus", "=": "Equal",
+  ",": "Comma", ".": "Period", "/": "Slash", ";": "Semicolon",
+  "'": "Quote", "`": "Backquote", "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash",
+};
+
+/**
+ * 规范化键位 → Tauri global-shortcut 的 accelerator 串（如 `"CommandOrControl+Shift+A"`）。
+ * 返回 null 表示该键位无法表达（调用方应跳过注册并上报，而不是猜一个）。
+ */
+export function toAccelerator(keys: string): string | null {
+  const p = parseKeys(keys);
+  if (!p.key) return null;
+  const code = KEY_TO_CODE[p.key];
+  if (!code) return null;
+  const parts: string[] = [];
+  if (p.mod) parts.push("CommandOrControl");
+  if (p.ctrl) parts.push("Control");
+  if (p.alt) parts.push("Alt");
+  if (p.shift) parts.push("Shift");
+  parts.push(code);
+  return parts.join("+");
+}

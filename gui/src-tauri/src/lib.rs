@@ -321,6 +321,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        // OS 级全局热键（GUI 失焦也生效）。**注册由前端发起**（见
+        // services/globalShortcutService.ts）：快捷键表的唯一真相源在前端
+        // （shortcuts.ts + settings.shortcuts），在 Rust 再建一份"键位→动作"映射
+        // 会立刻产生两份会漂移的真相。
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // GV-T1: 插件面板 iframe 内容源 —— plugins://<pluginName>/<src> 从
         // app_data_dir()/plugins/<pluginName>/ 读静态文件。插件 HTML 与 GUI
         // 同源（allow-same-origin 沙箱下可 fetch GUI / 本地接口）；路径穿越
@@ -368,6 +373,13 @@ pub fn run() {
                 }
             }
 
+            // 清理卸载时改名留下的 `.trash-*`（见 uninstall_plugin 的改名兜底）：
+            // 那时目录被占用删不掉，只能先改名让卸载"成功"。现在重启过了，
+            // 占用者（孤儿进程）已被上面的清扫杀掉，这里真删。
+            if let Ok(root) = plugins_base_dir(app.handle()) {
+                cleanup_trash_plugin_dirs(&root);
+            }
+
             // Create the main window programmatically with a per-instance WebView2
             // user data folder. WebView2 only allows one browser process per data
             // folder — a shared default folder makes a second GUI instance's webview
@@ -387,25 +399,8 @@ pub fn run() {
             // （点击 http(s) 链接由前端委托走 open_url_window 内置窗口打开）
             .on_navigation(is_allowed_navigation);
 
-            // 调试设施：CCGUI_CDP_PORT=<port> 时给主窗口开 WebView2 远程调试（CDP），
-            // 便于用 Playwright 连进来查 DOM / 计算样式 / 驱动 UI。
-            //
-            // 为什么必须在这里注入：wry 是 `additional_browser_args.unwrap_or_else(默认)`
-            // 之后**无条件** set_additional_browser_arguments()，会覆盖
-            // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS 环境变量 —— 所以那个 env 传不进去
-            // （实测端口不监听）。另外 wry 一旦拿到自定义 args 就**不再**使用它的默认值，
-            // 故这里必须把默认参数一并带上，否则会丢「去迷你菜单 / 去 SmartScreen」。
-            // 未设该 env 时行为与之前完全一致。
-            let main_builder = match std::env::var("CCGUI_CDP_PORT") {
-                Ok(port) if !port.trim().is_empty() => {
-                    main_builder.additional_browser_args(&format!(
-                        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                         --remote-debugging-port={}",
-                        port.trim()
-                    ))
-                }
-                _ => main_builder,
-            };
+            // 调试：CCGUI_CDP_PORT=<port> 开 WebView2 远程调试。**所有窗口统一走这个函数**。
+            let main_builder = with_debug_args(main_builder);
 
             // Windows: 自绘标题栏（前端 TitleBar 组件），关掉系统标题栏让工具栏
             // 与标题栏合并成一条。mac 保留原生装饰 —— 红绿灯与系统整合更好，
@@ -578,6 +573,12 @@ pub fn run() {
             open_system_terminal,
             spawn_gui_instance,
             create_floating_window,
+            open_plugin_overlay,
+            show_plugin_overlay,
+            close_plugin_overlay,
+            open_plugin_indicator,
+            move_plugin_indicator,
+            close_plugin_indicator,
             open_url_window,
             open_in_explorer,
             guard::guard_event,
@@ -589,6 +590,7 @@ pub fn run() {
             load_skills_i18n,
             close_me,
             get_skills_dir,
+            sync_plugin_skill_links,
             install_skill,
             install_package,
             install_plugin_package,
@@ -601,6 +603,7 @@ pub fn run() {
             note_get,
             note_list,
             note_search,
+            count_gui_instances,
             note_associate,
             note_disassociate,
             note_tags,
@@ -2095,6 +2098,40 @@ fn set_default_profile(profile_name: String) -> Result<(), String> {
 /// process per data folder — two instances share the default folder make
 /// the second one's webview fail with HRESULT 0x8007139F. Keying by PID keeps
 /// every concurrently-running instance isolated.
+/// CDP 调试参数（`CCGUI_CDP_PORT=<port>`）—— **必须应用到每一个窗口**。
+///
+/// ⚠️ 这不是"给某个窗口多加一个参数"那么局部的事：`additional_browser_args` 是
+/// **WebView2 environment 级**的选项（wry 在 `create_environment` 里调
+/// `set_additional_browser_arguments`，见 wry webview2/mod.rs），而**同一个 user data
+/// folder 只允许存在一个 environment**。若只给主窗加、其它窗口不加，第二个窗口建
+/// webview 时 environment 参数不一致 → `HRESULT 0x8007139F`（ERROR_INVALID_STATE）
+/// → **所有次级窗口全部建不出来**（浮窗 / overlay / 外链窗）。
+///
+/// 这个坑真的踩过：2026-09-16 排查 overlay 窗口建不出来时，最初误判为 overlay 实现
+/// 有问题，实际是当时只给主窗加了 CDP 参数 —— 对照实验里连**已发布的**
+/// `create_floating_window` 都以同一 HRESULT 失败，才定位到根因。
+///
+/// 另外两条约束（同一处代码）：
+/// ① wry 是 `additional_browser_args.unwrap_or_else(默认)` 之后**无条件**
+///    `set_additional_browser_arguments()`，会覆盖 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
+///    环境变量 —— 所以那个 env 传不进去（实测端口不监听）。
+/// ② wry 一旦拿到自定义 args 就**不再使用它的默认值**，故必须把默认参数一并带上，
+///    否则会丢「去迷你菜单 / 去 SmartScreen」。
+///
+/// 未设该 env 时返回原 builder，行为与加此功能前完全一致。
+fn with_debug_args<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: tauri::WebviewWindowBuilder<'a, R, M>,
+) -> tauri::WebviewWindowBuilder<'a, R, M> {
+    match std::env::var("CCGUI_CDP_PORT") {
+        Ok(port) if !port.trim().is_empty() => builder.additional_browser_args(&format!(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+             --remote-debugging-port={}",
+            port.trim()
+        )),
+        _ => builder,
+    }
+}
+
 fn webview_data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
     let base = app
         .path()
@@ -2190,11 +2227,11 @@ fn create_floating_window(
     let title_clone = title.clone();
     let label_clone = label.clone();
     std::thread::spawn(move || {
-        match tauri::WebviewWindowBuilder::new(
+        match with_debug_args(tauri::WebviewWindowBuilder::new(
             &app,
             &label,
             tauri::WebviewUrl::App(path.into()),
-        )
+        ))
         // Window titles may be any string (only LABELS are charset-restricted).
         .title(&title_clone)
         .inner_size(width, height)
@@ -2221,11 +2258,524 @@ fn create_floating_window(
     Ok(())
 }
 
+/// overlay 窗口的**显示兜底**超时（毫秒）。
+///
+/// 窗口建好后是**隐藏**的（避免 WebView2 白底闪屏，见 `show_plugin_overlay`），
+/// 由前端在内容就绪后请求显示。但插件是任意第三方 HTML，不保证上报就绪信号 ——
+/// 故到点仍没显示就强制显示：宁可闪一下，也不能让窗口永远不出来。
+const OVERLAY_SHOW_FALLBACK_MS: u64 = 1200;
+
+/// 指示窗（小浮标）建好后延迟多久显示。
+/// 同样是为了避开 WebView2 的白底首帧，但小窗的构造与绘制开销远小于全屏 overlay，
+/// 固定短延迟即可，不必像 overlay 那样要前端回报就绪。
+const INDICATOR_SHOW_DELAY_MS: u64 = 250;
+
+/// 给 overlay 窗口设置「鼠标穿透」（教鞭不该挡住用户点击下面真正要点的东西）。
+///
+/// **透明**不在这里处理 —— 它由 vendored 的 `tauri-runtime-wry` 在**建窗时**完成
+/// （`WS_EX_NOREDIRECTIONBITMAP` + 跳过 softbuffer 底色，见 `Cargo.toml` 的
+/// `[patch.crates-io]` 说明）。这里只补穿透。
+///
+/// 为什么不在这里设 `WS_EX_LAYERED`：透明窗口现在走 **DComp 合成**路径，
+/// 再叠一个经典 layered 位是两套合成机制的混合，行为不可预期；
+/// 而光有 `WS_EX_TRANSPARENT` 就足以表达"鼠标穿透"。
+/// （另注：**绝不能用 tao 的 `set_ignore_cursor_events`** —— 它会顺带加
+/// `WS_EX_LAYERED` 却不设属性，导致整个窗口不绘制 = 全黑，实测踩过。）
+#[cfg(windows)]
+fn setup_overlay_window_bits(
+    win: &tauri::WebviewWindow,
+    transparent: bool,
+    click_through: bool,
+) -> tauri::Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TRANSPARENT,
+    };
+    let _ = transparent;   // 透明已由 patched runtime 在建窗时处理
+    if click_through {
+        let hwnd = win.hwnd()?.0 as *mut core::ffi::c_void;
+        unsafe {
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT as isize);
+        }
+    }
+    Ok(())
+}
+
+/// overlay 窗口 label 前缀 —— open / close 共用同一份，保证两边对得上。
+/// Tauri 的 label 只允许 `[A-Za-z0-9-/:_.]`，而插件名是自由字符串，故净化一次。
+fn overlay_label_prefix(plugin: &str) -> String {
+    let slug: String = plugin
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    format!("overlay-{slug}-")
+}
+
+/// 插件请求开「全屏 overlay」窗口 —— **通用能力**，非某个插件专属。
+///
+/// 用途：需要铺满显示器、置顶、无边框的全屏交互 UI（区域框选、浮层标注、取色器…）。
+/// 插件侧 HTML 由 `src` 指定（插件目录内相对路径，经 `plugins://` 协议加载），
+/// 窗口内的 postMessage 上行复用插件面板那套协议（同一 origin 校验，见 pluginPanelBridge）。
+///
+/// `monitor`: `Some(i)` 只开第 i 块显示器；`None` = 每块显示器各开一个。
+/// 返回实际打开的显示器索引。
+///
+/// ⚠️ **敏感能力**：插件借此可覆盖用户整个屏幕。本轮不做权限门控（见实现计划）。
+/// 边界仅两条：① `src` 受 `plugins://` 协议的既有路径校验（只能读插件自己目录）；
+/// ② 窗口 label 前缀 `overlay-*` 加进 capability —— 只是为了允许 postMessage，
+///    并不额外放权（overlay 窗口拿不到比主窗更多的 IPC 能力）。
+#[tauri::command]
+fn open_plugin_overlay(
+    app: tauri::AppHandle,
+    plugin: String,
+    src: String,
+    monitor: Option<usize>,
+    // 不透明透传参数（宿主不解释，只拼进 iframe URL 的 query）—— 插件常用它把
+    // 后台进程端口带进 overlay。形如 `key=value&key2=value2`。
+    params: Option<String>,
+    // 🆕 「标注/教鞭」类 overlay 的两个开关（默认 false = 保持原有行为，
+    // 如截图插件的区域框选：不透明 + 要接收点击）：
+    //   transparent   —— 窗口背景透明（页面用 CSS 自己画半透明遮罩/图形）
+    //   click_through —— 鼠标事件**穿透**到底下窗口。这是教鞭的关键：
+    //                    指示器不该挡住用户真正想点的东西。
+    //                    启用后 overlay 自身收不到点击（正常 —— 它只是画给人看的）。
+    transparent: Option<bool>,
+    click_through: Option<bool>,
+    // 🛡 硬超时（秒）：到点无条件关窗 —— 防"覆盖层关不掉把屏幕锁死"。
+    // 正常关闭依赖覆盖层自己的 JS 跑起来（到期上报 close）；页面没渲染出来时
+    // 没有任何 JS 可依赖，这条是唯一的兜底。None/0 = 不设（如框选类 overlay
+    // 要等用户操作，靠用户自己按 Esc）。
+    hard_ttl_sec: Option<u64>,
+) -> Result<Vec<usize>, String> {
+    let want_transparent = transparent.unwrap_or(false);
+    let want_click_through = click_through.unwrap_or(false);
+    let monitors = app.available_monitors().map_err(|e| format!("枚举显示器失败: {e}"))?;
+    if monitors.is_empty() {
+        return Err("没有可用显示器".into());
+    }
+    let indices: Vec<usize> = match monitor {
+        Some(i) if i < monitors.len() => vec![i],
+        Some(i) => return Err(format!("显示器索引 {i} 越界（共 {} 块）", monitors.len())),
+        None => (0..monitors.len()).collect(),
+    };
+
+    let prefix = overlay_label_prefix(&plugin);
+    // 分隔符用 `|`（`/` 会与 src 内的目录分隔冲突）。两侧都要转义 `|` 本身，
+    // 否则插件名或路径里含 `|` 会把 hash 解析切错段（TS 侧 parseOverlayHash 对齐）。
+    let mut path = format!("index.html#overlay/{}|{}", hash_enc(&plugin), hash_enc(&src));
+    if let Some(p) = params.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        path.push('|');
+        path.push_str(&hash_enc(p));
+    }
+    log::info!("[Rust] open_plugin_overlay: plugin={plugin} src={src} monitors={indices:?}");
+
+    let mut opened = Vec::new();
+    for &idx in &indices {
+        let m = &monitors[idx];
+        let pos = m.position(); // PhysicalPosition<i32>
+        let size = m.size(); // PhysicalSize<u32>
+        let (px, py, sw, sh) = (pos.x, pos.y, size.width, size.height);
+        let label = format!("{prefix}{idx}");
+
+        // 幂等：
+        //   ① 已存在且**几何一致** → 直接复用（show + 返回），不重建。
+        //      重建会让覆盖层重新加载 → 屏幕上闪一下；连续标注（如"先点这、再点那"）
+        //      尤其明显。复用时插件侧的数据更新由覆盖层自己的轮询拿（无需宿主参与）。
+        //   ② 几何不一致（换显示器/分辨率变了）→ 关掉重建。
+        //
+        // 🔴 ② 必须**等窗口真的销毁**再 build：`close()` 是异步的（发关闭请求，
+        //    实际销毁在事件循环里），紧接着 build 同 label 会报
+        //    `a webview with label ... already exists`（实测踩过：第二次调用静默失败，
+        //    用户看到的是"什么都没画"）。
+        if let Some(w) = app.get_webview_window(&label) {
+            let geom_matches = w
+                .outer_position()
+                .map(|p| p.x == px && p.y == py)
+                .unwrap_or(false)
+                && w
+                    .outer_size()
+                    .map(|s| s.width == sw && s.height == sh)
+                    .unwrap_or(false);
+            if geom_matches {
+                let _ = w.show();
+                log::info!("[Rust] overlay reused: {label}");
+                opened.push(idx);
+                continue;
+            }
+            let _ = w.close();
+            // 等它从窗口表里消失（最多 ~1.5s；正常几毫秒）
+            for _ in 0..75 {
+                if app.get_webview_window(&label).is_none() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        let label2 = label.clone();
+        let path2 = path.clone();
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            // ⚠️ 混合 DPI 的关键：builder 的 `position`/`inner_size` 只吃**逻辑**像素，
+            // 而每块显示器缩放可能不同 → 直接喂物理值会错位。
+            // 故先以隐藏状态建窗，再用**物理**坐标 set_position/set_size 精确贴合，
+            // 最后才 show()（避免默认位置闪一下）。
+            let built = with_debug_args(tauri::WebviewWindowBuilder::new(
+                &app2,
+                &label2,
+                tauri::WebviewUrl::App(path2.into()),
+            ))
+            .title("Overlay")
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .shadow(false)
+            .visible(false)
+            // 透明与穿透见 open_plugin_overlay 的参数说明。默认 false → 截图插件行为不变。
+            .transparent(want_transparent)
+            .data_directory(webview_data_dir(&app2))
+            .build();
+
+            match built {
+                Ok(win) => {
+                    // 透明 + 穿透：都走自写的 Win32 版本 —— tao 的两条实现都有致命问题
+                    // （透明在 Win11 失效 / 穿透会加 LAYERED 导致全黑）。详见函数注释。
+                    // 建窗后立刻设（show 之前也行 —— 这是窗口样式位，与可见性无关）。
+                    #[cfg(windows)]
+                    if want_transparent || want_click_through {
+                        if let Err(e) =
+                            setup_overlay_window_bits(&win, want_transparent, want_click_through)
+                        {
+                            log::error!("[Rust] overlay window bits failed: {e}");
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    let _ = (want_transparent, want_click_through);
+
+                    // 诊断：透明是否真的走到 DComp 路径。排查"覆盖层不透明"时先看这条 ——
+                    //   NOREDIR=1 表示 patched runtime 生效（透明的前提）
+                    //   TRANSPARENT=1 表示鼠标穿透已设
+                    // 没有这行就只能靠肉眼判断透明，而 GDI 截图对这类窗口会渲染成黑（有误导性）。
+                    #[cfg(windows)]
+                    if let Ok(h) = win.hwnd() {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{
+                            GetWindowLongPtrW, GWL_EXSTYLE,
+                        };
+                        let ex =
+                            unsafe { GetWindowLongPtrW(h.0 as *mut core::ffi::c_void, GWL_EXSTYLE) }
+                                as u32;
+                        log::info!(
+                            "[Rust] overlay {label} bits: exstyle=0x{ex:08x} NOREDIR={} CLICKTHRU={}",
+                            ex & 0x0020_0000 != 0,
+                            ex & 0x0000_0020 != 0
+                        );
+                    }
+
+                    // 🛡 硬超时兜底（防"关不掉的覆盖层把用户屏幕锁死"）。
+                    // 为什么必须有：覆盖层的正常关闭依赖**它自己页面里的 JS 能跑起来**
+                    // （到期 → 上报 close）。若页面根本没渲染（加载失败 / WebView 异常），
+                    // 就没有任何 JS 去关它 —— 用户面对一个盖满屏幕、又不响应任何操作的窗口。
+                    // 实测（2026-09-18）：用户被迫强制重启电脑。
+                    if let Some(ttl) = hard_ttl_sec {
+                        if ttl > 0 {
+                            let win_t = win.clone();
+                            let label_t = label.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_secs(ttl));
+                                if win_t.is_visible().unwrap_or(false) {
+                                    log::warn!("[Rust] overlay hard TTL ({ttl}s) fired, closing {label_t}");
+                                    let _ = win_t.close();
+                                }
+                            });
+                        }
+                    }
+                    if let Err(e) = win.set_position(tauri::PhysicalPosition::new(px, py)) {
+                        log::error!("[Rust] overlay set_position failed: {e}");
+                    }
+                    if let Err(e) = win.set_size(tauri::PhysicalSize::new(sw, sh)) {
+                        log::error!("[Rust] overlay set_size failed: {e}");
+                    }
+                    // ⚠️ **这里刻意不 show()** —— 见 `show_plugin_overlay` 的注释：
+                    // 窗口一显示，WebView2 就用**默认白底**渲染尚未加载完的内容，
+                    // 而 overlay 铺满整块屏幕 → 用户看到"整个屏幕白闪一下"。
+                    // 改由前端在内容就绪（iframe + 冻结图加载完）后调
+                    // `show_plugin_overlay`；下面还有一个超时兜底，保证任何情况下
+                    // 窗口都不会永远不显示。
+                    let emit_label = win.label().to_string();
+                    let app_ev = app2.clone();
+                    // 窗口被外部销毁（Alt+F4 / 杀进程）时通知前端，便于清理会话
+                    win.on_window_event(move |event| {
+                        if matches!(event, tauri::WindowEvent::Destroyed) {
+                            let _ = app_ev.emit("plugin-overlay-closed", emit_label.as_str());
+                        }
+                    });
+
+                    // 兜底：前端若因任何原因没来调 show（插件走的是插件自己的 HTML，
+                    // 未必上报就绪），到点强制显示 —— 退回"会白闪但能用"的旧行为，
+                    // 而不是"窗口永远不出来"。
+                    let win_t = win.clone();
+                    let label_t = label2.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            OVERLAY_SHOW_FALLBACK_MS,
+                        ));
+                        if !win_t.is_visible().unwrap_or(true) {
+                            log::info!("[Rust] overlay show fallback fired: {label_t}");
+                            let _ = win_t.show();
+                            let _ = win_t.set_focus();
+                        }
+                    });
+
+                    log::info!("[Rust] overlay built (hidden): {label2} @({px},{py}) {sw}x{sh}");
+                }
+                Err(e) => log::error!("[Rust] overlay build FAILED: {e}"),
+            }
+        });
+        opened.push(idx);
+    }
+    Ok(opened)
+}
+
+/// 指示窗 label —— 每插件**一个**（不像 overlay 是每显示器一个）。
+fn indicator_label(plugin: &str) -> String {
+    let slug: String = plugin
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    format!("indicator-{slug}")
+}
+
+/// 打开插件的小指示窗（如鼠标键盘插件的"AI 操作中"浮标）。
+///
+/// 与 `open_plugin_overlay`（铺满整块显示器、给区域框选用）的区别：这是**小窗**，
+/// 位置尺寸由调用方给，且**不抢焦点**。
+///
+/// ## 两个必须做对的地方
+///
+/// 1. **`set_focusable(false)`（WS_EX_NOACTIVATE）** —— 指示窗属于宿主进程，若点击它
+///    会让它成为前台窗口，而鼠标键盘插件的"前台是宿主就拒绝操作"防护会立刻生效 →
+///    用户点一次停止按钮之后，AI 的后续操作**全被拒**，且原因看不出来。
+///    设成不可激活：点得到按钮、但前台窗口不变。
+/// 2. **`always_on_top` + `skip_taskbar`** —— 它是"随时能看见"的浮标，不进任务栏。
+///
+/// 位置缺省：主显示器右下角（不挡常见操作区）。
+#[tauri::command]
+fn open_plugin_indicator(
+    app: tauri::AppHandle,
+    plugin: String,
+    src: String,
+    params: Option<String>,
+    x: Option<i32>,
+    y: Option<i32>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<(), String> {
+    let label = indicator_label(&plugin);
+    // 已存在则先关掉重建（可能换了 src / 尺寸）。要**移动**请用 move_plugin_indicator
+    // —— 那条路不重建窗口（重建会闪、也会丢页面状态）。
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.close();
+    }
+
+    // 与 overlay 同一套 hash 协议 —— 复用前端 PluginOverlayApp 的渲染与上行通道
+    let mut path = format!("index.html#overlay/{}|{}", hash_enc(&plugin), hash_enc(&src));
+    if let Some(p) = params.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        path.push('|');
+        path.push_str(&hash_enc(p));
+    }
+
+    let w = width.unwrap_or(300).clamp(120, 2000);
+    let h = height.unwrap_or(150).clamp(60, 2000);
+
+    let (px, py) = match (x, y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => {
+            let m = app
+                .primary_monitor()
+                .map_err(|e| format!("取主显示器失败: {e}"))?
+                .ok_or("没有主显示器")?;
+            let pos = m.position();
+            let size = m.size();
+            (
+                pos.x + size.width as i32 - w as i32 - 16,
+                pos.y + size.height as i32 - h as i32 - 64,   // 多留一点，避开任务栏
+            )
+        }
+    };
+
+    log::info!("[Rust] open_plugin_indicator: plugin={plugin} {w}x{h} @({px},{py})");
+
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let built = with_debug_args(tauri::WebviewWindowBuilder::new(
+            &app2,
+            &label,
+            tauri::WebviewUrl::App(path.into()),
+        ))
+        // 标题是插件**找回这个窗口**的锚点：插件进程按标题 FindWindow 找到它、
+        // GetWindowRect 拿屏幕矩形（用于"别操作指示窗所在区域"的判断）。
+        //
+        // ⚠️ 必须带**宿主 PID**：多开时每个实例都有自己的指示窗，标题若只含插件名，
+        // FindWindow 会返回**另一个实例**的窗口 —— 既会读错矩形，也会挪错窗口。
+        // 插件侧用同一个规则拼（`indicator::<插件名>::<CLAUDE_PLUGIN_HOST_PID>`）。
+        // 窗口无装饰 + 不进任务栏，这个标题用户看不到。
+        .title(&format!("indicator::{}::{}", plugin, std::process::id()))
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .visible(false)      // 先隐藏，稍后再显示（避免 WebView2 白底闪一下）
+        .data_directory(webview_data_dir(&app2))
+        .build();
+
+        match built {
+            Ok(win) => {
+                // ⚠️ 不可激活：见函数注释（否则点一次停止按钮就触发"前台是宿主"防护）
+                if let Err(e) = win.set_focusable(false) {
+                    log::error!("[Rust] indicator set_focusable(false) failed: {e}");
+                }
+                if let Err(e) = win.set_position(tauri::PhysicalPosition::new(px, py)) {
+                    log::error!("[Rust] indicator set_position failed: {e}");
+                }
+                if let Err(e) = win.set_size(tauri::PhysicalSize::new(w, h)) {
+                    log::error!("[Rust] indicator set_size failed: {e}");
+                }
+                let win_t = win.clone();
+                std::thread::spawn(move || {
+                    // 小窗构造开销远小于全屏 overlay，固定短延迟即可
+                    std::thread::sleep(std::time::Duration::from_millis(INDICATOR_SHOW_DELAY_MS));
+                    let _ = win_t.show();
+                });
+                log::info!("[Rust] indicator built: {label}");
+            }
+            Err(e) => log::error!("[Rust] indicator build FAILED: {e}"),
+        }
+    });
+
+    Ok(())
+}
+
+/// 移动指示窗（AI 发现它挡住操作时可请求挪开；也可用于恢复到缺省位置）。
+#[tauri::command]
+fn move_plugin_indicator(
+    app: tauri::AppHandle,
+    plugin: String,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    let label = indicator_label(&plugin);
+    let Some(w) = app.get_webview_window(&label) else {
+        return Err(format!("指示窗不存在（{label}）"));
+    };
+    w.set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|e| format!("移动指示窗失败: {e}"))?;
+    log::info!("[Rust] move_plugin_indicator: {plugin} -> ({x},{y})");
+    Ok(())
+}
+
+/// 关闭指示窗（插件请求 / 面板关 / 禁用插件时清理）。
+#[tauri::command]
+fn close_plugin_indicator(app: tauri::AppHandle, plugin: String) -> Result<(), String> {
+    let label = indicator_label(&plugin);
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.close();
+        log::info!("[Rust] close_plugin_indicator: {plugin}");
+    }
+    Ok(())
+}
+
+/// 关闭某插件的全部 overlay 窗口（插件主动收起 / 禁用 / 退出时清理）。
+#[tauri::command]
+fn close_plugin_overlay(app: tauri::AppHandle, plugin: String) -> Result<usize, String> {
+    let prefix = overlay_label_prefix(&plugin);
+    let mut closed = 0usize;
+    for w in app.webview_windows().values() {
+        if w.label().starts_with(&prefix) {
+            let _ = w.close();
+            closed += 1;
+        }
+    }
+    log::info!("[Rust] close_plugin_overlay: {plugin} -> closed {closed}");
+    Ok(closed)
+}
+
+/// 本机有几个同款 GUI 实例（含自己，最小 1）。
+///
+/// 前端用它把「全局热键注册失败」的两种来源分开：另一个 GUI 实例（多开的正常现象）
+/// vs 其它软件（需要用户换键）。OS 的错误信息不区分这两者，而用户要采取的动作
+/// 完全不同 —— 见 `prockill::count_sibling_instances`。
+#[tauri::command]
+fn count_gui_instances() -> usize {
+    #[cfg(windows)]
+    {
+        crate::prockill::count_sibling_instances()
+    }
+    #[cfg(not(windows))]
+    {
+        1
+    }
+}
+
+/// 删除插件根下所有 `.trash-*` 目录（卸载时删不掉、改名留下的残留）。
+///
+/// 只要名字前缀匹配就删 —— 这些目录是**我们自己**改名产生的，且不在插件扫描范围内
+/// （`.trash-` 前缀不是合法插件名），删错的可能不存在。
+fn cleanup_trash_plugin_dirs(plugins_root: &str) {
+    let Ok(entries) = std::fs::read_dir(plugins_root) else { return };
+    let mut n = 0usize;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with(".trash-") {
+            continue;
+        }
+        if std::fs::remove_dir_all(e.path()).is_ok() {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        log::info!("startup: cleaned up {n} trashed plugin dir(s)");
+    }
+}
+
+/// 显示某插件的 overlay 窗口（内容已就绪，可以亮出来了）。
+///
+/// **为什么要有这条命令**：`open_plugin_overlay` 建窗时刻意**不 show**。窗口一显示，
+/// WebView2 就用它自己的**默认白底**绘制尚未加载完的内容，而 overlay 是铺满整块
+/// 屏幕的窗口 —— 于是用户看到"整个屏幕白闪一下"，观感上很廉价（原生截图工具没有
+/// 这一下，因为它们不经过 WebView 启动）。改成：窗口先隐藏建好、摆好位置，
+/// 由前端在 iframe 与冻结图都加载完之后调本命令亮出来 —— 用户直接看到成品画面。
+///
+/// 幂等：重复调用只是再 show 一次（无害）。
+#[tauri::command]
+fn show_plugin_overlay(app: tauri::AppHandle, plugin: String) -> Result<(), String> {
+    let prefix = overlay_label_prefix(&plugin);
+    let mut shown = 0usize;
+    for w in app.webview_windows().values() {
+        if w.label().starts_with(&prefix) {
+            let _ = w.show();
+            let _ = w.set_focus();
+            shown += 1;
+        }
+    }
+    if shown > 0 {
+        log::info!("[Rust] show_plugin_overlay: {plugin} -> shown {shown}");
+    }
+    Ok(())
+}
+
 fn urlencoding(s: &str) -> String {
     s.replace('%', "%25")
         .replace('#', "%23")
         .replace('&', "%26")
         .replace('+', "%2B")
+}
+
+/// overlay hash 段编码：在 `urlencoding` 基础上额外转义 `|`（分段符本身）
+/// 与 `/`（避免与片段语义混淆）。TS 侧 `decodeURIComponent` 能还原。
+fn hash_enc(s: &str) -> String {
+    urlencoding(s).replace('|', "%7C").replace('/', "%2F")
 }
 
 // ── 外部链接窗口 ──
@@ -2281,11 +2831,11 @@ fn open_url_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let title_clone = host.clone();
     let app_for_spawn = app.clone();
     std::thread::spawn(move || {
-        match tauri::WebviewWindowBuilder::new(
+        match with_debug_args(tauri::WebviewWindowBuilder::new(
             &app_for_spawn,
             &label,
             tauri::WebviewUrl::External(parsed),
-        )
+        ))
         .title(&title_clone)
         .inner_size(1000.0, 720.0)
         .min_inner_size(480.0, 360.0)
@@ -3370,6 +3920,218 @@ fn load_skills_i18n() -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("Cannot load: {}", e))
 }
 
+
+// ── 插件贡献的 skill：把插件内的 skill 目录"链接"进 ~/.claude/skills/ ──
+//
+// ## 为什么是链接而不是复制
+//
+// 链接让**插件目录**成为唯一来源：改插件里的 skill 文件立刻生效，不会出现
+// "插件更新了、技能目录里还是旧副本"。也省掉一份磁盘副本。
+// 卸载插件 → 目录没了 → 链接变悬空 → 下次扫描自动清掉（见下）。
+//
+// ## 为什么放在"每次扫描"而不是安装时的一次性动作
+//
+// 这是**幂等同步**：插件在 → 链接在（缺了补、指向错了重建）；插件不在 → 链接清掉。
+// 用户手删了链接、或插件被手工挪走，下次重扫都会自愈。
+// 做成"安装时建一次"的话，之后状态漂了没人管。
+//
+// ## 平台差异（都实测过）
+//
+// - **Windows**：用 **junction**（`mklink /J`）—— 目录联接**不需要管理员权限、
+//   也不需要开发者模式**（真 symlink 两者都要）。虽叫 junction，Node 的
+//   `Dirent.isSymbolicLink()` 对它返回 true（reparse point），而 skill 加载器
+//   显式接受 `isSymbolicLink()`（见 `src/skills/loadSkillsDir.ts`）→ 能被识别。
+// - **macOS/Linux**：用 symlink。
+
+/// 一个要链接进来的 skill。
+#[derive(serde::Deserialize)]
+pub struct SkillLinkSpec {
+    /// 目标目录名：`~/.claude/skills/<name>`。必须是安全的单层目录名。
+    pub name: String,
+    /// **绝对路径**：插件目录内那个 skill 目录（须含 SKILL.md）。
+    /// 由前端拼好（`<pluginsRoot>/<pluginName>/<path>`）——
+    /// 与其它 contributes 一致：宿主不解析插件 manifest。
+    pub source: String,
+}
+
+/// 校验 skill 名：只允许字母/数字/`-`/`_`/`.`。
+/// name 会被直接 join 进 skills 目录，故必须杜绝路径穿越。
+fn sanitize_skill_name(name: &str) -> Option<&str> {
+    let n = name.trim();
+    if n.is_empty() || n == "." || n == ".." || n.len() > 64 {
+        return None;
+    }
+    if !n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return None;
+    }
+    Some(n)
+}
+
+/// 建目录链接（Windows=junction，其它=symlink）。链接位已占时先清，保证幂等。
+fn create_dir_link(link: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    if link.symlink_metadata().is_ok() {
+        remove_dir_link(link)?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // 🔴 **必须先把正斜杠换成反斜杠** —— `mklink` 是 cmd 的**内置命令**，
+        // 而 cmd 把 `/` 当作**参数开关前缀**。传 `C:/Users/...` 时 cmd 会看到
+        // `/Users` 这个"开关" → 报 `无效参数 - "Users"`（实测复现）。
+        //
+        // 这个坑的来源：前端拼路径用 `/` 是**合理**的（跨平台心智，Windows 上也
+        // 能正常工作 —— Rust 的 std::fs 两种都吃），所以转换放在这"最后一公里"
+        // 是对的位置：**只有外部命令 mklink 有这个限制**。
+        // （`std::fs` 的 read_link/remove_dir 等不受影响，不必转换。）
+        let link_w = link.to_string_lossy().replace('/', "\\");
+        let target_w = target.to_string_lossy().replace('/', "\\");
+        let out = Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link_w)
+            .arg(&target_w)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("mklink 启动失败: {e}"))?;
+        if !out.status.success() {
+            // stderr 是**控制台代码页（中文 Windows = GBK）**，不是 UTF-8 ——
+            // 直接 from_utf8_lossy 会得到乱码。尽力解码，解不出就给出退出码，
+            // 至少让排查者知道"失败了"而不是看到一串 `�`。
+            let raw = out.stderr;
+            let msg = String::from_utf8(raw.clone())
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("exit {} (stderr 非 UTF-8，原始 {} 字节)", out.status, raw.len()));
+            return Err(format!("mklink /J 失败: {msg}"));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::os::unix::fs::symlink(target, link).map_err(|e| format!("symlink 失败: {e}"))
+    }
+}
+
+/// 删目录链接。**只摘链接本身，绝不递归删目标**。
+/// 发现它不是链接（而是真目录）时报错返回 —— 那是用户的东西，不擅自删。
+fn remove_dir_link(link: &std::path::Path) -> Result<(), String> {
+    let is_link = link
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_link {
+        return Err(format!("{} 不是链接（为安全起见不递归删除）", link.display()));
+    }
+    std::fs::remove_dir(link).map_err(|e| format!("移除链接失败: {e}"))
+}
+
+/// 收尾：清掉 skills 目录里**指向插件目录、但本次没在清单里**的链接。
+///
+/// 两个"只动自己的"判据，避免误删用户手建的链接（如指向 `~/.agents/skills` 的）：
+///   ① 必须是链接（真目录一律不碰）
+///   ② 目标路径含 `/plugins/`（我们建的链接都指向插件目录）
+fn prune_stale_plugin_skill_links(
+    skills_dir: &std::path::Path,
+    keep: &std::collections::HashSet<String>,
+    plugins_root_norm: &str,
+) {
+    let Ok(entries) = std::fs::read_dir(skills_dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if keep.contains(&name) {
+            continue;
+        }
+        let p = e.path();
+        let is_link = p.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+        if !is_link {
+            continue;   // 用户自己装的技能目录 → 不动
+        }
+        // 目标是插件目录下 → 是我们建的（含已悬空的）。read_link 对 junction 也有效。
+        let owned = std::fs::read_link(&p)
+            .map(|t| {
+                let ts = t.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+                ts.starts_with(plugins_root_norm)
+            })
+            .unwrap_or(false);
+        if owned {
+            match remove_dir_link(&p) {
+                Ok(()) => log::info!("skill link pruned: {name}"),
+                Err(err) => log::warn!("skill link prune 失败 {name}: {err}"),
+            }
+        }
+    }
+}
+
+/// 同步插件贡献的 skill 链接。**幂等**，可反复调用。
+#[tauri::command]
+fn sync_plugin_skill_links(
+    app: tauri::AppHandle,
+    specs: Vec<SkillLinkSpec>,
+) -> Result<serde_json::Value, String> {
+    let skills_dir = user_home().join(".claude").join("skills");
+    std::fs::create_dir_all(&skills_dir).map_err(|e| format!("Cannot create skills dir: {e}"))?;
+
+    let plugins_base = plugins_base_dir(&app)?;
+    let plugins_root = std::path::PathBuf::from(&plugins_base);
+    // 归一化用于前缀比对（大小写 + 分隔符），只用于 prune 的归属判断
+    let plugins_root_norm = plugins_root
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+
+    let mut linked: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for spec in &specs {
+        let Some(name) = sanitize_skill_name(&spec.name) else {
+            errors.push(format!("非法 skill 名（已跳过）: {}", spec.name));
+            continue;
+        };
+        let src = std::path::PathBuf::from(&spec.source);
+        // **只允许链接插件目录内的东西**（source 由前端拼，仍校验一道 ——
+        // 万一前端被改了，这里挡住"把任意目录挂进技能目录"）
+        let src_norm = src.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        if !src_norm.starts_with(&plugins_root_norm) {
+            errors.push(format!("source 不在插件目录内（已跳过）: {name} → {}", src.display()));
+            continue;
+        }
+        if !src.is_dir() {
+            errors.push(format!("skill 目录不存在（已跳过）: {name} → {}", src.display()));
+            continue;
+        }
+        if !src.join("SKILL.md").exists() {
+            errors.push(format!("缺 SKILL.md（已跳过）: {name} → {}", src.display()));
+            continue;
+        }
+        keep.insert(name.to_string());
+
+        let link = skills_dir.join(name);
+        // 已存在且已指向同一目标 → 不动（省一次 mklink，也避免无谓的目录抖动）
+        if link.symlink_metadata().is_ok() {
+            if let Ok(cur) = std::fs::read_link(&link) {
+                if cur == src {
+                    linked.push(name.to_string());
+                    continue;
+                }
+            }
+        }
+        match create_dir_link(&link, &src) {
+            Ok(()) => {
+                log::info!("skill link: {name} → {}", src.display());
+                linked.push(name.to_string());
+            }
+            Err(e) => errors.push(format!("建链失败 {name}: {e}")),
+        }
+    }
+
+    prune_stale_plugin_skill_links(&skills_dir, &keep, &plugins_root_norm);
+
+    Ok(serde_json::json!({ "linked": linked, "errors": errors }))
+}
+
 // ── Skill Marketplace ──
 
 #[tauri::command]
@@ -3627,16 +4389,151 @@ async fn install_plugin_package(
 }
 
 /// 卸载插件: 杀该插件声明的后台进程 → 删除 plugins/<name>/ 目录。
+
+// ── 插件生命周期 hook（beforeUninstall）──────────────────────────────
+//
+// 卸载流程是「**先杀进程 → 再删目录**」，所以 hook 不能是"让插件进程自己跑"
+// —— 那一刻它已经死了。必须是**声明式脚本、由宿主执行**。
+//
+// 与更新组件的 `post_install`（update.rs）同一模式，但有两个关键差别：
+//
+// ① **用 bun / python 跑，不用 node**
+//    宿主安装包自带 bun（安装目录 `bun.exe`）与 python（`python/python.exe`），
+//    两者都已由 `prepend_tool_dirs` 前置进 PATH → **零前置条件**。
+//    而 node 要靠 `nodejs` **插件**提供 —— hook 是基础能力，不该依赖另一个插件。
+//
+// ② **失败绝不阻断卸载**
+//    刚修完"卸载不了"的坑（见 uninstall_plugin 的注释），不能因为 hook 写错、
+//    超时、或依赖缺失又让用户卸不掉。所有异常只 warn。
+//
+// 参数经**环境变量**传给脚本（不用命令行，避免引号/转义地狱，也给更多上下文）：
+//   CLAUDE_PLUGIN_NAME      被卸载的插件名
+//   CLAUDE_PLUGIN_DIR       插件目录（**即将被删除**，脚本应只读它）
+//   CLAUDE_PLUGIN_DATA_DIR  插件数据目录（宿主管理，卸载时自动清；脚本可提前处理）
+//   CLAUDE_PLUGIN_WORKSPACE 当前工作区（可能为空）
+const HOOK_TIMEOUT_SECS: u64 = 15;
+
+/// 选解释器：bun 优先（安装目录自带），其次 python（自带），最后 PATH 里的。
+/// 返回 (exe, 额外参数)。缺失时返回 None（调用方 warn 后跳过 hook）。
+fn pick_hook_interpreter(install_dir: &std::path::Path, script: &str) -> Option<(std::path::PathBuf, Vec<String>)> {
+    let ext = std::path::Path::new(script)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_py = ext == "py";
+    let is_js = ext == "js" || ext == "mjs" || ext == "cjs";
+
+    let bun = if cfg!(target_os = "windows") { "bun.exe" } else { "bun" };
+    let py = if cfg!(target_os = "windows") { "python.exe" } else { "python3" };
+
+    if is_js {
+        // .js/.cjs/.mjs → bun run（bun 直接跑脚本，无需额外子命令）
+        let cand = install_dir.join(bun);
+        if cand.is_file() { return Some((cand, vec![])); }
+        return Some((std::path::PathBuf::from("bun"), vec![]));   // 交给 PATH
+    }
+    if is_py {
+        // .py → python（Windows 在 install_dir/python/，mac 在 python/bin/）
+        let cand = if cfg!(target_os = "windows") {
+            install_dir.join("python").join(py)
+        } else {
+            install_dir.join("python").join("bin").join(py)
+        };
+        if cand.is_file() { return Some((cand, vec![])); }
+        return Some((std::path::PathBuf::from(py), vec![]));
+    }
+    None   // 未知扩展名 → 不猜
+}
+
+/// 执行插件的 beforeUninstall hook。**任何失败只 warn，返回 Err 供调用方记日志。**
+fn run_uninstall_hook(
+    install_dir: &std::path::Path,
+    plugin_dir: &std::path::Path,
+    plugin_name: &str,
+    script_rel: &str,
+) -> Result<(), String> {
+    let script = plugin_dir.join(script_rel);
+    if !script.is_file() {
+        return Err(format!("hook 脚本不存在: {}", script.display()));
+    }
+    let (exe, extra) = pick_hook_interpreter(install_dir, script_rel)
+        .ok_or_else(|| format!("hook 脚本扩展名不支持（只认 .js/.cjs/.mjs/.py）: {script_rel}"))?;
+
+    log::info!("uninstall_plugin: running hook {script_rel} via {}", exe.display());
+    let mut cmd = Command::new(&exe);
+    cmd.arg(&script);
+    for a in &extra { cmd.arg(a); }
+    cmd.current_dir(plugin_dir);
+    cmd.env("CLAUDE_PLUGIN_NAME", plugin_name);
+    cmd.env("CLAUDE_PLUGIN_DIR", plugin_dir.to_string_lossy().to_string());
+    cmd.env("CLAUDE_PLUGIN_DATA_DIR", plugin_data_dir(install_dir, plugin_name).to_string_lossy().to_string());
+    let wd = crate::settings::bound_work_dir();
+    if !wd.is_empty() { cmd.env("CLAUDE_PLUGIN_WORKSPACE", wd); }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("启动 hook 失败: {e}"))?;
+
+    // 超时：到点就杀（不能让它挂住卸载流程）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(HOOK_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    log::info!("uninstall_plugin: hook {script_rel} ok");
+                    return Ok(());
+                }
+                return Err(format!("hook 退出码 {status}"));
+            }
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    return Err(format!("hook 超时（>{HOOK_TIMEOUT_SECS}s），已终止"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+            Err(e) => return Err(format!("等待 hook 失败: {e}")),
+        }
+    }
+}
+
+/// 插件数据目录（宿主管理；卸载时自动清空）。
+/// 与 plugins-settings 同级放在 app_data_dir 下，便于统一清理。
+fn plugin_data_dir(install_dir: &std::path::Path, plugin: &str) -> std::path::PathBuf {
+    install_dir.join("plugins-data").join(plugin)
+}
+
 /// 前端卸载后调 reloadPlugins 重扫, 面板/命令即消失。
 /// process_ids: 前端从 manifest.processes[].id 取（**裸名**, 如 "git-viewer-server"——
 /// 与 registry 实际注册 id 一致; 曾按 `plugin:<name>:` 前缀过滤, 与裸名不匹配 → 进程
 /// 没被杀 → Windows 文件占用删目录失败「另一个程序正在使用此文件」, 用户实测）。
+/// 卸载结果（前端据此决定是否提示"需要重启"）。
+#[derive(serde::Serialize)]
+struct UninstallOutcome {
+    /// 是否真的卸载了（false = 本来就没装，幂等）
+    removed: bool,
+    /// 插件声明了"卸载后需重启才生效" → 前端提示用户
+    needs_restart: bool,
+    /// beforeUninstall hook 的问题（有值时前端可提示"清理未完全"，但不阻断）
+    hook_warning: Option<String>,
+}
+
+/// 插件可在 manifest 声明 `beforeUninstall`（脚本路径）与 `needsRestart: true`。
+/// 两者都由**前端**从 manifest 读出后传进来 —— Rust 侧不解析 manifest
+/// （插件目录即将被删，不必也不该在这里读它）。
 #[tauri::command]
 async fn uninstall_plugin(
     app: tauri::AppHandle,
     plugin_name: String,
     process_ids: Vec<String>,
-) -> Result<bool, String> {
+    before_uninstall_hook: Option<String>,
+    needs_restart: Option<bool>,
+) -> Result<UninstallOutcome, String> {
     if plugin_name.trim().is_empty() || plugin_name.contains(['/', '\\', '.', ':']) {
         return Err(format!("invalid plugin name: {plugin_name}"));
     }
@@ -3646,8 +4543,24 @@ async fn uninstall_plugin(
         .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"));
     let target = base.join("plugins").join(&plugin_name);
     if !target.exists() {
-        return Ok(false); // 未安装, 幂等
+        return Ok(UninstallOutcome { removed: false, needs_restart: false, hook_warning: None }); // 未安装, 幂等
     }
+    // ── beforeUninstall hook（**在杀进程之前**）──
+    // 放到杀进程前，插件还有机会做"需要活着"的事（发通知、断连接、刷盘）；
+    // 只清文件的 hook 在杀前跑也没问题。
+    // ⚠️ 失败只 warn，**绝不阻断卸载**（刚修完"卸载不了"的坑，不能因 hook 又卸不掉）。
+    let mut hook_warning: Option<String> = None;
+    if let Some(script) = before_uninstall_hook.as_deref().filter(|s| !s.trim().is_empty()) {
+        let install_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::env::temp_dir());
+        if let Err(e) = run_uninstall_hook(&install_dir, &target, &plugin_name, script) {
+            log::warn!("uninstall_plugin: beforeUninstall hook 未成功（不阻断卸载）: {e}");
+            hook_warning = Some(e);
+        }
+    }
+
     // 杀该插件的后台进程: 裸名 id（前端传） + 前缀约定兜底（兼容未来带命名空间的注册）。
     let prefix = format!("plugin:{plugin_name}:");
     let mut ids: Vec<String> = process_ids;
@@ -3659,14 +4572,23 @@ async fn uninstall_plugin(
     for id in &ids {
         plugin_process::kill_plugin_process(&app, id);
     }
-    // 决定性一步: 杀所有 **cwd 在该插件目录** 的进程。registry 只覆盖当前 GUI 自己
-    // spawn 的进程——更新/强杀留下的孤儿 node（cwd 钉在插件目录, Windows 目录句柄）
-    // 不在表里, 上面杀不到, 不杀干净这里就会报「另一个程序正在使用此文件」(os error 32)。
+    // 决定性的一步：把**占着这个目录的进程**全杀掉。registry 只覆盖当前 GUI 自己
+    // spawn 的进程 —— 更新/强杀/重启 GUI 留下的进程不在表里，上面杀不到，
+    // 不杀干净这里就会报「另一个程序正在使用此文件」/「拒绝访问」。
+    //
+    // **两种占用来源都要杀，缺一个就会漏**（2026-09-17 实测踩到）：
+    //   ① cwd 钉住**目录** ② 加载了 .node/.dll → 锁住**文件**
+    // 当时只做了 ①，日志显示一个都没命中，而 ② 精确找到了持有 vendor/*.node 的进程。
     #[cfg(windows)]
     {
-        let n = crate::prockill::kill_processes_with_cwd_under(&target.to_string_lossy());
-        if n > 0 {
-            log::info!("uninstall_plugin: killed {} processes holding cwd in {}", n, plugin_name);
+        let t = target.to_string_lossy().to_string();
+        let n1 = crate::prockill::kill_processes_with_cwd_under(&t);
+        let n2 = crate::prockill::kill_processes_loading_from(&t);
+        if n1 + n2 > 0 {
+            log::info!(
+                "uninstall_plugin: killed {n1} cwd-holder(s) + {n2} module-loader(s) of {plugin_name}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(150));
         }
     }
     // Windows: 进程退出后文件句柄释放有延迟——重试删除（最多 ~2s）。
@@ -3683,10 +4605,82 @@ async fn uninstall_plugin(
         }
     }
     if !last_err.is_empty() {
-        return Err(format!("Cannot remove plugin dir: {last_err}"));
+        // **兜底：改名而不是放弃。** 目录里可能还有我们杀不掉的占用者（别的用户
+        // 起的进程、杀不动的权限等）。改名在"文件被占用"时通常仍能成功（锁的是
+        // 具体文件/目录内容，不是父目录项），于是：
+        //   · 对用户 = 卸载成功（插件从列表消失、目录不再被扫描）
+        //   · 残留的真删除交给下次启动的清理（见 sweep_trash_plugin_dirs）
+        // 比"卸载失败 + 让用户自己找占用进程"好得多。
+        let trash = base.join("plugins").join(format!(
+            ".trash-{}-{}",
+            plugin_name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        match std::fs::rename(&target, &trash) {
+            Ok(()) => {
+                log::warn!(
+                    "uninstall_plugin: {plugin_name} could not be deleted ({last_err}); \
+                     moved to {} for cleanup on next start",
+                    trash.display()
+                );
+            }
+            Err(re) => {
+                return Err(format!(
+                    "Cannot remove plugin dir: {last_err}（改名兜底也失败: {re}）"
+                ));
+            }
+        }
     }
+    // ── 清宿主侧的插件残留（目录之外的东西）──
+    // 这两样**卸载时必须清**，否则重装后旧设置/旧数据会"借尸还魂"：
+    //   · plugins-settings/<name>.json（全局 + 工作区）—— 之前一直没清，是既有 bug
+    //   · plugins-data/<name>/（宿主管理的插件数据目录）
+    cleanup_plugin_residue(&app, &plugin_name);
+
     log::info!("Plugin uninstalled: {}", plugin_name);
-    Ok(true)
+    Ok(UninstallOutcome {
+        removed: true,
+        needs_restart: needs_restart.unwrap_or(false),
+        hook_warning,
+    })
+}
+
+/// 清宿主侧的插件残留（插件目录之外）。
+/// 失败只 warn —— 残留比"卸载不了"轻得多。
+fn cleanup_plugin_residue(app: &tauri::AppHandle, plugin: &str) {
+    let fname = format!("{plugin}.json");
+    // 全局设置
+    if let Ok(dir) = app.path().app_data_dir() {
+        let p = dir.join("plugins-settings").join(&fname);
+        if p.exists() {
+            match std::fs::remove_file(&p) {
+                Ok(()) => log::info!("uninstall_plugin: removed {}", p.display()),
+                Err(e) => log::warn!("uninstall_plugin: 清全局设置失败 {}: {e}", p.display()),
+            }
+        }
+        // 插件数据目录
+        let data = plugin_data_dir(&dir, plugin);
+        if data.exists() {
+            match std::fs::remove_dir_all(&data) {
+                Ok(()) => log::info!("uninstall_plugin: removed {}", data.display()),
+                Err(e) => log::warn!("uninstall_plugin: 清数据目录失败 {}: {e}", data.display()),
+            }
+        }
+    }
+    // 工作区设置（<workdir>/.claude/plugins-settings/<name>.json）
+    let wd = crate::settings::bound_work_dir();
+    if !wd.is_empty() {
+        let p = std::path::PathBuf::from(&wd).join(".claude").join("plugins-settings").join(&fname);
+        if p.exists() {
+            match std::fs::remove_file(&p) {
+                Ok(()) => log::info!("uninstall_plugin: removed {}", p.display()),
+                Err(e) => log::warn!("uninstall_plugin: 清工作区设置失败 {}: {e}", p.display()),
+            }
+        }
+    }
 }
 
 /// 验证市场插件包签名(Ed25519)。下载 zip 原始字节 + 拉 `<slug>/signature` 端点,
@@ -4435,4 +5429,144 @@ async fn note_apply_tag_mapping(
         }
     }
     notes::note_apply_tag_mapping(mappings)
+}
+
+
+#[cfg(test)]
+mod uninstall_hook_tests {
+    use super::pick_hook_interpreter;
+
+    /// 解释器选择：`.js/.cjs/.mjs` → bun，`.py` → python，其它 → None（不猜）。
+    ///
+    /// 为什么用 bun/python 而不是 node：宿主安装包**自带**这两个
+    /// （`bun.exe` + `python/python.exe`，且已由 prepend_tool_dirs 前置进 PATH），
+    /// 而 node 要靠 **nodejs 插件**提供 —— hook 是基础能力，不该依赖另一个插件。
+    #[test]
+    fn picks_bun_for_js_and_python_for_py() {
+        let dir = std::path::Path::new("C:/nonexistent-install-dir");
+        for s in ["cleanup.cjs", "cleanup.js", "cleanup.mjs"] {
+            let (exe, _) = pick_hook_interpreter(dir, s).unwrap_or_else(|| panic!("{s} 应可解析"));
+            let name = exe.file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+            assert!(name.starts_with("bun"), "{s} 应选 bun，实际 {name}");
+        }
+        for s in ["cleanup.py", "clean.py"] {
+            let (exe, _) = pick_hook_interpreter(dir, s).unwrap_or_else(|| panic!("{s} 应可解析"));
+            let name = exe.file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+            assert!(name.starts_with("python"), "{s} 应选 python，实际 {name}");
+        }
+    }
+
+    /// 大小写不敏感（用户可能写 `Cleanup.CJS`）
+    #[test]
+    fn extension_match_is_case_insensitive() {
+        let dir = std::path::Path::new("C:/nonexistent");
+        assert!(pick_hook_interpreter(dir, "Cleanup.CJS").is_some());
+        assert!(pick_hook_interpreter(dir, "CLEANUP.PY").is_some());
+    }
+
+    /// 🔴 **未知扩展名必须返回 None**，绝不能猜着用某个解释器跑 ——
+    /// 那等于让 manifest 决定"用什么程序执行什么文件"，是个提权面。
+    #[test]
+    fn unknown_extension_is_refused() {
+        let dir = std::path::Path::new("C:/nonexistent");
+        for s in ["cleanup.sh", "cleanup.bat", "cleanup.exe", "cleanup", "cleanup.txt", "cleanup.cmd"] {
+            assert!(pick_hook_interpreter(dir, s).is_none(), "{s} 不该被接受");
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod skill_link_tests {
+    use super::{create_dir_link, remove_dir_link};
+
+    /// 🔴 **建链走的到底是哪条路** —— 手工验证时我用的是 PowerShell 的
+    /// `New-Item -ItemType Junction`，**而代码里用的是 `cmd /c mklink /J`**
+    /// —— 两条完全不同的实现。这个测试直接测**代码里那条**。
+    #[test]
+    fn skill_link_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("skilllink_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let target = tmp.join("plugin").join("skill");
+        let link = tmp.join("skills").join("computer-use");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(target.join("SKILL.md"), b"---
+name: t
+---
+").unwrap();
+
+        // ① 建链（代码里那条路：cmd /c mklink /J）
+        create_dir_link(&link, &target).expect("create_dir_link 应成功");
+
+        // ② 链接存在，且**通过它能读到文件**（这是 Node 侧 loader 的行为）
+        let meta = link.symlink_metadata().expect("链接应存在");
+        assert!(meta.file_type().is_symlink(), "必须是 reparse point（Node isSymbolicLink 依赖它）");
+        assert!(link.join("SKILL.md").exists(), "通过链接应能读到 SKILL.md");
+
+        // ③ 幂等：再建一次（先删后建）不应报错
+        create_dir_link(&link, &target).expect("重复建链应成功（幂等）");
+        assert!(link.join("SKILL.md").exists());
+
+        // ④ 删链**不能误删目标**
+        remove_dir_link(&link).expect("remove_dir_link 应成功");
+        assert!(link.symlink_metadata().is_err(), "链接应已移除");
+        assert!(target.join("SKILL.md").exists(), "🔴 目标被误删了！");
+
+        // ⑤ 防御：对**真目录**调 remove_dir_link 应拒绝（不递归删用户数据）
+        let real_dir = tmp.join("real-dir");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        assert!(remove_dir_link(&real_dir).is_err(), "对真目录应拒绝删除");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 🔴 **回归测试（2026-09-18）**：source 用**正斜杠**时也必须能建链。
+    ///
+    /// 实测事故：前端拼路径用 `/`（`C:/Users/.../plugins/computer-use/skill`），
+    /// 而 `mklink` 是 cmd 内置命令、**把 `/` 当参数开关** → 报
+    /// `无效参数 - "Users"`（cmd 把 `/Users` 当成了开关）。
+    ///
+    /// 这个测试用**正斜杠 target** 建链 —— 若有人把 Rust 侧的斜杠转换去掉，
+    /// 它会立刻变红。
+    #[test]
+    fn skill_link_accepts_forward_slash_source() {
+        let tmp = std::env::temp_dir().join(format!("skilllink_fwd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let target = tmp.join("com.claudecode.gui").join("plugins").join("computer-use").join("skill");
+        let link = tmp.join(".claude").join("skills").join("computer-use");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(target.join("SKILL.md"), b"x").unwrap();
+
+        // 模拟前端传来的形态：**正斜杠**
+        let target_fwd = std::path::PathBuf::from(target.to_string_lossy().replace('\\', "/"));
+        assert!(target_fwd.to_string_lossy().contains('/'), "前提：路径确实是正斜杠");
+
+        create_dir_link(&link, &target_fwd)
+            .expect("🔴 正斜杠路径建链失败 —— mklink 需要反斜杠（见 create_dir_link 注释）");
+        assert!(link.join("SKILL.md").exists(), "通过链接应能读到文件");
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 路径含空格时仍能建链 —— `cmd /c` 的引号处理是著名坑点。
+    /// 本机 `%APPDATA%` 无空格所以现网没暴露，但别的机器可能踩。
+    #[test]
+    fn skill_link_works_with_spaces_in_path() {
+        let tmp = std::env::temp_dir().join(format!("skill link test {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let target = tmp.join("my plugin").join("skill dir");
+        let link = tmp.join("skills").join("some skill");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(target.join("SKILL.md"), b"x").unwrap();
+
+        let r = create_dir_link(&link, &target);
+        if let Err(e) = &r {
+            panic!("含空格路径建链失败（cmd /c 引号问题？）: {e}");
+        }
+        assert!(link.join("SKILL.md").exists(), "含空格路径下应能通过链接读到文件");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }

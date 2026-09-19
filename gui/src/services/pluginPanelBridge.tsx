@@ -172,7 +172,14 @@ function PluginIframePanel({ manifest, panel }: { manifest: PluginManifest; pane
         ).catch(() => {});
         return;
       }
-      void sendPluginViewerChip(d).catch(() => {});
+      // 能力类上行（on-overlay / chat-reference / desktop-image / …）走统一分派，
+      // **必须在兜底之前** —— 兜底接的是"任意未识别 kind"，插件发个
+      // {kind:"随便", payload:{head:"..."}} 就能往用户输入框塞文本。
+      void dispatchPluginUplink(manifest.pluginName, d.kind, d.payload).then((handled) => {
+        if (handled) return;
+        // 面板入口独有：未识别的 kind 落到 git-viewer 那套 chip 兜底
+        void sendPluginViewerChip(d).catch(() => {});
+      }).catch(() => {});
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -231,6 +238,347 @@ async function sendPluginViewerChip(d: { kind: string; payload?: { file?: string
     reference: { type: "paste", path, label: `git ${isDiff ? "diff" : "commit"}: ${labelText}` },
   });
 }
+
+// ── 插件上行「能力」消息 ──────────────────────────────────────────────
+//
+// ⚠️ payload 一律来自**第三方插件**（跨信任边界），每个都得过白名单校验，
+//    照 sanitizeChrome 的写法：只认已知键 + 已知类型，其余丢弃；校验失败即静默忽略。
+//
+// ⚠️ 这些分支**必须加在 `sendPluginViewerChip` 兜底之前** —— 那个兜底接的是
+//    "任意未识别 kind"，插件发个 {kind:"随便", payload:{head:"..."}} 就能往用户
+//    输入框塞文本。
+
+/** overlay 请求校验：src 的路径规则与面板 `content.src` 一致（禁绝对路径 /
+ *  盘符 / 反斜杠 / `..` 穿越），monitor 必须是非负整数。
+ *  `params` 是不透明查询串（宿主不解释，只透传）—— 长度设上限防滥用。 */
+export function sanitizeOverlayRequest(
+  raw: unknown,
+): {
+  src: string;
+  monitor?: number;
+  params?: string;
+  hostPort?: number;
+  transparent?: boolean;
+  clickThrough?: boolean;
+  hardTtlSec?: number;
+} | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const src = typeof r.src === "string" ? r.src.trim() : "";
+  if (!src) return null;
+  if (src.startsWith("/") || src.includes("\\") || src.includes("..")) return null;
+  if (/^[a-zA-Z]:/.test(src)) return null;
+  const out: {
+    src: string;
+    monitor?: number;
+    params?: string;
+    hostPort?: number;
+    transparent?: boolean;
+    clickThrough?: boolean;
+    hardTtlSec?: number;
+  } = { src };
+  // 标注/教鞭类 overlay：透明背景 + 点击穿透（语义见 Rust 侧 open_plugin_overlay）。
+  // 只认严格 true —— 传别的值一律当 false（即保持原有"不透明、收点击"行为）。
+  if (r.transparent === true) out.transparent = true;
+  if (r.clickThrough === true) out.clickThrough = true;
+  // 🛡 硬超时（秒）：到点宿主无条件关窗 —— 覆盖层的 JS 没跑起来时的唯一兜底
+  // （页面没渲染 = 没有任何 JS 会去关它 = 屏幕被锁死，实测踩过）。范围收窄防滥用。
+  if (typeof r.hardTtlSec === "number" && Number.isFinite(r.hardTtlSec)
+      && r.hardTtlSec > 0 && r.hardTtlSec <= 3600) {
+    out.hardTtlSec = Math.floor(r.hardTtlSec);
+  }
+  if (typeof r.monitor === "number" && Number.isInteger(r.monitor) && r.monitor >= 0) {
+    out.monitor = r.monitor;
+  }
+  if (typeof r.params === "string" && r.params.trim()) {
+    out.params = r.params.trim().slice(0, 2048);
+  }
+  // 插件请求「overlay 关闭时通知我把让位过的宿主窗口还回去」时带上它的端口。
+  // 只在插件真的让位过时才带（`restoreHostOnClose`），没有这个标记就完全不参与。
+  if (r.restoreHostOnClose === true
+      && typeof r.hostPort === "number" && Number.isInteger(r.hostPort)
+      && r.hostPort > 0 && r.hostPort < 65536) {
+    out.hostPort = r.hostPort;
+  }
+  return out;
+}
+
+/** 聊天引用校验：只允许 `file` 类型（插件不该能塞 `paste` 那种"内容即路径"的语义），
+ *  path 必须非空且看起来是绝对文件路径。 */
+export function sanitizeChatReference(raw: unknown): { path: string; label?: string } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const path = typeof r.path === "string" ? r.path.trim() : "";
+  if (!path) return null;
+  const out: { path: string; label?: string } = { path };
+  if (typeof r.label === "string" && r.label.trim()) {
+    // label 会进 `@ref{...|<label>}` —— `|` 会把分段切错，`}` 会提前闭合。
+    out.label = r.label.trim().replace(/[|}\n\r]/g, "-").slice(0, 120);
+  }
+  return out;
+}
+
+/** 插件请求开全屏 overlay（通用能力；overlay HTML 由插件提供）。
+ *  ⚠️ 敏感：插件借此可覆盖用户整个屏幕。 */
+async function openPluginOverlay(pluginName: string, raw: unknown): Promise<void> {
+  const req = sanitizeOverlayRequest(raw);
+  if (!req) return;
+  // 插件为截图**让位**过（最小化了宿主窗口），要我们在 overlay 关掉后通知它恢复。
+  // 记在这里、由 closePluginOverlay / overlay-closed 事件消费 —— 见 restoreHostIfNeeded。
+  if (req.hostPort) pendingHostRestore.set(pluginName, req.hostPort);
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("open_plugin_overlay", {
+    plugin: pluginName,
+    src: req.src,
+    monitor: req.monitor ?? null,
+    params: req.params ?? null,
+    transparent: req.transparent ?? false,
+    clickThrough: req.clickThrough ?? false,
+    hardTtlSec: req.hardTtlSec ?? null,
+  });
+}
+
+/** 插件请求关掉自己的全部 overlay 窗口。 */
+async function closePluginOverlay(pluginName: string): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("close_plugin_overlay", { plugin: pluginName });
+  // overlay 收起来了 → 把让位时最小化的窗口还回去。
+  // 挂在这里是因为**所有**正常关闭路径都会走到它（截图完成、Esc 取消、
+  // 插件禁用、退出清理）；Alt+F4 那种外部销毁走不到，由插件进程侧兜底
+  // （下次让位前先恢复残留，见 server.cjs 的 hideHost）。
+  await restoreHostIfNeeded(pluginName);
+}
+
+/** 让位过（还没恢复）的插件 → 它的进程端口。见 `restoreHostIfNeeded`。 */
+const pendingHostRestore = new Map<string, number>();
+
+// ── 小指示窗 ──────────────────────────────────────────────────────
+
+/**
+ * 指示窗请求的校验：**只允许相对定位的宽高**，坐标交给 Rust 侧兜底
+ * （不给坐标 = 用缺省位置）。
+ *
+ * 不复用 `sanitizeOverlayRequest` —— 那个是给"铺满显示器"的 overlay 用的，
+ * 语义（monitor 索引）与这里（像素坐标 + 尺寸）不同。
+ */
+export function sanitizeIndicatorRequest(
+  raw: unknown,
+): { src: string; params?: string; x?: number; y?: number; width?: number; height?: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const src = typeof r.src === "string" ? r.src.trim() : "";
+  if (!src) return null;
+  if (src.startsWith("/") || src.includes("\\") || src.includes("..")) return null;
+  if (/^[a-zA-Z]:/.test(src)) return null;
+  const out: { src: string; params?: string; x?: number; y?: number; width?: number; height?: number } = { src };
+  if (typeof r.params === "string" && r.params.trim()) out.params = r.params.trim().slice(0, 2048);
+  // 坐标：限个合理范围，避免插件传离谱的值把窗口丢到屏幕外
+  const num = (v: unknown, lo: number, hi: number) =>
+    typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi ? Math.round(v) : undefined;
+  out.x = num(r.x, -32000, 32000);
+  out.y = num(r.y, -32000, 32000);
+  out.width = num(r.width, 120, 2000);
+  out.height = num(r.height, 60, 2000);
+  return out;
+}
+
+/** 移动指示窗的载荷校验。 */
+export function sanitizeIndicatorMove(raw: unknown): { x: number; y: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const x = typeof r.x === "number" && Number.isFinite(r.x) ? Math.round(r.x) : null;
+  const y = typeof r.y === "number" && Number.isFinite(r.y) ? Math.round(r.y) : null;
+  if (x === null || y === null) return null;
+  if (Math.abs(x) > 32000 || Math.abs(y) > 32000) return null;
+  return { x, y };
+}
+
+async function openPluginIndicator(pluginName: string, raw: unknown): Promise<void> {
+  const req = sanitizeIndicatorRequest(raw);
+  if (!req) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("open_plugin_indicator", {
+    plugin: pluginName,
+    src: req.src,
+    params: req.params ?? null,
+    x: req.x ?? null,
+    y: req.y ?? null,
+    width: req.width ?? null,
+    height: req.height ?? null,
+  });
+}
+
+async function closePluginIndicator(pluginName: string): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("close_plugin_indicator", { plugin: pluginName });
+}
+
+/**
+ * 把让位过的宿主窗口还回去 —— 由插件进程执行（窗口句柄列表在它手里）。
+ *
+ * 为什么要绕这一圈：让位时最小化的是**该进程的全部可见窗口**（主窗 + 浮窗，
+ * 插件分不清哪个是主窗），而宿主前端的窗口 API 只能操作自己那一个 →
+ * 恢复只能由持有句柄列表的进程做，宿主只负责**时机**（overlay 关了）。
+ *
+ * 幂等：没有 pending 记录时直接返回（普通 overlay 不走让位，不参与）。
+ */
+export async function restoreHostIfNeeded(pluginName: string): Promise<void> {
+  const port = pendingHostRestore.get(pluginName);
+  if (!port) return;
+  pendingHostRestore.delete(pluginName);
+  try {
+    await fetch(`http://127.0.0.1:${port}/restore-host`, { method: "POST" });
+  } catch {
+    // 插件进程已退出等 —— 窗口留在最小化状态，用户点任务栏即可。
+    // 不重试：重试也无处可去（端口没了），且不该为此留住 pending 记录。
+  }
+}
+
+/** 插件 → 聊天输入框：以 `file` 引用插入（图片走这条，chip 图标 📄，
+ *  点击用编辑器/预览面板打开）。 */
+async function sendPluginChatReference(raw: unknown): Promise<void> {
+  const ref = sanitizeChatReference(raw);
+  if (!ref) return;
+  const { Events } = await import("./events");
+  const { windowBus } = await import("./windowBus");
+  const label = ref.label ?? ref.path.split(/[/\\]/).pop() ?? ref.path;
+  windowBus.emit(Events.CHAT_ADD_REFERENCE, {
+    reference: { type: "file", path: ref.path, label },
+  });
+}
+
+/** 插件 → 超级桌面：新增一个图片块。
+ *  ⚠️ `addItem` 在 desktopId 不存在时**静默失败**（返回一个看起来正常但没进 store
+ *  的对象）—— 必须先 loadDesktops()，并在无桌面时兜底建一个。 */
+async function sendPluginDesktopImage(raw: unknown): Promise<void> {
+  const ref = sanitizeChatReference(raw); // 同样的 shape：path(+label)
+  if (!ref) return;
+  const store = await import("../stores/desktopStore");
+  await store.loadDesktops();
+  let desktop = store.getActiveDesktop();
+  if (!desktop) desktop = store.createDesktop("Screenshots");
+  const label = ref.label ?? ref.path.split(/[/\\]/).pop() ?? "image";
+  const W = 400;
+  const H = 300;
+  const pos = store.findSmartPlace(desktop, W, H);
+  store.addItem(desktop.id, {
+    x: pos.x,
+    y: pos.y,
+    width: W,
+    height: H,
+    content: { type: "image", path: ref.path } as never,
+    label,
+  });
+}
+
+/** 插件 → 工作区文件：落盘到当前工作区内。
+ *  ⚠️ **必须限制在 workDir 之内** —— 这是插件唯一能触达文件系统的宿主通道，
+ *  不限制就是任意路径写入（`save_bytes` 本身不做沙箱）。 */
+async function writeWorkspaceFile(raw: unknown): Promise<void> {
+  if (!raw || typeof raw !== "object") return;
+  const r = raw as Record<string, unknown>;
+  const rel = typeof r.path === "string" ? r.path.trim().replace(/\\/g, "/") : "";
+  const base64 = typeof r.base64 === "string" ? r.base64 : "";
+  if (!rel || !base64) return;
+  // 拒绝绝对路径与任何形式的目录穿越
+  if (rel.startsWith("/") || /^[a-zA-Z]:/.test(rel) || rel.split("/").includes("..")) return;
+  const { getSettings } = await import("../stores/settingsStore");
+  const workDir = getSettings().workDir;
+  if (!workDir) return;
+  const abs = `${workDir.replace(/[\\/]+$/, "")}/${rel}`;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("save_bytes", { path: abs, base64Data: base64 });
+}
+
+/**
+ * 插件上行消息的**统一分派**（面板 iframe 与 overlay 窗口的 iframe 共用）。
+ *
+ * 两个入口的差别只在"消息怎么到达主窗"：
+ *   · 面板 iframe → 直接 `postMessage` 到主窗（`pluginPanelBridge` 的 onMessage）
+ *   · overlay 窗口的 iframe → postMessage 只能到 overlay 窗（跨窗口），由
+ *     `PluginOverlayApp` 转成 Tauri 事件，主窗再监听后调本函数
+ * 分派逻辑本身必须只有一份，否则两条路径会逐渐跑偏。
+ *
+ * 返回 true 表示已处理（调用方不必再走兜底）。
+ * ⚠️ 未识别的 kind 返回 false —— 面板入口据此走 `sendPluginViewerChip` 兜底
+ * （overlay 入口没有那个兜底，未识别即忽略）。
+ */
+export async function dispatchPluginUplink(
+  pluginName: string,
+  kind: unknown,
+  payload: unknown,
+): Promise<boolean> {
+  if (typeof kind !== "string") return false;
+  switch (kind) {
+    case "open-overlay":
+      await openPluginOverlay(pluginName, payload);
+      return true;
+    case "close-overlay":
+      await closePluginOverlay(pluginName);
+      return true;
+    // ── 小指示窗（"AI 操作中"浮标那一类）──
+    case "open-indicator":
+      await openPluginIndicator(pluginName, payload);
+      return true;
+    case "move-indicator": {
+      const mv = sanitizeIndicatorMove(payload);
+      if (mv) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("move_plugin_indicator", { plugin: pluginName, x: mv.x, y: mv.y });
+      }
+      return true;
+    }
+    case "close-indicator":
+      await closePluginIndicator(pluginName);
+      return true;
+    case "chat-reference":
+      await sendPluginChatReference(payload);
+      return true;
+    case "desktop-image":
+      await sendPluginDesktopImage(payload);
+      return true;
+    case "write-workspace-file":
+      await writeWorkspaceFile(payload);
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** 主窗监听 overlay 窗口转上来的消息（见 `dispatchPluginUplink` 注释）。
+ *  在 App 启动时订阅一次。 */
+export function startOverlayUplinkListener(): () => void {
+  // ⚠️ **单例保护**：重复注册会让同一个 overlay 上行被执行多次 —— 表现是
+  // 「拖一次框，往输入框插了 3 个同样的引用」。React StrictMode 的双调用、
+  // HMR 重载都会造成多份监听，而且这种重复**不会报错**，只体现为重复插入。
+  if (_overlayUplinkStop) return _overlayUplinkStop;
+
+  let un: (() => void) | null = null;
+  let stopped = false;
+  void import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<{ plugin: string; kind: string; payload: unknown }>(
+      "plugin-overlay-uplink",
+      (e) => {
+        const p = e.payload;
+        if (!p || typeof p.plugin !== "string") return;
+        void dispatchPluginUplink(p.plugin, p.kind, p.payload).catch(() => {});
+      },
+    ).then((fn) => {
+      if (stopped) fn();
+      else un = fn;
+    }),
+  ).catch(() => {});
+
+  const stop = () => {
+    stopped = true;
+    un?.();
+    _overlayUplinkStop = null;
+  };
+  _overlayUplinkStop = stop;
+  return stop;
+}
+
+let _overlayUplinkStop: (() => void) | null = null;
 
 // ── 通用: 插件面板打开 + 参数传递（平台机制, 渲染归插件）──
 // 插件 iframe 上行 { kind: "open-panel", payload: { panelId, params, title, width, height } }
@@ -441,11 +789,26 @@ export function registerPluginPanels(manifests: PluginManifest[]): void {
   }
 }
 
-/** 注销插件贡献的面板（禁用/卸载时调用）：
+/**
+ * 注销插件贡献的面板（禁用/卸载时调用）：
  *  ① panelRegistry 摘定义（图标栏/面板下拉即消失）
- *  ② 布局树移除已打开的实例（removePanelsFromTree 纯函数, T2 预留）
- *  ③ 浮窗形态的含该面板的窗口一并关闭 */
+ *  ② 布局树移除已打开的实例（removePanelsFromTree 纯函数）
+ *  ③ 浮窗形态的含该面板的窗口一并关闭
+ *  ④ **关掉该插件开的指示窗与 overlay 窗口**
+ *
+ * ④ 的必要性：**宿主自己开的窗口该由宿主收拾**。此前只在插件**主动请求**关闭时
+ * 才调 closePlugin*，禁用/卸载路径没有 —— 指示窗靠"插件进程没了就自愈"才没留下
+ * 残骸，但那是插件侧的兜底，不该当主路径用。
+ *
+ * ④ 异步且**失败即忽略**：窗口清理失败不该影响"注销面板"这件正事。
+ * 且它在 `panelIds.length === 0` 的早退**之前** —— 没贡献面板的插件
+ * （如鼠标键盘只开指示窗）同样要关窗。
+ */
 export function unregisterPluginPanels(pluginName: string): void {
+  // ④ 先发出去（不等结果）
+  void closePluginIndicator(pluginName).catch(() => {});
+  void closePluginOverlay(pluginName).catch(() => {});
+
   const panelIds = getAllPanels()
     .map((p) => p.id)
     .filter((id) => id.startsWith(`plugin:${pluginName}:`));

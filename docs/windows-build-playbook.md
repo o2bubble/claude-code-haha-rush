@@ -64,14 +64,37 @@ requests.post(f"{SERVER_96}/api/updates/{VERSION}/upload",
 
 ## 4. 上传到云（workbench，云直连 HTTP 502 不可达）
 
-云 `123.56.66.84:8765` **不能 HTTP 直连**（502）→ 走 workbench 内网通道：
+### 🔴 不要走公网 HTTPS —— 上传带宽极小
+
+`release.17lumen.cloud`（Cloudflare 回源云 ECS）**能连上但上传带宽很小**：23MB 的
+gui.zip 会卡很久、乃至 `ChunkedEncodingError: Connection broken`（实测 2026-09-17）。
+用户原话：「云服务器通过 workbench 上传后走 localhost 发布不快多了，直接通过外部
+IP 带宽很小的」。
+
+**判定规则**：往云**上传**（几十 MB 组件）→ 一律 workbench；只是**读**（latest 几 KB）
+→ 公网域名也行。走 workbench 后整轮云发布 **13 秒**（两次上传 + 服务端 localhost
+上传 + 清理）。
+
+### 流程
 
 ```
-workbench upload <local> /tmp/ -i i-2ze2rouoikcqrlbseu8a -r cn-beijing -f
-workbench exec   -i i-2ze2rouoikcqrlbseu8a -r cn-beijing -c "bash /tmp/cloud_upload.sh"
+workbench upload <local> //tmp//<name> -i i-2ze2rouoikcqrlbseu8a -r cn-beijing -f
+workbench exec   -i i-2ze2rouoikcqrlbseu8a -r cn-beijing -o json -c "curl -s -X POST \
+    http://localhost:8765/api/updates/<V>/upload -H 'X-API-Key: <key>' \
+    -F 'manifest=</tmp/manifest.json' -F 'platform=windows' -F 'components=@/tmp/gui.zip'"
 ```
 
-`cloud_upload.sh` 在云端容器 `localhost:8765` curl POST 上传（`manifest=@/tmp/manifest.json`、`components=@/tmp/gui.zip` 等）。**引号/转义放在 .sh 文件里**避免命令地狱。
+也可以先把 curl 写成 `cloud_upload.sh` 传上去再 `bash`（**引号/转义放 .sh 里**避免
+命令地狱）—— 两种都行，脚本里用 `-c "curl …"` 少一步。
+
+**⚠️ workbench 踩坑（两次实战累积）**：
+- **`-f` 是必须的**（`--force` = Overwrite remote file without confirmation）：目标
+  文件已存在时 workbench 会**交互式问 `Overwrite? [y/N]`**，非交互环境（subprocess）
+  直接被当作用户取消 → `upload canceled by user`。**症状有迷惑性**，看着像上传失败，
+  其实在等输入。
+- **偶发 DNS 抖动**：`dial tcp: lookup ecs-workbench.aliyuncs.com: no such host` ——
+  重试即可，别当代码问题查。发布脚本应内建 2-3 次重试。
+- **远端路径要 `//tmp//x` 双斜杠**：单斜杠会被 workbench 当成**本地**路径。
 
 **⚠️ workbench exec 踩坑（2026-08-26 实战）**：
 - **`missing port in address`（`\\.\pipe\workbench-exec-...`）是 v1.0.0 的 bug**：`net.Dial("tcp", "\\.\pipe\...")` 不识别 Windows named pipe。daemon 在跑（`daemon status` = running）也没用。**修复：`workbench upgrade` 到 ≥v1.0.1**（`workbench version` 会提示新版本）。升级后 exec 立即可用。↔ `daemon start` 报 `Access is denied` 是另一回事（本机 pipe 权限）。

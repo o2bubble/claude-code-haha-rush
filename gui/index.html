@@ -4,6 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Claude Code</title>
+  <!-- overlay 窗口（插件全屏框选等）会在内部 iframe / 冻结图就绪前短暂露底，
+       而 WebView2 的默认底色是**白**的 —— 深色主题下就是"整个屏幕白闪一下"。
+       这里在解析最早期**同步**铺黑，不等外部样式表（tokens.css）与 React 启动。
+       overlay 的底色必然是黑的（冻结图黑底 + 选区外压暗），与主题无关，
+       故不读主题直接给黑；其它窗口（hash 不以 #overlay/ 开头）不受影响。 -->
+  <script>
+    if (location.hash.indexOf("#overlay/") === 0) {
+      document.documentElement.style.backgroundColor = "#000";
+    }
+  </script>
   <link rel="stylesheet" href="/src/tokens.css" />
   <style>
     /* 启动动画由 React 覆盖层(App.tsx)渲染, keyframes 单一来源在 tokens.css;

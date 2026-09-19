@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>截图预览</title>
+<style>
+  /* 预览浮窗：宿主按传统浮窗渲染（有标题栏、可缩放），本页只管把图铺好。
+     之所以做成**独立浮窗面板**而不是面板内覆盖层：面板本身多宽，覆盖层就多宽，
+     缩略图看不清的细节在大图里还是看不清。浮窗可以拉大、可以摆到别处。 */
+  html, body { margin: 0; height: 100%; overflow: hidden;
+               background: var(--bg-root, #0e0e12); color: var(--fg-primary, #cdd1da); }
+  body { display: flex; flex-direction: column;
+         font: 12px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+
+  #bar { flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+         padding: 6px 10px; border-bottom: 1px solid var(--border-light, #242533);
+         color: var(--fg-muted, #5c6272); font-size: 11px; user-select: none; }
+  #name { color: var(--fg-secondary, #8f94a1); overflow: hidden;
+          text-overflow: ellipsis; white-space: nowrap; }
+  .spacer { flex: 1; }
+  #dims { flex-shrink: 0; }
+  #fit { flex-shrink: 0; font: inherit; font-size: 11px; padding: 2px 8px; cursor: pointer;
+         border-radius: 5px; border: 1px solid var(--border-medium, #3a3b4c);
+         background: var(--bg-hover, #1d1e28); color: inherit; }
+  #fit:hover { filter: brightness(1.25); }
+
+  /* 画布：图默认 contain 适应窗口；切到 1:1 时超出部分用滚动看 */
+  #stage { flex: 1; min-height: 0; overflow: auto; display: flex;
+           align-items: center; justify-content: center; padding: 10px;
+           box-sizing: border-box; }
+  #stage.zoom { align-items: flex-start; justify-content: flex-start; }
+  #img { display: block; max-width: 100%; max-height: 100%; object-fit: contain;
+         box-shadow: 0 6px 28px rgba(0, 0, 0, .45); border-radius: 4px;
+         user-select: none; -webkit-user-drag: none; }
+  #stage.zoom #img { max-width: none; max-height: none;
+                     width: auto; height: auto; image-rendering: pixelated; }
+
+  #err { padding: 30px; text-align: center; color: var(--fg-muted, #5c6272); }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span id="name"></span>
+  <span class="spacer"></span>
+  <span id="dims"></span>
+  <button id="fit" title="在「适应窗口」与「原始大小」之间切换（也可双击图片）">适应窗口</button>
+</div>
+<div id="stage"><div id="err">加载中…</div></div>
+
+<script>
+(function () {
+  "use strict";
+  // 与其它插件面板同一套：宿主把参数拼进 URL query（base64url JSON），
+  // 端口单独给（插件进程是 127.0.0.1:<port>）。见宿主 encodePanelParams。
+  var q = new URLSearchParams(location.search);
+  var PORT = q.get("port");
+  var API = PORT ? "http://127.0.0.1:" + PORT : null;
+
+  var stage = document.getElementById("stage");
+  var nameEl = document.getElementById("name");
+  var dimsEl = document.getElementById("dims");
+  var fitBtn = document.getElementById("fit");
+
+  // ── 主题跟随（URL 首帧 + 宿主后续推送）──
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
+  }
+  applyTheme(q.get("theme"));
+
+  function decodeParams(b64) {
+    try {
+      var s = b64.replace(/-/g, "+").replace(/_/g, "/");
+      while (s.length % 4) s += "=";
+      return JSON.parse(decodeURIComponent(escape(atob(s))));
+    } catch (e) { return null; }
+  }
+
+  var zoomed = false;
+  function setZoom(on) {
+    zoomed = on;
+    stage.classList.toggle("zoom", on);
+    fitBtn.textContent = on ? "适应窗口" : "原始大小";
+  }
+
+  function show(params) {
+    var path = params && params.path;
+    if (!path || !API) {
+      stage.innerHTML = '<div id="err">缺少图片路径 —— 预览参数不完整</div>';
+      return;
+    }
+    nameEl.textContent = params.name || String(path).split(/[/\\]/).pop();
+    var img = document.createElement("img");
+    img.id = "img";
+    img.alt = nameEl.textContent;
+    img.onload = function () {
+      dimsEl.textContent = img.naturalWidth + " × " + img.naturalHeight;
+      setZoom(false);   // 先给全貌，细节由用户双击放大
+    };
+    img.onerror = function () {
+      stage.innerHTML = '<div id="err">图片已不存在（可能已被删除）</div>';
+    };
+    img.ondblclick = function () { setZoom(!zoomed); };
+    img.src = API + "/file?path=" + encodeURIComponent(path);
+    stage.textContent = "";
+    stage.appendChild(img);
+  }
+
+  fitBtn.onclick = function () { setZoom(!zoomed); };
+
+  window.addEventListener("message", function (e) {
+    var d = e.data;
+    if (!d || typeof d !== "object" || d.source !== "plugin:host") return;
+    if (d.kind === "theme") { applyTheme(d.payload && d.payload.theme); return; }
+    // 宿主对已存在的浮窗再 open-panel 时，参数以 postMessage 增量下发
+    if (d.kind === "params" && d.payload) show(d.payload);
+  });
+
+  show(decodeParams(q.get("params")));
+})();
+</script>
+</body>
+</html>

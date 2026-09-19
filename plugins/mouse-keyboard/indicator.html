@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>AI 操作中</title>
+<style>
+  /* 小指示窗：置顶、无装饰、不可激活（点它不会抢焦点）。
+     尺寸约 300×132，做成两行信息 + 最近动作 + 一行汇总 —— 尽量少遮挡。
+     整体可拖动（-webkit-app-region: drag），按钮单独排除。 */
+  :root {
+    --bg: rgba(16, 17, 22, .92);
+    --fg: #d7dbe4;
+    --fg-dim: #8a90a0;
+    --accent: #58c4e8;
+    --danger: #e2564f;
+    --ok: #4caf7d;
+    --border: rgba(255, 255, 255, .10);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 11px/1.35 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    border: 1px solid var(--border); border-radius: 8px;
+    display: flex; flex-direction: column; padding: 7px 9px; gap: 4px;
+    -webkit-app-region: drag;           /* 整窗可拖 */
+    user-select: none;
+  }
+
+  .row { display: flex; align-items: center; gap: 6px; }
+  .spacer { flex: 1; }
+
+  #dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+  #dot.busy { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+  #dot.stopped { background: var(--danger); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+  /* 标题可被压缩（两个按钮 + 标题在 300px 里要放得下） */
+  #title { font-weight: 600; font-size: 11.5px; white-space: nowrap; overflow: hidden; }
+
+  /* 锁定态：整块变成醒目的警示色边框 —— 用户必须一眼看出"现在键鼠被接管了"，
+     否则他会以为电脑卡了 */
+  body.locked { border-color: var(--danger); box-shadow: 0 0 0 1px rgba(226, 86, 79, .35); }
+  #dot.locked { background: var(--danger); animation: pulse 1.2s ease-in-out infinite; }
+
+  /* 关闭按钮 —— 与「停止」语义**不同**：停止是停 AI 的操作，关闭只是收起这个窗口 */
+  #close {
+    -webkit-app-region: no-drag;
+    flex-shrink: 0; cursor: pointer;
+    font: inherit; font-size: 14px; line-height: 1;
+    padding: 2px 7px; border-radius: 5px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--fg-dim);
+  }
+  #close:hover { color: var(--fg); border-color: var(--fg-dim); background: rgba(255, 255, 255, .07); }
+
+  #current {
+    color: var(--accent); font-size: 11.5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    min-height: 15px;
+  }
+  #current.idle { color: var(--fg-dim); }
+
+  /* 动作历史：每行 = 相对时间 + 动作。**只表示"已经发生过"**，
+     不表示"当前进行到哪一步"（见 render 里的注释）。 */
+  #log { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 2px; }
+  #log > div { display: flex; gap: 7px; align-items: baseline; }
+  #log .t {
+    color: var(--fg-muted); font-size: 9.5px;
+    flex-shrink: 0; min-width: 46px; text-align: right;
+  }
+  #log .a {
+    color: var(--fg-dim); font-size: 10.5px; padding: 0 2px; border-radius: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #log .a.recent { color: var(--fg); }
+  /* 新出现的那条闪一下 —— 操作只有几百毫秒，光靠"内容变了"用户注意不到 */
+  #log .a.fresh { animation: freshIn .8s ease-out; }
+  @keyframes freshIn {
+    0% { background: rgba(88, 196, 232, .32); }
+    100% { background: transparent; }
+  }
+  #log .empty { color: var(--fg-muted); font-size: 10px; }
+
+  #foot { color: var(--fg-dim); font-size: 10px; display: flex; gap: 6px; }
+  kbd {
+    font-family: inherit; font-size: 9.5px; padding: 0 3px;
+    border: 1px solid var(--border); border-radius: 3px; color: var(--fg-dim);
+  }
+  #esc kbd { color: var(--fg); border-color: var(--fg-muted); }
+</style>
+</head>
+<body>
+<div class="row">
+  <span id="dot" class="busy"></span>
+  <span id="title">AI 操作中</span>
+  <span class="spacer"></span>
+  <!-- 没有「停止」按钮：AI 声明独占键盘时，用户的鼠标根本动不了 → 那个按钮
+       在最需要它的时刻恰恰点不到。中断统一走键盘（见下面的提示行）。 -->
+  <button id="close" title="关闭此窗口（不影响 AI 的操作状态）">✕</button>
+</div>
+
+<div id="current">连接中…</div>
+
+<div id="log"></div>
+
+<div id="foot">
+  <span id="stat">—</span>
+  <span class="spacer"></span>
+  <span id="esc"><kbd>Ctrl+Q</kbd> 接管</span>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var q = new URLSearchParams(location.search);
+  var PORT = q.get("port");
+  var API = PORT ? "http://127.0.0.1:" + PORT : null;
+  var SOURCE = "plugin:viewer:mouse-keyboard";
+
+  var dot = document.getElementById("dot");
+  var title = document.getElementById("title");
+  var curEl = document.getElementById("current");
+  var logEl = document.getElementById("log");
+  var statEl = document.getElementById("stat");
+
+  /**
+   * 距**最后一次操作**超过这么久 → 淡出。
+   *
+   * 取 30 秒：AI 干活的节奏是"几个动作 → 想几秒 → 再来几个"，短了会让窗口在两次
+   * 操作之间消失、下次又冒出来一顿闪。
+   */
+  var IDLE_CLOSE_MS = 30000;
+
+  var openedAt = Date.now();
+  var closed = false;
+
+  function toHost(kind, payload) {
+    try { parent.postMessage({ source: SOURCE, kind: kind, payload: payload }, "*"); } catch (e) {}
+  }
+
+  /**
+   * 上次渲染的"指纹" —— 只有内容真的变了才重建 DOM。
+   *
+   * 为什么要这个：本页 250ms 轮询一次（操作只有几百毫秒，慢了就看不见变化），
+   * 而下面重建 logEl 是 `textContent="" + 逐条 append` —— 每 250ms 重来一次会**闪**。
+   * 指纹里用 `Math.floor(uptimeMs/1000)`（秒级）而不是原始毫秒，否则"运行时长的
+   * 数字"每秒变动 4 次，等于没比较。
+   */
+  var lastSig = "";
+  /** 上次渲染时最新动作的时间戳 —— 用来判断"有没有新动作"（见下面的 .fresh） */
+  var lastNewestT = 0;
+
+  function render(s) {
+    var busy = !!s.currentAction;
+    var stopped = !!s.aborted;
+
+    // 「忙/闲」用**进程侧的活跃判定**（s.active = 有操作在跑，或刚操作过几秒内），
+    // 不是瞬时的 currentAction —— 后者在窗口出现时早就空了，会一直显示"空闲"
+    // 而用户明明看到鼠标在动（用户报的就是这个困惑）。
+    var active = !!s.active;
+
+    // ⚠️ 关闭判定必须在"指纹相同就提前 return"**之前** —— 它依赖时间流逝，
+    // 而内容可能一直不变（画面静止时倒计时照跑）。放后面会被 return 跳过，窗口永不关闭。
+    if (!busy && !stopped) {
+      var idleFor = typeof s.lastActivityMs === "number"
+        ? s.lastActivityMs
+        : Date.now() - openedAt;   // 进程还没记录过任何操作（如只调过 screen_info）→ 按窗口年龄算
+      if (idleFor > IDLE_CLOSE_MS) { closeSelf(); return; }
+    }
+
+    // 内容没变就不重建 DOM（本页 250ms 轮询，重建 logEl 会闪）。
+    // ⚠️ 指纹要含 `ago(t)` 的结果而非原始 `t` —— 时间戳不变，但"5 秒前"会变成
+    // "10 秒前"，不带上它列表里的时间就永远停在第一次渲染的样子。
+    // 锁定状态（AI 声明独占键鼠时）—— 用户必须一眼看出"现在不能操作"，
+    // 否则会以为电脑卡死。锁定时整窗变警示色边框 + 红点。
+    var locked = !!s.locked;
+    var lockRemainS = Math.max(0, Math.ceil((s.lockRemainMs || 0) / 1000));
+
+    var sig = JSON.stringify([
+      s.currentAction, s.aborted, active, s.count, locked, lockRemainS,
+      Math.floor((s.uptimeMs || 0) / 1000),
+      (s.log || []).map(function (x) { return x.t + "|" + ago(x.t); }),
+    ]);
+    if (sig === lastSig) return;
+    lastSig = sig;
+
+    document.body.className = locked ? "locked" : "";
+    dot.className = stopped ? "stopped" : (locked ? "locked" : (active ? "busy" : ""));
+    title.textContent = stopped ? "已停止"
+      : (locked ? "AI 独占中" : (active ? "AI 操作中" : "AI 空闲"));
+
+    // 正在做 → "正在：xxx"；刚做完 → "刚完成：xxx"（窗口多半是操作做完才开的）。
+    var last = (s.log && s.log[0]) ? s.log[0].text : "";
+    curEl.textContent = stopped
+      ? ("已急停（" + (s.abortReason || "原因未知") + "）")
+      : (locked
+        ? ("键鼠已锁定（" + (s.lockScope === "both" ? "键盘+鼠标" : s.lockScope === "keyboard" ? "键盘" : "鼠标")
+           + "）· 剩 " + lockRemainS + "s")
+        : (busy ? ("正在：" + s.currentAction)
+          : (last ? "刚完成：" + last : "等待 AI 操作…")));
+    curEl.className = busy || stopped || locked ? "" : "idle";
+
+    // 动作历史（新的在前），每条带**相对时间**。
+    //
+    // ⚠️ 这里是**过去时**的记录，不是进度条：不要把某条标成"当前步"。
+    // 之前用 `›` 标"最新一条"，用户直接问「前面那个 › 又不会随着具体到哪一步
+    // 更新状态啊 你弄那个干啥？」—— 它确实不表示进度，那个符号只会误导。
+    // 改成「时间 + 动作」后语义就清楚了：这些都是**已经发生过的**。
+    // （"当前在做什么"由上面那行负责，不要在这里重复表达。）
+    logEl.textContent = "";
+    var items = (s.log || []).slice(0, 3);
+    if (!items.length) {
+      var em = document.createElement("div");
+      em.className = "empty";
+      em.textContent = "（还没有动作）";
+      logEl.appendChild(em);
+    } else {
+      var newestT = items[0].t;
+      var justArrived = newestT !== lastNewestT;
+      for (var i = 0; i < items.length; i++) {
+        var row = document.createElement("div");
+        var tt = document.createElement("span");
+        tt.className = "t";
+        tt.textContent = ago(items[i].t);
+        var aa = document.createElement("span");
+        // 最新那条亮一点；刚出现的再加闪一下（操作只有几百毫秒，不加动效看不见）
+        aa.className = "a" + (i === 0 ? " recent" : "") + (i === 0 && justArrived ? " fresh" : "");
+        aa.textContent = items[i].text;
+        row.appendChild(tt);
+        row.appendChild(aa);
+        logEl.appendChild(row);
+      }
+      lastNewestT = newestT;
+    }
+
+    var secs = Math.round((s.uptimeMs || 0) / 1000);
+    statEl.textContent = "累计 " + (s.count || 0) + " 个动作 · " + fmtDur(secs);
+  }
+
+  function fmtDur(sec) {
+    if (sec < 60) return sec + "s";
+    if (sec < 3600) return Math.floor(sec / 60) + "m" + (sec % 60) + "s";
+    return Math.floor(sec / 3600) + "h" + Math.floor((sec % 3600) / 60) + "m";
+  }
+
+  /**
+   * 相对时间（"刚刚" / "5 秒前" / "2 分钟前"）。
+   *
+   * 秒数**取整到 5 的倍数**：一是"6 秒前"和"5 秒前"对用户没差别，二是这个字符串
+   * 会进渲染指纹（见 render）—— 粒度粗一点，DOM 重建就少一点。
+   * `t` 是**进程侧**的时间戳（`Date.now()`），同机可直接相减。
+   */
+  function ago(t) {
+    var s = Math.floor((Date.now() - t) / 1000);
+    if (s < 5) return "刚刚";
+    if (s < 60) return (Math.floor(s / 5) * 5) + " 秒前";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + " 分钟前";
+    return Math.floor(m / 60) + " 小时前";
+  }
+
+  /**
+   * 自己请求宿主关掉（本窗口是宿主开的，自己关不了）。
+   * 先做一个淡出，再请求关闭 —— 硬消失太突兀。
+   */
+  function closeSelf() {
+    if (closed) return;
+    closed = true;
+    clearInterval(timer);
+    document.body.style.transition = "opacity .45s ease";
+    document.body.style.opacity = "0";
+    setTimeout(function () { toHost("close-indicator"); }, 460);
+  }
+
+  // 关闭窗口 —— 只是收起它，**不改 AI 的操作状态**（要停 AI 请点左边的「停止」）。
+  // 下次 AI 开始操作时窗口会再出现（那是这个浮标的意义）；完全不想看到它就去
+  // 设置里关掉「AI 操作时显示浮动指示窗」。
+  document.getElementById("close").onclick = function () { closeSelf(); };
+
+  /** 上次向服务端续租约的时刻 —— 别每 250ms 都发一次。 */
+  var lastRenewAt = 0;
+
+  function tick() {
+    if (!API) { curEl.textContent = "缺少端口参数"; return; }
+    fetch(API + "/activity")
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (s && s.ok) {
+          render(s);
+          // 输入锁的租约续期：只在"锁着 + AI 确实在干活"时续。
+          // 服务端还会再校验一次活跃度（防伪造）——所以即使这里出错，锁也不会
+          // 被无限续下去（那是最坏的失败模式，见服务端 /lock/renew 注释）。
+          if (s.locked && s.active && Date.now() - lastRenewAt > 3000) {
+            lastRenewAt = Date.now();
+            fetch(API + "/lock/renew", { method: "POST" }).catch(function () {});
+          }
+        }
+      })
+      .catch(function () {
+        // 插件进程没了（禁用/崩溃）→ 自己收起来，别留一个孤零零的窗口
+        if (!closed) { closed = true; clearInterval(timer); toHost("close-indicator"); }
+      });
+  }
+
+  // 250ms：一批操作可能几百毫秒就跑完，600ms 会整批漏掉（用户看不到变化）。
+  // 本地回环 HTTP，4 次/秒的开销可忽略；DOM 重建有指纹去重，不会闪。
+  var timer = setInterval(tick, 250);
+  tick();
+
+  // 主题跟随（宿主推来）
+  window.addEventListener("message", function (ev) {
+    var d = ev.data;
+    if (!d || d.source !== "plugin:host") return;
+    if (d.kind === "theme" && d.payload && d.payload.theme === "light") {
+      document.body.style.background = "rgba(250,250,252,.95)";
+      document.body.style.color = "#1f2430";
+    }
+  });
+})();
+</script>
+</body>
+</html>

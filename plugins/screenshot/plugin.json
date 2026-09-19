@@ -1,0 +1,145 @@
+{
+  "pluginName": "screenshot",
+  "displayName": "截屏",
+  "version": "0.2.1",
+  "apiVersion": "1.0",
+  "description": "截屏工具：支持全屏 / 区域 / 窗口三种模式，截图时窗口自动让开位置。截完可直接插入聊天输入框、发送到超级桌面，或保存到当前工作区；AI 也能直接截屏看图。",
+  "icon": "desktopItemView",
+  "category": "tool",
+  "installType": "standard",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "截屏",
+        "panelKind": "in-main",
+        "userManaged": true,
+        "content": { "type": "html", "src": "panel.html" },
+        "process": "screenshot-server"
+      },
+      {
+        "id": "preview",
+        "title": "截图预览",
+        "panelKind": "floating",
+        "userManaged": false,
+        "content": { "type": "html", "src": "preview.html" },
+        "process": "screenshot-server"
+      }
+    ],
+    "commands": [
+      {
+        "id": "region",
+        "title": "截屏：区域",
+        "onInvoke": "region",
+        "hotkey": "Mod+Shift+X",
+        "scope": "app"
+      },
+      {
+        "id": "fullscreen",
+        "title": "截屏：全屏",
+        "onInvoke": "fullscreen"
+      },
+      {
+        "id": "window",
+        "title": "截屏：窗口",
+        "onInvoke": "window"
+      }
+    ],
+    "events": [],
+    "mcpTools": [
+      {
+        "name": "fullscreen",
+        "description": "Capture the screen (one whole monitor) and return the image. Use when you need to see what is currently displayed on the user's screen. Coordinates in the result are physical pixels relative to that monitor's top-left corner. Defaults to the primary monitor.",
+        "process": "screenshot-server",
+        "resultKind": "image",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "monitor": {
+              "type": "number",
+              "description": "Monitor index, 0 = primary (default). Out-of-range values fall back to the primary monitor."
+            },
+            "clearScreen": {
+              "type": "boolean",
+              "description": "Minimize the GUI window just before capturing so that whatever it was covering shows up in the shot (the window is restored right after). Pass true when you need to see what is BEHIND the GUI window; pass false to leave the user's window untouched (e.g. they are actively looking at it and you only need a quick look). Omit to use the user's configured default."
+            }
+          }
+        }
+      },
+      {
+        "name": "region",
+        "description": "Capture a rectangular region of the screen and return the image. Use when you only need part of the screen (e.g. a chart, a dialog, a table). Coordinates are physical pixels relative to the target monitor's top-left corner — call the fullscreen tool first if you need to locate something.",
+        "process": "screenshot-server",
+        "resultKind": "image",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "region": {
+              "type": "object",
+              "description": "Rectangle to capture, in physical pixels relative to the monitor's top-left corner.",
+              "properties": {
+                "x": { "type": "number", "description": "Left offset from the monitor's left edge" },
+                "y": { "type": "number", "description": "Top offset from the monitor's top edge" },
+                "w": { "type": "number", "description": "Width in pixels (must be >= 1)" },
+                "h": { "type": "number", "description": "Height in pixels (must be >= 1)" }
+              },
+              "required": ["x", "y", "w", "h"]
+            },
+            "monitor": {
+              "type": "number",
+              "description": "Monitor index, 0 = primary (default)."
+            },
+            "clearScreen": {
+              "type": "boolean",
+              "description": "Minimize the GUI window just before capturing so that whatever it was covering shows up in the shot (the window is restored right after). Pass true when the region you need is currently hidden BEHIND the GUI window; pass false to leave the user's window untouched (e.g. they are actively looking at it). Omit to use the user's configured default."
+            }
+          },
+          "required": ["region"]
+        }
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "screenshot-server",
+      "command": "node",
+      "args": ["server.cjs"],
+      "env": {
+        "CLAUDE_PLUGIN_WORKSPACE": "${workspace}"
+      },
+      "startOn": "workspace_bound"
+    }
+  ],
+  "settings": {
+    "saveDir": {
+      "type": "string",
+      "title": "保存目录",
+      "description": "留空 = 当前工作区的 .claude/screenshots/；填绝对路径则固定存到那里",
+      "default": ""
+    },
+    "defaultDest": {
+      "type": "select",
+      "title": "默认去向",
+      "description": "截完图直接送到哪里（之后可在面板里改投）",
+      "default": "chat",
+      "options": [
+        { "value": "chat", "label": "插入聊天输入框" },
+        { "value": "desktop", "label": "发送到超级桌面" },
+        { "value": "file", "label": "仅保存到文件" }
+      ]
+    },
+    "copyToClipboard": {
+      "type": "boolean",
+      "title": "同时复制到剪贴板",
+      "description": "每次截图后把图片写入系统剪贴板，方便直接粘到别处",
+      "default": true
+    },
+    "clearScreen": {
+      "type": "boolean",
+      "title": "截图时让开位置",
+      "description": "截图前把本窗口最小化，好让出被它挡住的画面（截图完成后自动恢复）。想让主窗口也在截图里出现时关掉它",
+      "default": true
+    }
+  },
+  "platforms": ["windows", "macos"]
+}

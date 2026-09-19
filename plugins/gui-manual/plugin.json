@@ -1,0 +1,35 @@
+{
+  "pluginName": "gui-manual",
+  "displayName": "GUI 功能手册",
+  "version": "0.1.2",
+  "apiVersion": "1.0",
+  "description": "把 GUI 的功能手册放进侧栏面板：78 个用户可见功能，按功能区组织，每个都写清「是什么 / 怎么用 / 入口在哪」。同一份手册也做成技能供 AI 查阅 —— 用户问「XX 在哪」或遇到界面问题时，AI 能按章检索并给出准确指引。手册由 docs/gui/features.md 构建生成，两份产物同源。",
+  "icon": "outline",
+  "category": "guide",
+  "installType": "standard",
+  "contributes": {
+    "panels": [
+      {
+        "id": "gui-manual-panel",
+        "title": "功能手册",
+        "panelKind": "in-main",
+        "userManaged": true,
+        "content": {
+          "type": "html",
+          "src": "manual.html"
+        }
+      }
+    ],
+    "commands": [],
+    "events": [],
+    "mcpTools": [],
+    "skills": [
+      {
+        "name": "gui-manual",
+        "path": "skill"
+      }
+    ]
+  },
+  "processes": [],
+  "platforms": []
+}

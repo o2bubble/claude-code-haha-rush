@@ -163,6 +163,11 @@ async function fetchDesktops(): Promise<void> {
       // 改动）。无条件用服务端 view 重建会让用户刚做的缩放/平移"闪回"回旧值。items/
       // connections/name 仍以服务端为准，只有视图保持本地（视图是本地交互态）。
       const prevById = new Map(desktops.map((d) => [d.id, d]));
+      // 同理，**选中态也是本地交互态**，不能被服务端快照覆盖 —— 用户点了
+      // 「桌面 2」，此时另一实例的一次改动（或自己刚触发的保存回声）会引发
+      // refetch，无条件写回 desktops[0] 会让用户看到"点完自己跳回桌面 1"，
+      // 像是点击没生效。只有当原选中已不存在（被删 / 换了工作区）才回退第一张。
+      const prevActive = activeDesktopId;
       desktops = records.map((r: any) => {
         const rec = recordToDesktop(r);
         const prev = prevById.get(rec.id);
@@ -176,7 +181,9 @@ async function fetchDesktops(): Promise<void> {
         }
         return rec;
       });
-      activeDesktopId = desktops[0].id;
+      activeDesktopId = desktops.some((d) => d.id === prevActive)
+        ? prevActive
+        : desktops[0].id;
       // Restore max zIndex
       _nextZIndex = 100;
       for (const d of desktops) {
@@ -363,7 +370,8 @@ export function deleteDesktop(id: string): void {
 
 export function setActiveDesktop(id: string): void {
   activeDesktopId = id;
-  notifyDesktopChanged();
+  // 用 View 变体：切选中是纯本地行为，不写库、不惊动别的实例
+  notifyDesktopViewChanged();
 }
 
 export function renameDesktop(id: string, name: string): void {
@@ -805,7 +813,9 @@ export async function forceSaveDesktop(): Promise<void> {
 
 // ─── Notification ───
 
-function notifyDesktopChanged(dirtyDesktopId?: string): void {
+/** 把桌面状态广播给本实例的其它窗口（Leaf / 浮窗）。
+ *  与"是否落盘"无关 —— 见下面两个 notify。 */
+function broadcastDesktopState(): void {
   const payload = { desktops: [...desktops], activeDesktopId };
   // 两条路各司其职，不能合并成一条：
   // - windowBus(DESKTOP_CHANGED) → crossWindowBusHub 继电 publish —— Hub 自身/
@@ -818,5 +828,19 @@ function notifyDesktopChanged(dirtyDesktopId?: string): void {
   windowBus.emit(Events.DESKTOP_CHANGED, payload, { sticky: true });
   crossWindowBus.publish("desktop.list", payload.desktops, { sticky: true });
   crossWindowBus.publish("desktop.items", payload.activeDesktopId, { sticky: true });
+}
+
+function notifyDesktopChanged(dirtyDesktopId?: string): void {
+  broadcastDesktopState();
   if (!_refetching) scheduleSave(dirtyDesktopId);
+}
+
+/** 纯**本地交互态**变化（目前只有"切换激活桌面"）—— 只广播，**不落盘**。
+ *
+ *  为什么要分开：激活哪张桌面既不进 DB（`desktopToRecord` 里根本没这个字段），
+ *  也不是别的实例关心的信息。走 `notifyDesktopChanged` 会经 `scheduleSave(undefined)`
+ *  → 退回"标脏激活桌面"→ 白白重写一次内容没变的桌面 → 产生一次 db_changed 广播
+ *  → **其他实例为此无谓 refetch**（多开时尤其明显）。 */
+function notifyDesktopViewChanged(): void {
+  broadcastDesktopState();
 }

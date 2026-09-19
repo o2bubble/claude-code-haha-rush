@@ -1,0 +1,30 @@
+{
+  "pluginName": "computer-use",
+  "displayName": "操作电脑（组合技能包）",
+  "version": "0.1.4",
+  "apiVersion": "1.0",
+  "description": "把「鼠标键盘」与「截屏」两个插件的能力组合成一套完整的「看屏幕 + 操作电脑」能力，并附赠一份实战心得 skill（如何可靠地点击、如何避免点错、长操作怎么不被干扰）。依赖两个插件；本身不含进程，只做组合与文档。",
+  "icon": "combine",
+  "category": "tool",
+  "dependencies": [
+    "mouse-keyboard",
+    "screenshot"
+  ],
+  "installType": "standard",
+  "contributes": {
+    "panels": [],
+    "commands": [],
+    "events": [],
+    "mcpTools": [],
+    "skills": [
+      {
+        "name": "computer-use",
+        "path": "skill"
+      }
+    ]
+  },
+  "processes": [],
+  "platforms": [
+    "windows"
+  ]
+}

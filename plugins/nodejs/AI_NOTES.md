@@ -212,5 +212,18 @@ npm install -g <pkg> --prefix ~/.local           # 需自行确保 ~/.local/bin 
 - dependencies: 无
 - installType: ai-guided——**卸载指导**：直接调 `plugin_uninstall`（用户同意后），
   Node 运行时在 runtime/ 内随目录一起删除，无系统残留
+- **`needsRestart: true`** —— ⚠️ 卸载后**要问用户是否重启**（见下）
 - platforms: ["windows","macos","linux"]
 - 版本兼容：跟随 LTS；本插件不管理多版本（将来如需，按 nodejs20/nodejs22 拆分插件）
+
+### ⚠️ 卸载后必须提示用户重启（`needsRestart` 的由来）
+
+本插件的 runtime 被**注入到运行中的进程与会话的 PATH** 里（插件进程 + AI Bash）。
+卸载后那些**已经跑起来的**进程，PATH 仍指向已被删除的 `plugins/nodejs/runtime/`：
+
+- 表现为 `node` 命令"回落到系统安装"，而不是干净地"这个插件没了"
+- 若系统本来没装 Node → 表现为 `node: command not found`（而插件明明卸载成功了）
+
+所以卸载完成后，`plugin_uninstall` 的返回值会带 `needsRestart: true` 与说明 ——
+**你要据此询问用户**是否现在重启（用户同意后再调 `app_relaunch` 带 `confirm:true`）。
+用户拒绝也完全可以（那就下次自己重启），但**必须如实告知**这一点。

@@ -1,5 +1,5 @@
 name: "git-viewer"
 author: "官方"
-version: "0.1.5"
+version: "0.2.0"
 description: "只读 Git 查看器 — 工作区改动 diff / 提交历史 / 分支列表, 纯查看不做写操作"
 tags: ["git", "diff", "viewport", "plugin"]

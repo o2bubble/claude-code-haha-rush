@@ -89,3 +89,79 @@ describe("shouldDispatch — 上下文放行判定", () => {
     });
   });
 });
+
+// ── 编译缓存的键（动态条目必须进键）──
+//
+// 这条锁的是一个**极易漏**的点：缓存键若只看 overrides，装/卸插件不会改变
+// overrides → 编译结果永不刷新 → 新插件的快捷键要重启才生效、卸载的插件
+// 命令继续被触发。startShortcutDispatcher 本身依赖 window（node 环境测不了），
+// 故把键的计算抽成纯函数单独锁住。
+
+import { bindingCacheKey } from "./shortcutDispatcher";
+import type { ShortcutEntry } from "./shortcuts";
+
+const pluginEntry = (over: Partial<ShortcutEntry> = {}): ShortcutEntry => ({
+  id: "plugin:demo:capture",
+  keys: "mod+shift+a",
+  commandId: "plugin:demo:capture",
+  scope: "app",
+  label: "截图",
+  labelKey: "",
+  group: "plugins",
+  ...over,
+});
+
+describe("bindingCacheKey — 覆盖配置与动态条目都进键", () => {
+  it("完全相同的输入 → 同一个键（避免无谓重编）", () => {
+    const a = bindingCacheKey({ x: "mod+a" }, [pluginEntry()]);
+    const b = bindingCacheKey({ x: "mod+a" }, [pluginEntry()]);
+    expect(a).toBe(b);
+  });
+
+  it("overrides 变了 → 键变", () => {
+    const a = bindingCacheKey({ x: "mod+a" }, []);
+    const b = bindingCacheKey({ x: "mod+b" }, []);
+    expect(a).not.toBe(b);
+  });
+
+  it("**新增插件条目 → 键变**（装插件后立即生效，不必重启）", () => {
+    const before = bindingCacheKey(undefined, []);
+    const after = bindingCacheKey(undefined, [pluginEntry()]);
+    expect(before).not.toBe(after);
+  });
+
+  it("**移除插件条目 → 键变**（卸载后不残留幽灵快捷键）", () => {
+    const before = bindingCacheKey(undefined, [pluginEntry()]);
+    const after = bindingCacheKey(undefined, []);
+    expect(before).not.toBe(after);
+  });
+
+  it("插件改了自己的默认键（插件升级）→ 键变", () => {
+    const a = bindingCacheKey(undefined, [pluginEntry({ keys: "mod+shift+a" })]);
+    const b = bindingCacheKey(undefined, [pluginEntry({ keys: "mod+shift+z" })]);
+    expect(a).not.toBe(b);
+  });
+
+  it("scope 从 app 改成 os → 键变（它决定走不走全局热键）", () => {
+    const a = bindingCacheKey(undefined, [pluginEntry({ scope: "app" })]);
+    const b = bindingCacheKey(undefined, [pluginEntry({ scope: "os" })]);
+    expect(a).not.toBe(b);
+  });
+
+  it("无关字段变化（label/run）→ 键不变（不做无意义的重新编译）", () => {
+    const a = bindingCacheKey(undefined, [pluginEntry({ label: "A" })]);
+    const b = bindingCacheKey(undefined, [pluginEntry({ label: "B" })]);
+    expect(a).toBe(b);
+  });
+
+  it("条目顺序变化 → 键变（顺序即优先级，不能忽略）", () => {
+    const e1 = pluginEntry({ id: "plugin:a:x" });
+    const e2 = pluginEntry({ id: "plugin:b:y" });
+    expect(bindingCacheKey(undefined, [e1, e2]))
+      .not.toBe(bindingCacheKey(undefined, [e2, e1]));
+  });
+
+  it("overrides 从 undefined 到空对象 → 键不变（语义等价）", () => {
+    expect(bindingCacheKey(undefined, [])).toBe(bindingCacheKey({}, []));
+  });
+});

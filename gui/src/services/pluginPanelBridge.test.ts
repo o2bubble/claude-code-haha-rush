@@ -37,6 +37,8 @@ describe("registerPluginPanels — 注册进 panelRegistry", () => {
       ],
       commands: [],
       events: [],
+      mcpTools: [],
+      skills: [],
     },
     processes: [],
     category: "tool",

@@ -76,6 +76,18 @@ export interface AppSettings {
    * 默认表与合并逻辑见 `services/shortcuts.ts`。
    */
   shortcuts?: Record<string, string>;
+  /**
+   * 本实例是否参与 OS 级全局热键注册（缺省 = 参与）。
+   *
+   * 全局热键是**进程级独占**的：多开 GUI 时只有先注册的实例能用，其余拿到
+   * `HotKey already registered`（OS 机制，不是故障）。关掉即主动放弃、让给别的实例。
+   *
+   * ⚠️ **按实例**（存工作区级，见 Rust `merge_workspace_overrides`）——
+   * 多开时每个实例绑不同工作区，"哪个实例持有全局热键"正是按实例的决策。
+   * 注意**不能**把让位实例退化成应用内快捷键兜底：OS 热键在部分场景（输入法激活/
+   * 远程桌面）不吞按键，会与持有实例**双重触发**（见 shortcutDispatcher 注释）。
+   */
+  globalHotkeysEnabled?: boolean;
   /** 上下文告警开关(默认开): 已用百分比跨过阈值时弹浮动层提示 */
   contextWarningEnabled?: boolean;
   /** 上下文告警阈值百分比(默认 90, 即剩余 10%) */

@@ -36,6 +36,7 @@ import { getPluginAiStatus } from "./pluginStatusStore";
 import { addStatusMessage } from "../stores/statusMsgStore";
 import { windowBus } from "./windowBus";
 import { Events } from "./events";
+import type { CollectedMcpTool } from "./pluginRegistry";
 
 // ─── Types ───
 
@@ -89,8 +90,14 @@ async function handleMcpRequest(req: McpRequest): Promise<void> {
     if (NOTE_MUTATIONS.has(toolName) && !notePhaseWroteNothing) windowBus.emit(Events.NOTES_CHANGED, {});
 
     // MCP protocol: tools/call responses must be wrapped in { content: [...] }
+    // 图片类工具（插件声明 resultKind:"image"）额外附一个 image content 块 —— 见 buildToolContent
+    let isImageTool = false;
+    if (method === "tools/call") {
+      const pt = (await getPluginTools()).find((t) => t.fullName === toolName);
+      isImageTool = pt?.resultKind === "image";
+    }
     const responsePayload = method === "tools/call"
-      ? { content: [{ type: "text", text: JSON.stringify(result) }] }
+      ? buildToolContent(result, isImageTool)
       : result;
     await respond(req.requestId, { jsonrpc: "2.0", result: responsePayload, id });
   } catch (err: any) {
@@ -105,25 +112,140 @@ function extractToolName(method: string, params?: Record<string, unknown>): stri
   return "";
 }
 
-// ── git-viewer 工具 helpers ──
+// ── 注：git-viewer 的 3 个工具已改为**插件侧声明**（contributes.mcpTools）──
+// 2026-09-18 从宿主搬走：原先写死在这里，导致**插件卸载后工具仍出现在 AI 列表里**
+// （调用才报"进程未运行"）。搬迁后未装/禁用 → 工具不出现；转发走通用
+// `callPluginMcpTool`（找进程、报错、/__mcp 契约都一致）。diff 截断（40K 上下文
+// 保护）也随之下放到插件 —— 由它决定返回给 AI 的体量更合适。
+// （`clampMcpInt` 随之删除 —— 它只服务 git_history，已随工具搬到插件侧。）
 
-/** git-viewer 插件进程端口 —— 从插件进程 store 找正在运行的 port（进程 id 裸名）。
- *  无 port = 进程未运行/未启动 → 返回 undefined, 调用方报明确错误。 */
-async function getGitViewerPort(): Promise<number | undefined> {
+// ── 插件贡献的 MCP 工具（contributes.mcpTools）──
+
+/** MCP 工具声明的形状（宿主工具与插件工具共用）。 */
+interface McpToolDef {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+/**
+ * 当前启用插件贡献的 MCP 工具。
+ *
+ * **每次现算**（不缓存）：插件可能刚装上/卸载/启用，缓存会让 AI 的工具表过期。
+ * 聚合本身是纯内存遍历（插件数量级是个位到几十），`getGuiPlatform` 另有缓存，
+ * 所以成本可忽略。
+ *
+ * 失败**不抛异常**：工具表构建失败会让整个 `tools/list` 失败，而 claude 遇到
+ * tools/list 失败会判定该 server 损坏 → **宿主自己的工具也一起消失**。
+ * 丢插件工具是小事，丢宿主工具是事故。
+ */
+async function getPluginTools(): Promise<CollectedMcpTool[]> {
   try {
-    const { getPluginProcesses } = await import("./pluginProcessBridge");
-    const p = getPluginProcesses().find((x) => x.processId === "git-viewer-server");
-    return typeof p?.port === "number" ? p.port : undefined;
-  } catch {
-    return undefined;
+    const { getActiveManifests, collectPluginMcpTools, getGuiPlatform } =
+      await import("./pluginRegistry");
+    return collectPluginMcpTools(getActiveManifests(), await getGuiPlatform());
+  } catch (e) {
+    console.warn("[mcp] 插件工具聚合失败，本次不暴露", e);
+    return [];
   }
 }
 
-/** MCP 数值参数 clamp（可选 number, 非数字/超界落到默认） */
-function clampMcpInt(v: unknown, def: number, min: number, max: number): number {
-  const n = typeof v === "number" ? v : NaN;
-  if (Number.isNaN(n)) return def;
-  return Math.max(min, Math.min(max, Math.round(n)));
+/**
+ * 调用插件贡献的 MCP 工具 —— `POST 127.0.0.1:<插件进程端口>/__mcp`。
+ *
+ * 契约固定（`{tool, args, settings}` → `{ok, ...}`），插件不能自定义路径 ——
+ * 收窄攻击面（见 pluginRegistry 的 PluginMcpTool 注释）。
+ *
+ * `settings` 必须带上：插件进程读不到宿主的设置存储，而它的行为（存哪、送哪去）
+ * 取决于用户配置。宿主本来就有，顺手给它（与 forwardToPluginProcess 一致）。
+ */
+async function callPluginMcpTool(
+  tool: CollectedMcpTool,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const { getPluginProcesses } = await import("./pluginProcessBridge");
+  const proc = getPluginProcesses().find(
+    (p) => p.processId === tool.processId && p.status === "running" && p.port,
+  );
+  if (!proc?.port) {
+    throw new Error(
+      `插件「${tool.pluginName}」的后台进程未运行（${tool.processId}）。` +
+      `该进程在工作区绑定时自动启动 —— 若刚启用插件，请稍候重试或重开会话。`,
+    );
+  }
+  const { getCachedPluginSettings } = await import("./pluginSettingsStore");
+  const resp = await fetch(`http://127.0.0.1:${proc.port}/__mcp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      tool: tool.name,
+      args: args ?? {},
+      settings: getCachedPluginSettings(tool.pluginName),
+    }),
+  });
+  if (!resp.ok) {
+    throw new Error(`插件工具 ${tool.fullName} 调用失败 (HTTP ${resp.status})`);
+  }
+  const data = (await resp.json()) as { ok?: boolean; error?: string; host?: unknown[] } | null;
+
+  // 插件可以在响应里请求宿主做事（`host: [动作]`）—— 与 `/__command` 那条路同一套
+  // 契约（见 pluginCommandBridge.forwardToPluginProcess）。鼠标键盘插件用它开/移
+  // 自己的"AI 操作中"指示窗：那个窗口只有宿主能建，而进程开不了。
+  //
+  // **无论 ok 与否都派发**：`host` 是插件的显式请求，与本次工具调用成败是两件事
+  // （例如"被前台防护拒绝"时它仍希望把指示窗亮出来说明发生了什么）。
+  if (data?.host?.length) {
+    try {
+      const { dispatchPluginUplink } = await import("./pluginPanelBridge");
+      for (const action of data.host) {
+        const a = action as { kind?: unknown; payload?: unknown };
+        if (!a || typeof a.kind !== "string") continue;
+        // 逐个兜住：一个动作失败不该拖累后面的，而且要能看到**是哪个**失败、为什么
+        try {
+          const handled = await dispatchPluginUplink(tool.pluginName, a.kind, a.payload);
+          if (!handled) {
+            console.warn(`[mcp] 插件 ${tool.pluginName} 请求的 host 动作未被识别: ${a.kind}`);
+          }
+        } catch (e) {
+          console.error(`[mcp] 插件 ${tool.pluginName} 的 host 动作「${a.kind}」执行失败:`, e);
+        }
+      }
+    } catch (e) {
+      console.error("[mcp] 插件 host 动作派发失败（import 阶段）", e);
+    }
+  }
+
+  if (!data?.ok) {
+    throw new Error(data?.error || `插件工具 ${tool.fullName} 执行失败`);
+  }
+  return data;
+}
+
+/**
+ * 把工具结果包成 MCP content 数组。
+ *
+ * `resultKind === "image"` 的工具会返回 `{ ..., image: { data, mimeType } }`：
+ *   · 图片单独作为一个 image content 块 —— 模型**能直接看到画面**
+ *   · **base64 必须从文本块里剥掉** —— 否则同一份数据以文本形式再进一次上下文。
+ *     1920×1080 的 PNG base64 约 30 万字符 ≈ 数十万 token，会瞬间撑爆预算，
+ *     而模型从文本里也读不出图像内容（纯浪费）。
+ *
+ * 声明了 image 却没拿到图（插件出错/取消）→ 退回纯文本，并如实带上状态。
+ */
+export function buildToolContent(result: unknown, isImageTool: boolean): { content: unknown[] } {
+  const asText = { content: [{ type: "text", text: JSON.stringify(result) }] };
+  if (!isImageTool) return asText;
+  const r = result as { image?: { data?: unknown; mimeType?: unknown } } | null | undefined;
+  const img = r && typeof r === "object" ? r.image : undefined;
+  const data = img && typeof img.data === "string" ? img.data : "";
+  if (!data) return asText;   // 没图（插件报错/取消）→ 文本里已有原因
+  const { image: _drop, ...meta } = r as Record<string, unknown>;
+  return {
+    content: [
+      { type: "image", data, mimeType: typeof img!.mimeType === "string" ? img!.mimeType : "image/png" },
+      { type: "text", text: JSON.stringify(meta) },
+    ],
+  };
 }
 
 /**
@@ -218,13 +340,6 @@ async function runCliPrintForJson<T extends object>(
   return value as T;
 }
 
-/** diff 截断: AI 上下文预算保护 —— 超 40K 字符截断并注记（可调 context 再看） */
-const DIFF_LIMIT = 40_000;
-function truncateDiff(diff: string): string {
-  if (diff.length <= DIFF_LIMIT) return diff;
-  return diff.slice(0, DIFF_LIMIT) + `\n… [diff 已截断: ${diff.length} 字符, 超出 ${DIFF_LIMIT} 上限]\n(可用 git_view_diff(file, context=较小编号) 看更小片段)`;
-}
-
 async function dispatchTool(name: string, params: Record<string, unknown>): Promise<unknown> {
   switch (name) {
     case "initialize":
@@ -234,8 +349,10 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
         serverInfo: { name: "claude-code-haha-desktop", version: "1.0.0" },
       };
 
-    case "tools/list":
-      return {
+    case "tools/list": {
+      // 显式类型：不加的话 TS 会把下面的字面量数组推断成一个巨大的联合类型，
+      // 后面 push 插件工具（宽类型）就会报"缺少属性"。
+      const base: { tools: McpToolDef[] } = {
         tools: [
           { name: "desktop_summary", description: "Get lightweight summary of all desktops and items (no content payloads)", inputSchema: { type: "object", properties: { viewportW: { type: "number" }, viewportH: { type: "number" } } } },
           { name: "desktop_get_items", description: "Get full content of specific items by ID", inputSchema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } }, required: ["ids"] } },
@@ -269,14 +386,23 @@ async function dispatchTool(name: string, params: Record<string, unknown>): Prom
           { name: "plugin_install", description: "Install a GUI plugin from the marketplace by slug (downloads zip, extracts, rescans — panels/commands become live). Only for standard plugins; ai-guided plugins have no runtime — read their docs and perform the guided steps yourself instead. Returns {installed, pluginName} or dependency error.", inputSchema: { type: "object", properties: { slug: { type: "string" } }, required: ["slug"] } },
           { name: "plugin_uninstall", description: "Uninstall a GUI plugin by pluginName. DANGEROUS — only call with confirm:true AFTER the user explicitly agreed in conversation. Refused when other installed plugins depend on it (uninstall them first). Kills the plugin's processes and deletes its directory (for ai-guided runtime plugins this also removes the downloaded runtime). ai-guided plugins: follow their uninstall guidance instead when applicable.", inputSchema: { type: "object", properties: { name: { type: "string" }, confirm: { type: "boolean" } }, required: ["name", "confirm"] } },
           { name: "plugin_set_status", description: "Report an AI-verified environment status for an ai-guided plugin (e.g. after manually installing a runtime per its AI_NOTES guidance). status: ready | not_ready | error. In-memory only (cleared on GUI restart — re-verify then). Reference info for later debugging: plugin_list/plugin_get expose it as aiStatus; the GUI does not act on it.", inputSchema: { type: "object", properties: { name: { type: "string" }, status: { type: "string", enum: ["ready", "not_ready", "error"] }, detail: { type: "object", description: "Optional free-form details: version, verify command output, error reason, etc." } }, required: ["name", "status"] } },
-          // ── git-viewer 只读工具（经插件进程 HTTP API 转接; AI 不经过面板直读）──
-          { name: "git_view_diff", description: "Read the diff of a working-tree file (uncommitted changes) for the bound workspace repo. Read-only; the git-viewer plugin process must be running (auto-starts on workspace bind). Pass file as repo-relative path (e.g. 'gui/src/App.tsx'). Optional context: lines of context around changes (default 3, max 60).", inputSchema: { type: "object", properties: { file: { type: "string" }, context: { type: "number" } }, required: ["file"] } },
-          { name: "git_history", description: "Read the recent commit history (git log, read-only) for the bound workspace repo. Optional limit: max commits to return (default 20, max 200).", inputSchema: { type: "object", properties: { limit: { type: "number" } } } },
-          { name: "git_branches", description: "Read the branch list (git branch, read-only) for the bound workspace repo.", inputSchema: { type: "object", properties: {} } },
           { name: "app_relaunch", description: "Restart the GUI application (spawns a fresh instance, then exits — the current AI session ends with it). DANGEROUS: only call with confirm:true AFTER the user explicitly agreed in conversation. Use as the LAST step of an installation flow (e.g. after an ai-guided plugin registered an MCP server that needs a session reload). All unsaved session state is preserved on disk by the backend; the new instance starts fresh.", inputSchema: { type: "object", properties: { confirm: { type: "boolean" } }, required: ["confirm"] } },
           { name: "chat_send_command", description: "Pre-fill a command or prompt (e.g. a slash command like '/mcp-refresh') into the chat input box for the user to review and send with one keystroke — the user stays in control (this is the confirmation itself: nothing is sent automatically). Use when a GUI-side action needs the user to trigger a slash command but you want to spare them typing it. The text is placed at the start of the input box and highlighted by focus; tell the user to press Enter to send.", inputSchema: { type: "object", properties: { text: { type: "string", description: "Command/prompt text to pre-fill (e.g. '/mcp-refresh')" } }, required: ["text"] } },
         ],
       };
+
+      // ── 插件贡献的工具（contributes.mcpTools）──
+      // 工具名已由 collectPluginMcpTools 加上 `plugin_<插件名>_` 前缀，插件**结构上**
+      // 无法覆盖上面任何一个宿主工具。描述里标注来源，便于 AI 与用户辨别出处。
+      for (const t of await getPluginTools()) {
+        base.tools.push({
+          name: t.fullName,
+          description: `[plugin: ${t.pluginName}] ${t.description}`,
+          inputSchema: t.inputSchema,
+        });
+      }
+      return base;
+    }
 
     // ── Query tools ──
 
@@ -528,9 +654,18 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
       const entry = installed.get(name);
       if (!entry?.manifestJson) throw new Error(`Plugin not found: ${name}`);
       const manifest = JSON.parse(entry.manifestJson);
-      // 该插件声明的进程的实时状态（process id 全局形式 plugin:<name>:<declId>）
-      const prefix = `plugin:${name}:`;
-      const processes = getPluginProcesses().filter((p) => p.processId.startsWith(prefix));
+      // 该插件声明的进程的实时状态。
+      // ⚠️ `ProcessInfo.processId` 是**裸 id**（如 `screenshot-server`），**不带**
+      // `plugin:<name>:` 前缀 —— 那个前缀只存在于命令 id / 面板 id。早先按前缀
+      // startsWith 过滤，恒为空数组（AI 永远看不到插件进程状态）。
+      // 正确做法：先从 manifest 取本插件声明了哪些 id，再按裸 id 匹配
+      // （与 pluginCommandBridge.forwardToPluginProcess 同一范式）。
+      const declared = new Set<string>(
+        (Array.isArray(manifest.processes) ? manifest.processes : [])
+          .map((p: { id?: unknown }) => p?.id)
+          .filter((x: unknown): x is string => typeof x === "string"),
+      );
+      const processes = getPluginProcesses().filter((p) => declared.has(p.processId));
       return {
         name,
         enabled: !(getSettings().disabledPlugins ?? []).includes(name),
@@ -571,60 +706,37 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
 
     // ── git-viewer 只读工具（经插件进程 HTTP API 转接; MCP 响应 = AI 呈现给用户）──
 
-    case "git_view_diff": {
-      const file = params.file as string | undefined;
-      if (!file) throw new Error("file is required");
-      const port = await getGitViewerPort();
-      if (!port) throw new Error("git-viewer 进程未运行（没有端口）。插件进程在工作区绑定时自动启动——等待或检查 Worker 面板状态。");
-      const url = `http://127.0.0.1:${port}/api/diff?file=${encodeURIComponent(file)}${params.context ? `&context=${params.context}` : ""}`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => "");
-        throw new Error(`git_view_diff 失败 (HTTP ${resp.status}): ${err.slice(0, 300)}`);
-      }
-      const body = await resp.json();
-      return { file, diff: truncateDiff(body.diff ?? "") };
-    }
-
-    case "git_history": {
-      const port = await getGitViewerPort();
-      if (!port) throw new Error("git-viewer 进程未运行（没有端口）。插件进程在工作区绑定时自动启动——等待或检查 Worker 面板状态。");
-      const limit = clampMcpInt(params.limit, 20, 1, 200);
-      const resp = await fetch(`http://127.0.0.1:${port}/api/log?limit=${limit}`);
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => "");
-        throw new Error(`git_history 失败 (HTTP ${resp.status}): ${err.slice(0, 300)}`);
-      }
-      const body = await resp.json();
-      return { commits: body.commits ?? [] };
-    }
-
-    case "git_branches": {
-      const port = await getGitViewerPort();
-      if (!port) throw new Error("git-viewer 进程未运行（没有端口）。插件进程在工作区绑定时自动启动——等待或检查 Worker 面板状态。");
-      const resp = await fetch(`http://127.0.0.1:${port}/api/branches`);
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => "");
-        throw new Error(`git_branches 失败 (HTTP ${resp.status}): ${err.slice(0, 300)}`);
-      }
-      const body = await resp.json();
-      return { branches: body.branches ?? [] };
-    }
+    // 注：`git_view_diff` / `git_history` / `git_branches` 三个 case 已于 2026-09-18
+    // **搬迁到插件侧**（contributes.mcpTools + 插件进程的 /__mcp 端点）。宿主的
+    // `callPluginMcpTool` 会处理转发、进程未运行时给出明确错误 —— 与其它插件一致。
 
     case "plugin_install": {
       const slug = params.slug as string;
       if (!slug) throw new Error("slug is required");
       const { skillMarketplace } = await import("./skillMarketplace");
       const { reloadPlugins } = await import("./pluginRegistry");
-      // 依赖校验: 市场详情里 dependencies 未装 → 拒绝并列出（AI 据此先装依赖）
+      // 依赖校验（与前端市场一键安装**同一套检查**，见 pluginDependencyCheck）：
+      //   · 未安装 → 拒绝并列出（AI 据此先装依赖）
+      //   · 装了但**未就绪**（如 nodejs 的 runtime 没下载）→ 也拒绝，
+      //     否则本插件装上了也跑不起来，用户只看到"插件坏了"
       const detail = await skillMarketplace.getPackage(slug);
       const deps: string[] = (detail as any).dependencies ?? [];
       if (deps.length > 0) {
-        const { getInstalledPluginEntries } = await import("./pluginRegistry");
-        const installed = await getInstalledPluginEntries();
-        const missing = deps.filter((d) => !installed.has(d));
-        if (missing.length > 0) {
-          throw new Error(`Missing dependencies: ${missing.join(", ")}. Install them first (plugin_install slug=<each>).`);
+        const { checkPluginDependencies } = await import("./pluginDependencyCheck");
+        const chk = await checkPluginDependencies(deps);
+        if (chk.missing.length > 0) {
+          throw new Error(
+            `Missing dependencies: ${chk.missing.join(", ")}. ` +
+            `Install them first (plugin_install slug=<each>).`,
+          );
+        }
+        if (chk.notReady.length > 0) {
+          const detailLines = chk.notReady.map((x) => `${x.name}: ${x.reason}`).join("; ");
+          throw new Error(
+            `Dependencies installed but NOT READY: ${detailLines}. ` +
+            `Finish their environment setup first (plugin_docs name=<dep> for the guided steps), ` +
+            `then retry. (Installing this plugin now would produce a plugin that cannot run.)`,
+          );
         }
       }
       // ai-guided 插件没有运行时, GUI 装了也只是文件——拒绝并引导 AI 走指导
@@ -651,9 +763,25 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
       }
       // 依赖反查 + 删除 + 重扫全部在 uninstallPlugin 单一入口（GUI 面板共用同一门）
       const { uninstallPlugin } = await import("./pluginRegistry");
-      await uninstallPlugin(pluginName);
+      const result = await uninstallPlugin(pluginName);
       addStatusMessage(`Plugin uninstalled: ${pluginName}`, "success");
-      return { uninstalled: true, pluginName };
+      // ⚠️ **不在这里弹重启确认** —— 重启是破坏性操作（会中断当前 AI 会话），
+      // 必须由**用户**决定。AI 代卸路径把它作为**结果字段**回给 AI，
+      // 由 AI 在对话里询问用户（与 app_relaunch 的 confirm 门同一原则）。
+      return {
+        uninstalled: true,
+        pluginName,
+        ...(result?.needsRestart
+          ? {
+              needsRestart: true,
+              note: "该插件声明卸载后需重启本应用才完全生效。请询问用户是否现在重启；" +
+                    "用户同意后再调用 app_relaunch（带 confirm:true）。",
+            }
+          : {}),
+        ...(result?.hookWarning
+          ? { cleanupWarning: result.hookWarning, note2: "卸载已完成，但插件的清理脚本没跑成功 —— 请如实告知用户清理可能不完整。" }
+          : {}),
+      };
     }
 
     case "plugin_set_status": {
@@ -698,8 +826,13 @@ Only include tags that need to be renamed. Tags that are already canonical shoul
       return { prefilled: true, text, note: "Placed into the chat input box. Ask the user to review and press Enter to send." };
     }
 
-    default:
+    default: {
+      // 不是宿主工具 → 可能是插件贡献的（名形如 `plugin_<插件名>_<工具>`）。
+      // 现算一次工具表（不缓存）：插件可能刚装上，缓存会让新工具"看不见"。
+      const t = (await getPluginTools()).find((x) => x.fullName === name);
+      if (t) return await callPluginMcpTool(t, params);
       throw new Error(`Unknown tool: ${name}`);
+    }
   }
 }
 

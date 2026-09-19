@@ -1,5 +1,5 @@
 name: "nodejs"
 author: "官方"
-version: "0.1.3"
+version: "0.1.4"
 description: "Node.js 运行时环境 — 为插件进程与 AI Bash 提供共享 Node LTS, AI 引导安装"
 tags: ["runtime", "nodejs", "infrastructure"]

@@ -1,6 +1,6 @@
 # macOS 构建发布手册（Playbook）
 
-> **操作手册**：照做即可发一次 mac 版本。架构细节/决策见 `docs/macos-port.md`。写于 2026-08-25（.25.3 验证通过），2026-09-04 更新（代理坑 + .26.4→09.04 同步流程）。
+> **操作手册**：照做即可发一次 mac 版本。架构细节/决策见 `docs/macos-port.md`。写于 2026-08-25（.25.3 验证通过），2026-09-04 更新（代理坑 + .26.4→09.04 同步流程），2026-09-18 更新（本机构建前置三坑 + `macos-private-api` 必开 + python 方案改 standalone）。
 
 ## 0. 架构决策速查
 
@@ -95,6 +95,97 @@ git -c http.proxy= -c https.proxy= push https://github.com/o2bubble/claude-code-
 
 **构建耗时**：Codemagic 实测 11m50s~14m40s；GitHub Actions 更久（无缓存，Tauri CLI 每次现编）。
 
+### 本机（裸机）构建前置 —— 三个必踩的坑（2026-09-18 实测）
+
+不走 CI、直接在本机跑 `bun run scripts/build.ts --platform macos` 时：
+
+1. **`cargo tauri` 子命令需先装**（build.ts 里调的是 `cargo tauri build`，不是 npm 版 CLI）：
+   ```bash
+   cargo install tauri-cli --locked      # 源码编译，实测约 22 分钟
+   ```
+   装在 `~/.cargo/bin/`，若该目录不在 PATH，脚本会报 `no such command: tauri`。
+   注意 npm 的 `@tauri-apps/cli` **不能**替代 —— build.ts 硬编码 `cargo tauri`。
+
+2. **必须用 arm64 node**：PATH 里若有 nvm 的 x64 node（如 v18 跑在 Rosetta 下），
+   vite/rollup 会报原生模块架构不兼容：
+   ```
+   Cannot find module './cli.darwin-universal.node'
+   mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64')
+   ```
+   解法（不改全局）：`export PATH="/opt/homebrew/bin:$PATH"`（Homebrew node 是原生 arm64）。
+   自检：`node -p process.arch` 应为 `arm64`。
+
+3. **新拉代码后必须 `bun install`（gui/ 和仓库根各一次）**：新依赖只进 package.json、
+   没同步进 node_modules 时，前端 `tsc` 直接失败。典型报错：
+   ```
+   error TS2307: Cannot find module '@tauri-apps/plugin-global-shortcut'
+   ```
+   —— 此前该插件只配了 Rust 侧（Cargo.toml + capabilities），JS 侧依赖漏装。
+
+> 另：`build.ts` 给 cargo 调用设了 **10 分钟超时**（`timeout: 600000`）。首次构建
+> 要下大量新 crate（如换 python 方案/加 feature 后），网络慢时会 `exit null` 被误杀，
+> 日志只留一行 `[Error] GUI build failed (exit null)`。绕过：单独跑 `cargo tauri build`
+> （无超时），再继续 build.ts 后续步骤。
+
+### ⚠️ mac 跑 GUI dev 模式：`bin/claude-haha` 空数组 + `set -u` 崩溃
+
+**现象**：macOS 上开工作区报 **「IDE backend did not start within timeout」**，
+后端进程一启动就退出、从不打印 `CLAUDE_CODE_IDE_PORT=`。
+
+**根因**：macOS 自带 `/bin/bash` 是 **3.2**。脚本头是 `set -euo pipefail`，
+`--ide-mode` 分支下 `PROFILE_OPTS` 保持**空数组**，而 bash 3.2 在 `set -u` 下展开
+空数组会直接报错退出（bash 4+ 才允许）：
+
+```
+bin/claude-haha: line 22: PROFILE_OPTS[@]: unbound variable
+```
+
+最小复现（bash 3.2）：
+```bash
+/bin/bash -c 'set -euo pipefail; A=(); echo "${A[@]}"'   # → A[@]: unbound variable
+```
+
+**修法**（`bin/claude-haha` 两处：recovery CLI 行 + 默认 exec 行）——用兼容惯用法：
+```bash
+${PROFILE_OPTS[@]+"${PROFILE_OPTS[@]}"}    # 有元素才展开，为空则安全展开成空
+```
+
+> 注意影响面：此坑只在**仓库/dev 布局**（`bin/claude-ide` → `bin/claude-haha`）出现。
+> 打包版 `.app` 里的 `claude-ide` 是 build.ts 生成的 shim，直接 `exec ./claude --ide-mode`，
+> 不经过该脚本，**不受影响**。
+
+### ⚠️ mac 构建必须开 `macos-private-api`（否则编译不过）
+
+`gui/src-tauri/src/lib.rs` 的覆盖层建窗无条件调用 `.transparent()`，而该方法在
+**macOS 上被 feature 门控**：
+
+```rust
+#[cfg(any(not(target_os = "macos"), feature = "macos-private-api"))]
+pub fn transparent(mut self, transparent: bool) -> Self
+```
+
+`not(target_os = "macos")` 那一支让 **Windows/Linux 天然满足条件**（所以只在 mac 暴露）。
+缺 feature 时报：
+
+```
+error[E0599]: no method named `transparent` found for struct `WebviewWindowBuilder`
+```
+
+两处**配套**配置，缺一不可：
+
+| 位置 | 内容 |
+|---|---|
+| `gui/src-tauri/Cargo.toml` | `tauri = { version = "2", features = ["devtools", "macos-private-api"] }` |
+| `gui/src-tauri/tauri.conf.json` | `"app": { "macOSPrivateApi": true }` |
+
+该 feature 传递链**不引入任何依赖**（`tauri-runtime/macos-private-api = []`、
+`wry/transparent = []`、`wry/fullscreen = []` 均为空 feature），故对 Windows 产物
+无影响；`tauri.conf.json` 的该字段在非 mac 平台被忽略。
+
+（`Cargo.lock` 里 `tauri-runtime-wry` 原带 `source = registry + checksum`，与 Cargo.toml
+的 `path = "vendor/tauri-runtime-wry"` 矛盾；cargo 在任何平台构建都会自动改成 path 依赖，
+属既存不一致，非 mac 独有。）
+
 ## 2. 产物下载与验证
 
 从构建页下载 artifacts —— **Codemagic**：构建页 artifacts 区；**GitHub Actions**：仓库
@@ -186,8 +277,10 @@ for n, v in sorted(emb["components"].items()):
 —— 报错文案指向权限，**真因是目录不存在**。先 `mkdir -p` + `chmod 777`。
 
 **③ `workbench upload` 遇同名文件会交互式问覆盖**
-输出 `Overwrite? [y/N]`，非交互环境直接当"取消"→ 上传失败。
+输出 `Overwrite? [y/N]`，非交互环境直接当"取消"→ 上传失败（`upload canceled by user`）。
 → 每次上传前 `rm -rf` 目标目录，从干净状态开始。
+→ **或更简单：加 `-f`**（`--force` = Overwrite remote file without confirmation），
+   省掉一次 exec 调用。实测有效（2026-09-17 Windows 侧）。
 
 **④ `workbench` 输出含 Braille 进度字符（`⠋⠙⠹…`），Windows 控制台 GBK 会崩**
 `UnicodeDecodeError: 'gbk' codec can't decode byte 0x8b` / 打印时 `UnicodeEncodeError`。
@@ -301,9 +394,21 @@ zip 137MB）。客户端下载的是 zip，用错会让**下载进度显示异�
 - upload 接口：manifest 引用但没上传的组件，**自动从前一版本复制 zip**
 - 所以只传本次变化的组件即可（claude/bun 单文件常不变）
 
-### python pkg 提取
-- 用 `installer -pkg x.pkg -target /`（`pkgutil --expand-full` 对嵌套 pkg 不可靠）→ 从 `/Library/Frameworks/Python.framework` ditto 提取
-- 瘦身：删 test/tkinter/idlelib/文档 + `lipo -thin arm64`
+### 内置 python 用 python-build-standalone（**旧 pkg 方案已废弃**）
+- 现行：`python-build-standalone`（Astral）tarball，解压即为 `dist/python`（顶层就是
+  `python/`，含 bin/lib/include/share，**无需再建 `bin/python3` 链接**）
+- 版本固定在 build.ts 顶部：`PBS_TAG` / `PBS_PY` / `PBS_ARCH`（只出 aarch64-apple-darwin）
+- ⚠️ 下载源是 `github.com/astral-sh/python-build-standalone/releases/...` —— 属被墙的
+  **资产 CDN**（`release-assets.githubusercontent.com`）。拿不到时把 tarball 手动放到
+  `offline-tools/macos/` 即可离线复用（该目录被 .gitignore 排除，不入库）
+- **为什么废弃 python.org 的 .pkg**（2026-09-13，`c107f64`）：pkg 是框架式安装，二进制里
+  **硬编码** `/Library/Frameworks/Python.framework/Versions/3.12/Python`（`LC_LOAD_DYLIB`
+  绝对路径）。ditto 拷副本只搬文件、改不了二进制内的路径 → 用户系统框架升到 3.14 后
+  3.12 的 dylib 没了，内置 python 直接 `dyld: Library not loaded`。
+  **重建 symlink 也救不了**（问题不在链接，在绝对路径）→ "分发副本"从根上不成立。
+  standalone 走 `@rpath` / `@executable_path/../lib`，libpython 随包分发，真自包含，
+  顺带 176MB→24MB。
+  （实测复现：pkg 解包后直接跑 `python3` 即报 dyld 找不到 framework path。）
 
 ### bun/shellcheck asset 命名
 - bun 用 `bun-darwin-aarch64.zip`（非 arm64）
