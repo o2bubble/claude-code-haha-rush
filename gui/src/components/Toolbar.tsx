@@ -820,6 +820,47 @@ function PresetMini({ id }: { id: string }) {
 /** 布局预设弹层的最大宽度（3 张 150px 预览卡 + gap + padding）。 */
 const PRESET_MENU_WIDTH = 520;
 
+/**
+ * 工作区切换按钮（供 barItems 的 render 复用）。
+ *
+ * ⚠️ **不要把它做成固定渲染** —— 它的宽度随工作区名变化（maxWidth 175px），
+ * 长名字（如 `claude-code-haha-dev`）会把右侧的窗口按钮**挤出可视区**
+ * （实测 800px 窗口下三个按钮全部消失 → 用户失去控制窗口的手段）。
+ * 做成可折叠项后，窄窗口下自动收进应用菜单。
+ */
+function WorkspaceButton({ workDir, fallbackLabel }: { workDir: string; fallbackLabel: string }) {
+  const name = workspaceBasename(workDir);
+  return (
+    <button
+      type="button"
+      title={name ? workDir : fallbackLabel}
+      aria-label={fallbackLabel}
+      style={{
+        ...btn(false),
+        width: "auto",
+        padding: "0 8px",
+        gap: 5,
+        maxWidth: 175,
+      }}
+      onClick={() => windowBus.emit(Events.WORKSPACE_OPEN_SELECTOR)}
+    >
+      <FolderOpen size={16} style={{ pointerEvents: "none", flexShrink: 0 }} />
+      {name && (
+        <span style={{
+          fontSize: 11,
+          color: "var(--fg-primary)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          maxWidth: 125,
+        }}>
+          {name}
+        </span>
+      )}
+    </button>
+  );
+}
+
 /** 预设预览网格 —— **下拉与居中浮层共用**（内容单一来源）。 */
 function PresetGrid({ onPick }: { onPick: (p: (typeof LAYOUT_PRESETS)[number]) => void }) {
   return (
@@ -1138,6 +1179,12 @@ export default function Toolbar() {
       onClick: () => setOpenModal("preset"), render: () => <LayoutPresetDropdown /> },
     { id: "guard", label: t("guard.title"), icon: <Shield size={14} />,
       onClick: () => setOpenModal("guard"), render: () => <GuardButton /> },
+    // 工作区切换器 —— 也做成**可折叠**：它的宽度随工作区名变化（最长 175px），
+    // 长名字会把窗口按钮挤出可视区（实测 800px 窗口下溢出）。
+    // 折叠后菜单项直接开工作区选择器（与点击按钮同效）。
+    { id: "workspace", label: t("workspace.title"), icon: <FolderOpen size={14} />,
+      onClick: () => windowBus.emit(Events.WORKSPACE_OPEN_SELECTOR),
+      render: () => <WorkspaceButton workDir={workDir} fallbackLabel={t("workspace.title")} /> },
   ], [isDark, hasUpdate, toggleTheme]);
 
   const { containerRef, collapsed } = useToolbarCollapse(barItems);
@@ -1175,34 +1222,7 @@ export default function Toolbar() {
       ))}
       {/* Workspace switcher — icon + bound workspace basename (hover = full path) */}
       <div style={TOOLBAR_DIVIDER} />
-      <button
-        type="button"
-        data-toolbar-item="__workspace"
-        title={workspaceName ? workDir : t("workspace.title")}
-        aria-label={t("workspace.title")}
-        style={{
-          ...btn(false),
-          width: "auto",
-          padding: "0 8px",
-          gap: 5,
-          maxWidth: 175,
-        }}
-        onClick={() => windowBus.emit(Events.WORKSPACE_OPEN_SELECTOR)}
-      >
-        <FolderOpen size={16} style={{ pointerEvents: "none", flexShrink: 0 }} />
-        {workspaceName && (
-          <span style={{
-            fontSize: 11,
-            color: "var(--fg-primary)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            maxWidth: 125,
-          }}>
-            {workspaceName}
-          </span>
-        )}
-      </button>
+
       {/* Command palette — 全局搜索入口 */}
       <button
         type="button"

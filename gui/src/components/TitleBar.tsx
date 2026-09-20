@@ -94,8 +94,13 @@ export function WindowControls() {
     borderRadius: 0,
   });
 
+  // flexShrink: 0 —— **窗口按钮绝不能被压缩/挤出**。
+  // 无装饰窗口下用户只能靠这三个按钮控制窗口（最小化/最大化/关闭），
+  // 一旦被挤到窗口外就彻底失去控制手段（实测：工作区名变长时溢出 81px，三个全看不见）。
+  // 空间不够是**折叠机制**要解决的问题（把低频项收进应用菜单），不是让核心控件消失。
+  // 与 btnStyle 里的 flexShrink: 0 是两层保险：内层保按钮不变形，外层保容器不缩。
   return (
-    <div style={{ display: "flex", alignItems: "stretch", height: "100%", marginLeft: 4 }}>
+    <div style={{ display: "flex", alignItems: "stretch", height: "100%", marginLeft: 4, flexShrink: 0 }}>
       <button
         type="button"
         aria-label={t("toolbar.windowMinimize")}
