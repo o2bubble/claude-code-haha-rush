@@ -37,6 +37,7 @@ const en: Locale = {
     diagnostics: "Runtime diagnostics",
     newInstance: "Open a new GUI instance (new window)",
     newInstanceShort: "New",
+    dragRegionHint: "Hold and drag to move the window",
     thinkingMode: "Thinking mode",
     thinkingOn: "On",
     thinkingOff: "Off",

@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope, Copy, Brain, Gauge } from "lucide-react";
+import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope, Copy, Brain, Gauge, GripHorizontal } from "lucide-react";
 import { getTree, findParentSplit, toggleGroupHidden, toggleLeftColumn, toggleRightPanel, addFloatingPanel, getFloatingPanels, bringFloatingToFront, findTabByPanelId, applyLayoutPreset, LAYOUT_PRESETS, togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
 import { iconFor } from "../utils/icons";
 import { getRecent, sortByRecent } from "../utils/recentUsage";
@@ -1097,6 +1097,8 @@ export default function Toolbar() {
   // ⚠️ 不把弹层里的选项拆成菜单项 —— 那会让菜单随选项数量膨胀，而用户点开菜单
   // 是想找**功能**。一次点击进浮层、在浮层里完成选择，菜单只多 1 项。
   const [openModal, setOpenModal] = useState<null | "preset" | "guard">(null);
+  /** 拖拽抓手的 hover 态（仅用于视觉反馈，不影响拖拽本身） */
+  const [hoverGrip, setHoverGrip] = useState(false);
 
   const barItems: ToolbarItem[] = useMemo(() => [
     // ① 固定降级（永远在菜单里）
@@ -1226,11 +1228,35 @@ export default function Toolbar() {
         {sessionTitle && (
           <span title={`Session: ${sessionTitle}`} style={{
             fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-secondary)",
-            maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            maxWidth: 200, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           }}>
             {sessionTitle}
           </span>
         )}
+        {/* 拖拽抓手 —— **常驻可见标识**：明确告诉用户"这片区域能拖动窗口"。
+            用户反馈"窄窗口下看不出哪里能拖"，光有空白不够，需要可见的提示。
+            ⚠️ 不能加 tabindex/role —— Tauri 的 drag.js 会把带这些的元素判为
+            clickable 并**阻断拖拽**（见其 isClickableElement）。当前写法
+            （span + svg，无 tabindex）会被正确跳过，拖拽照常生效。 */}
+        <span
+          title={t("toolbar.dragRegionHint")}
+          aria-hidden="true"
+          onMouseEnter={() => setHoverGrip(true)}
+          onMouseLeave={() => setHoverGrip(false)}
+          style={{
+            marginLeft: "auto",
+            display: "flex", alignItems: "center",
+            color: "var(--fg-secondary)",
+            // 平时克制（不干扰会话名），鼠标移上去变亮 —— 让"这里能拖"的提示
+            // 只在用户可能要用时才吸引注意。
+            opacity: hoverGrip ? 1 : 0.45,
+            cursor: "grab",
+            transition: "opacity .15s ease",
+            flexShrink: 0,
+          }}
+        >
+          <GripHorizontal size={14} />
+        </span>
       </div>
 
       {/* 可折叠项（未折叠的那些）。逐个渲染，带 data-toolbar-item 供折叠器实测宽度。

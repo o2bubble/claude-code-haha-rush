@@ -35,6 +35,7 @@ const zh = {
     diagnostics: "运行环境诊断",
     newInstance: "打开新的 GUI 实例（新窗口）",
     newInstanceShort: "新实例",
+    dragRegionHint: "按住此处可拖动窗口",
     thinkingMode: "思考模式",
     thinkingOn: "思考开",
     thinkingOff: "思考关",
