@@ -1,5 +1,5 @@
 name: "screenshot"
 author: "官方"
-version: "0.2.1"
+version: "0.3.0"
 description: "截屏工具 — 全屏/区域/窗口三种模式，截图时窗口自动让开位置；截完直接插入聊天框、发送到超级桌面或存到工作区；AI 也能直接截屏看图"
 tags: ["screenshot", "capture", "hotkey", "plugin"]

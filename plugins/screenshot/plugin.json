@@ -1,7 +1,7 @@
 {
   "pluginName": "screenshot",
   "displayName": "截屏",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "apiVersion": "1.0",
   "description": "截屏工具：支持全屏 / 区域 / 窗口三种模式，截图时窗口自动让开位置。截完可直接插入聊天输入框、发送到超级桌面，或保存到当前工作区；AI 也能直接截屏看图。",
   "icon": "desktopItemView",
@@ -14,7 +14,10 @@
         "title": "截屏",
         "panelKind": "in-main",
         "userManaged": true,
-        "content": { "type": "html", "src": "panel.html" },
+        "content": {
+          "type": "html",
+          "src": "panel.html"
+        },
         "process": "screenshot-server"
       },
       {
@@ -22,7 +25,10 @@
         "title": "截图预览",
         "panelKind": "floating",
         "userManaged": false,
-        "content": { "type": "html", "src": "preview.html" },
+        "content": {
+          "type": "html",
+          "src": "preview.html"
+        },
         "process": "screenshot-server"
       }
     ],
@@ -49,7 +55,7 @@
     "mcpTools": [
       {
         "name": "fullscreen",
-        "description": "Capture the screen (one whole monitor) and return the image. Use when you need to see what is currently displayed on the user's screen. Coordinates in the result are physical pixels relative to that monitor's top-left corner. Defaults to the primary monitor.",
+        "description": "Capture the screen (one whole monitor) and return the image. Use when you need to see what is currently displayed on the user's screen. Defaults to the primary monitor.\n\n⚠️ To turn what you see into a clickable coordinate, DO NOT just copy the pixel position off the image — you must apply `meta.monitorOrigin` and `meta.pixelRatio`. The exact formula (and the DPI pitfalls that silently break it) is in the `computer-use` skill; read it before your first click. Prefer the `region` tool for small targets — a region comes back at full resolution and is far easier to measure accurately.",
         "process": "screenshot-server",
         "resultKind": "image",
         "inputSchema": {
@@ -68,7 +74,7 @@
       },
       {
         "name": "region",
-        "description": "Capture a rectangular region of the screen and return the image. Use when you only need part of the screen (e.g. a chart, a dialog, a table). Coordinates are physical pixels relative to the target monitor's top-left corner — call the fullscreen tool first if you need to locate something.",
+        "description": "Capture a rectangular region of the screen and return the image. Use when you only need part of the screen (e.g. a chart, a dialog, a table) — and prefer it over fullscreen for small targets, since a region comes back at full resolution (pixelRatio 1) and is far easier to measure accurately. `region.x/y` are relative to the target monitor's top-left corner (not the virtual desktop). Call the fullscreen tool first if you need to locate something. For converting a measurement into a clickable coordinate, see the `computer-use` skill.",
         "process": "screenshot-server",
         "resultKind": "image",
         "inputSchema": {
@@ -78,12 +84,29 @@
               "type": "object",
               "description": "Rectangle to capture, in physical pixels relative to the monitor's top-left corner.",
               "properties": {
-                "x": { "type": "number", "description": "Left offset from the monitor's left edge" },
-                "y": { "type": "number", "description": "Top offset from the monitor's top edge" },
-                "w": { "type": "number", "description": "Width in pixels (must be >= 1)" },
-                "h": { "type": "number", "description": "Height in pixels (must be >= 1)" }
+                "x": {
+                  "type": "number",
+                  "description": "Left offset from the monitor's left edge"
+                },
+                "y": {
+                  "type": "number",
+                  "description": "Top offset from the monitor's top edge"
+                },
+                "w": {
+                  "type": "number",
+                  "description": "Width in pixels (must be >= 1)"
+                },
+                "h": {
+                  "type": "number",
+                  "description": "Height in pixels (must be >= 1)"
+                }
               },
-              "required": ["x", "y", "w", "h"]
+              "required": [
+                "x",
+                "y",
+                "w",
+                "h"
+              ]
             },
             "monitor": {
               "type": "number",
@@ -94,7 +117,9 @@
               "description": "Minimize the GUI window just before capturing so that whatever it was covering shows up in the shot (the window is restored right after). Pass true when the region you need is currently hidden BEHIND the GUI window; pass false to leave the user's window untouched (e.g. they are actively looking at it). Omit to use the user's configured default."
             }
           },
-          "required": ["region"]
+          "required": [
+            "region"
+          ]
         }
       }
     ]
@@ -103,7 +128,9 @@
     {
       "id": "screenshot-server",
       "command": "node",
-      "args": ["server.cjs"],
+      "args": [
+        "server.cjs"
+      ],
       "env": {
         "CLAUDE_PLUGIN_WORKSPACE": "${workspace}"
       },
@@ -123,9 +150,18 @@
       "description": "截完图直接送到哪里（之后可在面板里改投）",
       "default": "chat",
       "options": [
-        { "value": "chat", "label": "插入聊天输入框" },
-        { "value": "desktop", "label": "发送到超级桌面" },
-        { "value": "file", "label": "仅保存到文件" }
+        {
+          "value": "chat",
+          "label": "插入聊天输入框"
+        },
+        {
+          "value": "desktop",
+          "label": "发送到超级桌面"
+        },
+        {
+          "value": "file",
+          "label": "仅保存到文件"
+        }
       ]
     },
     "copyToClipboard": {
@@ -141,5 +177,8 @@
       "default": true
     }
   },
-  "platforms": ["windows", "macos"]
+  "platforms": [
+    "windows",
+    "macos"
+  ]
 }

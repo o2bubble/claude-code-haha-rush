@@ -4,13 +4,22 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Claude Code</title>
-  <!-- overlay 窗口（插件全屏框选等）会在内部 iframe / 冻结图就绪前短暂露底，
-       而 WebView2 的默认底色是**白**的 —— 深色主题下就是"整个屏幕白闪一下"。
-       这里在解析最早期**同步**铺黑，不等外部样式表（tokens.css）与 React 启动。
-       overlay 的底色必然是黑的（冻结图黑底 + 选区外压暗），与主题无关，
-       故不读主题直接给黑；其它窗口（hash 不以 #overlay/ 开头）不受影响。 -->
+  <!-- overlay 窗口会在内部 iframe / 冻结图就绪前短暂露底，而 WebView2 的默认底色是**白**的 ——
+       深色主题下就是"整个屏幕白闪一下"，故在解析最早期**同步**铺底色
+       （不等 tokens.css 与 React 启动）。其它窗口（hash 不以 #overlay/ 开头）不受影响。
+
+       ⚠️ 两种 overlay 的底色需求**相反**：
+         · 截图框选类 —— 底色必然是黑的（冻结图黑底 + 选区外压暗）→ **铺黑**
+         · 教鞭/指示器类 —— **必须保持透明**（要透出背后内容）→ **什么都不铺**
+       后者由宿主的 `transparent=true` 决定，以 `?overlay-clear=1` 传进来。
+       给它们铺任何底色，窗口透明了也白搭 —— pointer 长期"黑屏"的真根因即此。
+
+       注：内联样式优先于 tokens.css 的 `html { background: var(--bg-root) }`，
+       且运行时没有 JS 改它（只改 --font-scale），所以设一次即可。 -->
   <script>
-    if (location.hash.indexOf("#overlay/") === 0) {
+    if (location.search.indexOf("overlay-clear=1") >= 0) {
+      document.documentElement.style.background = "transparent";
+    } else if (location.hash.indexOf("#overlay/") === 0) {
       document.documentElement.style.backgroundColor = "#000";
     }
   </script>

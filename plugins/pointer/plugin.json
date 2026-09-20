@@ -1,12 +1,15 @@
 {
   "pluginName": "pointer",
   "displayName": "屏幕指示器（教鞭）",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "apiVersion": "1.0",
   "description": "给 AI 一根「教鞭」：在屏幕上画出箭头、方框、圆圈、文字标签，直接指给用户「点这里」。配合截图工具（先截图定位目标）与功能手册（先查功能在哪），AI 就能完成「你问在哪 → 我看一眼 → 画给你看」的闭环。指示器是**点击穿透**的透明覆盖层，不挡用户操作，几秒后自动消失。",
   "icon": "grid3x3",
   "category": "tool",
   "installType": "standard",
+  "dependencies": [
+    "screenshot"
+  ],
   "contributes": {
     "panels": [],
     "commands": [],
@@ -15,7 +18,7 @@
       {
         "name": "point",
         "process": "pointer-server",
-        "description": "Draw on-screen pointers (arrows / rectangles / circles / text labels) to show the user exactly where to click. The overlay is transparent and click-through — it never blocks the user's mouse, and fades out automatically after `duration` seconds. Coordinates are SCREEN-ABSOLUTE PHYSICAL PIXELS (same space as the screenshot tools' `meta.monitorOrigin` — see the computer-use skill for the conversion). Typical use: user asks \"where is X?\" → look it up in the gui-manual skill → screenshot to locate it → call this with an arrow/box pointing at it. Call with `clear: true` to remove pointers early.",
+        "description": "Draw on-screen pointers (arrows / rectangles / circles / text labels) to show the user exactly where to click — use this whenever the user asks \"where is X?\", \"how do I do X?\", or can't find something. The overlay is transparent and click-through (never blocks the user's mouse) and fades out after `duration` seconds.\n\n⚠️ READ THE `pointer` SKILL BEFORE YOUR FIRST CALL. Coordinates must be screen-absolute physical pixels, and getting them right requires a conversion step from the screenshot — the skill has the exact formula, the 3-step workflow (gui-manual → screenshot → draw), and the failure modes. Skipping it is the main reason pointers land in the wrong place.\n\nRequires the `screenshot` plugin to locate targets. Call with `clear: true` to remove pointers early.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -25,10 +28,22 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "fromX": { "type": "number", "description": "Start X (screen-absolute px)" },
-                  "fromY": { "type": "number", "description": "Start Y (screen-absolute px)" },
-                  "toX": { "type": "number", "description": "Tip X — the point being indicated" },
-                  "toY": { "type": "number", "description": "Tip Y — the point being indicated" }
+                  "fromX": {
+                    "type": "number",
+                    "description": "Start X (screen-absolute px)"
+                  },
+                  "fromY": {
+                    "type": "number",
+                    "description": "Start Y (screen-absolute px)"
+                  },
+                  "toX": {
+                    "type": "number",
+                    "description": "Tip X — the point being indicated"
+                  },
+                  "toY": {
+                    "type": "number",
+                    "description": "Tip Y — the point being indicated"
+                  }
                 }
               }
             },
@@ -38,11 +53,26 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "x": { "type": "number", "description": "Left edge (screen-absolute px)" },
-                  "y": { "type": "number", "description": "Top edge (screen-absolute px)" },
-                  "w": { "type": "number", "description": "Width" },
-                  "h": { "type": "number", "description": "Height" },
-                  "label": { "type": "string", "description": "Optional corner badge, e.g. a step number \"1\"" }
+                  "x": {
+                    "type": "number",
+                    "description": "Left edge (screen-absolute px)"
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "Top edge (screen-absolute px)"
+                  },
+                  "w": {
+                    "type": "number",
+                    "description": "Width"
+                  },
+                  "h": {
+                    "type": "number",
+                    "description": "Height"
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "Optional corner badge, e.g. a step number \"1\""
+                  }
                 }
               }
             },
@@ -52,10 +82,22 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "x": { "type": "number", "description": "Center X" },
-                  "y": { "type": "number", "description": "Center Y" },
-                  "r": { "type": "number", "description": "Radius" },
-                  "label": { "type": "string", "description": "Optional badge text" }
+                  "x": {
+                    "type": "number",
+                    "description": "Center X"
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "Center Y"
+                  },
+                  "r": {
+                    "type": "number",
+                    "description": "Radius"
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "Optional badge text"
+                  }
                 }
               }
             },
@@ -65,9 +107,18 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "x": { "type": "number", "description": "Text anchor X" },
-                  "y": { "type": "number", "description": "Text anchor Y" },
-                  "text": { "type": "string", "description": "The text to show" }
+                  "x": {
+                    "type": "number",
+                    "description": "Text anchor X"
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "Text anchor Y"
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "The text to show"
+                  }
                 }
               }
             },
@@ -91,13 +142,20 @@
         }
       }
     ],
-    "skills": []
+    "skills": [
+      {
+        "name": "pointer",
+        "path": "skill"
+      }
+    ]
   },
   "processes": [
     {
       "id": "pointer-server",
       "command": "node",
-      "args": ["server.cjs"],
+      "args": [
+        "server.cjs"
+      ],
       "env": {},
       "startOn": "workspace_bound"
     }

@@ -28,7 +28,9 @@ CLI 引擎（`src/`）与 Rust 后端主体**跨平台干净**，mac 可直接�
 - `codemagic.yaml`：mac_mini_m2，`build.ts --platform macos --release ci-build`
 - GitHub 镜像仓库 `o2bubble/claude-code-haha-rush`（private，孤儿快照分支，排除大文件）
 - 产物作为 Codemagic artifact 下载（`.app`/claude/组件 zip/manifest）
-- GitHub Actions `macos-build.yml` 保留但不用（macOS runner 付费）
+- GitHub Actions `macos-build.yml` **已启用**（2026-09-16 起）——本仓库 public，macOS
+  runner 免费；日常走它，要快时用 Codemagic。详见 `macos-build-playbook.md` §1
+  （旧说法「保留但不用（runner 付费）」已过时）
 
 ### 构建管线要点（build.ts mac 分支）
 
@@ -36,7 +38,7 @@ CLI 引擎（`src/`）与 Rust 后端主体**跨平台干净**，mac 可直接�
 - `gui`：`cargo tauri build --bundles app`（出 `.app`，非 dmg）
 - `bun`：官方 `bun-darwin-arm64.zip`
 - `tools`：rg/fd/jq/yq/shellcheck 官方 darwin arm64 资产
-- `python`：python.org pkg → **`installer -pkg -target /`**（pkgutil --expand-full 对嵌套 pkg 不可靠）→ ditto 提取 `/Library/Frameworks/Python.framework` → 瘦身（删 test/tkinter/idlelib/文档 + `lipo -thin arm64`）→ pip 装 mcp SDK
+- `python`：**python-build-standalone**（Astral）tarball → 解压即 `dist/python`（真自包含，走 `@rpath`；`c107f64` 起）。~~python.org pkg → `installer -pkg -target /` → ditto 提取 framework → 瘦身~~（**已废弃**：框架式安装硬编码 `/Library/Frameworks/Python.framework/...` 绝对路径，ditto 拷副本救不了，用户系统框架升级后 `dyld: Library not loaded`）
 - updater：mac 跳过（无 Update.exe）
 
 ## 2. 组件体系平台化

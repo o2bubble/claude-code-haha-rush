@@ -42,5 +42,18 @@ ingress:
     originRequest:
       noTLSVerify: true
 
+  # ④ api（转发到 nps 的 50009 —— 用户其他机器的 web 服务入口）
+  #    nps 在这条端口上做转发，CF 只负责域名 → 隧道 → 本机 50009。
+  #    验证：curl -s -o /dev/null -w '%{http_code}' https://api.17lumen.cloud/<路径>
+  #    （后端服务没起来时返回 502，属正常）
+  - hostname: api.17lumen.cloud
+    service: http://127.0.0.1:50009
+    originRequest:
+      noTLSVerify: true
+
+  # ⑤ nps 管理面板（自带 Web UI）
+  - hostname: nps.17lumen.cloud
+    service: http://127.0.0.1:50003
+
   # 兜底（必须最后）
   - service: http_status:404

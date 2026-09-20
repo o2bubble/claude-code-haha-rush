@@ -2276,9 +2276,16 @@ const INDICATOR_SHOW_DELAY_MS: u64 = 250;
 /// （`WS_EX_NOREDIRECTIONBITMAP` + 跳过 softbuffer 底色，见 `Cargo.toml` 的
 /// `[patch.crates-io]` 说明）。这里只补穿透。
 ///
-/// 为什么不在这里设 `WS_EX_LAYERED`：透明窗口现在走 **DComp 合成**路径，
-/// 再叠一个经典 layered 位是两套合成机制的混合，行为不可预期；
-/// 而光有 `WS_EX_TRANSPARENT` 就足以表达"鼠标穿透"。
+/// ⚠️ **不要在这里加 `WS_EX_LAYERED`** —— 2026-09-19 试过（含成对的
+/// `SetLayeredWindowAttributes`），**实测全黑，已撤回**。
+///
+/// 排查时曾被 `probe_layered.py` 的"半透明色块可见"误导：那证明的是
+/// **整窗统一 alpha** 可用，与覆盖层需要的 **WebView2 逐像素透明**是两套机制 ——
+///   · `WS_EX_LAYERED` + `SetLayeredWindowAttributes` = 整窗**一个** alpha 值
+///   · `WS_EX_NOREDIRECTIONBITMAP`（DComp）= **逐像素** alpha，由 WebView2 内容提供
+/// 而且两者语义冲突：NOREDIR 意为"无重定向位图"，而 layered 合成**需要**位图
+/// → 叠加后全黑。**别把这两种透明的实验结论互相套用。**
+///
 /// （另注：**绝不能用 tao 的 `set_ignore_cursor_events`** —— 它会顺带加
 /// `WS_EX_LAYERED` 却不设属性，导致整个窗口不绘制 = 全黑，实测踩过。）
 #[cfg(windows)]
@@ -2367,7 +2374,22 @@ fn open_plugin_overlay(
         path.push('|');
         path.push_str(&hash_enc(p));
     }
-    log::info!("[Rust] open_plugin_overlay: plugin={plugin} src={src} monitors={indices:?}");
+    // 🔴 透明 overlay 必须在 URL 上带标记 —— 页面据此**不铺任何底色**。
+    //
+    // 为什么必须让页面知道：overlay 的底色需求有两种且**相反** ——
+    //   · 截图框选类：底色必然是黑的（冻结图黑底 + 选区外压暗）→ 页面铺黑防 WebView2 白闪
+    //   · 教鞭/指示器类（transparent=true）：**必须保持透明**（要透出背后内容）→ 什么都不铺
+    // 给后者铺任何底色，窗口透明了也白搭 —— **pointer 长期"黑屏"的真根因就是这个**
+    // （窗口层指标全对，是页面自己画了背景；查窗口层/WebView2 层都查不到）。
+    //
+    // 用 query 而不是改 `#overlay/` 前缀：hash 的解析协议（前端 parseOverlayHash）
+    // 保持不变，避免波及多处解析；query 是 URL 标准部分，Tauri 的 App 资源解析照常。
+    let mut path = if want_transparent {
+        path.replacen("index.html", "index.html?overlay-clear=1", 1)
+    } else {
+        path
+    };
+    log::info!("[Rust] open_plugin_overlay: plugin={plugin} src={src} monitors={indices:?} transparent={want_transparent}");
 
     let mut opened = Vec::new();
     for &idx in &indices {
