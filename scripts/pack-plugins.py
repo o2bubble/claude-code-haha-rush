@@ -48,6 +48,16 @@ PLUGINS_DIR = os.path.join(ROOT, "plugins")
 SKIP_DIRS = {"node_modules", "__pycache__", ".git"}
 SKIP_EXT = {".zip", ".pyc"}
 
+# 打包时按 LF 归一化的文本扩展名（见 pack() 里 write 处的说明）
+# 工作树在 Windows 上是 CRLF，直接写进 zip 会让"重新打包"产生一堆二进制
+# diff（实测：一次打包 4 个 zip 全变脏，还挡住 git 分支切换）。
+TEXT_EXTS = {".md", ".yaml", ".yml", ".json", ".cjs", ".mjs", ".js",
+             ".html", ".css", ".py", ".txt", ".svg"}
+
+# zip entry 的固定时间戳（1980-01-01 = zip 格式最早合法值）。
+# 不固定的话，同样内容每次打包的字节都不同（mtime 参与），git 里全是噪音 diff。
+FIXED_TIME = (1980, 1, 1, 0, 0, 0)
+
 # 明确列出的"开发用、不进包"文件（相对插件目录）。
 # 之所以逐个列而不是用通配：新增源文件时**默认进包**，漏发比多发的代价大得多。
 DEV_ONLY = {
@@ -110,7 +120,19 @@ def pack(plugin: str, check_only: bool = False) -> bool:
     if not check_only:
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
             for full, rel in files:
-                z.write(full, rel)
+                with open(full, "rb") as f:
+                    data = f.read()
+                # 文本按 LF 归一化：工作树在 Windows 上是 CRLF（core.autocrlf），
+                # 原样打包会让"重新打包"产生一堆二进制 diff（实测挡住过 git 分支切换）。
+                if os.path.splitext(rel)[1].lower() in TEXT_EXTS:
+                    data = data.replace(b"\r\n", b"\n")
+                # ⚠️ 时间戳也要固定住：zip 的每个 entry 都带 mtime（writestr 用"当前时刻"、
+                # write 用文件 mtime），不固定的话**同样内容每次打包字节都不同** ——
+                # 行尾归一化只解决了一半问题。
+                zi = zipfile.ZipInfo(rel, date_time=FIXED_TIME)
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                zi.external_attr = 0o644 << 16  # 可读权限位（Windows 忽略）
+                z.writestr(zi, data)
 
         # ── 打包后：把 zip 重新读回来核对（防止 write 阶段出问题）──
         with zipfile.ZipFile(out) as z:
