@@ -81,6 +81,10 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
 - \`settings\`: 插件设置声明（轻量 JSON Schema：type/title/default/options 等），
   设置面板按插件分组渲染
 
+  ⚠️ **顶层键，不在 \`contributes\` 下** —— 语义上像"贡献点"，极易误放。
+  放错层级**不报错**（宿主读不到，只是设置面板里没有该插件的分组），
+  实测踩过：写进 contributes 后用户反馈"贡献的设置呢 没看到啊"。
+
 ## 生命周期
 
 - 安装: 市场一键装（zip 下载解压校验）或手动放目录 → 重扫即活（无需重启）
