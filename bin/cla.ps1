@@ -1,4 +1,4 @@
-#!/usr/bin/env pwsh
+﻿#!/usr/bin/env pwsh
 set-strictmode -version 3.0
 $ErrorActionPreference = "Stop"
 

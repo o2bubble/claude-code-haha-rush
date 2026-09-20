@@ -1,4 +1,4 @@
-# install.ps1 — Claude Code Haha 安装引导 (PowerShell)
+﻿# install.ps1 — Claude Code Haha 安装引导 (PowerShell)
 # 仅负责：1) 安装 Bun（如未安装） 2) 委托给 scripts/install.ts
 # 用法: powershell -ExecutionPolicy Bypass -File install.ps1
 
