@@ -5,9 +5,10 @@ import { iconFor } from "../utils/icons";
 import { getRecent, sortByRecent } from "../utils/recentUsage";
 import { getChatState } from "../stores/chatStore";
 import { GuardButton } from "./chat/GuardButton";
+import { getGuardStatus, guardStart, guardStop, subscribeGuard } from "../services/guardBridge";
 import { WindowControls, isWindowsChrome } from "./TitleBar";
 import { AppMenu } from "./AppMenu";
-import { useToolbarCollapse } from "./useToolbarCollapse";
+import { useToolbarCollapse, DRAG_GUTTER_PX } from "./useToolbarCollapse";
 import { partitionItems, type ToolbarItem } from "./toolbarItems";
 import { DEFAULT_SHORTCUTS, resolveBindings, displayKeys } from "../services/shortcuts";
 import { isMacPlatform } from "../services/shortcutDispatcher";
@@ -1050,11 +1051,51 @@ export default function Toolbar() {
     { id: "newInstance", label: t("toolbar.newInstance"), shortLabel: t("toolbar.newInstanceShort"),
       title: t("toolbar.newInstance"), icon: <Copy size={14} />,
       onClick: spawnNewInstance, showLabel: true, alwaysVisible: true },
+    // ③ 带自身弹层、但**允许折叠**的两项（用户要求：窄窗口下收进菜单腾出拖拽区）。
+    //    与上面①的"固定降级"不同 —— 它们宽窗口下常驻工具栏，只在放不下时进菜单。
+    //    ⚠️ 折叠后菜单里不能用 render（菜单项只支持 icon+onClick），
+    //       故 menuItems 里另给「菜单形态」：布局预设 → 逐个预设；无人值守 → toggle。
+    { id: "layoutPreset", label: t("toolbar.layoutPicker"), icon: <LayoutTemplate size={14} />,
+      onClick: () => {}, render: () => <LayoutPresetDropdown /> },
+    { id: "guard", label: t("guard.title"), icon: <Shield size={14} />,
+      onClick: () => {}, render: () => <GuardButton /> },
   ], [isDark, hasUpdate, toggleTheme]);
 
   const { containerRef, collapsed } = useToolbarCollapse(barItems);
   const { inBar, inMenu } = partitionItems(barItems, collapsed);
-  const menuItems = inMenu;
+
+  // 无人值守状态（菜单形态的 label 要用："进入"/"停止"）
+  const [guardStatus, setGuardStatus] = useState(getGuardStatus());
+  useEffect(() => subscribeGuard(() => setGuardStatus(getGuardStatus())), []);
+  const guardActive = guardStatus !== "off";
+
+  // 菜单形态：带弹层的组件折叠后无法用 render（菜单项只支持 icon+onClick），
+  // 故在菜单里换成**等价的动作项**。
+  const menuItems: ToolbarItem[] = useMemo(() => {
+    const extra: ToolbarItem[] = [];
+    if (collapsed.has("layoutPreset")) {
+      // 布局预设折叠 → 逐个预设成项（3 个，直接应用，语义与弹层里点确认一致）
+      for (const p of LAYOUT_PRESETS) {
+        extra.push({
+          id: `preset-${p.id}`,
+          label: t(p.nameKey),
+          icon: <LayoutTemplate size={14} />,
+          onClick: () => applyLayoutPreset(p.id),
+        });
+      }
+    }
+    if (collapsed.has("guard")) {
+      // 无人值守折叠 → 单个 toggle。启动文案自带风险告知（"自担风险"），
+      // 与工具栏上确认框的告知等价，故菜单项可直达。
+      extra.push({
+        id: "guardToggle",
+        label: guardActive ? t("guard.stopped") : t("guard.enter"),
+        icon: <Shield size={14} />,
+        onClick: () => { if (guardActive) void guardStop(); else void guardStart(); },
+      });
+    }
+    return [...inMenu, ...extra];
+  }, [inMenu, collapsed, guardActive]);
 
   return (
     <div
@@ -1124,9 +1165,16 @@ export default function Toolbar() {
         <Search size={15} style={{ pointerEvents: "none" }} />
       </button>
 
-      {/* Middle area: session name —— minWidth:0 让它真正可压缩；
-          没有它 flex 子项默认 min-width:auto，长会话名会把右侧按钮推出可视区 */}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, marginLeft: 8 }}>
+      {/* Middle area: 会话名 + **拖拽安全带**。
+          flex:1 让它吸收剩余空间（宽窗口下这片空白就是拖窗口的抓手）；
+          minWidth 保证**窄窗口下也不被压到 0** —— 否则空白消失，用户没有稳定的
+          拖拽触发区（无装饰窗口下拖标题栏是移动窗口的主要手段）。
+          `data-toolbar-flex` 供折叠算法识别并跳过（它是剩余空间的**吸收者**，
+          实测宽度取决于折叠结果，计入 fixedWidth 会形成循环依赖）。 */}
+      <div
+        data-toolbar-flex="1"
+        style={{ flex: 1, minWidth: DRAG_GUTTER_PX, display: "flex", alignItems: "center", gap: 8, marginLeft: 8 }}
+      >
         {sessionTitle && (
           <span title={`Session: ${sessionTitle}`} style={{
             fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-secondary)",
@@ -1140,7 +1188,16 @@ export default function Toolbar() {
       {/* 可折叠项（未折叠的那些）。逐个渲染，带 data-toolbar-item 供折叠器实测宽度。
           放在此处（中间弹性区之后、核心控件之前）：折叠时右侧核心控件位置稳定，
           不会因为折叠而左右抖动。 */}
-      {inBar.map((it) => (
+      {inBar.map((it) =>
+        it.render ? (
+          // 带自身弹层/交互的组件（布局预设的预览网格、无人值守的确认框）——
+          // 直接用 render 输出组件本身，交互完全保留。
+          // ⚠️ 折叠进菜单时不能这么干（菜单项只支持 icon+onClick），
+          //    故这类项必须在 menuItems 里另给「菜单形态」（见下）。
+          <div key={it.id} data-toolbar-item={it.id} style={{ display: "flex", flexShrink: 0 }}>
+            {it.render()}
+          </div>
+        ) : (
         <button
           key={it.id}
           type="button"
@@ -1162,20 +1219,16 @@ export default function Toolbar() {
           )}
           {it.hasBadge && <ToolbarBadgeDot />}
         </button>
-      ))}
+        ),
+      )}
 
       <PermModeDropdown />
-      {/* 布局预设：自带弹层（预览网格 + 确认框），与"布局模式"同族，故相邻放置。
-          有独立弹层的组件都是**固定渲染**（不走 barItems 折叠数组）—— 折叠需要
-          ToolbarItem 的 onClick 形态，装不下"点开弹层"这类交互。 */}
-      <LayoutPresetDropdown />
       {/* 系统终端：自带弹层（选终端类型），同样固定渲染 */}
       <TerminalDropdown />
       {/* 模型名 = 模型相关设置的统一入口：点开含 模型列表 / 思考 / 档位 / Profile 管理。
           这些设置重要但不常改，工具栏常态不提供切换交互、只显示当前模型名。 */}
       <ModelDropdown />
       <PanelDropdown />
-      <GuardButton />
       <button
         type="button"
         data-toolbar-item="__settings"

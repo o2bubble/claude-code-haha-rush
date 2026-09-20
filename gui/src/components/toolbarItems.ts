@@ -53,6 +53,16 @@ export interface ToolbarItem {
   hasBadge?: boolean;
   /** 是否禁用（灰显、不可点） */
   disabled?: boolean;
+  /**
+   * **自定义渲染** —— 用于「带自身弹层/交互的组件」（如布局预设的预览网格、
+   * 无人值守的确认框）。设置后工具栏用它替代 `icon`+`onClick` 的默认按钮渲染，
+   * 组件自身的交互完全保留。
+   *
+   * ⚠️ 折叠进菜单时**不能**用 render（菜单项只支持 icon+onClick）——
+   * 所以带 render 的项必须同时提供「菜单形态」：见 Toolbar 的 menuItems 扩展
+   * （布局预设 → 逐个预设成项；无人值守 → 单个 toggle 项）。
+   */
+  render?: () => ReactNode;
 }
 
 /**
