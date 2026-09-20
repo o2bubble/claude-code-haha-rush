@@ -32,6 +32,13 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 OutputDir=..\dist
 OutputBaseFilename=ClaudeCodeHaha_Setup_v{#MyAppVersion}
+; 让 exe 的「文件版本」也有值 —— 不写的话 Windows 属性对话框里那一栏是空的
+; （Inno 只从 AppVersion 写 ProductVersion，不自动填 FileVersion）。
+; 需要四段数字，而我们的版本号恰好是（2026.09.20.6）→ 可直接用。
+VersionInfoVersion={#MyAppVersion}
+VersionInfoDescription={#MyAppName} Setup
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion={#MyAppVersion}
 WizardStyle=modern
 ; All-users install → Program Files + system env (elevated); current-user install
 ; → {localappdata}\Programs + user env (no UAC). {autopf} resolves to the right
