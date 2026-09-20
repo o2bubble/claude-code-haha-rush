@@ -11,6 +11,8 @@ import { switchSession } from "./chat/useChatBridge";
 import { getAllPanels } from "../stores/panelRegistry";
 import type { PaletteItem } from "../utils/commandPaletteLogic";
 import { buildPanelItems, buildCommandItems, buildSessionItems, type SkillI18n } from "../utils/commandPaletteItems";
+import { getSettings } from "../stores/settingsStore";
+import type { SessionFolderTree } from "./chat/sessionFolders";
 import { buildEditorCommandItems } from "../utils/editorCommands";
 import { recordRecent, getRecent, sortByRecent } from "../utils/recentUsage";
 import { CATEGORIES } from "./chat/SettingsPanel";
@@ -102,8 +104,12 @@ export function useCommandPalette() {
     }));
 
     // 会话：最近使用排序，点击记录
+    // 文件夹功能开启时传 tree → 有归属的会话在名称前显示层级路径
+    const st = getSettings();
+    const sessionFolderTree: SessionFolderTree | undefined =
+      st.sessionFolders ? (st.sessionFolderTree ?? { folders: [], assignments: {} }) : undefined;
     const sessions: PaletteItem[] = sortByRecent(
-      buildSessionItems(chat.sessions, chat.sessionId),
+      buildSessionItems(chat.sessions, chat.sessionId, sessionFolderTree),
       getRecent("session"),
     ).map((s) => ({
       ...s,

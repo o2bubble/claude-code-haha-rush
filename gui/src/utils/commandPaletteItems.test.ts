@@ -94,4 +94,23 @@ describe("buildSessionItems", () => {
     const items = buildSessionItems([{ id: "s3", title: "", timestamp: 0 }], null);
     expect(items[0].label).toBe("s3");
   });
+
+  it("传 folderTree 时，有归属的会话带层级 prefix", () => {
+    const tree = {
+      folders: [
+        { id: "f1", name: "工作" },
+        { id: "f2", name: "项目A", parentId: "f1" },
+      ],
+      assignments: { s2: "f2" },
+    };
+    const items = buildSessionItems(sessions, null, tree);
+    expect(items.find((i) => i.id === "session-s2")?.prefix).toBe("工作 / 项目A");
+    // 无归属的会话不带 prefix（渲染层据此留空）
+    expect(items.find((i) => i.id === "session-s1")?.prefix).toBeUndefined();
+  });
+
+  it("不传 folderTree 时一律无 prefix（向后兼容）", () => {
+    const items = buildSessionItems(sessions, null);
+    expect(items.every((i) => i.prefix === undefined)).toBe(true);
+  });
 });

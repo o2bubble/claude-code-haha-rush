@@ -6,6 +6,7 @@ import {
   createFolder, renameFolder, deleteFolder, moveFolder,
   assignSession, unassignSession, moveSessions,
   buildFolderTree, partitionSessions, pruneOrphanAssignments, isSessionListComplete,
+  folderPathOf, folderPathLabel,
   type SessionFolderTree,
 } from "./sessionFolders";
 
@@ -189,5 +190,49 @@ describe("isSessionListComplete（列表完整性保护）", () => {
     // 会话全集 60 个，后端只返回 50（旧 slice(0,50) 行为）→ 不能据此清理，
     // 否则后 10 个真实存在会话的归属被误删（回列表时变未分类/找不到）。
     expect(isSessionListComplete(50, 60)).toBe(false);
+  });
+});
+
+describe("folderPathOf / folderPathLabel（命令面板的层级前缀）", () => {
+  // 结构：工作 ─┬─ 项目A
+  //                └─ 项目B
+  const tree: SessionFolderTree = {
+    folders: [
+      { id: "f-work", name: "工作" },
+      { id: "f-a", name: "项目A", parentId: "f-work" },
+      { id: "f-b", name: "项目B", parentId: "f-work" },
+    ],
+    assignments: { s1: "f-a", s2: "f-work" },
+  };
+
+  it("嵌套层级按 根 → 叶 顺序返回", () => {
+    expect(folderPathOf(tree, "s1")).toEqual(["工作", "项目A"]);
+  });
+
+  it("一级文件夹返回单元素", () => {
+    expect(folderPathOf(tree, "s2")).toEqual(["工作"]);
+  });
+
+  it("无归属返回空（渲染层据此不显示前缀）", () => {
+    expect(folderPathOf(tree, "s3")).toEqual([]);
+    expect(folderPathLabel(tree, "s3")).toBe("");
+  });
+
+  it("归属到不存在的文件夹 → 空（防悬挂，与 partitionSessions 同语义）", () => {
+    const dangling: SessionFolderTree = { folders: [{ id: "f1", name: "X" }], assignments: { s9: "gone" } };
+    expect(folderPathOf(dangling, "s9")).toEqual([]);
+  });
+
+  it("成环时不死循环（返回已走到的部分）", () => {
+    // A → B → A（moveFolder 有防环，但数据可能来自旧版本/手改）
+    const cyclic: SessionFolderTree = {
+      folders: [{ id: "a", name: "A", parentId: "b" }, { id: "b", name: "B", parentId: "a" }],
+      assignments: { s: "a" },
+    };
+    expect(folderPathOf(cyclic, "s")).toEqual(["B", "A"]);
+  });
+
+  it("显示串用 ` / ` 连接", () => {
+    expect(folderPathLabel(tree, "s1")).toBe("工作 / 项目A");
   });
 });

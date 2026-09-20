@@ -136,3 +136,29 @@ export function partitionSessions<T extends { id: string }>(
   }
   return { byFolder, uncategorized };
 }
+
+/**
+ * 会话所属文件夹的**层级路径**（根 → 叶），如 `["工作", "项目A"]`。
+ * 无归属、归属到不存在的文件夹、或成环时返回 `[]`（防悬挂/防死循环）。
+ *
+ * 用途：命令面板在会话名前展示层级（`folderPathLabel` 拼成显示串）。
+ */
+export function folderPathOf(tree: SessionFolderTree, sessionId: string): string[] {
+  const folderId = tree.assignments[sessionId];
+  if (!folderId) return [];
+  const byId = new Map(tree.folders.map((f) => [f.id, f]));
+  const path: string[] = [];
+  const seen = new Set<string>();
+  let cur = byId.get(folderId);
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    path.unshift(cur.name);
+    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+  }
+  return path;
+}
+
+/** 层级路径 → 显示串（`工作 / 项目A`）。空路径返回空串。 */
+export function folderPathLabel(tree: SessionFolderTree, sessionId: string): string {
+  return folderPathOf(tree, sessionId).join(" / ");
+}

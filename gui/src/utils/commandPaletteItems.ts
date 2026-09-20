@@ -1,6 +1,7 @@
 // ── CommandPalette item 组装 — 从 store 数据构建 PaletteItem（纯函数，可单测）──
 
 import type { PaletteItem } from "./commandPaletteLogic";
+import { folderPathLabel, type SessionFolderTree } from "../components/chat/sessionFolders";
 
 export interface PanelLike {
   id: string;
@@ -62,16 +63,26 @@ export function buildCommandItems(commands: CommandLike[], i18n?: SkillI18n): Pa
 }
 
 /** 会话组：标注当前会话，按时间倒序 */
-export function buildSessionItems(sessions: SessionLike[], activeSessionId: string | null): PaletteItem[] {
+export function buildSessionItems(
+  sessions: SessionLike[],
+  activeSessionId: string | null,
+  /** 会话文件夹树 —— 传入时，有归属的会话在名称**前面**显示层级路径 */
+  folderTree?: SessionFolderTree,
+): PaletteItem[] {
   return [...sessions]
     .sort((a, b) => b.timestamp - a.timestamp)
-    .map((s) => ({
-      id: `session-${s.id}`,
-      kind: "session" as const,
-      label: s.title || s.id,
-      sublabel: new Date(s.timestamp).toLocaleString(),
-      icon: "sessions",
-      active: s.isActive || s.id === activeSessionId,
-      run: () => {},
-    }));
+    .map((s) => {
+      const path = folderTree ? folderPathLabel(folderTree, s.id) : "";
+      return {
+        id: `session-${s.id}`,
+        kind: "session" as const,
+        label: s.title || s.id,
+        // 层级前缀（无归属时为空串 → 渲染层自然不显示）
+        prefix: path || undefined,
+        sublabel: new Date(s.timestamp).toLocaleString(),
+        icon: "sessions",
+        active: s.isActive || s.id === activeSessionId,
+        run: () => {},
+      };
+    });
 }

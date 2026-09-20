@@ -6,6 +6,12 @@ export interface PaletteItem {
   id: string;
   kind: PaletteKind;
   label: string;
+  /**
+   * 名称**前面**的层级前缀（如会话的文件夹路径 `工作 / 项目A`）。
+   * 渲染为弱化的灰色小字 —— 与 label 视觉分离，不喧宾夺主。
+   * 参与搜索匹配（搜文件夹名能找到里面的会话）。
+   */
+  prefix?: string;
   sublabel?: string;
   icon?: string;
   /** 已打开/已激活 状态标记（面板、会话） */
@@ -17,7 +23,7 @@ export interface PaletteItem {
 export function matchPaletteItem(item: PaletteItem, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  const hay = `${item.label} ${item.sublabel ?? ""}`.toLowerCase();
+  const hay = `${item.label} ${item.prefix ?? ""} ${item.sublabel ?? ""}`.toLowerCase();
   return hay.includes(q);
 }
 

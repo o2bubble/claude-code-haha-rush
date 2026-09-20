@@ -149,6 +149,19 @@ export default function CommandPalette({ open, onClose, items, editorFocused = f
                       <span style={{ width: 18, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--fg-muted)", flexShrink: 0 }}>
                         {iconFor(item.icon as IconKey)}
                       </span>
+                      {/* 层级前缀（如会话的文件夹路径）—— 灰色小字，`›` 与标题分离。
+                          名字是主体，故前缀可被压缩省略（flexShrink 更大、有 maxWidth）。 */}
+                      {item.prefix && (
+                        <span
+                          style={{
+                            flexShrink: 2, minWidth: 0, maxWidth: 220, display: "flex", alignItems: "center", gap: 5,
+                            fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap",
+                          }}
+                        >
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{item.prefix}</span>
+                          <span style={{ opacity: 0.45, flexShrink: 0 }}>›</span>
+                        </span>
+                      )}
                       <span style={{ flex: 1, minWidth: 0, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</span>
                       {item.sublabel && (
                         <span style={{
