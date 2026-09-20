@@ -1,16 +1,23 @@
 ; Claude Code Haha 安装程序脚本
 ; 需要 Inno Setup 6+ (https://jrsoftware.org/isdl.php)
-; 用法: ISCC.exe installer\setup.iss
+;
+; 用法（**推荐**经 installer\build.ps1 调用，它会从 dist\manifest.json 读版本）：
+;   ISCC.exe installer\setup.iss /DMyAppVersion=2026.09.20.6
 
 #define MyAppName "Claude Code Haha"
-#define MyAppVersion "2.1.89"
 #define MyAppPublisher "Claude Code Local"
 #define MyAppURL "https://gitee.com/randomlife/claude-code-haha-dev"
 #define MyAppExeName "claude-code-gui.exe"
 
-; Build tag: pass via /DBuildTag=2026W28 or leave blank for DEV
-#ifndef BuildTag
-  #define BuildTag "DEV"
+; 安装包版本 = **项目发布版本**（日期式，如 2026.09.20.6），由 build.ps1 从
+; dist\manifest.json 读出后经 /D 传入。
+;
+; ⚠️ 这里曾硬编码 "2.1.89"（那是 claude.exe 的**上游**版本）→ 安装包文件名
+; 与卸载列表里显示的都是一个跟项目发布无关的号，用户拿到包无法判断对应哪次发布。
+; 同时曾用 BuildTag（周数 2026W38）也与此版本体系脱节，一并去掉 ——
+; 版本号本身已含日期 + 当日序号（.6 → .7），无需第二个标识。
+#ifndef MyAppVersion
+  #error MyAppVersion is required: pass /DMyAppVersion=<version> (see build.ps1)
 #endif
 
 [Setup]
@@ -24,7 +31,7 @@ DefaultGroupName={#MyAppName}
 Compression=lzma2/ultra64
 SolidCompression=yes
 OutputDir=..\dist
-OutputBaseFilename=ClaudeCodeHaha_Setup_v{#MyAppVersion}_{#BuildTag}
+OutputBaseFilename=ClaudeCodeHaha_Setup_v{#MyAppVersion}
 WizardStyle=modern
 ; All-users install → Program Files + system env (elevated); current-user install
 ; → {localappdata}\Programs + user env (no UAC). {autopf} resolves to the right
@@ -244,72 +251,6 @@ begin
 end;
 
 // ── Install / Uninstall hooks ─────────────────────────────────────────
-
-// ── Claude global config injection ────────────────────────────────────
-
-procedure InjectPythonNote(AppDir: string);
-var
-  ClaudeDir, ClaudeFile, NoteSrc, NoteDst, PythonExe: string;
-  Content, OldNote, InjectLine: AnsiString;
-  OldNotePos: Integer;
-begin
-  ClaudeDir := ExpandConstant('{userdocs}\..\.claude');
-  ClaudeFile := ClaudeDir + '\CLAUDE.md';
-  NoteSrc := AppDir + '\extensions\python\python-env.md';
-  NoteDst := ClaudeDir + '\python-env.md';
-  PythonExe := '%' + HomeVarName + '%\python\python.exe';
-
-  ForceDirectories(ClaudeDir);
-
-  // Copy python-env.md — CLAUDE.md references it via @python-env.md so the content
-  // is maintained in one place (the bundled source file), not pasted into CLAUDE.md.
-  if FileExists(NoteSrc) then begin
-    CopyFile(NoteSrc, NoteDst, False);
-    Log('Installed python-env.md to: ' + NoteDst);
-  end else begin
-    Log('WARNING: python-env.md not found at: ' + NoteSrc);
-    Exit;
-  end;
-
-  if FileExists(ClaudeFile) then begin
-    LoadStringFromFile(ClaudeFile, Content);
-  end else begin
-    Content := '';
-  end;
-
-  // Drop the legacy inline note text (pre-@ref installs wrote it directly into
-  // CLAUDE.md) so an upgrade doesn't end up with both the old inline text and
-  // the new @python-env.md reference.
-  OldNote := '## Python Environment' + #13#10 +
-             '' + #13#10 +
-             'Prefer the user''s existing Python environment (python / python3 on PATH).' + #13#10 +
-             'Only fall back to the bundled Python when no system Python is found:' + #13#10 +
-             '  ' + PythonExe + #13#10 +
-             '' + #13#10 +
-             'To install packages with the bundled Python:' + #13#10 +
-             '  ' + PythonExe + ' -m pip install <package>' + #13#10;
-  OldNotePos := Pos(OldNote, Content);
-  if OldNotePos > 0 then begin
-    Delete(Content, OldNotePos, Length(OldNote));
-    Log('Removed legacy inline Python note from CLAUDE.md');
-  end;
-
-  // Inject @python-env.md into CLAUDE.md
-  InjectLine := '@python-env.md';
-
-  if Pos(InjectLine, Content) > 0 then begin
-    Log('@python-env.md already in CLAUDE.md');
-    Exit;
-  end;
-
-  if Content <> '' then
-    Content := Content + #13#10 + InjectLine + #13#10
-  else
-    Content := '# Claude Code Global Instructions' + #13#10#13#10 + InjectLine + #13#10;
-
-  SaveStringToFile(ClaudeFile, Content, False);
-  Log('Injected @python-env.md into: ' + ClaudeFile);
-end;
 
 // ── Install / Uninstall hooks ─────────────────────────────────────────
 
