@@ -4,8 +4,7 @@ import { getTree, findParentSplit, toggleGroupHidden, toggleLeftColumn, toggleRi
 import { iconFor } from "../utils/icons";
 import { getRecent, sortByRecent } from "../utils/recentUsage";
 import { getChatState } from "../stores/chatStore";
-import { GuardButton } from "./chat/GuardButton";
-import { getGuardStatus, guardStart, guardStop, subscribeGuard } from "../services/guardBridge";
+import { GuardButton, GuardConfirmDialog } from "./chat/GuardButton";
 import { WindowControls, isWindowsChrome } from "./TitleBar";
 import { AppMenu } from "./AppMenu";
 import { useToolbarCollapse, DRAG_GUTTER_PX } from "./useToolbarCollapse";
@@ -821,6 +820,126 @@ function PresetMini({ id }: { id: string }) {
 /** 布局预设弹层的最大宽度（3 张 150px 预览卡 + gap + padding）。 */
 const PRESET_MENU_WIDTH = 520;
 
+/** 预设预览网格 —— **下拉与居中浮层共用**（内容单一来源）。 */
+function PresetGrid({ onPick }: { onPick: (p: (typeof LAYOUT_PRESETS)[number]) => void }) {
+  return (
+    <>
+      {LAYOUT_PRESETS.map((p) => (
+        <div
+          key={p.id}
+          onClick={() => onPick(p)}
+          style={{
+            width: 150,
+            border: "1px solid var(--border-medium)",
+            borderRadius: 8,
+            padding: 6,
+            cursor: "pointer",
+            background: "transparent",
+            fontFamily: "var(--font-sans)",
+          }}
+        >
+          <div style={{ height: 70, borderRadius: 4, overflow: "hidden" }}>
+            <PresetMini id={p.id} />
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 600, marginTop: 5, color: "var(--fg-primary)" }}>
+            {t(p.nameKey)}
+          </div>
+          <div style={{ fontSize: 9, color: "var(--fg-muted)", marginTop: 1, lineHeight: 1.3 }}>
+            {t(p.descKey)}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
+/** 应用预设的确认框（**居中模态**）—— 下拉与浮层共用。 */
+function PresetConfirmDialog({
+  preset,
+  onClose,
+}: {
+  preset: (typeof LAYOUT_PRESETS)[number] | null;
+  onClose: () => void;
+}) {
+  if (!preset) return null;
+  return (
+    <div
+      {...DROPDOWN_MENU_ATTRS}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.35)",
+        zIndex: 200,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: "var(--bg-root)",
+          borderRadius: 10,
+          padding: "18px 20px",
+          width: 340,
+          boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
+          fontFamily: "var(--font-sans)",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: "var(--fg-primary)" }}>
+          {t("toolbar.layoutApplyTitle").replace("{name}", t(preset.nameKey))}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--fg-muted)", marginBottom: 16, lineHeight: 1.5 }}>
+          {t("toolbar.layoutApplyMsg")}
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              border: "1px solid var(--border-medium)",
+              borderRadius: 6,
+              padding: "6px 14px",
+              fontSize: 12,
+              fontFamily: "var(--font-sans)",
+              cursor: "pointer",
+              background: "transparent",
+              color: "var(--fg-primary)",
+            }}
+          >
+            {t("toolbar.layoutCancel")}
+          </button>
+          <button
+            type="button"
+            onClick={() => { applyLayoutPreset(preset.id); onClose(); }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              border: "none",
+              borderRadius: 6,
+              padding: "6px 14px",
+              fontSize: 12,
+              fontFamily: "var(--font-sans)",
+              cursor: "pointer",
+              background: "var(--accent)",
+              color: "var(--fg-inverse)",
+              fontWeight: 600,
+            }}
+          >
+            {t("toolbar.layoutApply")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 工具栏上的**下拉形态**（按钮 + 下拉网格 + 确认框）。 */
 function LayoutPresetDropdown() {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState<(typeof LAYOUT_PRESETS)[number] | null>(null);
@@ -861,109 +980,60 @@ function LayoutPresetDropdown() {
               maxWidth,
             }}
           >
-            {LAYOUT_PRESETS.map((p) => (
-              <div
-                key={p.id}
-                onClick={() => { setConfirming(p); setOpen(false); }}
-                style={{
-                  width: 150,
-                  border: "1px solid var(--border-medium)",
-                  borderRadius: 8,
-                  padding: 6,
-                  cursor: "pointer",
-                  background: "transparent",
-                  fontFamily: "var(--font-sans)",
-                }}
-              >
-                <div style={{ height: 70, borderRadius: 4, overflow: "hidden" }}>
-                  <PresetMini id={p.id} />
-                </div>
-                <div style={{ fontSize: 12, fontWeight: 600, marginTop: 5, color: "var(--fg-primary)" }}>
-                  {t(p.nameKey)}
-                </div>
-                <div style={{ fontSize: 9, color: "var(--fg-muted)", marginTop: 1, lineHeight: 1.3 }}>
-                  {t(p.descKey)}
-                </div>
-              </div>
-            ))}
+            <PresetGrid onPick={(p) => { setConfirming(p); setOpen(false); }} />
           </div>
         )}
       </div>
-      {confirming && (
+      <PresetConfirmDialog preset={confirming} onClose={() => setConfirming(null)} />
+    </>
+  );
+}
+
+/**
+ * 布局预设的**居中浮层形态** —— 工具栏折叠后从应用菜单进入时用。
+ *
+ * 为什么不是"把预设拆成菜单项"：那会让菜单膨胀（3 个预设 + 未来的预设都要占位），
+ * 而用户点开菜单是想找**功能**，不是找某个预设的具体选项。一次点击进浮层、
+ * 在浮层里完成选择，菜单只多 1 项。
+ */
+export function PresetPickerModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [confirming, setConfirming] = useState<(typeof LAYOUT_PRESETS)[number] | null>(null);
+  if (!open) return null;
+  return (
+    <>
+      <div
+        {...DROPDOWN_MENU_ATTRS}
+        style={{
+          position: "fixed",
+          inset: 0,
+          background: "rgba(0,0,0,0.35)",
+          zIndex: 200,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+        onClick={onClose}
+      >
         <div
-          {...DROPDOWN_MENU_ATTRS}
           style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.35)",
-            zIndex: 200,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
+            background: "var(--bg-root)",
+            border: "1px solid var(--border-medium)",
+            borderRadius: 12,
+            padding: 16,
+            boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
+            fontFamily: "var(--font-sans)",
           }}
-          onClick={() => setConfirming(null)}
+          onClick={(e) => e.stopPropagation()}
         >
-          <div
-            style={{
-              background: "var(--bg-root)",
-              borderRadius: 10,
-              padding: "18px 20px",
-              width: 340,
-              boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
-              fontFamily: "var(--font-sans)",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: "var(--fg-primary)" }}>
-              {t("toolbar.layoutApplyTitle").replace("{name}", t(confirming.nameKey))}
-            </div>
-            <div style={{ fontSize: 12, color: "var(--fg-muted)", marginBottom: 16, lineHeight: 1.5 }}>
-              {t("toolbar.layoutApplyMsg")}
-            </div>
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-              <button
-                type="button"
-                onClick={() => setConfirming(null)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  border: "1px solid var(--border-medium)",
-                  borderRadius: 6,
-                  padding: "6px 14px",
-                  fontSize: 12,
-                  fontFamily: "var(--font-sans)",
-                  cursor: "pointer",
-                  background: "transparent",
-                  color: "var(--fg-primary)",
-                }}
-              >
-                {t("toolbar.layoutCancel")}
-              </button>
-              <button
-                type="button"
-                onClick={() => { applyLayoutPreset(confirming.id); setConfirming(null); }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  border: "none",
-                  borderRadius: 6,
-                  padding: "6px 14px",
-                  fontSize: 12,
-                  fontFamily: "var(--font-sans)",
-                  cursor: "pointer",
-                  background: "var(--accent)",
-                  color: "var(--fg-inverse)",
-                  fontWeight: 600,
-                }}
-              >
-                {t("toolbar.layoutApply")}
-              </button>
-            </div>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, color: "var(--fg-primary)" }}>
+            {t("toolbar.layoutPicker")}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, maxWidth: 500 }}>
+            <PresetGrid onPick={setConfirming} />
           </div>
         </div>
-      )}
+      </div>
+      <PresetConfirmDialog preset={confirming} onClose={() => setConfirming(null)} />
     </>
   );
 }
@@ -1023,6 +1093,11 @@ export default function Toolbar() {
   //
   // 只收「简单动作按钮」——带自身弹出层的下拉组件（模型/权限/面板/布局预设/
   // 终端）不参与：塞进菜单会变成嵌套下拉，交互难看且易错。它们常驻工具栏。
+  // 折叠后从菜单进入时打开的**居中浮层**（null = 没开）。
+  // ⚠️ 不把弹层里的选项拆成菜单项 —— 那会让菜单随选项数量膨胀，而用户点开菜单
+  // 是想找**功能**。一次点击进浮层、在浮层里完成选择，菜单只多 1 项。
+  const [openModal, setOpenModal] = useState<null | "preset" | "guard">(null);
+
   const barItems: ToolbarItem[] = useMemo(() => [
     // ① 固定降级（永远在菜单里）
     { id: "theme", label: isDark ? t("toolbar.switchToLight") : t("toolbar.switchToDark"),
@@ -1055,47 +1130,20 @@ export default function Toolbar() {
     //    与上面①的"固定降级"不同 —— 它们宽窗口下常驻工具栏，只在放不下时进菜单。
     //    ⚠️ 折叠后菜单里不能用 render（菜单项只支持 icon+onClick），
     //       故 menuItems 里另给「菜单形态」：布局预设 → 逐个预设；无人值守 → toggle。
+    // onClick = **菜单态**（折叠进应用菜单后）：开居中浮层完成完整交互。
+    // render  = **工具栏态**：直接用带自身弹层的组件（交互原样保留）。
     { id: "layoutPreset", label: t("toolbar.layoutPicker"), icon: <LayoutTemplate size={14} />,
-      onClick: () => {}, render: () => <LayoutPresetDropdown /> },
+      onClick: () => setOpenModal("preset"), render: () => <LayoutPresetDropdown /> },
     { id: "guard", label: t("guard.title"), icon: <Shield size={14} />,
-      onClick: () => {}, render: () => <GuardButton /> },
+      onClick: () => setOpenModal("guard"), render: () => <GuardButton /> },
   ], [isDark, hasUpdate, toggleTheme]);
 
   const { containerRef, collapsed } = useToolbarCollapse(barItems);
   const { inBar, inMenu } = partitionItems(barItems, collapsed);
 
-  // 无人值守状态（菜单形态的 label 要用："进入"/"停止"）
-  const [guardStatus, setGuardStatus] = useState(getGuardStatus());
-  useEffect(() => subscribeGuard(() => setGuardStatus(getGuardStatus())), []);
-  const guardActive = guardStatus !== "off";
-
-  // 菜单形态：带弹层的组件折叠后无法用 render（菜单项只支持 icon+onClick），
-  // 故在菜单里换成**等价的动作项**。
-  const menuItems: ToolbarItem[] = useMemo(() => {
-    const extra: ToolbarItem[] = [];
-    if (collapsed.has("layoutPreset")) {
-      // 布局预设折叠 → 逐个预设成项（3 个，直接应用，语义与弹层里点确认一致）
-      for (const p of LAYOUT_PRESETS) {
-        extra.push({
-          id: `preset-${p.id}`,
-          label: t(p.nameKey),
-          icon: <LayoutTemplate size={14} />,
-          onClick: () => applyLayoutPreset(p.id),
-        });
-      }
-    }
-    if (collapsed.has("guard")) {
-      // 无人值守折叠 → 单个 toggle。启动文案自带风险告知（"自担风险"），
-      // 与工具栏上确认框的告知等价，故菜单项可直达。
-      extra.push({
-        id: "guardToggle",
-        label: guardActive ? t("guard.stopped") : t("guard.enter"),
-        icon: <Shield size={14} />,
-        onClick: () => { if (guardActive) void guardStop(); else void guardStart(); },
-      });
-    }
-    return [...inMenu, ...extra];
-  }, [inMenu, collapsed, guardActive]);
+  // 菜单项直接用 partitionItems 的结果 —— 折叠的项自带正确的 onClick
+  // （见 barItems 里两项：工具栏态走 render，菜单态走 onClick 开浮层）。
+  const menuItems = inMenu;
 
   return (
     <div
@@ -1239,6 +1287,10 @@ export default function Toolbar() {
       >
         <Settings size={16} style={{ pointerEvents: "none" }} />
       </button>
+
+      {/* 折叠后的居中浮层（应用菜单里点「布局预设」/「无人值守」进入） */}
+      <PresetPickerModal open={openModal === "preset"} onClose={() => setOpenModal(null)} />
+      <GuardConfirmDialog open={openModal === "guard"} onClose={() => setOpenModal(null)} />
 
       {/* 自绘窗口按钮（仅 Windows）。放最右且与工具栏按钮留有间距 ——
           Win11 的关闭按钮贴角，视觉上不该和功能按钮挤在一起。
