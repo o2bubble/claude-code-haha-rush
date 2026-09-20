@@ -1,7 +1,7 @@
 {
   "pluginName": "pointer",
   "displayName": "屏幕指示器（教鞭）",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "apiVersion": "1.0",
   "description": "给 AI 一根「教鞭」：在屏幕上画出箭头、方框、圆圈、文字标签，直接指给用户「点这里」。配合截图工具（先截图定位目标）与功能手册（先查功能在哪），AI 就能完成「你问在哪 → 我看一眼 → 画给你看」的闭环。指示器是**点击穿透**的透明覆盖层，不挡用户操作，几秒后自动消失。",
   "icon": "grid3x3",
@@ -147,7 +147,33 @@
         "name": "pointer",
         "path": "skill"
       }
-    ]
+    ],
+    "settings": {
+      "colorScheme": {
+        "type": "select",
+        "title": "配色方案",
+        "description": "指示器的颜色。红色系在中文语境里有强烈的警示/提醒意味；蓝色系更现代克制",
+        "default": "blue",
+        "options": [
+          {
+            "value": "blue",
+            "label": "现代蓝（默认）"
+          },
+          {
+            "value": "red",
+            "label": "警示红"
+          },
+          {
+            "value": "green",
+            "label": "确认绿"
+          },
+          {
+            "value": "amber",
+            "label": "醒目橙"
+          }
+        ]
+      }
+    }
   },
   "processes": [
     {

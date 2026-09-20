@@ -2308,6 +2308,7 @@ fn setup_overlay_window_bits(
     Ok(())
 }
 
+
 /// overlay 窗口 label 前缀 —— open / close 共用同一份，保证两边对得上。
 /// Tauri 的 label 只允许 `[A-Za-z0-9-/:_.]`，而插件名是自由字符串，故净化一次。
 fn overlay_label_prefix(plugin: &str) -> String {
@@ -2471,6 +2472,12 @@ fn open_plugin_overlay(
                         {
                             log::error!("[Rust] overlay window bits failed: {e}");
                         }
+                        // ⚠️ 已知限制：WebView2 的覆盖层**做不到真正的鼠标穿透**。
+                        // 根因：输入由 WebView2 浏览器进程的子窗口接收（跨进程），
+                        // WS_EX_TRANSPARENT 的 HTTRANSPARENT 机制只在同线程窗口链内有效，
+                        // EnableWindow 也只作用于本进程窗口 —— 宿主侧三条路都试过，无效。
+                        // （2026-09-20 实测；透明覆盖层仅用于"能看不能点"的降级场景，
+                        //  真正可用的路径是 pointer 的 render.py 原生绘制。）
                     }
                     #[cfg(not(windows))]
                     let _ = (want_transparent, want_click_through);

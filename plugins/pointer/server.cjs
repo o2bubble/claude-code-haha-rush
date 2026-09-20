@@ -72,6 +72,15 @@ let state = {
 };
 
 /**
+ * 插件设置（宿主随每次命令下发 —— 见 /__mcp 的 {tool, args, settings} 契约）。
+ * 与 screenshot 一致：这里只存当前值；声明与 UI 由 plugin.json 的
+ * contributes.settings 负责。
+ */
+let settings = {
+  colorScheme: "blue",
+};
+
+/**
  * 绘制进程是否在跑 —— 决定要不要再 spawn。
  *
  * ⚠️ **必须由 `renderProc` 派生，不能是独立布尔量**（2026-09-20 修）。
@@ -268,7 +277,8 @@ function spawnRenderer(monitor) {
 
   const py = findPython();
   try {
-    renderProc = spawn(py, [script, "--port", String(actualPort()), "--monitor", String(monitor)], {
+    renderProc = spawn(py, [script, "--port", String(actualPort()), "--monitor", String(monitor),
+                            "--color", settings.colorScheme], {
       cwd: __dirname,
       stdio: "ignore",
       windowsHide: true,
@@ -331,6 +341,18 @@ async function handle(req, res) {
       catch { return json(res, 200, { ok: false, error: "请求体不是合法 JSON" }); }
       if (body.tool !== "point") {
         return json(res, 200, { ok: false, error: `未知工具: ${body.tool}（本插件只提供 point）` });
+      }
+      // 设置随命令下发（宿主每次都带当前值）
+      if (body.settings && typeof body.settings === "object") {
+        const next = String(body.settings.colorScheme || "blue");
+        if (next !== settings.colorScheme) {
+          settings = { colorScheme: next };
+          // 配色是 render.py 的**启动参数** → 已在跑的进程要重启才能生效
+          if (renderProc) {
+            try { renderProc.kill(); } catch { /* ignore */ }
+            renderProc = null;
+          }
+        }
       }
       try { return json(res, 200, handlePoint(body.args)); }
       catch (e) { return json(res, 200, { ok: false, error: String((e && e.message) || e) }); }

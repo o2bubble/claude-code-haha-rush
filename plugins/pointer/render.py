@@ -56,12 +56,28 @@ ULW_ALPHA, AC_SRC_ALPHA, DIB_RGB_COLORS = 0x02, 0x01, 0
 PM_REMOVE = 0x0001
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
 
-# 视觉常量（与 overlay.html 保持一致，避免换后端后"看起来不是同一个东西"）
-ACCENT = (255, 59, 48)                  # #ff3b30
-HALO = (255, 255, 255, 235)
-LABEL_BG = (20, 24, 32, 225)
-DIM_COLOR = (8, 10, 16, 107)            # rgba(8,10,16,.42)
-SS = 2                                  # 超采样倍数（PIL 无抗锯齿，2x 画完缩回）
+# 视觉常量 —— **tldraw 风格**（2026-09-20 与用户对比 5 种风格后选定）
+#
+# 为什么换掉旧的红白双描边：用户对比后选中 tldraw —— 冷蓝单色 + 精确几何
+# 更现代、不刺眼；文字标签**保留深色底框**（用户原话："文字显示部分有个背景色，
+# 不会发生任何阅读和识别的障碍"）。
+#
+# 尺寸说明：下面的 px 值都是**设计尺寸**（相当于 100% 缩放下），
+# 实际绘制时统一乘 self.k（k = DPR 缩放比）—— 否则 150% 缩放的屏幕上线条会太细。
+# 配色方案（由 --color 选择；用户在插件设置里选，默认 blue）
+# 为什么提供红色系：中文语境里"红 = 警示/提醒"是刻在认知里的，
+# 很多用户对红色的反应速度明显快于蓝色（用户 2026-09-20 提出）。
+PALETTES = {
+    "blue":  (77, 130, 240),    # #4d82f0 现代蓝（默认，tldraw 风格）
+    "red":   (255, 69, 58),     # #ff453a 警示红（Apple 系统红）
+    "green": (48, 209, 88),     # #30d158 确认绿
+    "amber": (255, 159, 10),    # #ff9f0a 醒目橙
+}
+ACCENT = PALETTES["blue"]               # 运行时由 --color 覆盖（见 main）
+LABEL_BG = (28, 30, 38, 238)            # 标签底框（深色、略透明）
+LABEL_FG = (255, 255, 255, 255)
+DIM_COLOR = (8, 10, 16, 107)            # 保留：dim 参数仍支持，但默认不再用
+SS = 4                                  # 超采样倍数（4x 画完 LANCZOS 缩回，曲线更干净）
 
 LRESULT = ctypes.c_ssize_t
 WNDPROCTYPE = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, ctypes.c_uint, wt.WPARAM, wt.LPARAM)
@@ -295,13 +311,16 @@ class Canvas:
       · **预乘 alpha**：UpdateLayeredWindow + AC_SRC_ALPHA 的硬要求，不预乘会出现黑边
     """
 
-    def __init__(self, w, h):
+    def __init__(self, w, h, scale=1.0):
         self.w, self.h = w, h
         self.img = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
         self.d = ImageDraw.Draw(self.img)
-        self.font = _font(15 * SS)
-        self.font_bold = _font(15 * SS, bold=True)
-        self.font_badge = _font(14 * SS, bold=True)
+        # k = DPR 缩放比 —— 设计尺寸 × k = 该屏幕上的物理像素
+        # （高 DPI 屏幕上不放大，线会细得看不清；低 DPI 上不缩小，会显得笨重）
+        self.k = max(1.0, float(scale))
+        self.font = _font(int(15 * SS * self.k))
+        self.font_bold = _font(int(15 * SS * self.k), bold=True)
+        self.font_badge = _font(int(14 * SS * self.k), bold=True)
 
     def _s(self, *vals):
         """逻辑（CSS 等价）值 → 超采样画布坐标"""
@@ -322,33 +341,38 @@ class Canvas:
         self.img.alpha_composite(layer)
 
     def arrow(self, a):
+        """箭头（tldraw 风格）：细线 + **两条短线**做箭尖（不是三角填充）。
+
+        tldraw 的箭头标志性做法是"V 形两笔"而不是实心三角 —— 更轻、更现代。
+        线宽也降到 5px（设计尺寸），不再是旧版 9px 白描边 + 4.5px 红的双描边。
+        """
         x1, y1, x2, y2 = a["fromX"], a["fromY"], a["toX"], a["toY"]
         ang = math.atan2(y2 - y1, x2 - x1)
-        head = 22
-        # 线画到"箭头根部"一点（而非尖端），避免线头戳出箭头
-        bx = x2 - math.cos(ang) * head * 0.72
-        by = y2 - math.sin(ang) * head * 0.72
-        back = ang + math.pi
-        p1 = (x2 + math.cos(back - 0.42) * head, y2 + math.sin(back - 0.42) * head)
-        p2 = (x2 + math.cos(back + 0.42) * head, y2 + math.sin(back + 0.42) * head)
-        # 白描边打底 → 红主色（halo 效果：在任何背景上都看得清）
-        self.d.line(self._s(x1, y1, bx, by), fill=HALO, width=9 * SS)
-        self.d.polygon([self._s(x2, y2), self._s(*p1), self._s(*p2)], fill=HALO)
-        self.d.line(self._s(x1, y1, bx, by), fill=ACCENT + (255,), width=int(4.5 * SS))
-        self.d.polygon([self._s(x2, y2), self._s(*p1), self._s(*p2)], fill=ACCENT + (255,))
+        head = 18 * self.k                     # 箭尖臂长（设计尺寸）
+        lw = max(2, int(5 * SS * self.k))      # 杆宽
+
+        # 杆：从起点到**箭尖**（不缩短 —— V 形臂从尖端伸出，杆到尖即可）
+        self.d.line(self._s(x1, y1, x2, y2), fill=ACCENT + (255,), width=lw)
+
+        # 两条斜臂（V 形）
+        for off in (-0.45, 0.45):
+            hx = x2 - head * math.cos(ang + off)
+            hy = y2 - head * math.sin(ang + off)
+            self.d.line(self._s(hx, hy, x2, y2), fill=ACCENT + (255,), width=lw)
 
     def rect(self, r):
         x, y, w, h = r["x"], r["y"], r["w"], r["h"]
-        self.d.rounded_rectangle(self._s(x, y, x + w, y + h), radius=8 * SS,
-                                 outline=HALO, width=9 * SS)
-        self.d.rounded_rectangle(self._s(x, y, x + w, y + h), radius=8 * SS,
-                                 outline=ACCENT + (255,), width=4 * SS)
+        self.d.rounded_rectangle(self._s(x, y, x + w, y + h),
+                                 radius=int(14 * SS * self.k),
+                                 outline=ACCENT + (255,),
+                                 width=max(2, int(5 * SS * self.k)))
         self.badge(x, y, r.get("label"))
 
     def circle(self, c):
         cx, cy, r = c["x"], c["y"], c["r"]
-        self.d.ellipse(self._s(cx - r, cy - r, cx + r, cy + r), outline=HALO, width=9 * SS)
-        self.d.ellipse(self._s(cx - r, cy - r, cx + r, cy + r), outline=ACCENT + (255,), width=4 * SS)
+        self.d.ellipse(self._s(cx - r, cy - r, cx + r, cy + r),
+                       outline=ACCENT + (255,),
+                       width=max(2, int(5 * SS * self.k)))
         off = r * 0.707
         self.badge(cx - off, cy - off, c.get("label"))
 
@@ -356,25 +380,25 @@ class Canvas:
         """角标：画在(x,y)左上外侧的小圆 + 白字（如步骤序号 "1"）"""
         if not text:
             return
-        r = 13
+        r = 14 * self.k
         cx, cy = x - r + 2, y - r + 2
-        self.d.ellipse(self._s(cx - r - 2.5, cy - r - 2.5, cx + r + 2.5, cy + r + 2.5), fill=HALO)
         self.d.ellipse(self._s(cx - r, cy - r, cx + r, cy + r), fill=ACCENT + (255,))
         self.d.text(self._s(cx, cy), str(text)[:8], font=self.font_badge,
-                    fill=(255, 255, 255, 255), anchor="mm")
+                    fill=LABEL_FG, anchor="mm")
 
     def label(self, l):
         """文字标签：先量文字尺寸再补圆角气泡（SVG 版用 getBBox，这里用 textbbox）"""
         x, y = l["x"], l["y"]
         text = l["text"]
-        pad = 9
+        pad = 12 * self.k
         tb = self.d.textbbox((0, 0), text, font=self.font)
         tw, th = (tb[2] - tb[0]) / SS, (tb[3] - tb[1]) / SS
+        # 底框保留 —— 用户明确要求（"文字显示部分有个背景色，不会发生任何阅读和识别的障碍"）
         self.d.rounded_rectangle(
-            self._s(x - pad, y - th * 0.5 - pad * 0.6, x + tw + pad, y + th * 0.5 + pad * 0.8),
-            radius=7 * SS, fill=LABEL_BG, outline=ACCENT + (255,), width=2 * SS)
-        self.d.text(self._s(x, y), text, font=self.font,
-                    fill=(255, 255, 255, 255), anchor="lm")
+            self._s(x - pad, y - th * 0.5 - pad * 0.6, x + tw + pad, y + th * 0.5 + pad * 0.85),
+            radius=int(14 * SS * self.k), fill=LABEL_BG,
+            outline=ACCENT + (255,), width=max(1, int(2 * SS * self.k)))
+        self.d.text(self._s(x, y), text, font=self.font, fill=LABEL_FG, anchor="lm")
 
     def finish(self):
         """缩回原尺寸 → 预乘 alpha → BGRA 字节（UpdateLayeredWindow 要的格式）"""
@@ -409,7 +433,7 @@ def render_state(st, monitor_rect, scale=1.0):
         """物理像素 → 位图坐标（先除以 scale，再减本显示器原点）"""
         return (x / scale - ox, y / scale - oy)
 
-    cv = Canvas(w, h)
+    cv = Canvas(w, h, scale)
     if st.get("dim") is not False:
         holes = []
         for r in rects:
@@ -521,7 +545,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, required=True, help="pointer-server 的端口")
     ap.add_argument("--monitor", type=int, default=0, help="显示器索引（0=主屏）")
+    ap.add_argument("--color", default="blue",
+                    choices=sorted(PALETTES.keys()),
+                    help="配色方案（插件设置 colorScheme）")
     args = ap.parse_args()
+
+    # 应用配色 —— ACCENT 是模块级常量（绘制方法直接引用它），故用 global 覆盖。
+    # ⚠️ 必须在**任何绘制之前**执行（ConstructCanvas 在下面才创建）。
+    global ACCENT
+    ACCENT = PALETTES.get(args.color, PALETTES["blue"])
+    print(f"[pointer] color={args.color} → ACCENT={ACCENT}", flush=True)
 
     mons = _monitors()
     if not mons:
