@@ -5,7 +5,7 @@
 
 import { useEffect, useRef } from "react";
 import { chatSession } from "../../chat/chatSession";
-import { getChatState } from "../../stores/chatStore";
+import { getChatState, updateChatState } from "../../stores/chatStore";
 import { setTranscriptLoading } from "../../stores/subAgentStore";
 
 export function useChatBridge(port: number | null) {
@@ -56,6 +56,10 @@ export function requestSessionList() {
   send("list_sessions");
 }
 export function switchSession(id: string) {
+  // 标记"切换中" —— 后端可能要好几秒（读会话 + 跑 SessionStart hooks），
+  // 期间消息区还是旧会话内容，不提示的话用户以为点了没反应。
+  // 清空在 chatReduce 的 session_loaded / error（见 chatStore.switchingTo）。
+  updateChatState({ switchingTo: id });
   send("resume_session", { session_id: id });
 }
 /** 启动意图: 标记已有明确目标会话(抑制"自动加载最近会话") */

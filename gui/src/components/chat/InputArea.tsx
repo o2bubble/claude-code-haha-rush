@@ -4,7 +4,7 @@ import { useEvent, useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
 import type { ChatInsertTextPayload, ChatAddReferencePayload, SettingsChangedPayload, ChatStateChangedPayload } from "../../services/events";
 import { formatReference } from "../../utils/referenceParser";
-import { saveClipboardItem, resolvePaste, collectPaste, isRealFilePath, defaultReadDir, defaultReadClipboardFiles } from "../../services/clipboardService";
+import { saveClipboardItem, resolvePaste, collectPaste, isRealFilePath, defaultReadDir, defaultReadClipboardFiles, ensurePlainPasteTracking, isPlainPasteHeld } from "../../services/clipboardService";
 import { getChatState, isChatReady } from "../../stores/chatStore";
 import { getSettings } from "../../stores/settingsStore";
 import type { SlashCommand } from "../../stores/chatStore";
@@ -429,6 +429,9 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const workDir = settingsPayload?.settings?.workDir ?? "";
 
+  // Shift 键跟踪（"Ctrl+Shift+V = 强制纯文本"）—— 必须在挂载时就开始（详见 clipboardService）
+  useEffect(() => { ensurePlainPasteTracking(); }, []);
+
   // Strip formatting on paste; auto-chip long text; handle images/files
   const handlePaste = useCallback(
     async (e: React.ClipboardEvent) => {
@@ -440,6 +443,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
       // 提取结构化剪贴板输入，交给 resolvePaste 做粘贴决策。
       // readClipboardFiles：粘贴的文件没有 .path（Tauri 只对拖放注入），
       // 靠它拿源路径让文件走引用而非复制内容（见 clipboardService 注释）。
+      // Ctrl+Shift+V = 强制纯文本（跳过路径探测与长文本折叠）—— 见 features.md 3.2。
       const { files, images, text } = collectPaste(e);
       const decision = await resolvePaste({
         files,
@@ -448,6 +452,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
         pathExists: isRealFilePath,
         readDir: defaultReadDir,
         readClipboardFiles: defaultReadClipboardFiles,
+        forceText: isPlainPasteHeld(),
       });
 
       if (decision.kind === "refs") {

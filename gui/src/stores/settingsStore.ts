@@ -70,6 +70,15 @@ export interface AppSettings {
    *  老用户由启动期迁移 `migrate_message_timeline_default_on` 补写实值；
    *  用户手动关闭后写 false，迁移只补「字段缺失」故不会再翻回。 */
   messageTimeline?: boolean;
+  /** 窗口标题里的先后顺序（多实例时靠标题区分）。
+   *  缺省 = "workspace-first"（工作区在前）。见 services/windowTitle.ts。
+   *  ⚠️ **全局字段**：不进 Rust 的 merge_workspace_overrides 白名单，前端也固定写
+   *  global（SettingsPanel 的 applyGlobalOnly）—— 理由见 Rust 侧同名字段注释。 */
+  windowTitleOrder?: "workspace-first" | "session-first";
+  /** 升级重启后自动把其他实例恢复回来（缺省**开** —— undefined 视为开）。
+   *  关掉后升级只重启本实例，不再拉起其他窗口。
+   *  ⚠️ **全局字段**（同 windowTitleOrder）：不进 Rust 的 merge_workspace_overrides 白名单。 */
+  autoRestoreInstances?: boolean;
   /**
    * 快捷键用户覆盖：功能 ID → 规范化键位字符串（`"mod+shift+p"`）。
    * 空字符串 = 显式解绑。未出现的 id 用默认表的值。
@@ -219,6 +228,36 @@ export async function saveSettings(
     localStorage.setItem("claude-code-settings", JSON.stringify(settings));
   }
   windowBus.emit(Events.SETTINGS_CHANGED, { settings: { ...settings } }, { sticky: true });
+}
+
+/**
+ * 收敛「待保存字段」（设置面板的 dirty）：外部同步到达时，与本实例待保存值
+ * **不一致**的字段说明已被外部（别的 GUI 实例）改过 —— 必须从待存集合移除，
+ * 否则下次保存会把本实例的旧值写回去、覆盖外部刚写入的新值。
+ *
+ * 这是多实例"僵尸写回"的修复（用户实测两例）：
+ *   A 关闭会话文件夹 → B 面板里该字段的旧值仍在待存集合 → B 保存别的设置时
+ *   把「开」又写了回去 → A 那边"关了又自己开"。
+ *
+ * 值一致的字段保留：本地 `update()` 也会触发 SETTINGS_CHANGED，但那时全局
+ * settings 里就是刚写入的值，必然一致 → 不受影响。
+ */
+export function reconcileDirty(
+  dirty: Partial<AppSettings>,
+  authoritative: AppSettings,
+): Partial<AppSettings> {
+  const keys = Object.keys(dirty) as (keyof AppSettings)[];
+  if (keys.length === 0) return dirty;
+  const next: Partial<AppSettings> = { ...dirty };
+  let changed = false;
+  for (const k of keys) {
+    // JSON 比较：字段可能是对象/数组（layoutTree / sessionFolderTree …）
+    if (JSON.stringify(dirty[k]) !== JSON.stringify(authoritative[k])) {
+      delete next[k]; // 被外部改过 → 丢弃本实例的待存值（外部赢）
+      changed = true;
+    }
+  }
+  return changed ? next : dirty;
 }
 
 // Get default work directory via Rust (knows user home)

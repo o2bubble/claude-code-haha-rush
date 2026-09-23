@@ -65,6 +65,8 @@ const ROUTES: RouteRule[] = [
 
   // Bulk — large one-shot payloads
   { channel: "bulk", topic: "chat.session.loaded" },   // eslint-disable-line object-shorthand
+  // 挂件的历史回填应答（含最近 N 条消息，量可能不小 → bulk：立即发、不合并、不进 sticky）
+  { channel: "bulk", topic: "widget.history" },        // eslint-disable-line object-shorthand
 
   // Everything else → State (default)
 ];
@@ -74,6 +76,7 @@ const STICKY_TOPICS = new Set([
   "chat.message", "chat.streaming", "chat.connected", "chat.context",
   "chat.model", "chat.sessions", "chat.activeSession", "chat.tasks",
   "chat.slashCommands", "chat.inputBlocked", "chat.skills.dialog",
+  "chat.sessionsLoaded",
   "terminal.output",
   "plan.tasks",
   "subagents.list",

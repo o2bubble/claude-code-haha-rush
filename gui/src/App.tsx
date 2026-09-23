@@ -12,13 +12,14 @@ import { reloadPlugins, getActiveManifests, collectPluginHotkeys } from "./servi
 import { startPluginProcessListener } from "./services/pluginProcessBridge";
 import { ALL_PANEL_DEFS } from "./services/panelDefs";
 import { getSettings, loadSettings, reloadSettings, saveSettings, updateSettings } from "./stores/settingsStore";
+import { syncWindowTitle, DEFAULT_WINDOW_TITLE, type WindowTitleOrder } from "./services/windowTitle";
 import { workspaceBasename } from "./utils/workspace";
 import { normalizeTheme, isDarkTheme } from "./utils/themeUtils";
 import { serverProfileUrls } from "./utils/serverProfile";
 import { resolveLinkAction, isNavigableHref } from "./utils/linkOpen";
 import { setLanguage, t } from "./i18n";
 import { windowBus } from "./services/windowBus";
-import { Events, type BackendStateChangedPayload } from "./services/events";
+import { Events, type BackendStateChangedPayload, type ChatStateChangedPayload } from "./services/events";
 import { BackendService } from "./services/backendService";
 import { startSessionStatusSync } from "./services/sessionStatusSync";
 import { commandRegistry } from "./services/windowBus";
@@ -300,8 +301,57 @@ export default function App() {
         const launchNormal = () => {
           import("@tauri-apps/api/core").then(({ invoke }) =>
             invoke<string | null>("get_cli_workspace").then((cliWs) => {
-              if (cliWs) enterWorkspace(cliWs);
-              else autoEnterOrSelector();
+              if (!cliWs) return autoEnterOrSelector();
+              // --session <id>（升级恢复实例时带上）：回到该工作区**并加载原会话**。
+              //
+              // ⚠️ 这段必须**在 bind 之前**决定抑制自动加载，且必须**等会话列表就绪**
+              // 再发 resume_session —— 两个坑我都踩过（2026-09-21 用户实测"恢复了实例
+              // 但没进会话"）：
+              //  ① 不抑制 → 后端连上后 `command.resumeSession` 先自动开了"最近会话"，
+              //     我们再切目标 = 用户看到跳两次，且第一个是错的；
+              //  ② 用 setTimeout 死等 → 机器慢时后端还没连上就发了 resume_session，
+              //     请求打空。
+              // 正确做法完全照 intent 通路（handleIntentLaunch + runIntent）：
+              // 提前 setIntentTargeted(true) 抑制，然后 retryUntil(sessionsLoaded)
+              // 轮询等真就绪，再 launchIntentSession 一步到位。
+              invoke<string | null>("get_cli_session").then(async (sess) => {
+                if (!sess) {
+                  // 恢复快照里没有会话（历史遗留：早期版本会在会话暂时为空时把它写空）。
+                  // 留一条日志便于区分"快照本来就没有"和"有但没加载成功"。
+                  console.warn("[restore] 无目标会话（快照中会话为空），只绑定工作区");
+                  enterWorkspace(cliWs);
+                  return;
+                }
+                console.info("[restore] 目标会话:", sess);
+                try {
+                  const bridge = await import("./components/chat/useChatBridge");
+                  // 必须在 bind 之前（见上）
+                  bridge.setIntentTargeted(true);
+                  enterWorkspace(cliWs);
+                  const ready = await retryUntil(async () => {
+                    const { getChatState } = await import("./stores/chatStore");
+                    return getChatState().sessionsLoaded;
+                  });
+                  if (!ready) {
+                    bridge.setIntentTargeted(false);
+                    // 这里失败 = 会话列表一直没来（后端没连上/没回 session_list）。
+                    // 原来是静默 return，用户只看到"没加载会话"、查不出原因。
+                    console.warn("[restore] 等待会话列表就绪超时，放弃自动加载目标会话");
+                    return;
+                  }
+                  bridge.requestSessionList();
+                  bridge.launchIntentSession(sess); // 一步打开目标，不先切最近
+                  bridge.setIntentTargeted(false);
+                  console.info("[restore] 已请求加载目标会话:", sess);
+                } catch (e) {
+                  console.warn("[restore] 加载目标会话失败:", e);
+                  // 任何一步失败都别把抑制状态留着（否则"自动加载最近会话"被永久关掉）
+                  try {
+                    const b = await import("./components/chat/useChatBridge");
+                    b.setIntentTargeted(false);
+                  } catch { /* ignore */ }
+                }
+              }).catch(() => enterWorkspace(cliWs));
             }).catch(() => autoEnterOrSelector())
           ).catch(() => autoEnterOrSelector());
         };
@@ -511,6 +561,66 @@ export default function App() {
     setUiFontSize(data.settings.uiFontSize ?? 100);
   });
 
+  // ── 主窗口标题：跟随「当前工作区 + 当前会话」──
+  //
+  // 多开实例时任务栏上全是同一个名字，分不清谁是谁（用户反馈）。标题里带上
+  // 工作区名与会话名，**先后顺序可在 设置→通用 里切换**（缺省工作区在前 ——
+  // Windows 任务栏从尾部截断，工作区才是区分实例的第一要素；习惯靠会话名认
+  // 窗口的人可切到 session-first）。
+  // 两个事件源：SETTINGS_CHANGED（工作区绑定/切换 + 顺序设置）+ CHAT_STATE_CHANGED
+  // （会话加载/切换/改名）。两者都是 sticky，挂载后各自会立刻收到当前值。
+  // 详见 services/windowTitle.ts。
+  const titleRef = useRef<{
+    workDir?: string;
+    sessionTitle?: string;
+    order?: WindowTitleOrder;
+  }>({});
+  const applyWindowTitle = () => {
+    void syncWindowTitle(
+      titleRef.current.workDir,
+      titleRef.current.sessionTitle,
+      DEFAULT_WINDOW_TITLE,
+      titleRef.current.order,
+    );
+  };
+  useEventHandler<{ settings: { workDir?: string; windowTitleOrder?: WindowTitleOrder } }>(
+    Events.SETTINGS_CHANGED,
+    (data) => {
+      titleRef.current.workDir = data.settings.workDir;
+      titleRef.current.order = data.settings.windowTitleOrder;
+      applyWindowTitle();
+
+      // 工作区绑定/切换 → 更新本实例的自述（升级恢复靠它知道这个实例绑了哪儿）。
+      // 只传工作区：reportInstanceState 会**同时重置会话**（切工作区旧会话必然失效），
+      // 新会话由随后的 CHAT_STATE_CHANGED 补上。
+      if (data.settings.workDir) {
+        void import("./services/instanceRegistry").then(({ reportInstanceState }) => {
+          reportInstanceState(data.settings.workDir);
+        });
+      }
+    },
+  );
+  useEventHandler<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED, (data) => {
+    const st = data.state;
+    // 会话名来自列表（后端生成/用户改名后回传）；找不到就退回 undefined（标题只显示工作区）
+    titleRef.current.sessionTitle = st.sessions.find((s) => s.id === st.sessionId)?.title;
+    applyWindowTitle();
+
+    // 会话变了 → 更新本实例的自述（升级恢复时据此把会话也带回来）。
+    // 传当前工作区：reportInstanceState 是"整体覆盖"语义，不传会把工作区冲掉。
+    //
+    // ⚠️ `keepSession: true` 是**必须的**（2026-09-22 用户实测"恢复了实例但没加载会话"）：
+    // 这个事件在流式输出时每个 token 都触发，而 `st.sessionId` 在会话刚切/新建中/还没
+    // 加载完时会短暂为 null —— 照直写成空的话，自述里就没有会话了，升级后自然"只绑
+    // 工作区、不开会话"。会话为空几乎总是"还没就绪"而非"用户不要会话"，所以保留旧值。
+    // 真正要清空（用户新建会话）由 chatSession.resetSession 显式上报。
+    void import("./services/instanceRegistry").then(({ reportInstanceState }) => {
+      reportInstanceState(titleRef.current.workDir ?? "", st.sessionId ?? undefined, {
+        keepSession: true,
+      });
+    });
+  });
+
   // Listen for workspace switch request from SettingsPanel
   useEventHandler(Events.WORKSPACE_OPEN_SELECTOR, () => {
     const s = getSettings();
@@ -612,6 +722,17 @@ export default function App() {
   // is sticky, so a listener registered after the event still receives it.
   useEffect(() => {
     return windowBus.on(Events.WORKSPACE_BOUND, () => {
+      // 换工作区了 → 先丢掉旧会话名。
+      //
+      // 会话是按项目目录存的，切工作区 = 换项目目录 → 旧会话名必然不再适用。
+      // 而此处 SETTINGS_CHANGED（新 workDir）已经/即将到达、CHAT_STATE_CHANGED
+      // 却要等后端重启+重连（可能几秒）—— 不主动清的话标题会在那几秒里显示
+      // 「**新工作区 · 旧会话名**」这种错误组合（用户会以为开错了会话）。
+      // 清了之后：立刻只显示新工作区名，等新会话加载完再补上会话名。
+      // 两个 handler 都只读 titleRef（ref），故这里用首次渲染的闭包是安全的。
+      titleRef.current.sessionTitle = undefined;
+      applyWindowTitle();
+
       reloadSettings()
         .then((s) => {
           if (s.layoutTree) {

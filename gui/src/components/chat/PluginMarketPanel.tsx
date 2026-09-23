@@ -4,7 +4,7 @@
 // T7: 卡片点击 → 详情在独立系统面板 plugin-market-detail(editor-area 中央区)打开——
 // 本面板常驻侧栏窄, 宽幅 README markdown 展示由详情面板承担(数据经 pluginDetailStore)。
 
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 import { t as i18nT } from "../../i18n";
 import { skillMarketplace, type PackageSummary, type PackageDetail } from "../../services/skillMarketplace";
 import { reloadPlugins, getInstalledPluginEntries, getGuiPlatform, pluginSupportsPlatform, isPluginUpdateAvailable, type GuiPlatform } from "../../services/pluginRegistry";
@@ -297,14 +297,16 @@ export default function PluginMarketPanel() {
     if (!ok) addStatusMessage(i18nT("pluginMarket.aiNoSession"), "warn");
   };
 
-  const filtered = packages.filter(
-    (p) =>
-      (categoryFilter === "all" || (p.category ?? "tool") === categoryFilter) &&
-      (!search ||
-        p.name.toLowerCase().includes(search.toLowerCase()) ||
-        (p.description ?? "").toLowerCase().includes(search.toLowerCase()) ||
-        p.tags.some((tag) => tag.toLowerCase().includes(search.toLowerCase()))),
-  );
+  // 搜索 + 分类过滤 —— 抽成函数让**本地插件分区共用同一套条件**
+  // （否则搜索时本地插件纹丝不动，看着像 bug）
+  const matchesFilter = (p: PackageSummary) =>
+    (categoryFilter === "all" || (p.category ?? "tool") === categoryFilter) &&
+    (!search ||
+      p.name.toLowerCase().includes(search.toLowerCase()) ||
+      (p.description ?? "").toLowerCase().includes(search.toLowerCase()) ||
+      p.tags.some((tag) => tag.toLowerCase().includes(search.toLowerCase())));
+
+  const filtered = packages.filter(matchesFilter);
   // VS Code 式分区: 已安装(含禁用)在上, 可安装在下——装多了不再混排难找
   const installedPkgs = filtered.filter(
     (p) => installedMap.has(p.name) || installedMap.has(p.slug),
@@ -312,6 +314,14 @@ export default function PluginMarketPanel() {
   const availablePkgs = filtered.filter(
     (p) => !installedMap.has(p.name) && !installedMap.has(p.slug),
   );
+
+  // ── 本地插件（侧载 / 本地开发，非市场来源）──
+  // 逻辑抽成纯函数（buildLocalPkgs），这里只做 memo。
+  const localPkgs: PackageSummary[] = useMemo(
+    () => buildLocalPkgs(installedMap, packages),
+    [installedMap, packages],
+  );
+  const localFiltered = localPkgs.filter(matchesFilter);
   const categoryTabs = collectCategoryTabs(packages, categoryFilter);
 
   // 卡片共享上下文（两分区同款卡片, 避免逐 prop 透传）
@@ -375,7 +385,7 @@ export default function PluginMarketPanel() {
             <div>{i18nT("pluginMarket.marketplaceError")}: {error}</div>
             <button onClick={fetchPackages} style={retryBtnStyle}>{i18nT("pluginMarket.marketplaceRetry")}</button>
           </div>
-        ) : filtered.length === 0 ? (
+        ) : filtered.length === 0 && localFiltered.length === 0 ? (
           <div style={emptyStyle}>{i18nT("pluginMarket.marketplaceEmpty")}</div>
         ) : (
           <>
@@ -385,6 +395,16 @@ export default function PluginMarketPanel() {
                 <SectionHeader label={i18nT("pluginMarket.sectionInstalled")} count={installedPkgs.length} />
                 {installedPkgs.map((pkg) => (
                   <PkgCard key={pkg.slug} pkg={pkg} ctx={cardCtx} />
+                ))}
+              </>
+            )}
+            {/* 本地插件（侧载/本地开发，非市场来源）—— 见 localPkgs 的注释。
+                放在「已安装」之后：它也是"已装"的一种，只是不来自市场。 */}
+            {localFiltered.length > 0 && (
+              <>
+                <SectionHeader label={i18nT("pluginMarket.sectionLocal")} count={localFiltered.length} />
+                {localFiltered.map((pkg) => (
+                  <PkgCard key={`local:${pkg.slug}`} pkg={pkg} ctx={cardCtx} />
                 ))}
               </>
             )}
@@ -401,6 +421,57 @@ export default function PluginMarketPanel() {
       </div>
     </div>
   );
+}
+
+// ── 本地插件 → 伪包（供「本地插件」分区复用市场卡片）──
+
+/**
+ * 从已装清单里挑出**市场没有的**插件，构造成 PackageSummary 形状，让它们能复用
+ * 同一张 PkgCard。
+ *
+ * 为什么需要：市场面板的「已安装」是**从市场包列表里筛出来的**，本地开发的插件
+ * 从不在市场包里 → 在面板上完全不可见（用户实测：装了 rss-reader 却哪儿都找不到，
+ * 既看不到也没法禁用/卸载）。
+ *
+ * 字段映射的两个要点：
+ * - **slug = 插件目录名**（= pluginName）：PkgCard 的 installedMap 匹配与
+ *   `toggleDisabled`/`handleUninstall` 都要用目录名。`name` 用 displayName 给
+ *   人看 —— PkgCard 的匹配会**回退到 slug**，所以两者可以分开。
+ * - **version 用本地版本**（不是市场版本）：这样 `needsUpdate` 恒为 false，
+ *   本地插件不会误报"可更新"。
+ * 坏 manifest 不跳过 —— 至少让用户看得见它、能禁用/卸载（否则又变成"看不见"）。
+ */
+export function buildLocalPkgs(
+  installedMap: Map<string, { name: string; manifestJson?: string }>,
+  packages: PackageSummary[],
+): PackageSummary[] {
+  const inMarket = (dirName: string) =>
+    packages.some((p) => p.name === dirName || p.slug === dirName);
+  const out: PackageSummary[] = [];
+  for (const [dirName, e] of installedMap) {
+    if (inMarket(dirName)) continue; // 市场插件由「已安装/可安装」两分区负责
+    let m: Record<string, unknown> = {};
+    try {
+      m = JSON.parse(e.manifestJson ?? "{}") as Record<string, unknown>;
+    } catch { /* 坏 manifest → 用兜底值 */ }
+    out.push({
+      slug: dirName,
+      name: String(m.displayName ?? "") || dirName,
+      description: String(m.description ?? ""),
+      author: "",
+      version: String(m.version ?? "?"),
+      tags: [],
+      download_count: 0,
+      skill_count: 0,
+      type: "plugin",
+      category: m.category as PackageSummary["category"],
+      dependencies: (m.dependencies as string[]) ?? [],
+      installType: (m.installType as PackageSummary["installType"]) ?? "standard",
+      platforms: (m.platforms as string[]) ?? undefined,
+      local: true,
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // ── 插件卡片（已安装/可安装两分区共用, VS Code 式同款渲染）──
@@ -494,9 +565,15 @@ export function PkgCard({ pkg, ctx }: { pkg: PackageSummary; ctx: PkgCardCtx }) 
       {/* r2 描述（clamp 2 行） */}
       {pkg.description ? <div style={cardDescStyle}>{pkg.description}</div> : null}
 
-      {/* r3 元信息: 作者 · 版本 · 下载 + 依赖/标签小片 */}
+      {/* r3 元信息: 作者 · 版本 · 下载 + 依赖/标签小片
+          本地插件没有作者也没有下载量（不来自市场）→ 用「本机安装」代替这两项，
+          否则会显示成「by  · v0.1.0 · 0 次下载」，看着像数据缺失。 */}
       <div style={cardMetaStyle}>
-        <span>{i18nT("pluginMarket.byAuthor", { author: pkg.author })}</span>
+        {pkg.local ? (
+          <span title={i18nT("pluginMarket.localSourceTip")}>{i18nT("pluginMarket.localSource")}</span>
+        ) : (
+          <span>{i18nT("pluginMarket.byAuthor", { author: pkg.author })}</span>
+        )}
         <span style={{ opacity: 0.45 }}>·</span>
         {/* 已装且可更新 → 显示「本地 → 市场」版本迁移, 否则只显示市场版本。
             只给市场版本时用户看到「已安装 v0.1.4 [可更新]」会以为判定有误(实测困惑)。 */}
@@ -507,8 +584,12 @@ export function PkgCard({ pkg, ctx }: { pkg: PackageSummary; ctx: PkgCardCtx }) 
         ) : (
           <span>{i18nT("pluginMarket.versionLabel", { version: pkg.version })}</span>
         )}
-        <span style={{ opacity: 0.45 }}>·</span>
-        <span>{i18nT("pluginMarket.downloads", { count: pkg.download_count })}</span>
+        {!pkg.local && (
+          <>
+            <span style={{ opacity: 0.45 }}>·</span>
+            <span>{i18nT("pluginMarket.downloads", { count: pkg.download_count })}</span>
+          </>
+        )}
         <MetaChips items={[...(pkg.dependencies ?? []), ...(pkg.tags ?? [])]} style={metaChipStyle} />
       </div>
 

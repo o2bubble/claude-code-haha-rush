@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope, Copy, Brain, Gauge, GripHorizontal } from "lucide-react";
+import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope, Copy, Brain, Gauge, GripHorizontal, PictureInPicture2 } from "lucide-react";
 import { getTree, findParentSplit, toggleGroupHidden, toggleLeftColumn, toggleRightPanel, addFloatingPanel, getFloatingPanels, bringFloatingToFront, findTabByPanelId, applyLayoutPreset, LAYOUT_PRESETS, togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
 import { iconFor } from "../utils/icons";
 import { getRecent, sortByRecent } from "../utils/recentUsage";
@@ -1169,6 +1169,15 @@ export default function Toolbar() {
     { id: "newInstance", label: t("toolbar.newInstance"), shortLabel: t("toolbar.newInstanceShort"),
       title: t("toolbar.newInstance"), icon: <Copy size={14} />,
       onClick: spawnNewInstance, showLabel: true, alwaysVisible: true },
+    // 挂件模式 —— 常驻工具栏（用户要求）：它是"换个形态用 GUI"的一等入口，
+    // 藏进折叠菜单会让人找不到；不参与折叠。
+    // 门禁：**没加载会话时不可点** —— 挂件只展示"当前会话的最近几条"，
+    // 没有会话时它是个空壳（用户点了会困惑），历史回填也拿不到东西。
+    { id: "widgetMode", label: t("toolbar.widgetMode"), title: t("toolbar.widgetModeNoSession"),
+      icon: <PictureInPicture2 size={14} />,
+      disabled: !state.sessionId,
+      onClick: () => { void import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_chat_widget")).catch(() => {}); },
+      alwaysVisible: true },
     // ③ 带自身弹层、但**允许折叠**的两项（用户要求：窄窗口下收进菜单腾出拖拽区）。
     //    与上面①的"固定降级"不同 —— 它们宽窗口下常驻工具栏，只在放不下时进菜单。
     //    ⚠️ 折叠后菜单里不能用 render（菜单项只支持 icon+onClick），
@@ -1185,7 +1194,8 @@ export default function Toolbar() {
     { id: "workspace", label: t("workspace.title"), icon: <FolderOpen size={14} />,
       onClick: () => windowBus.emit(Events.WORKSPACE_OPEN_SELECTOR),
       render: () => <WorkspaceButton workDir={workDir} fallbackLabel={t("workspace.title")} /> },
-  ], [isDark, hasUpdate, toggleTheme]);
+    // sessionId 进依赖：挂件按钮的门禁（disabled: !state.sessionId）要随会话切换刷新
+  ], [isDark, hasUpdate, toggleTheme, state.sessionId]);
 
   const { containerRef, collapsed } = useToolbarCollapse(barItems);
   const { inBar, inMenu } = partitionItems(barItems, collapsed);

@@ -51,6 +51,7 @@ import { getTools } from 'src/tools.js'
 import { transitionPermissionMode } from '../utils/permissions/permissionSetup.js'
 import { createAbortController } from 'src/utils/abortController.js'
 import { createFileStateCacheWithSizeLimit } from 'src/utils/fileStateCache.js'
+import { singleFlight } from 'src/utils/singleFlight.js'
 import { setCwd } from 'src/utils/Shell.js'
 import { preconnectAnthropicApi } from '../utils/apiPreconnect.js'
 import { applyExtraCACertsFromConfig } from '../utils/caCertsConfig.js'
@@ -1416,6 +1417,31 @@ async function refreshMcpTools(): Promise<void> {
   }
 }
 
+/**
+ * 后台刷新 MCP（会话加载/恢复用）——**不阻塞调用方**。
+ *
+ * 两条纪律：
+ *  ① 不 await：刷新可能因失败 server 重连而耗时（含 30s 超时），绝不能挡在读会话
+ *     文件之前 —— 那会把"MCP 慢"变成"切会话慢"（用户实测反馈）。
+ *  ② **并发合并**（singleFlight）：快速连切会话会连着触发多次；`refreshMcpTools`
+ *     内部是"读 tools → 追加新工具"的写法，并发跑可能重复追加。已有刷新在飞时
+ *     后来者复用同一个 Promise —— 它跑完拿到的就是最新列表，不必再跑一遍。
+ *
+ * 内部吞错：调用方不 await，抛出去只会变成 unhandled rejection。
+ * 先吞 refresh 的错再广播，保证将来 refreshMcpTools 改成会抛时命令列表也照常刷新。
+ */
+const refreshMcpToolsInBackground = singleFlight(async () => {
+  try {
+    await refreshMcpTools()
+    broadcastSlashCommands()
+  } catch (err) {
+    console.error(
+      '[ideMode] background MCP refresh failed:',
+      err instanceof Error ? err.message : String(err),
+    )
+  }
+})
+
 // ============================================================================
 // Handle a single user prompt turn
 // ============================================================================
@@ -2137,9 +2163,11 @@ async function handleLoadSession(
 
   // 会话加载时自动刷新 MCP — 用户在会话 A 期间往配置加了新 MCP server（或某 server
   // 刚恢复），不 refresh 的话旧会话里工具列表缺失，只能手动 /mcp-refresh（用户实测
-  // 高频痛点）。已连接 server 被 memoize 跳过，只有失败/新增的才会重连，开销可控。
-  await refreshMcpTools()
-  broadcastSlashCommands()
+  // 高频痛点）。已连接 server 被 memoize 跳过，只有失败/新增的才会重连。
+  //
+  // 后台刷新（不 await）—— 见 refreshMcpToolsInBackground 的注释：
+  // 绝不能挡在读会话文件之前，否则"MCP 慢"会变成"切会话慢"（用户实测反馈）。
+  refreshMcpToolsInBackground()
 
   try {
     const projectsDir = getProjectsDir()
@@ -2249,8 +2277,8 @@ async function handleResumeSession(
 
   // 会话加载自动刷新 MCP（理由同 handleLoadSession）——恢复旧会话同样要拿到
   // 最新工具列表。放在 try 外: refresh 自带容错, 失败不应阻断会话恢复。
-  await refreshMcpTools()
-  broadcastSlashCommands()
+  // 后台刷新（不 await）：同 handleLoadSession，见 refreshMcpToolsInBackground。
+  refreshMcpToolsInBackground()
 
   try {
     const projectsDir = getProjectsDir()

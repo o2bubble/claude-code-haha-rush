@@ -1,0 +1,5 @@
+name: "rss-reader"
+author: "官方"
+version: "0.1.0"
+description: "RSS 订阅 — 订阅并集中查看 RSS/Atom 源（如模型 API 状态页）；新条目未读标记 + 桌面挂件提醒；数据只存本地"
+tags: ["rss", "feed", "status", "monitor", "plugin"]

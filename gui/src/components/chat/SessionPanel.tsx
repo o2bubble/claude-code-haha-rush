@@ -432,6 +432,19 @@ function SessionPanelImpl() {
           style={{ margin: 0, cursor: "pointer" }}
         />
       )}
+      {/* 正在切换到这一项 —— 与消息区的遮罩不同，这里**不延迟**：
+          它是"我点了"的直接反馈，晚出现反而像点不动。 */}
+      {chatState.switchingTo === s.id && (
+        <span
+          title={t("chat.switchingSession")}
+          style={{
+            width: 10, height: 10, flexShrink: 0,
+            border: "1.5px solid var(--accent)", borderTopColor: "transparent",
+            borderRadius: "50%", animation: "spin 1s linear infinite",
+            display: "inline-block",
+          }}
+        />
+      )}
       {/* 跨 GUI 标记：其他实例打开的会话标"↗另一窗口打开"+状态圆点；当前会话只显自己的状态圆点 */}
       {(isCurrent || openElsewhere.length > 0) && (
         <span

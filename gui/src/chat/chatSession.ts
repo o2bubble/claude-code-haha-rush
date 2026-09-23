@@ -32,10 +32,29 @@ import {
 } from "../services/guardBridge";
 import { registerPluginInstallChatApi } from "../services/pluginInstallBridge";
 import { wsDiagAdd } from "../services/wsDiag";
+import { crossWindowBus } from "../services/crossWindowBus";
+import { chatReduce, isBackendBusy } from "./chatReduce";
+import { applyStoreEffects } from "./effects";
+import type { WireMessage } from "./types";
 
 // 本实例是否是第一个 GUI 实例（缓存）。第二个实例跳过"自动加载最近会话"，
 // 避免与已在运行（可能同一工作区）的实例争抢同一会话。
 let _isFirstInstance: boolean | null = null;
+
+// ── 旁问（/btw）的请求-响应登记表 ──
+//
+// 后端的 side_question 通道是**一问一答**式的（见 ideMode 的 handleSideQuestion）：
+// 发 `{type:'side_question', question, context_id}`，回
+// `{type:'side_question_result', context_id, response|error}`。
+// 用 context_id 把响应配回发起的那次调用 —— 所以支持并发（同时翻译多段）。
+const pendingSideQuestions = new Map<
+  string,
+  (r: { response?: string; error?: string }) => void
+>();
+
+/** 旁问超时（毫秒）。后端要起一次 API 调用，给足时间；超时后 UI 不会永远转圈。 */
+const SIDE_QUESTION_TIMEOUT_MS = 120_000;
+
 async function checkFirstInstance(): Promise<boolean> {
   if (_isFirstInstance !== null) return _isFirstInstance;
   try {
@@ -46,14 +65,12 @@ async function checkFirstInstance(): Promise<boolean> {
   }
   return _isFirstInstance ?? true;
 }
-import { crossWindowBus } from "../services/crossWindowBus";
-import { chatReduce, isBackendBusy } from "./chatReduce";
-import { applyStoreEffects } from "./effects";
-import type { WireMessage } from "./types";
 
 export interface ChatSession {
   connect(port: number): void;
   send(type: string, payload?: any): void;
+  /** 旁问（/btw）：同进程 fork 轻量 agent 回答，不打断主对话。见实现处注释。 */
+  askSideQuestion(question: string): Promise<{ response?: string; error?: string }>;
   interrupt(): void;
   sendMessage(content: string): void;
   respondToPermission(allowed: boolean, always?: boolean, updatedInput?: any): void;
@@ -227,6 +244,13 @@ export function createChatSession(): ChatSession {
       case "list_tasks":
         msg.type = "list_tasks";
         break;
+      // 旁问（翻译按钮）：后端起同进程的轻量 agent 回答，回 side_question_result。
+      // 见 chatSession.askSideQuestion 与 ideMode 的 handleSideQuestion。
+      case "side_question":
+        msg.type = "side_question";
+        msg.question = p.question;
+        msg.context_id = p.context_id;
+        break;
       default:
         msg.type = type;
     }
@@ -253,6 +277,19 @@ export function createChatSession(): ChatSession {
   }
 
   function dispatch(msg: WireMessage) {
+    // 旁问（/btw 的翻译按钮）的结果 —— **必须最先拦截、不进 chatReduce**：
+    // 它是独立的"一问一答"，不属于会话状态机（既不是消息也不是状态变更），
+    // 丢给 reducer 只会多出一堆要忽略的 case。用 context_id 匹配回对应的 Promise。
+    if (msg.type === "side_question_result") {
+      const m = msg as unknown as { context_id?: string; response?: string; error?: string };
+      const id = m.context_id ?? "";
+      const resolver = pendingSideQuestions.get(id);
+      if (resolver) {
+        pendingSideQuestions.delete(id);
+        resolver({ response: m.response, error: m.error });
+      }
+      return;
+    }
     // 消化中的消息被后端 busy 拒绝 → 重发(吞掉错误, 不落 "Error:..." 气泡)
     if (msg.type === "error" && pendingDrain && isBusyRejectError(msg)) {
       retryDrain();
@@ -626,6 +663,13 @@ export function createChatSession(): ChatSession {
       outputTokens: 0,
       model: "",
     });
+    // 用户新建会话 → 自述里确实该没有会话了。
+    // 这里是**唯一**会清空自述会话的地方：其它路径（CHAT_STATE_CHANGED 带 null、
+    // 切工作区）都只是"还没就绪"，必须保留旧值 —— 否则升级后恢复不了会话
+    // （2026-09-22 用户实测）。见 instanceRegistry 的 keepSession 注释。
+    void import("../services/instanceRegistry").then(({ reportInstanceState }) => {
+      reportInstanceState(getSettings().workDir ?? "", "", { keepSession: false });
+    }).catch(() => {});
   }
 
   function clearMessages() {
@@ -689,6 +733,25 @@ export function createChatSession(): ChatSession {
       _autoLoaded = true;      // 意图已有明确目标, 之后不再自动切最近(防回跳)
       _intentTargeted = true;
       send("resume_session", { session_id: sessionId });
+    },
+    /**
+     * 旁问（`/btw`）—— 用后端**同一个进程**里 fork 的轻量 agent 回答，
+     * 不新起 claude 实例、不打断主对话（见 ideMode 的 handleSideQuestion）。
+     * 目前用于消息块上的「翻译」按钮。
+     */
+    askSideQuestion: (question: string): Promise<{ response?: string; error?: string }> => {
+      return new Promise((resolve) => {
+        const contextId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`);
+        const timer = setTimeout(() => {
+          if (pendingSideQuestions.delete(contextId)) resolve({ error: "timeout" });
+        }, SIDE_QUESTION_TIMEOUT_MS);
+        // 包一层：无论走 timeout 还是正常响应，都要清掉定时器
+        pendingSideQuestions.set(contextId, (r) => {
+          clearTimeout(timer);
+          resolve(r);
+        });
+        send("side_question", { question, context_id: contextId });
+      });
     },
   };
 }

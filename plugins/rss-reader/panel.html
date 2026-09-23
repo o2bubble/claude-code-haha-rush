@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>RSS 订阅</title>
+<style>
+  :root {
+    --bg: #20242f; --bg2: #161a23; --fg: #e6e9f0; --fg-muted: #8b93a7;
+    --border: #2c3547; --accent: #5aa8ff; --accent-subtle: rgba(90,168,255,.14);
+    --success: #4ecb71; --danger: #f0666e; --hover: #232a3a;
+  }
+  html.theme-light {
+    --bg: #f3f5f9; --bg2: #ffffff; --fg: #1f2430; --fg-muted: #5b6474;
+    --border: #d8dee8; --accent: #2563eb; --accent-subtle: rgba(37,99,235,.12);
+    --success: #15803d; --danger: #dc2626; --hover: #eef1f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px;
+  }
+
+  /* ── 左栏：订阅源 ── */
+  .sidebar { width: 208px; flex-shrink: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--bg2); }
+  .side-head { padding: 8px 10px 6px; font-weight: 600; font-size: 11px; color: var(--fg-muted); letter-spacing: .4px; }
+  .side-list { flex: 1; overflow-y: auto; min-height: 0; }
+  .src {
+    display: flex; align-items: center; gap: 6px; padding: 6px 10px; cursor: pointer;
+    border-left: 2px solid transparent; position: relative;
+  }
+  .src:hover { background: var(--hover); }
+  .src.active { background: var(--accent-subtle); border-left-color: var(--accent); }
+  .src .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .src .badge {
+    flex-shrink: 0; min-width: 16px; text-align: center; font-size: 10px; font-weight: 600;
+    background: var(--accent); color: #fff; border-radius: 8px; padding: 1px 5px;
+  }
+  .src .err { flex-shrink: 0; color: var(--danger); font-size: 10px; cursor: help; }
+  .src .del {
+    display: none; flex-shrink: 0; border: none; background: none; color: var(--fg-muted);
+    cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px;
+  }
+  .src:hover .del { display: block; }
+  .src .del:hover { color: var(--danger); }
+
+  /* 添加源 */
+  .add-box { border-top: 1px solid var(--border); padding: 6px; display: flex; gap: 4px; flex-shrink: 0; }
+  .add-box input {
+    flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border);
+    color: var(--fg); border-radius: 4px; padding: 4px 6px; font-size: 11px; outline: none;
+  }
+  .add-box input:focus { border-color: var(--accent); }
+  .add-box button {
+    flex-shrink: 0; background: var(--accent); border: none; color: #fff;
+    border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 11px;
+  }
+  .add-box button:disabled { opacity: .5; cursor: default; }
+
+  .side-foot {
+    border-top: 1px solid var(--border); padding: 5px 8px; display: flex; align-items: center;
+    gap: 6px; font-size: 10px; color: var(--fg-muted); flex-shrink: 0;
+  }
+  .side-foot select {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 4px; font-size: 10px; padding: 2px 4px; outline: none;
+  }
+  .side-foot .foot-btn { margin-left: auto; }
+
+  /* ── 右栏 ── */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .toolbar {
+    display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--bg2);
+  }
+  .toolbar .title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toolbar .time { font-size: 10px; color: var(--fg-muted); flex-shrink: 0; }
+  .toolbar .spacer { flex: 1; }
+  .btn {
+    background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 4px; padding: 3px 9px; cursor: pointer; font-size: 11px; flex-shrink: 0;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .content { flex: 1; overflow: auto; min-height: 0; }
+
+  /* 条目列表 */
+  .item {
+    display: flex; gap: 8px; padding: 8px 12px; cursor: pointer;
+    border-bottom: 1px solid var(--border); align-items: baseline;
+  }
+  .item:hover { background: var(--hover); }
+  .item .dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: transparent; margin-top: 5px; }
+  .item.unread .dot { background: var(--accent); }
+  .item.unread .t { font-weight: 600; }
+  .item .mid { flex: 1; min-width: 0; }
+  .item .t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .sub { display: block; font-size: 10px; color: var(--fg-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .when { flex-shrink: 0; font-size: 10px; color: var(--fg-muted); }
+  .item .src-tag { font-size: 10px; color: var(--accent); margin-right: 6px; }
+
+  /* 详情 */
+  .detail-head {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border-bottom: 1px solid var(--border); background: var(--bg2); flex-shrink: 0;
+  }
+  .detail-head .dt { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detail-meta { padding: 6px 12px; font-size: 10px; color: var(--fg-muted); border-bottom: 1px solid var(--border); }
+  .detail-meta a { color: var(--accent); text-decoration: none; }
+  .detail-meta a:hover { text-decoration: underline; }
+  .detail-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .detail-body iframe { flex: 1; width: 100%; border: none; background: transparent; min-height: 0; }
+
+  .empty { color: var(--fg-muted); padding: 24px; text-align: center; }
+  .empty .hint { font-size: 11px; margin-top: 6px; }
+  .toast {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 14px; font-size: 11px; opacity: 0; transition: opacity .2s; pointer-events: none;
+    box-shadow: 0 4px 14px rgba(0,0,0,.25); z-index: 10; max-width: 80%;
+  }
+  .toast.show { opacity: 1; }
+  .toast.err { border-color: var(--danger); color: var(--danger); }
+</style>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="side-head">订阅源</div>
+    <div class="side-list" id="srcList"></div>
+    <div class="add-box">
+      <input id="addUrl" placeholder="粘贴 RSS 链接…" spellcheck="false" />
+      <button id="addBtn">添加</button>
+    </div>
+    <div class="side-foot">
+      <span>刷新间隔</span>
+      <select id="refreshSel">
+        <option value="5">5 分钟</option>
+        <option value="10" selected>10 分钟</option>
+        <option value="30">30 分钟</option>
+        <option value="60">1 小时</option>
+      </select>
+      <button class="btn foot-btn" id="indicatorBtn" title="在桌面角落开一个常驻小挂件，有新条目时提醒">桌面挂件</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="toolbar">
+      <span class="title" id="tbTitle">全部</span>
+      <span class="time" id="tbTime"></span>
+      <span class="spacer"></span>
+      <button class="btn" id="readAllBtn" title="把当前列表标记为全部已读">全部已读</button>
+      <button class="btn" id="refreshBtn">刷新</button>
+    </div>
+    <div class="content" id="content"></div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+  const params = new URLSearchParams(location.search);
+  const port = params.get("port");
+  const API = port ? "http://127.0.0.1:" + port : null;
+  const SOURCE = "plugin:viewer:rss-reader";
+
+  // ── 主题跟随（初始 URL theme + 宿主 postMessage 推送）──
+  function applyTheme(theme) {
+    if (theme === "light") document.documentElement.classList.add("theme-light");
+    else document.documentElement.classList.remove("theme-light");
+  }
+  applyTheme(params.get("theme"));
+  window.addEventListener("message", (e) => {
+    const d = e.data;
+    if (d && d.source === "plugin:host" && d.kind === "theme" && d.payload && d.payload.theme) {
+      applyTheme(d.payload.theme);
+    }
+  });
+
+  // ── state ──
+  const S = {
+    feeds: [],
+    unreadTotal: 0,
+    selected: "all",       // "all" | feedId
+    detail: null,          // 当前打开的条目
+    lastState: null,
+    indicatorOn: false,    // 桌面挂件是否已请求开启（本会话内；关掉由挂件侧决定）
+    widgetPos: null,       // 挂件上次位置（由进程记忆，见 /api/state）
+    readAllBusy: false,
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const contentEl = $("content");
+
+  function toast(msg, isErr) {
+    const el = $("toast");
+    el.textContent = msg;
+    el.className = "toast show" + (isErr ? " err" : "");
+    clearTimeout(el._t);
+    el._t = setTimeout(() => { el.className = "toast"; }, 2600);
+  }
+
+  async function api(path, method, body) {
+    if (!API) throw new Error("无进程端口——进程未启动");
+    const r = await fetch(API + path, {
+      method: method || "GET",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.ok === false) throw new Error(data.error || ("HTTP " + r.status));
+    return data;
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  /** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / 日期 */
+  function ago(ms) {
+    if (!ms) return "";
+    const d = Date.now() - ms;
+    if (d < 0) return "刚刚";
+    const m = Math.floor(d / 60000);
+    if (m < 1) return "刚刚";
+    if (m < 60) return m + " 分钟前";
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + " 小时前";
+    const day = Math.floor(h / 24);
+    if (day < 30) return day + " 天前";
+    const dt = new Date(ms);
+    return dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+  }
+
+  function fmtTime(ms) {
+    if (!ms) return "";
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, "0");
+    return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+
+  // ── 数据 ──
+
+  function currentItems() {
+    const feeds = S.selected === "all" ? S.feeds : S.feeds.filter((f) => f.id === S.selected);
+    const rows = [];
+    for (const f of feeds) {
+      for (const it of f.items) rows.push({ ...it, feedId: f.id, feedTitle: f.title });
+    }
+    rows.sort((a, b) => (b.pubDate || 0) - (a.pubDate || 0));
+    return rows;
+  }
+
+  function selectedFeed() {
+    return S.selected === "all" ? null : S.feeds.find((f) => f.id === S.selected) || null;
+  }
+
+  // ── 渲染 ──
+
+  function renderSidebar() {
+    const list = $("srcList");
+    list.innerHTML = "";
+    const mkRow = (label, unread, opts) => {
+      const row = document.createElement("div");
+      row.className = "src" + (S.selected === opts.id ? " active" : "");
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = label;
+      name.title = opts.title || label;
+      row.appendChild(name);
+      if (opts.error) {
+        const e = document.createElement("span");
+        e.className = "err";
+        e.textContent = "!";
+        e.title = "抓取失败：" + opts.error;
+        row.appendChild(e);
+      }
+      if (unread > 0) {
+        const b = document.createElement("span");
+        b.className = "badge";
+        b.textContent = String(unread);
+        row.appendChild(b);
+      }
+      if (opts.deletable) {
+        const x = document.createElement("button");
+        x.className = "del";
+        x.textContent = "×";
+        x.title = "取消订阅";
+        x.onclick = (ev) => { ev.stopPropagation(); removeFeed(opts.id, label); };
+        row.appendChild(x);
+      }
+      row.onclick = () => { S.selected = opts.id; S.detail = null; render(); };
+      list.appendChild(row);
+    };
+
+    mkRow("全部", S.unreadTotal, { id: "all", title: "所有订阅源的条目" });
+    for (const f of S.feeds) {
+      mkRow(f.title, f.unread, { id: f.id, title: f.url, error: f.error, deletable: true });
+    }
+    if (S.feeds.length === 0) {
+      const d = document.createElement("div");
+      d.className = "empty";
+      d.style.padding = "16px 10px";
+      d.innerHTML = '还没有订阅<br><span style="font-size:10px">在下面粘贴一个 RSS 链接试试</span>';
+      list.appendChild(d);
+    }
+  }
+
+  function renderToolbar() {
+    const f = selectedFeed();
+    $("tbTitle").textContent = f ? f.title : "全部";
+    $("tbTime").textContent = f && f.fetchedAt ? "更新于 " + fmtTime(f.fetchedAt) : "";
+    $("refreshSel").value = String(S.refreshMinutes || 10);
+    $("indicatorBtn").className = "btn foot-btn" + (S.indicatorOn ? " on" : "");
+    $("readAllBtn").disabled = currentItems().every((i) => i.read);
+  }
+
+  function renderItems() {
+    const rows = currentItems();
+    contentEl.innerHTML = "";
+    if (rows.length === 0) {
+      const d = document.createElement("div");
+      d.className = "empty";
+      const f = selectedFeed();
+      if (f && f.error) {
+        d.innerHTML = "抓取失败：" + esc(f.error) + '<div class="hint">点「刷新」重试；持续失败检查链接是否有效</div>';
+      } else if (S.feeds.length === 0) {
+        d.innerHTML = '还没有订阅源<div class="hint">在左侧输入框粘贴 RSS 链接（如 https://status.deepseek.com/feed.rss）</div>';
+      } else {
+        d.innerHTML = "暂无条目";
+      }
+      contentEl.appendChild(d);
+      return;
+    }
+    for (const it of rows) {
+      const row = document.createElement("div");
+      row.className = "item" + (it.read ? "" : " unread");
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      row.appendChild(dot);
+      const mid = document.createElement("span");
+      mid.className = "mid";
+      const t = document.createElement("span");
+      t.className = "t";
+      t.textContent = it.title || "(无标题)";
+      mid.appendChild(t);
+      const sub = document.createElement("span");
+      sub.className = "sub";
+      const plain = it.description.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+      sub.textContent = plain.slice(0, 160) || it.link || "";
+      mid.appendChild(sub);
+      row.appendChild(mid);
+      const when = document.createElement("span");
+      when.className = "when";
+      when.textContent = ago(it.pubDate);
+      when.title = it.pubDate ? new Date(it.pubDate).toLocaleString() : "";
+      row.appendChild(when);
+      row.onclick = () => openDetail(it);
+      contentEl.appendChild(row);
+    }
+  }
+
+  /**
+   * 详情：正文是**外部 HTML**，必须隔离渲染。
+   * 用 `iframe sandbox=""`（空值 = 最严：无脚本、无表单、无同源、无跳转）+
+   * `srcdoc`，把 RSS 内容关进沙箱——即使源站内容里带脚本也执行不了。
+   */
+  function openDetail(item) {
+    // 点开即已读：先本地翻状态（立刻变灰点），异步落盘，不阻塞详情渲染
+    if (!item.read) {
+      item.read = true;
+      item._justRead = true;
+      markRead(item.guid).then(() => loadState());
+    }
+    S.detail = item;
+    contentEl.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "detail-head";
+    const back = document.createElement("button");
+    back.className = "btn";
+    back.textContent = "← 返回";
+    back.onclick = () => { S.detail = null; render(); };
+    head.appendChild(back);
+    const dt = document.createElement("span");
+    dt.className = "dt";
+    dt.textContent = item.title || "(无标题)";
+    head.appendChild(dt);
+    contentEl.appendChild(head);
+
+    const meta = document.createElement("div");
+    meta.className = "detail-meta";
+    const when = item.pubDate ? new Date(item.pubDate).toLocaleString() : "";
+    meta.innerHTML = esc(item.feedTitle || "") + (when ? " · " + esc(when) : "") + " · ";
+    if (item.link) {
+      const a = document.createElement("a");
+      a.href = "#";
+      a.textContent = "在浏览器打开原文 ↗";
+      a.onclick = (e) => { e.preventDefault(); openExternal(item.link); };
+      meta.appendChild(a);
+    }
+    contentEl.appendChild(meta);
+
+    const body = document.createElement("div");
+    body.className = "detail-body";
+    const frame = document.createElement("iframe");
+    frame.setAttribute("sandbox", ""); // 空 = 完全隔离
+    frame.srcdoc = wrapDetailHtml(item.description || "(这条没有正文内容)", isLight());
+    body.appendChild(frame);
+    contentEl.appendChild(body);
+  }
+
+  function isLight() {
+    return document.documentElement.classList.contains("theme-light");
+  }
+
+  /** 把外部 HTML 包进带基础样式的完整文档（供 sandbox iframe 渲染）。 */
+  function wrapDetailHtml(html, light) {
+    const fg = light ? "#1f2430" : "#e6e9f0";
+    const link = light ? "#2563eb" : "#5aa8ff";
+    const muted = light ? "#5b6474" : "#8b93a7";
+    return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>" +
+      "body{margin:0;padding:12px 16px;font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;line-height:1.65;color:" + fg + ";background:transparent;word-break:break-word}" +
+      "a{color:" + link + "} img{max-width:100%;height:auto}" +
+      "pre,code{background:rgba(127,127,127,.12);border-radius:4px;padding:1px 4px;font-family:ui-monospace,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-word}" +
+      "pre{padding:8px 10px} blockquote{margin:8px 0;padding:2px 10px;border-left:3px solid " + muted + ";color:" + muted + "}" +
+      "hr{border:none;border-top:1px solid " + muted + "44}" +
+      "</style></head><body>" + html + "</body></html>";
+  }
+
+  /**
+   * 用系统浏览器打开外部链接。
+   * 面板 iframe 是 `allow-scripts allow-same-origin` 沙箱（**没有 allow-popups**），
+   * `<a target="_blank">` 会被拦、原位导航会把面板替换成外网站点；宿主上行也没有
+   * open-url。故走**插件进程** `/api/open`（它调系统命令打开，详见 server 注释）。
+   */
+  async function openExternal(url) {
+    if (!url) return;
+    try {
+      await api("/api/open", "POST", { url });
+    } catch (e) {
+      toast("打开失败：" + e.message, true);
+    }
+  }
+
+  function render() {
+    renderSidebar();
+    renderToolbar();
+    if (S.detail) openDetail(S.detail);
+    else renderItems();
+  }
+
+  // ── 动作 ──
+
+  async function refresh(showToast) {
+    $("refreshBtn").disabled = true;
+    try {
+      await api("/api/refresh", "POST", {});
+      await loadState(true);
+      if (showToast) toast("已刷新");
+    } catch (e) {
+      toast("刷新失败：" + e.message, true);
+    } finally {
+      $("refreshBtn").disabled = false;
+    }
+  }
+
+  async function loadState(forceRender) {
+    try {
+      const data = await api("/api/state");
+      S.feeds = data.feeds || [];
+      S.unreadTotal = data.unreadTotal || 0;
+      S.refreshMinutes = data.refreshMinutes || 10;
+      S.lastNew = data.lastNew;
+      S.widgetPos = data.widgetPos || null; // 挂件上次被拖到的位置（记忆），开挂件时带上
+      // 选中的源被删掉了 → 回到"全部"
+      if (S.selected !== "all" && !S.feeds.some((f) => f.id === S.selected)) S.selected = "all";
+      // 详情打开时，用新数据里的同 guid 条目替换（保持已读状态新鲜）
+      if (S.detail) {
+        const fresh = currentItems().find((i) => i.guid === S.detail.guid);
+        if (fresh) S.detail = fresh;
+      }
+      render();
+    } catch (e) {
+      if (S.feeds.length === 0) {
+        contentEl.innerHTML = '<div class="empty">无法连接插件进程<br><span class="hint">' + esc(e.message) + "</span></div>";
+      }
+    }
+  }
+
+  async function addFeed() {
+    const input = $("addUrl");
+    const url = input.value.trim();
+    if (!url) return;
+    $("addBtn").disabled = true;
+    $("addBtn").textContent = "抓取中…";
+    try {
+      const r = await api("/api/add", "POST", { url });
+      input.value = "";
+      S.selected = r.feed.id;
+      S.detail = null;
+      await loadState();
+      toast("已订阅：" + r.feed.title + "（" + r.count + " 条）");
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      $("addBtn").disabled = false;
+      $("addBtn").textContent = "添加";
+    }
+  }
+
+  async function removeFeed(id, name) {
+    if (!confirm("取消订阅「" + name + "」？\n（只删本地订阅记录，不影响源站）")) return;
+    try {
+      await api("/api/remove", "POST", { id });
+      await loadState();
+      toast("已取消订阅");
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }
+
+  async function markRead(guid) {
+    try { await api("/api/read", "POST", { guid }); } catch { /* 标记失败不打扰 */ }
+  }
+
+  async function markAllRead() {
+    try {
+      await api("/api/read", "POST", { all: true, feedId: S.selected === "all" ? undefined : S.selected });
+      await loadState();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  }
+
+  /** 请求宿主开桌面挂件（面板是宿主里的 iframe，可直接上行）。 */
+  function openIndicator() {
+    if (S.indicatorOn) {
+      // 再点一次发 close（挂件自己不追踪"面板想要什么"，重开/收起都由这里发起）
+      window.parent.postMessage({ source: SOURCE, kind: "close-indicator", payload: {} }, "*");
+      S.indicatorOn = false;
+      renderToolbar();
+      return;
+    }
+    if (!port) { toast("插件进程未就绪", true); return; }
+    // 尺寸 = 内容 340×92 + 上下左右各 8px padding（投影占位，见 indicator.html 注释）
+    const payload = { src: "indicator.html", params: "port=" + port, width: 356, height: 108 };
+    // 位置记忆：用户拖过就停在那（宿主缺省是主屏右下角）
+    if (S.widgetPos) { payload.x = S.widgetPos.x; payload.y = S.widgetPos.y; }
+    window.parent.postMessage({ source: SOURCE, kind: "open-indicator", payload: payload }, "*");
+    S.indicatorOn = true;
+    renderToolbar();
+    toast("桌面挂件已开启 —— 按住它可拖动位置");
+  }
+
+  // ── 事件接线 ──
+  $("addBtn").onclick = addFeed;
+  $("addUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") addFeed(); });
+  $("refreshBtn").onclick = () => refresh(true);
+  $("readAllBtn").onclick = markAllRead;
+  $("indicatorBtn").onclick = openIndicator;
+  $("refreshSel").onchange = async (e) => {
+    try {
+      await api("/api/config", "POST", { refreshMinutes: Number(e.target.value) });
+      toast("刷新间隔已设为 " + e.target.value + " 分钟");
+    } catch (err) { toast(err.message, true); }
+  };
+
+  // 轮询：可见时每 60s 拉一次（进程侧才是真正抓取的定时器，这里只是刷新界面）
+  setInterval(() => { if (!document.hidden && !S.detail) loadState(); }, 60_000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadState(); });
+
+  // ── 初始 ──
+  if (!API) {
+    contentEl.innerHTML = '<div class="empty">插件进程未运行（无端口）<br><span class="hint">去「工作进程」面板看 rss-server 状态</span></div>';
+  } else {
+    loadState();
+  }
+})();
+</script>
+</body>
+</html>

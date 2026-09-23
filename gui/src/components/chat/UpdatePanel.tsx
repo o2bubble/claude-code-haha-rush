@@ -136,6 +136,9 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
   /** Staging path + Update.exe path returned by prepareGuiUpdate — reused by the
    *  restart button so it does NOT re-download the GUI zip. */
   const [updaterPath, setUpdaterPath] = useState<string | null>(null);
+  /** 除自己以外、会被恢复的实例数（进 needsRestart 时查一次）。
+   *  0 = 单实例，不显示「升级并恢复」按钮。 */
+  const [restorable, setRestorable] = useState(0);
 
   // 发布说明 markdown 解析一次即可 —— 下载进度等 state 会高频触发重渲染，
   // 每次重解析既浪费又无意义（内容在一轮检查内不变）。
@@ -323,6 +326,9 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
         const stagedPath = await updateService.prepareGuiUpdate(result.version, guiComp?.remote_sha256, guiComp?.size);
         setUpdaterPath(stagedPath);
         setDownloading((prev) => { const n = new Set(prev); n.delete("gui"); return n; });
+        // 查一下有没有别的实例要恢复（决定是否显示「升级并恢复」按钮）。
+        // 失败按 0 处理 —— 少一个按钮不影响升级本身。
+        updateService.countRestorableInstances().then(setRestorable).catch(() => setRestorable(0));
         setState("needsRestart");
       } catch (e: any) {
         setErrors((prev) => ({ ...prev, gui: e?.toString() ?? String(e) }));
@@ -353,6 +359,23 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
       setState("error");
     }
   }, [result, updaterPath]);
+
+  /** 升级并恢复：先存"其他实例在跑什么"，再走正常升级重启。恢复由新启动的 GUI 执行。 */
+  const handleRestartWithRestore = useCallback(async () => {
+    try {
+      // 存快照失败不该挡住升级 —— 用户要的是"装上新版"，恢复只是锦上添花。
+      try {
+        const n = await updateService.prepareRestoreSnapshot();
+        addStatusMessage(t("update.restoreSnapshotSaved", { count: String(n) }), "info");
+      } catch (e: any) {
+        addStatusMessage(t("update.restoreSnapshotFailed", { err: String(e?.message ?? e) }), "info");
+      }
+      await handleRestart();
+    } catch (e: any) {
+      setErrorMsg(e?.toString() ?? String(e));
+      setState("error");
+    }
+  }, [handleRestart]);
 
   const handleSkipAll = useCallback(() => {
     addStatusMessage(t("update.installStatus.skipped"), "info");
@@ -529,7 +552,19 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
             <button type="button" style={S.btn(false)} onClick={handleSkipAll}>
               {t("update.actions.skipAll")}
             </button>
-            <button type="button" style={S.btn(true)} onClick={handleRestart}>
+            {/* 「升级并恢复」只在**确实有别的实例要恢复**时出现 —— 单实例用户
+                看到它只会困惑（"恢复什么？"）。数量取自与快照同一套过滤规则。 */}
+            {restorable > 0 && (
+              <button
+                type="button"
+                style={S.btn(true)}
+                onClick={handleRestartWithRestore}
+                title={t("update.restoreHint")}
+              >
+                {t("update.actions.restartAndRestore", { count: String(restorable) })}
+              </button>
+            )}
+            <button type="button" style={S.btn(restorable === 0)} onClick={handleRestart}>
               {t("update.actions.restart")}
             </button>
           </>

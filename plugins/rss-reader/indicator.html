@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>RSS 订阅</title>
+<style>
+  :root {
+    --bg: rgba(32,36,47,.96); --fg: #e6e9f0; --fg-muted: #8b93a7;
+    --border: #2c3547; --accent: #5aa8ff; --danger: #f0666e;
+  }
+  html.theme-light {
+    --bg: rgba(248,250,253,.97); --fg: #1f2430; --fg-muted: #5b6474;
+    --border: #d8dee8; --accent: #2563eb; --danger: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  /* ⚠️ body 留 8px padding 给 wrap 的投影 —— 窗口是**透明**的（宿主建窗时
+     transparent(true) + 页面不铺底），投影属页面绘制，贴边会被窗口裁掉。
+     窗口尺寸因此按 340×92 内容 + 16 → 见 panel.html 的 openIndicator()。 */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+  body {
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px; color: var(--fg);
+    user-select: none; -webkit-user-select: none;
+    padding: 8px;
+  }
+  .wrap {
+    height: 100%; display: flex; align-items: center; gap: 9px; padding: 10px 10px 10px 12px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.38);
+    cursor: grab; /* 整个挂件可拖（见底部拖拽段） */
+  }
+  body.dragging .wrap { cursor: grabbing; }
+  /* 有新条目到达时整窗闪一下（一次性，不持续闪——持续闪会变噪音） */
+  .wrap.ping { animation: ping .9s ease-out 2; }
+  @keyframes ping {
+    0% { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(90,168,255,.35), 0 6px 18px rgba(0,0,0,.38); }
+    100% { border-color: var(--border); box-shadow: 0 6px 18px rgba(0,0,0,.38); }
+  }
+  .dot { flex-shrink: 0; width: 9px; height: 9px; border-radius: 50%; background: var(--fg-muted); opacity: .5; }
+  .dot.unread { background: var(--accent); opacity: 1; }
+  .main { flex: 1; min-width: 0; }
+  .line1 { display: flex; align-items: baseline; gap: 6px; }
+  .app { font-weight: 600; font-size: 11px; letter-spacing: .3px; }
+  .count { font-size: 11px; color: var(--fg-muted); }
+  .count.unread { color: var(--accent); font-weight: 600; }
+  .line2 {
+    margin-top: 2px; font-size: 11px; color: var(--fg-muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .line2.unread { color: var(--fg); }
+  .close {
+    flex-shrink: 0; width: 20px; height: 20px; border: none; background: transparent;
+    color: var(--fg-muted); cursor: pointer; border-radius: 4px; font-size: 13px; line-height: 1;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+  }
+  .close:hover { background: var(--border); color: var(--danger); }
+</style>
+</head>
+<body>
+  <div class="wrap" id="wrap">
+    <div class="dot" id="dot"></div>
+    <div class="main">
+      <div class="line1">
+        <span class="app">RSS 订阅</span>
+        <span class="count" id="count">连接中…</span>
+      </div>
+      <div class="line2" id="detail"></div>
+    </div>
+    <button class="close" id="close" title="收起挂件（可从 RSS 面板再打开）">✕</button>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+  const params = new URLSearchParams(location.search);
+  const port = params.get("port");
+  const API = port ? "http://127.0.0.1:" + port : null;
+  const SOURCE = "plugin:viewer:rss-reader";
+  const POLL_MS = 30_000;
+
+  const $ = (id) => document.getElementById(id);
+
+  // ── 主题跟随 ──
+  function applyTheme(theme) {
+    if (theme === "light") document.documentElement.classList.add("theme-light");
+    else document.documentElement.classList.remove("theme-light");
+  }
+  applyTheme(params.get("theme"));
+  window.addEventListener("message", (e) => {
+    const d = e.data;
+    if (d && d.source === "plugin:host" && d.kind === "theme" && d.payload && d.payload.theme) {
+      applyTheme(d.payload.theme);
+    }
+  });
+
+  // ── 关闭：上行让宿主收窗（挂件窗口自己控制生命周期）──
+  $("close").onclick = () => {
+    try { parent.postMessage({ source: SOURCE, kind: "close-indicator", payload: {} }, "*"); } catch (e) {}
+  };
+
+  // ── 拖动移动挂件 ──
+  //
+  // 有**两条路**，按宿主能力自动选（宿主在建窗 URL 上给 `native-drag=1` 标记）：
+  //
+  // ① **原生**（Windows + 新宿主，首选）：只把"用户按下了"告诉宿主，剩下交给
+  //    **系统** —— 宿主发 `WM_NCLBUTTONDOWN + HTCAPTION`，Windows 进入模态拖拽循环。
+  //    零 IPC、零滞后，鼠标绝不会"脱离"。
+  //    为什么必须走原生：窗口要**追着鼠标跑**，而窗口只有 356×108 —— JS 那条路每次
+  //    移动都要 `pointermove → postMessage → invoke → set_position` 一整圈（十几到
+  //    几十毫秒），窗口明显落后于鼠标。插件作者实测即"拖着会经常脱离鼠标的控制、
+  //    自己停下来"。
+  // ② **JS 回退**（老宿主 / 非 Windows）：记下起始的鼠标与窗口屏幕坐标，pointermove
+  //    按差值发 `move-indicator` 上行（宿主 `move_plugin_indicator` 直接 set_position，
+  //    **不重建窗口** —— 重建会闪且丢页面状态）。`e.screenX` 是屏幕绝对坐标
+  //    （Chromium 标准语义，跨 iframe 一致）；`window.screenX` 是顶层窗口位置。
+  //    这里**必须 setPointerCapture**：没有捕获时指针一旦落在窗口矩形之外就收不到
+  //    move 事件，拖动会当场停住。
+  //
+  // 两条路都要在结束时把最终位置存进插件数据（/api/config widgetPos）—— 下次从
+  // 面板开挂件时带上，位置就"记住了"。
+  const NATIVE_DRAG = params.get("native-drag") === "1";
+  const wrapEl = $("wrap");
+  let drag = null;      // ② 用：{ pid, mx, my, wx, wy, k } —— 起始鼠标 / 窗口坐标 / 缩放
+  let lastPos = null;   // 本次拖动的最新位置（松手时存）
+  let lastSentAt = 0;
+
+  /** 屏幕坐标是 CSS 像素，而宿主的 set_position 收**物理**像素 —— 换算。 */
+  const dprOf = () => window.devicePixelRatio || 1;
+
+  function postMove(x, y) {
+    try {
+      parent.postMessage({ source: SOURCE, kind: "move-indicator", payload: { x: x, y: y } }, "*");
+    } catch (e) {}
+  }
+
+  /** 记忆挂件位置（失败不打扰 —— 顶多下次回到默认位置）。 */
+  function savePos(x, y) {
+    if (!API) return;
+    fetch(API + "/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ widgetPos: { x: x, y: y } }),
+    }).catch(() => {});
+  }
+
+  // ── ① 原生拖拽：位置靠**轮询自己**（拖拽由系统接管，页面收不到 pointermove/up）──
+  let posWatch = null;
+  function watchPositionAfterNativeDrag() {
+    if (posWatch) clearInterval(posWatch);
+    const k = dprOf();
+    let last = { x: window.screenX, y: window.screenY };
+    let changed = false;
+    let stable = 0;
+    let ticks = 0;
+    posWatch = setInterval(() => {
+      ticks++;
+      const cur = { x: window.screenX, y: window.screenY };
+      if (cur.x !== last.x || cur.y !== last.y) {
+        last = cur;
+        changed = true;
+        stable = 0;
+      } else {
+        stable++;
+      }
+      // 位置稳定 ~800ms 且确实动过 → 拖拽已结束，记下
+      if (changed && stable >= 4) {
+        clearInterval(posWatch);
+        posWatch = null;
+        document.body.classList.remove("dragging");
+        savePos(Math.round(last.x * k), Math.round(last.y * k));
+        return;
+      }
+      // 保险：60s 后无论怎样都收工（用户按了很久 / 系统拖拽没起来）
+      if (ticks > 300) {
+        clearInterval(posWatch);
+        posWatch = null;
+        document.body.classList.remove("dragging");
+      }
+    }, 200);
+  }
+
+  wrapEl.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest("#close")) return; // 关闭按钮不触发拖动
+    e.preventDefault(); // 防选中/原生拖拽
+    document.body.classList.add("dragging");
+
+    if (NATIVE_DRAG) {
+      try { parent.postMessage({ source: SOURCE, kind: "drag-indicator", payload: {} }, "*"); } catch (err) {}
+      watchPositionAfterNativeDrag();
+      return;
+    }
+
+    // ② JS 回退
+    try { wrapEl.setPointerCapture(e.pointerId); } catch (err) { /* 老环境不支持则退化为普通拖动 */ }
+    const k = dprOf();
+    drag = {
+      pid: e.pointerId,
+      mx: e.screenX, my: e.screenY,               // 鼠标屏幕坐标（CSS px）
+      wx: window.screenX * k, wy: window.screenY * k, // 窗口位置（换算成物理 px）
+      k: k,
+    };
+    lastPos = { x: drag.wx, y: drag.wy };
+    lastSentAt = 0;
+  });
+
+  // ⚠️ 监听在 **window** 上而不是 wrapEl：捕获成功后事件会从 wrapEl 冒泡上来，
+  // 两种情况都能收到；反过来绑在 wrapEl 上时，一旦捕获失败（老环境），鼠标滑出
+  // 这个小窗口就再也收不到事件了。
+  window.addEventListener("pointermove", (e) => {
+    if (!drag || e.pointerId !== drag.pid) return;
+    const nx = Math.round(drag.wx + (e.screenX - drag.mx) * drag.k);
+    const ny = Math.round(drag.wy + (e.screenY - drag.my) * drag.k);
+    lastPos = { x: nx, y: ny };
+    // 时间节流（约 60Hz 上限）：pointermove 可能比屏幕刷新还密，逐条发会积压 IPC。
+    // 用 performance.now 而非 rAF —— rAF 在页面不可见时会暂停（挂件被遮挡时拖动会卡）。
+    const now = performance.now();
+    if (now - lastSentAt < 16) return;
+    lastSentAt = now;
+    postMove(nx, ny);
+  });
+
+  /** 结束拖动（JS 路径）：补发最终位置 + 记住它。 */
+  function endDrag(e) {
+    if (!drag) return;
+    if (e && e.pointerId !== undefined && e.pointerId !== drag.pid) return;
+    const didDrag = lastPos && (lastPos.x !== drag.wx || lastPos.y !== drag.wy);
+    drag = null;
+    document.body.classList.remove("dragging");
+    if (!lastPos) return;
+    postMove(lastPos.x, lastPos.y); // 补发最终位置（节流可能吞掉最后几像素）
+    if (!didDrag) return; // 只是点了一下没拖动 → 不必写盘
+    savePos(lastPos.x, lastPos.y);
+  }
+
+  // 同理接在 window 上（捕获时事件冒泡到 window；未捕获时鼠标在窗口外松手也能收到）
+  window.addEventListener("pointerup", endDrag);
+  window.addEventListener("pointercancel", endDrag);
+
+  // ── 渲染 ──
+  let lastUnread = null; // 上次见到的未读数 —— 变大 = 有新条目 → 闪一下
+
+  function render(state) {
+    const unread = state.unreadTotal || 0;
+    const dot = $("dot");
+    const count = $("count");
+    const detail = $("detail");
+
+    dot.className = "dot" + (unread > 0 ? " unread" : "");
+    count.className = "count" + (unread > 0 ? " unread" : "");
+
+    if (state.feeds.length === 0) {
+      count.textContent = "还没有订阅";
+      detail.textContent = "在 RSS 面板里添加源";
+      detail.className = "line2";
+    } else if (unread > 0) {
+      count.textContent = unread + " 条未读";
+      // 找到最新一条未读的标题（列表已按时间排好）
+      let latest = null;
+      for (const f of state.feeds) {
+        for (const it of f.items) {
+          if (it.read) continue;
+          if (!latest || (it.pubDate || 0) > (latest.pubDate || 0)) latest = it;
+        }
+      }
+      detail.textContent = latest ? (latest.title || "(无标题)") : unread + " 条新内容";
+      detail.className = "line2 unread";
+      detail.title = detail.textContent;
+    } else {
+      const total = state.feeds.reduce((n, f) => n + f.items.length, 0);
+      count.textContent = "无未读";
+      detail.textContent = state.feeds.length + " 个源 · 共 " + total + " 条";
+      detail.className = "line2";
+      detail.title = "";
+    }
+
+    // 新条目到达 → 闪一次（只在未读数**变大**时；初始加载不算）
+    if (lastUnread !== null && unread > lastUnread) {
+      const w = $("wrap");
+      w.classList.remove("ping");
+      void w.offsetWidth; // 重启动画
+      w.classList.add("ping");
+    }
+    lastUnread = unread;
+  }
+
+  async function tick() {
+    if (!API) { $("count").textContent = "进程未运行"; return; }
+    try {
+      const r = await fetch(API + "/api/state");
+      const data = await r.json();
+      if (data && data.ok) render(data);
+    } catch (e) {
+      $("count").textContent = "进程未运行";
+      $("detail").textContent = "";
+    }
+  }
+
+  tick();
+  setInterval(() => { if (!document.hidden) tick(); }, POLL_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+})();
+</script>
+</body>
+</html>

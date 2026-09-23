@@ -1,16 +1,18 @@
 {
   "identifier": "default",
-  "description": "Default capability — main + floating + plugin overlay windows",
+  "description": "Default capability — main + floating + plugin overlay + chat widget windows",
   "windows": [
     "main",
     "float-*",
     "overlay-*",
-    "indicator-*"
+    "indicator-*",
+    "widget-*"
   ],
   "permissions": [
     "core:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
+    "core:event:allow-emit-to",
     "dialog:allow-open",
     "dialog:allow-save",
     "fs:allow-read-text-file",
@@ -25,6 +27,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-is-maximized",
-    "core:window:allow-close"
+    "core:window:allow-close",
+    "core:window:allow-set-title"
   ]
 }

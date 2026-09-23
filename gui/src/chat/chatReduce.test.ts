@@ -617,3 +617,36 @@ describe("isBackendBusy — authoritative busy with streaming fallback", () => {
     expect(isBackendBusy({ ...emptyChatState(), streaming: true, backendBusy: false })).toBe(false);
   });
 });
+
+// ── 切换会话的"进行中"标记（switchingTo）──
+//
+// 用户点会话后，后端要读会话文件 + 跑 SessionStart hooks（装了记忆类插件时可达
+// 数秒），期间消息区还是旧会话内容。界面上要给提示，否则"点了没反应"很迷惑。
+// 这两个用例锁住**清除时机** —— 那是这个状态最容易写错的地方。
+describe("chatReduce — switchingTo（会话切换中标记）", () => {
+  it("session_loaded 时清除（此时消息列表才真正被替换）", () => {
+    const base = { ...emptyChatState(), switchingTo: "target-sess" };
+    const r = reduce({ type: "session_loaded", session_id: "target-sess", messages: [] }, base);
+    expect(r.nextState.switchingTo).toBeNull();
+  });
+
+  it("error 时也清除（加载失败不能一直转圈）", () => {
+    const base = { ...emptyChatState(), switchingTo: "gone-sess" };
+    const r = reduce({ type: "error", message: "Session not found: gone-sess" }, base);
+    expect(r.nextState.switchingTo).toBeNull();
+  });
+
+  it("current_session **不**清除 —— 那条只换 id，消息还是旧的", () => {
+    // 这条是刻意的：后端在 resume 早期就会发 current_session（列表项据此高亮），
+    // 但 session_loaded 还没到 —— 提前清会让 loading 在内容没换时就消失。
+    const base = { ...emptyChatState(), switchingTo: "target-sess" };
+    const r = reduce({ type: "current_session", session_id: "target-sess" }, base);
+    expect(r.nextState.switchingTo).toBe("target-sess");
+  });
+
+  it("普通消息不清除（切换期间可能穿插其它事件）", () => {
+    const base = { ...emptyChatState(), switchingTo: "target-sess" };
+    const r = reduce({ type: "stream_event", event: { type: "message_start", message: { id: "m1" } } }, base);
+    expect(r.nextState.switchingTo).toBe("target-sess");
+  });
+});

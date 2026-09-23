@@ -1156,6 +1156,7 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
 | 架构 | `docs/ARCHITECTURE.md` · `docs/agents/issue-tracker.md` | 架构与工单约定 |
 | **部署（memory）** | `docs/memory-deploy-playbook.md` | **memory 服务发版手册**（本地构建→workbench 上传→云端切换） |
 | **部署（release-platform）** | `claude-code-gui-release-platform/DEPLOY.md` | **发布平台部署手册**（WSL 构建→上传→服务器只 load；含禁 build/禁 reload 的理由） |
+| **备案主页** | `docs/17lumen-homepage-playbook.md` · `homepage/` | **17lumen.com/.cn 站点手册**（改内容 / 证书 / 安全组 / 排障；含公安备案待办） |
 | **CF Tunnel（实战）** | `docs/cloudflare-tunnel-cloud-playbook.md` | 本环境完整记录：为什么弃 frp 转 CF、7 个实测坑、诊断方法论 |
 | **CF Tunnel（通用）** | `docs/cloudflare-tunnel-playbook.md` | 通用用法：快速隧道/命名隧道/服务化/原理 |
 | 工具配置 | `tools/cloudflared/config-17lumen.yml` | 隧道 ingress 配置（二进制不入库，用时按手册下载） |

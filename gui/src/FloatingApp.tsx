@@ -10,7 +10,8 @@ import { getTree, setTree } from "./stores/layoutStore";
 import type { TabGroup } from "./types/layout";
 import { t } from "./i18n";
 import { bridge } from "./services/bridge";
-import { startCrossWindowBusLeaf } from "./services/crossWindowBusLeaf";
+import { startCrossWindowBusLeaf, resetCrossWindowBusLeaf } from "./services/crossWindowBusLeaf";
+import { currentWindowLabel } from "./utils/tauriWindow";
 import { ALL_PANEL_DEFS } from "./services/panelDefs";
 import { setCurrentViewerItemId } from "./services/desktopItemViewerRegistry";
 import CommandPalette from "./components/CommandPalette";
@@ -25,7 +26,7 @@ export default function FloatingApp() {
 
   const hash = window.location.hash;
   const hm = hash.match(/^#floating\/(.+?)\/(.+?)\/.+$/);
-  const label = window.__TAURI_INTERNALS__?.webview?.label || "";
+  const label = currentWindowLabel();
   const lm = label.match(/^float-(.+?)--(.+?)--(.+)$/);
   const panelId = hm
     ? decodeURIComponent(hm[1])
@@ -100,6 +101,13 @@ export default function FloatingApp() {
       setTimeout(() => {
         if (!realMount.current) {
           bridge.sendGoodbye().catch(() => {});
+          // ⚠️ 同样要重置 leaf 的一次性状态 —— 否则**关掉浮窗再开**时
+          // `startLeaf`/`startCrossWindowBusLeaf` 的幂等守卫会直接 return，
+          // 监听器与订阅都不再注册 → 浮窗一片空白。
+          // 根因同挂件：同进程内所有窗口共享一个 WebView2 数据目录
+          // （EBWebView-{PID}），窗口关闭不会清模块级状态。
+          bridge.resetLeaf();
+          resetCrossWindowBusLeaf();
         }
       }, 0);
     };

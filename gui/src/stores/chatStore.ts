@@ -113,6 +113,18 @@ export interface ChatState {
    *  （初始化/WS 半开），回落 streaming；true/false 后即用权威值。用于消除乐观
    *  streaming 与后端 busy 的失同步（interrupt 乐观清空/等子代理静默/error 卡 true）。 */
   backendBusy?: boolean;
+  /**
+   * 正在切换到哪个会话（null = 没有切换在进行）。
+   *
+   * 为什么需要：切会话时后端要做不少事（读会话文件、跑 SessionStart hooks —— 装了
+   * 记忆类插件时 hook 可能要几秒），期间**消息区还是旧会话的内容**，用户点了没反馈
+   * 会以为"点不动了"。有了它，界面能立刻给出"正在切换"的提示。
+   *
+   * 时机：点击会话列表项时置为目标 id；收到 session_loaded / error 时清空。
+   * ⚠️ **不要**在 `current_session` 到达时清 —— 那条只带 session_id、消息列表还是旧的，
+   * 提前清会让 loading 在"内容还没换"时就消失（闪一下更迷惑）。
+   */
+  switchingTo?: string | null;
 }
 
 let state: ChatState = emptyChatState();

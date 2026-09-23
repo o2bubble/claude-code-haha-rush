@@ -2,6 +2,7 @@ import React, { memo, useState, useEffect, useCallback, useRef } from "react";
 import {
   getSettings,
   loadSettings,
+  reconcileDirty,
   saveSettings,
   updateSettings,
   type AppSettings,
@@ -17,6 +18,7 @@ import {
   type ServerProfile,
 } from "../../utils/serverProfile";
 import { EmptyState } from "../SharedStates";
+import type { WindowTitleOrder } from "../../services/windowTitle";
 import { S } from "./settingsStyles";
 import ShortcutsPanel from "./ShortcutsPanel";
 import { useEventHandler } from "../../services/useService";
@@ -385,11 +387,15 @@ function CompactSettingsSection({ settings, update }: {
 
 // ── Content renderer per category ──
 
-function CategoryContent({ cat, settings, update, applyServer, flashField }: {
+function CategoryContent({ cat, settings, update, applyServer, applyWorkspaceOnly, applyGlobalOnly, flashField }: {
   cat: string;
   settings: AppSettings;
   update: (patch: Partial<AppSettings>) => void;
   applyServer: (patch: Partial<AppSettings>, persist: boolean) => void;
+  /** 固定写工作区（绕开 dirty 与 scope 选择器）——工作区级字段专用 */
+  applyWorkspaceOnly: (patch: Partial<AppSettings>) => void;
+  /** 固定写全局（绕开 dirty 与 scope 选择器）——纯 UI 偏好字段专用 */
+  applyGlobalOnly: (patch: Partial<AppSettings>) => void;
   flashField: string | null;
 }) {
   switch (cat) {
@@ -436,10 +442,31 @@ function CategoryContent({ cat, settings, update, applyServer, flashField }: {
             <FieldHint text={t("settings.uiFontSizeDesc")} />
           </div>
           <div>
+            <Label text={t("settings.windowTitleOrder")} />
+            {/* 固定写全局（applyGlobalOnly）：标题顺序是纯 UI 偏好，与工作区无关，
+                且不在 Rust 的 merge 白名单里 —— 跟着 scope 走会静默回退 */}
+            <select
+              value={settings.windowTitleOrder ?? "workspace-first"}
+              onChange={(e) => applyGlobalOnly({ windowTitleOrder: e.target.value as WindowTitleOrder })}
+              style={S.select}
+            >
+              <option value="workspace-first">{t("settings.windowTitleWorkspaceFirst")}</option>
+              <option value="session-first">{t("settings.windowTitleSessionFirst")}</option>
+            </select>
+            <FieldHint text={t("settings.windowTitleOrderDesc")} />
+          </div>
+          <div>
             <Label text={t("settings.autoEnterRecentWorkspace")} />
             <Toggle value={settings.autoEnterRecentWorkspace ?? false}
               onChange={(v) => update({ autoEnterRecentWorkspace: v })} />
             <FieldHint text={t("settings.autoEnterRecentWorkspaceDesc")} />
+          </div>
+          <div>
+            {/* 固定写全局（applyGlobalOnly）：升级行为是全局偏好，与工作区无关 */}
+            <Label text={t("settings.autoRestoreInstances")} />
+            <Toggle value={settings.autoRestoreInstances ?? true}
+              onChange={(v) => applyGlobalOnly({ autoRestoreInstances: v })} />
+            <FieldHint text={t("settings.autoRestoreInstancesDesc")} />
           </div>
           <div>
             <Label text={t("settings.saveLayoutToGlobal")} />
@@ -617,8 +644,11 @@ function CategoryContent({ cat, settings, update, applyServer, flashField }: {
         <div style={S.form}>
           <div>
             <Label text={t("settings.sessionFolders")} />
+            {/* 固定工作区作用域（不跟保存栏的 global/workspace 选择器）——
+                与文件夹数据同域，否则「全局关、工作区开」时 Rust merge 会让
+                工作区的 true 永久压制全局的 false（详见 applyWorkspaceOnly） */}
             <Toggle value={settings.sessionFolders ?? false}
-              onChange={(v) => update({ sessionFolders: v })} />
+              onChange={(v) => applyWorkspaceOnly({ sessionFolders: v })} />
             <FieldHint text={t("settings.sessionFoldersDesc")} />
           </div>
         </div>
@@ -786,10 +816,13 @@ function SettingsPanelImpl() {
     });
   }, []);
 
-  // Sync external changes when user hasn't made unsaved edits
+  // Sync external changes (other instances / backend) into this panel.
+  // dirty 必须一并收敛：被外部改过的字段说明本实例的待存值已过时，留着它
+  // 会在下次保存时把外部的新值覆盖回去（多实例僵尸写回，见 reconcileDirty）。
   useEventHandler<{ settings: AppSettings }>(Events.SETTINGS_CHANGED, (data) => {
     if (saving) return;
     setSettings({ ...data.settings });
+    setDirty((d) => reconcileDirty(d, data.settings));
   });
 
   // ── 命令面板/「去设置」导航：跳转到指定分类，并可选定位高亮具体字段 ──
@@ -834,6 +867,28 @@ function SettingsPanelImpl() {
     if (persist) void saveSettings(patch, "global").catch(() => {});
   };
 
+  // 工作区级字段：绕开 dirty 与保存栏的作用域选择器，**固定**落工作区。
+  //
+  // 为什么（2026-09-20 用户实测）：会话文件夹开关若跟着「全局」scope 走，
+  // 而工作区文件里已有 true，Rust 侧 merge_workspace_overrides（workspace
+  // 覆盖 global）会让工作区的 true **永久压制**全局的 false —— 表现为
+  // 「在默认作用域下关闭无效、重启后还是开着的」。开关与它的数据
+  // （sessionFolderTree，SessionPanel 固定写工作区）必须同域。
+  const applyWorkspaceOnly = (patch: Partial<AppSettings>) => {
+    setSettings((s) => (s ? { ...s, ...patch } : s));
+    void saveSettings(patch, "workspace").catch(() => {});
+  };
+
+  // 全局级字段：绕开 dirty 与作用域选择器，**固定**落全局。
+  //
+  // 用于「纯 UI 偏好、本就与工作区无关」的字段。若跟着 scope 走，用户选
+  // 「工作区」保存会把它写进工作区文件，而 Rust 的 merge_workspace_overrides
+  // 白名单不含它 → 读不回来 → 重启静默回退（服务器地址曾踩过同一个坑）。
+  const applyGlobalOnly = (patch: Partial<AppSettings>) => {
+    setSettings((s) => (s ? { ...s, ...patch } : s));
+    void saveSettings(patch, "global").catch(() => {});
+  };
+
   const handleSave = async () => {
     if (!settings) return;
     setSaving(true);
@@ -864,7 +919,7 @@ function SettingsPanelImpl() {
         </div>
 
         <div ref={contentRef} style={{ flex: 1, overflow: "auto" }}>
-          <CategoryContent cat={cat} settings={settings} update={update} applyServer={applyServer} flashField={flashField} />
+          <CategoryContent cat={cat} settings={settings} update={update} applyServer={applyServer} applyWorkspaceOnly={applyWorkspaceOnly} applyGlobalOnly={applyGlobalOnly} flashField={flashField} />
         </div>
 
         <div style={S.saveBar}>

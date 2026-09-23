@@ -6,6 +6,48 @@ import { addStatusMessage } from "../stores/statusMsgStore";
 import { fileService } from "./fileService";
 
 /**
+ * 在编辑器里打开一个路径 —— **全应用唯一的入口**，按类型分流：
+ * - 图片 / PDF（`isPreviewable`）→ `openPreview`（由 FilePreview 用 read_bytes 加载）
+ * - 其它（文本）→ 读内容后 `openFile`
+ * - 读失败（二进制 / 超大 / 特殊文件）→ **回退到资源管理器**并提示，不让用户"点了没反应"
+ *
+ * 抽成公开函数是因为这条分流逻辑被多处需要（消息里的路径链接、划词工具栏、
+ * 引用跳转…）。各写一份的话，改了一处忘了另一处就会出现"这里能开、那里打不开"
+ * 的不一致 —— 之前 MessageItem 就踩过（只走 readFile，图片读出乱码被静默吞掉）。
+ *
+ * @returns 是否成功打开（回退到资源管理器也算成功）
+ */
+export async function openPathInEditor(path: string, opts?: {
+  /** 需要额外提示的使用场景（默认静默成功 —— 打开本身已是反馈） */
+  silent?: boolean;
+}): Promise<boolean> {
+  if (!path) return false;
+  const name = path.split(/[/\\]/).pop() || path;
+  if (isPreviewable(path)) {
+    editorStore.openPreview(path, name);
+    return true;
+  }
+  try {
+    const content = await fileService.readFile(path);
+    editorStore.openFile(path, name, content);
+    return true;
+  } catch {
+    // 编辑器打不开 → 回退资源管理器（至少让用户能定位到文件）
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("open_in_explorer", { path });
+      if (!opts?.silent) {
+        addStatusMessage(`无法在编辑器打开 ${name}，已在资源管理器中打开`, "info");
+      }
+      return true;
+    } catch {
+      addStatusMessage(`Cannot open: ${path}`, "error");
+      return false;
+    }
+  }
+}
+
+/**
  * Execute the action for a reference — open file, locate panel, switch session, etc.
  */
 export async function openReference(ref: Reference): Promise<boolean> {
@@ -87,30 +129,10 @@ export async function openReference(ref: Reference): Promise<boolean> {
 }
 
 async function openFileAtLine(path: string, line?: number): Promise<boolean> {
-  if (!path) return false;
-  const name = path.split(/[/\\]/).pop() || path;
-  if (isPreviewable(path)) {
-    editorStore.openPreview(path, name);
-    if (line) addStatusMessage(`Opened ${name} (line ${line})`, "info");
-    return true;
+  const ok = await openPathInEditor(path, { silent: !line });
+  if (ok && line) {
+    const name = path.split(/[/\\]/).pop() || path;
+    addStatusMessage(`Opened ${name} (line ${line})`, "info");
   }
-  try {
-    const content = await fileService.readFile(path);
-    editorStore.openFile(path, name, content);
-    if (line) {
-      addStatusMessage(`Opened ${name} (line ${line})`, "info");
-    }
-    return true;
-  } catch {
-    // 编辑器打不开（二进制/超大/特殊文件，readFile 失败）→ 回退到资源管理器打开并提示。
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("open_in_explorer", { path });
-      addStatusMessage(`无法在编辑器打开 ${name}，已在资源管理器中打开`, "info");
-      return true;
-    } catch {
-      addStatusMessage(`Cannot open: ${path}`, "error");
-      return false;
-    }
-  }
+  return ok;
 }

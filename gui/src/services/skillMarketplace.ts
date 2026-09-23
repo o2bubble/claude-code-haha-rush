@@ -22,6 +22,14 @@ export interface PackageSummary {
   installType?: "standard" | "ai-guided";
   /** 支持平台 (windows/macos/linux)。undefined/空 = 全平台。GUI 按编译结果展示支持状态 */
   platforms?: string[];
+  /**
+   * **本机侧载 / 本地开发的插件**（不出自市场）。
+   *
+   * 市场面板的「本地插件」分区靠它在**同一张卡片**上分流：这类包没有下载量、
+   * 没有作者，也不该出现"可更新"这类市场语义。不设此标记 = 正常市场包。
+   * 值由面板从本地已装清单构造（见 PluginMarketPanel 的 localPkgs）。
+   */
+  local?: boolean;
 }
 
 export interface SkillInPackage {

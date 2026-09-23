@@ -105,6 +105,182 @@ describe("resolvePaste — 粘贴内容 → 引用/保存/文本 决策", () => 
     expect(d).toEqual({ kind: "inlineText", text: "hello" });
   });
 
+  // ── 路径探测的两道闸 + Alt 强制纯文本（2026-09-20）──
+  // 背景：工作区里几乎总有 src/docs/temp 这类目录，粘贴一个普通单词（哪怕不含斜杠）
+  // 只要撞上真实目录名就被转成引用 —— 命中率高得离谱（用户实测反馈）。
+
+  it("不含分隔符的单词（如 docs）即使存在也不转 —— 挡单词撞名", async () => {
+    const pathExists = mkPathExists(true);
+    const d = await resolvePaste({
+      files: [], images: [], text: "docs", pathExists,
+    });
+    expect(d).toEqual({ kind: "inlineText", text: "docs" });
+    // 连存在性探测都不该发起（含分隔符检查在 pathExists 之前短路）
+    expect(pathExists).not.toHaveBeenCalled();
+  });
+
+  it("含分隔符且存在 → 照常转引用（保留『粘贴路径』的用法）", async () => {
+    const d = await resolvePaste({
+      files: [], images: [], text: "gui/src", pathExists: mkPathExists(true),
+    });
+    expect(d).toEqual({
+      kind: "refs",
+      refs: [{ type: "file", path: "gui/src", label: "src" }],
+    });
+  });
+
+  it("整段超过 200 字 → 不做路径探测（长文本里列路径是内容，不是引用）", async () => {
+    const longPathLike = "/w/" + "a".repeat(250);
+    const pathExists = mkPathExists(true);
+    const d = await resolvePaste({
+      files: [], images: [], text: longPathLike, pathExists,
+    });
+    expect(pathExists).not.toHaveBeenCalled();
+    // >120 字 → 仍是 paste chip（长文本折叠），但不是 file/dir ref
+    expect(d.kind).toBe("refs");
+    if (d.kind === "refs") expect(d.refs[0].type).toBe("paste");
+  });
+
+  it("Alt（forceText）：存在的路径也不转，原样插入", async () => {
+    const pathExists = mkPathExists(true);
+    const d = await resolvePaste({
+      files: [], images: [], text: "/w/src/a.ts", pathExists, forceText: true,
+    });
+    expect(d).toEqual({ kind: "inlineText", text: "/w/src/a.ts" });
+    expect(pathExists).not.toHaveBeenCalled();
+  });
+
+  it("Alt（forceText）：长文本也不折叠 —— 所见即所得", async () => {
+    const long = "y".repeat(300);
+    const d = await resolvePaste({
+      files: [], images: [], text: long, pathExists: mkPathExists(true), forceText: true,
+    });
+    expect(d).toEqual({ kind: "inlineText", text: long });
+  });
+
+  // ── 路径的"字形"闸：除盘符外，路径里不可能出现的字符不该被拿去探测 ──
+  // 背景：只查"含不含斜杠"就无脑发文件系统查询，等于把 glob、引号、多行文本
+  // 全当成候选路径去问一遍。
+
+  it.each([
+    ["glob 模式", "src/*.ts"],
+    ["问号包裹", "foo/bar?"],
+    ["内部引号（非包裹）", 'a/b "c"'],
+    ["管道", "a|b/c"],
+    ["尖括号", "a<b/c>d"],
+    ["非盘符位置的冒号", "a:b/c"],
+    ["多行（含换行）", "line1/x\nline2/y"],
+    ["含制表符", "a/b\tc"],
+  ])("不可能字符（%s）→ 不探测，直接按文本处理", async (_name, text) => {
+    const pathExists = mkPathExists(true); // 即便"存在"也不该问
+    const d = await resolvePaste({
+      files: [], images: [], text, pathExists,
+    });
+    expect(pathExists).not.toHaveBeenCalled();
+    expect(d).toEqual({ kind: "inlineText", text });
+  });
+
+  // ── 整段被成对引号包裹（Windows 右键「复制文件地址」的形态）──
+  // 引号是转录噪音，剥掉不丢内容（保留率 100%）→ 该照常探测，引用里存干净路径。
+
+  it.each([
+    ["ASCII 双引号", '"C:\\Storage\\proj\\a.txt"'],
+    ["单引号",       "'C:\\Storage\\proj\\a.txt'"],
+    ["中文弯引号",   "\u201CC:\\Storage\\proj\\a.txt\u201D"],
+  ])("%s 包裹的真实路径 → 剥引号后转引用，存干净路径", async (_n, text) => {
+    const pathExists = mkPathExists(true);
+    const d = await resolvePaste({ files: [], images: [], text, pathExists });
+    // 探测的是剥引号后的路径（引号本身在 Windows 上非法）
+    expect(pathExists).toHaveBeenCalledWith("C:\\Storage\\proj\\a.txt");
+    expect(d).toEqual({
+      kind: "refs",
+      refs: [{ type: "file", path: "C:\\Storage\\proj\\a.txt", label: "a.txt" }],
+    });
+  });
+
+  it("引号包裹但剥后不存在 → 纯文本原样插入（带引号，不丢字符）", async () => {
+    const pathExists = mkPathExists(false);
+    const d = await resolvePaste({
+      files: [], images: [], text: '"a/b"', pathExists,
+    });
+    expect(pathExists).toHaveBeenCalledWith("a/b");
+    // 注意：不做引号剥离，任何情况下都不丢字符
+    expect(d).toEqual({ kind: "inlineText", text: '"a/b"' });
+  });
+
+  it("引号包裹的目录 → 转目录引用（存干净路径）", async () => {
+    const d = await resolvePaste({
+      files: [], images: [],
+      text: '"C:\\Storage\\proj\\gui"',
+      pathExists: mkPathExists(true),
+      readDir: vi.fn().mockResolvedValue([{ path: "x", name: "x", is_dir: false }]),
+    });
+    expect(d).toEqual({
+      kind: "refs",
+      refs: [{ type: "dir", path: "C:\\Storage\\proj\\gui", label: "gui" }],
+    });
+  });
+
+  it("单侧引号不是包裹 → 不剥（不做无依据的猜测）", async () => {
+    const pathExists = mkPathExists(false);
+    const d = await resolvePaste({
+      files: [], images: [], text: '"C:\\Storage\\proj\\a.txt', pathExists,
+    });
+    expect(pathExists).not.toHaveBeenCalled(); // 未剥 → 字形闸拦下
+    expect(d).toEqual({ kind: "inlineText", text: '"C:\\Storage\\proj\\a.txt' });
+  });
+
+  it("Alt（forceText）优先于剥引号：所见即所得", async () => {
+    const pathExists = mkPathExists(true);
+    const d = await resolvePaste({
+      files: [], images: [], text: '"C:\\Storage\\proj\\a.txt"',
+      pathExists, forceText: true,
+    });
+    expect(pathExists).not.toHaveBeenCalled();
+    expect(d).toEqual({ kind: "inlineText", text: '"C:\\Storage\\proj\\a.txt"' });
+  });
+
+  it("盘符的冒号合法 → 绝对路径照常探测（不能误伤）", async () => {
+    const d = await resolvePaste({
+      files: [], images: [],
+      text: "C:\\Storage\\proj\\gui\\src",
+      pathExists: mkPathExists(true),
+    });
+    expect(d).toEqual({
+      kind: "refs",
+      refs: [{ type: "file", path: "C:\\Storage\\proj\\gui\\src", label: "src" }],
+    });
+  });
+
+  it("空格与中文是合法路径字符 → 不做字形拦截（只靠存在性兜底）", async () => {
+    // `C:\Program Files\app.exe` 这类真实路径必须能过 —— 所以空白不能进黑名单。
+    // 代价：`看看 a/b 目录` 这种句子仍会探一次（结果为"不存在"→ 纯文本），无害。
+    const pathExists = mkPathExists(true);
+    const d = await resolvePaste({
+      files: [], images: [], text: "C:\\Program Files\\app.exe", pathExists,
+    });
+    expect(pathExists).toHaveBeenCalledWith("C:\\Program Files\\app.exe");
+    expect(d.kind).toBe("refs");
+
+    const pathExists2 = mkPathExists(false);
+    const d2 = await resolvePaste({
+      files: [], images: [], text: "看看 a/b 目录", pathExists: pathExists2,
+    });
+    expect(pathExists2).toHaveBeenCalledWith("看看 a/b 目录"); // 没被字形拦（空格/中文合法）
+    expect(d2).toEqual({ kind: "inlineText", text: "看看 a/b 目录" }); // 靠"不存在"兜底
+  });
+
+  it("Alt（forceText）只影响文本 —— 剪贴板里的真实文件照常走引用", async () => {
+    const d = await resolvePaste({
+      files: [{ name: "a.ts", blob: mkBlob("x"), path: "/w/a.ts" }],
+      images: [], text: "", pathExists: mkPathExists(true), forceText: true,
+    });
+    expect(d).toEqual({
+      kind: "refs",
+      refs: [{ type: "file", path: "/w/a.ts", label: "a.ts" }],
+    });
+  });
+
   it("空输入 → 空 refs（不抛错）", async () => {
     const d = await resolvePaste({
       files: [],
@@ -205,6 +381,61 @@ describe("resolvePaste — 粘贴内容 → 引用/保存/文本 决策", () => 
       pathExists: mkPathExists(true),
     });
     expect(d.kind).toBe("saveImages");
+  });
+
+  // ── Ctrl+Shift+V 的 Shift 跟踪（forceText 的信号源）──
+  // ClipboardEvent 上没有修饰键信息，所以"粘贴时是否按着 Shift"靠键盘事件跟踪。
+  // 用假 window 验证事件 → 状态 → 幂等这条链。
+
+  it("Shift 跟踪：按住期间 true，松开 / 窗口失焦 → false", async () => {
+    vi.resetModules();
+    const listeners = new Map<string, ((e: unknown) => void)[]>();
+    (globalThis as unknown as { window: unknown }).window = {
+      addEventListener: (t: string, fn: (e: unknown) => void) => {
+        if (!listeners.has(t)) listeners.set(t, []);
+        listeners.get(t)!.push(fn);
+      },
+    };
+    try {
+      const m = await import("./clipboardService");
+      expect(m.isPlainPasteHeld()).toBe(false);
+      m.ensurePlainPasteTracking();
+      const fire = (t: string, e: unknown) => (listeners.get(t) || []).forEach((fn) => fn(e));
+
+      fire("keydown", { shiftKey: true });          // 按住 Shift（Ctrl+Shift+V 的中间态）
+      expect(m.isPlainPasteHeld()).toBe(true);
+      fire("keyup", { shiftKey: false });           // 松开 Shift
+      expect(m.isPlainPasteHeld()).toBe(false);
+      fire("keydown", { shiftKey: true });
+      fire("blur", undefined);                      // Alt+Tab 切走 → 不能把状态卡住
+      expect(m.isPlainPasteHeld()).toBe(false);
+    } finally {
+      delete (globalThis as unknown as { window?: unknown }).window;
+    }
+  });
+
+  it("Shift 跟踪是幂等的：重复安装只挂一份监听", async () => {
+    vi.resetModules();
+    let keydownCount = 0;
+    (globalThis as unknown as { window: unknown }).window = {
+      addEventListener: (t: string) => { if (t === "keydown") keydownCount++; },
+    };
+    try {
+      const m = await import("./clipboardService");
+      m.ensurePlainPasteTracking();
+      m.ensurePlainPasteTracking();
+      m.ensurePlainPasteTracking();
+      expect(keydownCount).toBe(1);
+    } finally {
+      delete (globalThis as unknown as { window?: unknown }).window;
+    }
+  });
+
+  it("Shift 跟踪：无 window 环境（测试 / 非浏览器）下调用不抛", async () => {
+    vi.resetModules();
+    const m = await import("./clipboardService");
+    expect(() => m.ensurePlainPasteTracking()).not.toThrow();
+    expect(m.isPlainPasteHeld()).toBe(false);
   });
 
   it("无 .path 的图片不会因 files+images 重复计数（粘贴图片只出一个 clip）", async () => {

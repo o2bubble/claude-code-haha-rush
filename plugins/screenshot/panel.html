@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <title>截屏</title>
 <style>
+  /* 亮色主题 —— 必须**自己定义**，不能指望宿主。
+     ⚠️ 面板是独立文档的 iframe，**拿不到宿主的 CSS 变量**（自定义属性不跨文档继承），
+     所以 `var(--bg-root, #0e0e12)` 永远取 fallback —— 插件一直只有深色（2026-09-21 用户发现）。
+     主题值由宿主 postMessage 推送（见底部 applyTheme），落到 html[data-theme]。
+     下面这组取值与宿主 tokens.css 的默认（亮色）一致，保证面板与主界面观感统一；
+     深色/深色变体**不定义** —— 落到各处的 fallback（深色），老宿主不推主题时行为不变。 */
+  [data-theme="light"] {
+    --bg-root: #ffffff; --bg-surface: #fafafa; --bg-hover: #f3f3f3;
+    --fg-primary: #333333; --fg-secondary: #666666; --fg-muted: #999999;
+    --accent: #007acc;
+    --border-light: #e0e0e0; --border-medium: #d4d4d4;
+  }
   html, body { margin: 0; height: 100%; }
   body {
     background: var(--bg-root, #0e0e12); color: var(--fg-primary, #cdd1da);
@@ -397,13 +409,20 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && selectMode) setSelectMode(false);
 });
 
-// 宿主推送主题（与其它插件面板同一套协议）
+// ── 主题跟随（URL 首帧 + 宿主后续推送）──
+// 首帧必须**自己读 URL**：宿主只在挂载时推一次 postMessage，那一刻 iframe 可能还没
+// 加载完成，消息就丢了 —— 丢了要等用户切主题才恢复（宿主侧注释也写了"加载后自己也
+// 读 URL theme 兜底"，本页此前漏了这一步）。深色变体统一归一到 "dark"（CSS 里深浅
+// 各一套，变体走深色 fallback），与 preview.html 同一套逻辑。
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
+}
+applyTheme(q.get("theme"));
+
 window.addEventListener("message", (ev) => {
   const d = ev.data;
   if (!d || d.source !== "plugin:host") return;
-  if (d.kind === "theme" && d.payload && d.payload.theme) {
-    document.documentElement.dataset.theme = d.payload.theme;
-  }
+  if (d.kind === "theme") applyTheme(d.payload && d.payload.theme);
 });
 
 setButtons(false);

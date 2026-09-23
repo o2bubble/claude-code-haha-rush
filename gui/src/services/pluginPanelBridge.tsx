@@ -531,6 +531,19 @@ export async function dispatchPluginUplink(
     case "close-indicator":
       await closePluginIndicator(pluginName);
       return true;
+    // 让**系统**接管这个指示窗的拖拽（挂件按住时请求）。
+    //
+    // 为什么不让插件自己 JS 移动窗口：窗口要追着鼠标跑，而 JS 那条路每次移动都要
+    // `pointermove → postMessage → invoke → set_position` 一整圈（十几到几十毫秒），
+    // 窗口明显滞后 —— 插件作者实测抱怨"拖着会脱离鼠标控制、自己停下来"。
+    // 系统拖拽在消息循环里完成，零 IPC、零滞后（见 Rust `start_indicator_drag`）。
+    case "drag-indicator": {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("start_indicator_drag", { plugin: pluginName }).catch((e) => {
+        console.warn("[plugin] start_indicator_drag failed:", e);
+      });
+      return true;
+    }
     case "chat-reference":
       await sendPluginChatReference(payload);
       return true;

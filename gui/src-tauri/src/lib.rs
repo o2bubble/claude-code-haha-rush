@@ -27,6 +27,7 @@ mod backend;
 mod db;
 mod diagnostics;
 mod guard;
+mod instances;
 mod mcp;
 mod migrations;
 mod plugin_process;
@@ -44,6 +45,14 @@ struct DbState {
 
 /// The `--workspace <path>` CLI argument, if this instance was launched with one.
 static CLI_WORKSPACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The `--session <id>` CLI argument —— 升级后恢复实例时带上，
+/// 前端在绑定工作区后读它并自动加载该会话（见 command `get_cli_session`）。
+static CLI_SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 启动后等多久再按快照恢复其他实例（秒）。给本实例留出绑定工作区 + 写自述的时间
+/// （去重靠"已有实例绑定该工作区"，写太早会漏判）。
+const STARTUP_INSTANCE_RESTORE_DELAY_SECS: u64 = 8;
 
 /// The `--intent <intentId>` CLI argument, if this instance was launched in
 /// intent mode. Mutually exclusive with CLI_WORKSPACE: when set, regular args
@@ -242,8 +251,10 @@ pub fn run() {
     // instance attaches, claims it, and executes instead of showing landing.
     // --intent swallows all regular args, so --workspace is ignored when present.
     // --workspace <path>: (non-intent) bind directly, skipping the selector.
+    // --session <id>: 绑定工作区后自动加载该会话 —— 升级后恢复实例用（见 instances.rs）。
     let mut cli_workspace: Option<String> = None;
     let mut cli_intent: Option<String> = None;
+    let mut cli_session: Option<String> = None;
     {
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
@@ -260,6 +271,11 @@ pub fn run() {
                         cli_workspace = Some(v);
                     }
                 }
+                "--session" => {
+                    if let Some(v) = args.next() {
+                        cli_session = Some(v);
+                    }
+                }
                 _ => {}
             }
         }
@@ -272,9 +288,38 @@ pub fn run() {
     } else if let Some(ws) = &cli_workspace {
         log::info!("CLI --workspace: {}", ws);
         CLI_WORKSPACE.set(ws.clone()).ok();
+        if let Some(sess) = &cli_session {
+            log::info!("CLI --session: {}", sess);
+            CLI_SESSION.set(sess.clone()).ok();
+        }
         // Set the process-level binding early so setup()'s settings::load_settings()
         // merges this workspace's gui (window state, layout) before restore.
         settings::set_bound_work_dir(ws);
+    }
+
+    // ── 无参启动时认领"升级前自己的状态"（必须在 load_settings 之前）──
+    //
+    // updater 替换完文件只会**裸 spawn 一个 exe（不带任何参数）** —— 它不知道原来
+    // 绑的哪个工作区，所以那个实例启动后停在"选择工作区"（用户实测反馈："升级完
+    // 没进工作区、也没打开原会话"）。升级前存的快照里有 self_record，这里认领回来。
+    //
+    // 位置很关键：`setup()` 里认领**太晚** —— load_settings（下一行）已经跑过了，
+    // 工作区的窗口状态/布局就不会被合并。所以这里用 app_data_dir_early() 提前定位
+    // （那时候还没有 AppHandle）。setup() 里仍留了一份兜底认领，防常量失配。
+    //
+    // ⚠️ 仅当**既没有** --workspace **也没有** --intent 时才认领：带参数的实例
+    // （用户手动指定、被 restore 拉起、intent 自带工作区）绝不该被旧快照覆盖。
+    if cli_workspace.is_none() && cli_intent.is_none() {
+        if let Some(dir) = instances::app_data_dir_early() {
+            if let Some((ws, sess)) = instances::adopt_self_record(&dir) {
+                log::info!("[instances] 早期认领自己的状态: ws={ws} session={sess}");
+                CLI_WORKSPACE.set(ws.clone()).ok();
+                if !sess.is_empty() {
+                    CLI_SESSION.set(sess).ok();
+                }
+                settings::set_bound_work_dir(&ws);
+            }
+        }
     }
 
     let settings = settings::load_settings();
@@ -351,6 +396,29 @@ pub fn run() {
             // 全局 AppHandle：供 server 事件转发器 emit 到前端。
             server_client::set_app_handle(app.handle().clone());
 
+            // ── 升级后认领自己的状态（必须在建窗之前）──
+            //
+            // updater 替换完文件只会**裸 spawn 一个 exe（不带任何参数）** —— 它不知道
+            // 原来绑的哪个工作区，所以那个实例启动后停在"选择工作区"（用户实测反馈：
+            // "升级完没进工作区、也没打开原会话"）。升级前存的快照里有 self_record，
+            // 这里认领回来，效果等同于用户当初就是带 --workspace/--session 启动的。
+            //
+            // ⚠️ 仅当**没有** --workspace 参数时才认领：带参数的实例（用户手动指定、
+            // 或被 restore 逻辑拉起）绝不该被一份旧快照覆盖。
+            // 必须在建窗之前 —— 前端的 get_cli_workspace 是在页面加载后才调的。
+            if CLI_WORKSPACE.get().is_none() {
+                if let Ok(dir) = app.path().app_data_dir() {
+                    if let Some((ws, sess)) = instances::adopt_self_record(&dir) {
+                        log::info!("[instances] 认领自己的状态: ws={ws} session={sess}");
+                        CLI_WORKSPACE.set(ws.clone()).ok();
+                        if !sess.is_empty() {
+                            CLI_SESSION.set(sess).ok();
+                        }
+                        settings::set_bound_work_dir(&ws);
+                    }
+                }
+            }
+
             // 进程级环境：GUI 及其所有子进程（IDE 后端/系统终端）不需要系统注册表
             // 即可工作。系统级只保留 CLAUDE_CODE_HAHA_HOME（非 GUI 场景锚点），
             // PATH 等工具目录在进程内前置——免提权、装完免重启、mac/win 统一。
@@ -410,6 +478,26 @@ pub fn run() {
             let main_builder = main_builder.decorations(false);
             let main_window = main_builder.build()?;
 
+            // 🔴 主窗口关闭前，先关掉本实例开的所有插件窗口（挂件 / 覆盖层）。
+            //
+            // 为什么必须做：Tauri 的退出策略是「**所有**窗口都关闭后才退出进程」。
+            // 插件窗口（open_plugin_indicator / open_plugin_overlay）是独立顶层窗口
+            // —— 主窗口关掉后它还在，进程就认为"还有窗口"而**不退出**，挂件于是成了
+            // 没人管得住的孤儿：新开的实例不认识它（窗口标题里是旧实例的 PID），
+            // 用户既关不掉也拖不动（2026-09-21 用户实测，最后只能杀进程）。
+            // 关掉插件窗口后主窗口再关 → 窗口归零 → 进程正常退出。
+            //
+            // ⚠️ 只关**本进程**的窗口（`app.webview_windows()` 本就是本实例的）——
+            // 多开时别的实例有自己的挂件/覆盖层，绝不能碰。
+            {
+                let app_h = app.handle().clone();
+                main_window.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                        close_plugin_windows(&app_h);
+                    }
+                });
+            }
+
             // Restore window position first (only if not maximized).
             // When maximized, the OS manages position — skip to avoid
             // restoring a snapped-to-edge position as a normal position.
@@ -429,6 +517,89 @@ pub fn run() {
             // assigning a slot (or the saved position points at a removed monitor)
             // — bring it back on-screen so the GUI is never invisible.
             ensure_window_on_screen(app.handle(), &main_window);
+
+            // ── 升级后恢复其他实例 ──
+            // 升级时所有实例被强杀（释放 exe 文件锁），只有本进程被 updater 重启。
+            // 若升级前存过"恢复快照"，这里按快照逐个拉起（带 --workspace/--session）。
+            // 详见 instances.rs 的模块注释。
+            //
+            // ⚠️ **延迟几秒再拉**：本实例要先完成工作区绑定/写自述，且别让新实例的
+            // 启动与首屏渲染抢资源（用户刚点完升级，正在等第一个窗口）。
+            //
+            // ⚠️ **必须在拉下一个之前等上一个就绪**（`wait_for_new_instance`）：
+            // 光按固定间隔 spawn 是**假串行** —— spawn 只启动进程，真正的资源消耗在
+            // 随后的初始化（WebView2 + 后端 + 5 个插件，十几秒），所以上一个还在初始化
+            // 时下一个就开始了，瞬时峰值照样叠加。2026-09-22 用户升级时系统服务成片
+            // 崩溃（explorer 重启），与此类峰值高度相关。
+            //
+            // 可用设置 `autoRestoreInstances` 关掉（默认开）。
+            if crate::settings::load_settings().auto_restore_instances.unwrap_or(true) {
+                let app_h = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(
+                        STARTUP_INSTANCE_RESTORE_DELAY_SECS,
+                    ));
+                    let Ok(dir) = app_h.path().app_data_dir() else { return };
+                    let Some(snap) = instances::take_restore_snapshot(&dir) else {
+                        return; // 没有待恢复的（绝大多数启动都是这条路）
+                    };
+                    if snap.instances.is_empty() {
+                        return;
+                    }
+                    let Ok(exe) = std::env::current_exe() else { return };
+                    // 发起前已在跑的 pid —— 用来区分"本来就在的"和"刚拉起的"（等就绪用）
+                    let before_pids: std::collections::HashSet<u32> =
+                        instances::collect_live_instances(&dir, instances::is_process_alive)
+                            .into_iter()
+                            .map(|r| r.pid)
+                            .collect();
+
+                    let mut spawned = 0usize;
+                    for rec in &snap.instances {
+                        // 去重**每轮重新取**（不是循环外取一次）：刚拉起的实例绑定后
+                        // 会写自述，重新取才能看到它；也能发现用户期间手工开的同工作区窗口。
+                        let live_workspaces: std::collections::HashSet<String> =
+                            instances::collect_live_instances(&dir, instances::is_process_alive)
+                                .into_iter()
+                                .map(|r| r.workspace)
+                                .filter(|w| !w.is_empty())
+                                .collect();
+                        if live_workspaces.contains(&rec.workspace) {
+                            log::info!("[instances] 跳过 {}（已有实例绑定该工作区）", rec.workspace);
+                            continue;
+                        }
+                        match instances::spawn_instance(&exe, &rec.workspace, &rec.session_id) {
+                            Ok(_) => {
+                                spawned += 1;
+                                // 等它真正绑定完成再拉下一个（超时不阻塞，继续下一个）
+                                let ready = instances::wait_for_new_instance(
+                                    &dir,
+                                    &before_pids,
+                                    instances::is_process_alive,
+                                    instances::INSTANCE_READY_TIMEOUT_MS,
+                                );
+                                if ready {
+                                    log::info!("[instances] {} 已就绪，继续下一个", rec.workspace);
+                                } else {
+                                    log::warn!(
+                                        "[instances] {} 等待就绪超时（{}s），继续下一个",
+                                        rec.workspace,
+                                        instances::INSTANCE_READY_TIMEOUT_MS / 1000
+                                    );
+                                }
+                            }
+                            Err(e) => log::warn!("[instances] 拉起 {} 失败: {e}", rec.workspace),
+                        }
+                    }
+                    log::info!(
+                        "[instances] 恢复完成：拉起 {spawned} 个 / 快照 {} 个",
+                        snap.instances.len()
+                    );
+                });
+            } else {
+                log::info!("[instances] 自动恢复实例已关闭（设置 autoRestoreInstances=false）");
+            }
+
             // 启动期迁移（旧 profile 目录 / 单文件 MCP → 双文件）——
             // 全清单见 src/migrations.rs 的 MIGRATION_REGISTRY。
             // 必须在 spawn 后端之前跑（后端启动时读全局配置）。
@@ -507,6 +678,10 @@ pub fn run() {
             mcp::get_mcp_port,
             bind_workspace,
             get_cli_workspace,
+            get_cli_session,
+            update_instance_record,
+            prepare_restore_snapshot,
+            count_restorable_instances,
             get_startup_intent_mode,
             get_startup_intent_id,
             claim_startup_intent,
@@ -578,7 +753,13 @@ pub fn run() {
             close_plugin_overlay,
             open_plugin_indicator,
             move_plugin_indicator,
+            #[cfg(windows)]
+            start_indicator_drag,
             close_plugin_indicator,
+            open_chat_widget,
+            show_chat_widget,
+            close_chat_widget,
+            focus_main_window,
             open_url_window,
             open_in_explorer,
             guard::guard_event,
@@ -628,6 +809,11 @@ pub fn run() {
                 }
                 // T3: 插件后台进程随 GUI 退出 kill(防孤儿/占端口)。
                 crate::plugin_process::kill_all_plugin_processes();
+                // 删本实例的自述文件（升级路径走 exit(0) 绕过这里，但那种情况下
+                // 进程已死 → collect_live_instances 会按 pid 判死并清掉，不影响正确性）。
+                if let Ok(dir) = app_handle.path().app_data_dir() {
+                    instances::remove_instance_record(&dir, std::process::id());
+                }
                 log::info!("Cleanup complete");
             }
         });
@@ -1462,6 +1648,81 @@ fn get_app_settings(_state: tauri::State<Mutex<settings::AppSettings>>) -> Resul
 #[tauri::command]
 fn get_cli_workspace() -> Option<String> {
     CLI_WORKSPACE.get().cloned()
+}
+
+/// `--session <id>` CLI arg（升级恢复实例时带上）。前端在绑定工作区后读它，
+/// 并自动加载该会话 —— 否则恢复的实例只回到工作区、不回到原来的会话。
+#[tauri::command]
+fn get_cli_session() -> Option<String> {
+    CLI_SESSION.get().cloned()
+}
+
+/// 更新本实例的自述（工作区 / 当前会话变了就写一次）。
+///
+/// 前端在「绑定工作区」与「加载/切换会话」时调用 —— 升级时读这些自述来知道
+/// **每个实例在跑什么**（见 instances.rs 的模块注释）。写失败不影响使用，
+/// 最多是升级后少恢复一个窗口，故只 log 不抛。
+///
+/// `keep_session`：`sessionId` 为空时**保留原有会话**而不是清空。
+///
+/// 为什么需要（2026-09-22 用户实测"恢复了实例但没加载会话"）：前端在**每次**
+/// `CHAT_STATE_CHANGED` 都上报，而流式的每一个 token 都会触发它 —— 期间 `sessionId`
+/// 可能短暂为 null（会话刚切、新建中、还没加载完），若照直写成空，自述里就没有会话了，
+/// 升级后自然"只绑工作区、不开会话"。会话为空几乎总是"还没就绪"而不是"用户不要会话"，
+/// 所以默认保留；真正要清空（用户新建会话）由明确传 false 表达。
+#[tauri::command]
+fn update_instance_record(
+    app: tauri::AppHandle,
+    workspace: Option<String>,
+    session_id: Option<String>,
+    keep_session: Option<bool>,
+) {
+    let Ok(dir) = app.path().app_data_dir() else { return };
+    let pid = std::process::id();
+    let incoming = session_id.unwrap_or_default();
+    let resolved_session = if incoming.is_empty() && keep_session.unwrap_or(false) {
+        // 读回已有值沿用（读不到就是空，等价于清空）
+        instances::read_instance_record(&dir, pid)
+            .map(|r| r.session_id)
+            .unwrap_or_default()
+    } else {
+        incoming
+    };
+    let rec = instances::InstanceRecord {
+        pid,
+        workspace: workspace.unwrap_or_default(),
+        session_id: resolved_session,
+        updated_at: instances::now_ms(),
+    };
+    if let Err(e) = instances::write_instance_record(&dir, &rec) {
+        log::warn!("[instances] 写实例自述失败: {e}");
+    }
+}
+
+/// 升级前调用：把所有**还活着**的实例状态存成恢复快照。返回写入的实例数。
+#[tauri::command]
+fn prepare_restore_snapshot(app: tauri::AppHandle) -> Result<usize, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let live = instances::collect_live_instances(&dir, instances::is_process_alive);
+    let n = instances::save_restore_snapshot(&dir, std::process::id(), &live)?;
+    log::info!("[instances] 恢复快照已写入：{n} 个实例（共发现 {} 个存活）", live.len());
+    Ok(n)
+}
+
+/// 「升级并恢复」按钮要显示的数量：**除自己以外**、已绑定工作区、且会真的被恢复的实例数。
+///
+/// 与 `save_restore_snapshot` 用**同一套过滤规则**（排除自己 + 排除无工作区 +
+/// 截断到上限）——否则按钮写着"恢复 3 个"、实际只恢复 1 个，是明确的错误信息。
+#[tauri::command]
+fn count_restorable_instances(app: tauri::AppHandle) -> Result<usize, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let live = instances::collect_live_instances(&dir, instances::is_process_alive);
+    let self_pid = std::process::id();
+    Ok(live
+        .iter()
+        .filter(|r| r.pid != self_pid && !r.workspace.trim().is_empty())
+        .count()
+        .min(instances::MAX_RESTORE_INSTANCES))
 }
 
 /// True when this instance was launched with `--intent <id>` (intent mode).
@@ -2319,6 +2580,29 @@ fn overlay_label_prefix(plugin: &str) -> String {
     format!("overlay-{slug}-")
 }
 
+/// 关闭**本实例**开的所有插件窗口（挂件 / 覆盖层）。
+///
+/// 主窗口关闭时调用（见那里的长注释）——不这么做，插件窗口会让 Tauri 认为
+/// "还有窗口"而拖住进程不退，挂件就成了关不掉的孤儿。
+///
+/// 只遍历本进程的窗口 —— 多开时别的实例有自己的窗口，绝不能碰。
+/// label 规则：挂件 `indicator-<slug>`、覆盖层 `overlay-<slug>-<显示器序号>`。
+fn close_plugin_windows(app: &tauri::AppHandle) {
+    let mut closed = 0usize;
+    for w in app.webview_windows().values() {
+        let label = w.label().to_string();
+        // `widget-` 也要关：聊天挂件无装饰、没有系统关闭按钮，主窗关掉后它会变成
+        // 关不掉的孤儿，而 Tauri 要等**所有**窗口关闭才退进程 → 进程卡住不退出。
+        if label.starts_with("indicator-") || label.starts_with("overlay-") || label.starts_with("widget-") {
+            let _ = w.close();
+            closed += 1;
+        }
+    }
+    if closed > 0 {
+        log::info!("[Rust] close_plugin_windows: closed {closed} plugin window(s)");
+    }
+}
+
 /// 插件请求开「全屏 overlay」窗口 —— **通用能力**，非某个插件专属。
 ///
 /// 用途：需要铺满显示器、置顶、无边框的全屏交互 UI（区域框选、浮层标注、取色器…）。
@@ -2385,7 +2669,7 @@ fn open_plugin_overlay(
     //
     // 用 query 而不是改 `#overlay/` 前缀：hash 的解析协议（前端 parseOverlayHash）
     // 保持不变，避免波及多处解析；query 是 URL 标准部分，Tauri 的 App 资源解析照常。
-    let mut path = if want_transparent {
+    let path = if want_transparent {
         path.replacen("index.html", "index.html?overlay-clear=1", 1)
     } else {
         path
@@ -2614,6 +2898,25 @@ fn open_plugin_indicator(
         path.push_str(&hash_enc(p));
     }
 
+    // 🔴 指示窗**始终透明** —— 挂件自己做圆角/半透明底，窗口层必须让圆角外透出桌面。
+    //
+    // 两个缺口都要补（缺任一都会看到"圆角外一圈黑"）：
+    //   ① 窗口不透明 → 找 `transparent(true)`（下面 build 链）；
+    //   ② 页面层铺黑 → 本 path 上的 `?overlay-clear=1`（gui/index.html 据此不铺底色）。
+    //   ② 之所以存在：指示窗复用了 `#overlay/` hash 协议，而那个前缀默认是"铺黑"的
+    //   （给截图框选类 overlay 防白闪用）—— 给挂件铺任何底色，窗口透明了也白搭
+    //   （与 pointer"黑屏"同一类根因，见 open_plugin_overlay 的长注释）。
+    //
+    // 对既有插件是纯改善：圆角外从"窗底色"变成真正的透明（body 铺满的挂件观感不变）。
+    //
+    // 同一个 query 里带上**能力标记** `native-drag=1`：挂件据此改用宿主
+    // `start_indicator_drag`（系统级拖拽，见该 command 的注释）而不是 JS 移动窗口。
+    // 用 query 而非探测：插件读一个参数就知道该走哪条路，不必等一次失败再回退。
+    #[cfg(windows)]
+    let path = path.replacen("index.html", "index.html?overlay-clear=1&native-drag=1", 1);
+    #[cfg(not(windows))]
+    let path = path.replacen("index.html", "index.html?overlay-clear=1", 1);
+
     let w = width.unwrap_or(300).clamp(120, 2000);
     let h = height.unwrap_or(150).clamp(60, 2000);
 
@@ -2656,6 +2959,7 @@ fn open_plugin_indicator(
         .resizable(false)
         .shadow(false)
         .visible(false)      // 先隐藏，稍后再显示（避免 WebView2 白底闪一下）
+        .transparent(true)   // 见上方注释：圆角外必须透出桌面（页面层配合 overlay-clear）
         .data_directory(webview_data_dir(&app2))
         .build();
 
@@ -2704,6 +3008,60 @@ fn move_plugin_indicator(
     Ok(())
 }
 
+/// 让**系统**接管指示窗的拖拽（用户按住挂件拖动时调用）。
+///
+/// 为什么要原生拖拽而不是 JS 移动窗口（2026-09-20 用户实测）：
+/// 挂件窗口只有 ~356×108，而窗口要**追着鼠标跑**。走 JS 的话每次移动都要
+/// `pointermove → postMessage → 宿主 → invoke → Rust set_position` 一整条 IPC
+/// 链路（十几到几十毫秒），窗口明显滞后于鼠标 —— 用户描述为"拖着会经常脱离
+/// 鼠标的控制、自己停下来"。改由系统驱动后，拖拽在**内核/系统消息循环**里完成：
+/// 零 IPC、零滞后、鼠标不会脱离，且松手位置天然就是窗口位置。
+///
+/// 实现是 Windows 无边框窗口拖拽的标准做法：`ReleaseCapture()` 清掉当前捕获
+/// （WebView2 按下时可能已 SetCapture），再给窗口发 `WM_NCLBUTTONDOWN + HTCAPTION`
+/// —— DefWindowProc 会进入模态拖拽循环，直到用户松手才返回。
+///
+/// ⚠️ `SendMessage` **阻塞**到拖拽结束，所以放独立线程：command 立刻返回，
+/// 不占 Tauri 的 async executor 线程（拖拽可能持续几秒）。
+/// ⚠️ hwnd 是裸指针（非 Send），跨线程用 isize 中转再还原。
+///
+/// 位置记忆不在这里做 —— 挂件页面在拖拽结束后读自己的 `window.screenX/Y`
+/// 上报给插件进程（见 plugins/rss-reader/indicator.html）。
+#[tauri::command]
+fn start_indicator_drag(app: tauri::AppHandle, plugin: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SendMessageW, HTCAPTION, WM_NCLBUTTONDOWN,
+        };
+
+        let label = indicator_label(&plugin);
+        let w = app
+            .get_webview_window(&label)
+            .ok_or_else(|| format!("指示窗不存在（{label}）"))?;
+        let hwnd = w.hwnd().map_err(|e| format!("取窗口句柄失败: {e}"))?.0 as isize;
+        log::info!("[Rust] start_indicator_drag: {plugin}");
+
+        std::thread::spawn(move || unsafe {
+            // 清掉既有捕获（否则拖拽可能被其他窗口/WebView 的捕获干扰）
+            ReleaseCapture();
+            SendMessageW(
+                hwnd as *mut core::ffi::c_void,
+                WM_NCLBUTTONDOWN,
+                HTCAPTION as usize,
+                0,
+            );
+        });
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, plugin);
+        Err("原生拖拽仅 Windows 支持（其它平台挂件走 JS 拖动）".into())
+    }
+}
+
 /// 关闭指示窗（插件请求 / 面板关 / 禁用插件时清理）。
 #[tauri::command]
 fn close_plugin_indicator(app: tauri::AppHandle, plugin: String) -> Result<(), String> {
@@ -2712,6 +3070,158 @@ fn close_plugin_indicator(app: tauri::AppHandle, plugin: String) -> Result<(), S
         let _ = w.close();
         log::info!("[Rust] close_plugin_indicator: {plugin}");
     }
+    Ok(())
+}
+
+// ── 聊天挂件（纯挂件模式）──
+//
+// 一个半透明、置顶、无边框、可拖的小窗，只显示当前会话最近几条消息 + 输入框。
+// **它不是 leaf 的普通浮窗**：后端 WS 与 chatSession 只在主窗进程里，所以挂件靠
+// DataBus 从主窗镜像数据（同 float 浮窗的机制，见 services/bridge.ts 的 leaf 角色）。
+//
+// 进入挂件模式 = 开这个小窗 + **隐藏主窗**（主窗进程必须活着 —— 后端在它里面）。
+
+/// 挂件窗的固定 label —— 单例。
+/// 挂件跟随主窗当前会话，不需要多实例；固定名让"重复进入"天然幂等。
+const WIDGET_LABEL: &str = "widget-main";
+/// 挂件窗的兜底显示延迟：前端就绪信号（握手 + 历史回填完成）可能永不到达，
+/// 不能让用户干等 —— 到点无论就绪与否都亮出来（同 INDICATOR_SHOW_DELAY_MS 的思路，
+/// 但更长：挂件要等桥接握手与历史回填）。
+const WIDGET_SHOW_FALLBACK_MS: u64 = 1500;
+
+/// 打开聊天挂件（若已存在则直接亮出）。
+///
+/// 只建窗、**不隐藏主窗** —— 隐藏动作在 `show_chat_widget` 里做：那时挂件已完成
+/// 握手与历史回填、马上要显示，先亮挂件再藏主窗才不会出现"两个都没有"的空窗期。
+#[tauri::command]
+fn open_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(WIDGET_LABEL) {
+        // 幂等：已开着就亮它（主窗由调用方决定去留）
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+
+    let w: u32 = 360;
+    let h: u32 = 560;
+    let (px, py) = {
+        let m = app
+            .primary_monitor()
+            .map_err(|e| format!("取主显示器失败: {e}"))?
+            .ok_or("没有主显示器")?;
+        let pos = m.position();
+        let size = m.size();
+        (
+            pos.x + size.width as i32 - w as i32 - 24,
+            pos.y + size.height as i32 - h as i32 - 80, // 留出任务栏
+        )
+    };
+
+    // `?overlay-clear=1` → gui/index.html 把根背景设成 transparent。
+    // ⚠️ 缺了它，tokens.css 的 `html{background:var(--bg-root)}` 会把窗口涂实，
+    // 挂件的 `transparent(true)` 就白搭（圆角外一圈底色）。
+    let path = "index.html?overlay-clear=1#widget/main".to_string();
+    log::info!("[Rust] open_chat_widget: {w}x{h} @({px},{py})");
+
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let built = with_debug_args(tauri::WebviewWindowBuilder::new(
+            &app2,
+            WIDGET_LABEL,
+            tauri::WebviewUrl::App(path.into()),
+        ))
+        .title("Claude Code Widget")
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .resizable(true)     // ⚠️ 与插件指示窗相反：挂件要能拉大小
+        .visible(false)      // 先隐藏，等页面就绪（避免 WebView2 白底首帧）
+        .transparent(true)   // 半透明的窗口层前提（页面层配合 overlay-clear=1）
+        .inner_size(w as f64, h as f64)
+        .min_inner_size(240.0, 220.0)
+        .data_directory(webview_data_dir(&app2))
+        // ⚠️ 与插件指示窗的关键分歧：**绝不** set_focusable(false)。
+        //    那条是给"不该被激活"的指示窗用的，挂件里有输入框，必须能拿键盘焦点。
+        .build();
+
+        match built {
+            Ok(win) => {
+                let _ = win.set_position(tauri::PhysicalPosition::new(px, py));
+                let app_ev = app2.clone();
+                win.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::Destroyed) {
+                        // 🔴 主窗恢复放在 **Rust 侧**，不依赖被隐藏页的 JS：
+                        //    这样 Alt+F4、任务管理器结束、渲染进程崩溃……任何销毁路径
+                        //    都能把主窗亮回来。（隐藏页的定时器会被 Chromium 节流。）
+                        if let Some(main) = app_ev.get_webview_window("main") {
+                            let _ = main.show();
+                            let _ = main.unminimize();
+                            let _ = main.set_focus();
+                        }
+                        let _ = app_ev.emit("chat-widget-closed", ());
+                        log::info!("[Rust] 聊天挂件已关闭，主窗已恢复");
+                    }
+                });
+                let win_t = win.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(WIDGET_SHOW_FALLBACK_MS));
+                    let _ = win_t.show();
+                });
+                log::info!("[Rust] 聊天挂件已创建: {WIDGET_LABEL}");
+            }
+            Err(e) => log::error!("[Rust] 聊天挂件创建失败: {e}"),
+        }
+    });
+
+    Ok(())
+}
+
+/// 挂件页就绪（已完成桥接握手 + 历史回填）→ 亮挂件 + 藏主窗。
+///
+/// 顺序要紧：**先 show 挂件、再 hide 主窗** —— 反过来的话中间会有一帧什么都看不到。
+#[tauri::command]
+fn show_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(win) = app.get_webview_window(WIDGET_LABEL) else {
+        return Err("挂件窗不存在".into());
+    };
+    let _ = win.show();
+    let _ = win.set_focus();
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.hide();
+    }
+    log::info!("[Rust] 进入挂件模式（主窗已隐藏）");
+    Ok(())
+}
+
+/// 退出挂件模式（挂件里的 ✕ 调用）。
+///
+/// 主窗的真正恢复由窗口销毁回调负责；这里补一次是**幂等兜底**（覆盖"窗口本就不存在"
+/// 这种边界：那时不会有 Destroyed 事件，得有人把主窗亮回来）。
+#[tauri::command]
+fn close_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(WIDGET_LABEL) {
+        let _ = win.close();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
+    Ok(())
+}
+
+/// 把主窗亮出来并聚焦，**但不关挂件**。
+///
+/// 用途：挂件模式下若 AI 触发权限确认，弹窗渲染在（不可见的）主窗里 —— 用户会看到
+/// "卡住"。挂件检测到输入被阻止时给出「回主窗确认」按钮，用户确认完可以再切回挂件。
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(main) = app.get_webview_window("main") else {
+        return Err("主窗不存在".into());
+    };
+    let _ = main.show();
+    let _ = main.unminimize();
+    let _ = main.set_focus();
     Ok(())
 }
 

@@ -3,9 +3,9 @@ import type { ChatMessage } from "../../stores/chatStore";
 import { dedupTools } from "../../utils/dedupTools";
 import { parseReferences } from "../../utils/referenceParser";
 import { ReferenceLink } from "./ReferenceLink";
-import { editorStore, isPreviewable } from "../../stores/editorStore";
 import { activatePanel } from "../../stores/layoutStore";
-import { fileService } from "../../services/fileService";
+import { openPathInEditor } from "../../services/referenceActions";
+import { TranslateButton } from "./TranslateButton";
 import { getDesktops, addItem, findSmartPlace, panToItem } from "../../stores/desktopStore";
 import { setSelection } from "../desktop/selectionStore";
 import { isDarkTheme } from "../../utils/themeUtils";
@@ -57,39 +57,60 @@ function ClickableFilePath({ path, style }: { path: string; style?: React.CSSPro
     <span
       style={{ ...style, cursor: "pointer", textDecoration: "underline", textDecorationColor: "var(--semantic-info)", textUnderlineOffset: 3 }}
       title={`Click to open: ${path}`}
-      onClick={async () => {
-        const name = path.split(/[/\\]/).pop() || path;
-        // 二进制/预览类（图片、PDF、SVG）不能当文本读 —— 原先一律走 readFile
-        // 再 openFile，这类文件读出乱码或抛错，被 catch 静默吞掉，表现为
-        // "点了没反应"。改走 openPreview：EditorPanel 会挂 FilePreview 组件，
-        // 由它用 read_bytes 加载（见 editorStore.openPreview 的注释）。
-        if (isPreviewable(path)) {
-          editorStore.openPreview(path, name);
-          return;
-        }
-        try {
-          const content = await fileService.readFile(path);
-          editorStore.openFile(path, name, content);
-          activatePanel("editor");
-        } catch { /* file not readable */ }
-      }}
+      onClick={() => void openPathInEditor(path, { silent: true })}
     >
       {path}
     </span>
   );
 }
 
+/**
+ * 文件路径 → highlight.js 语言名。**空串表示"不高亮"**（走纯转义）。
+ *
+ * ⚠️ 映射漏了扩展名的代价**极其昂贵**：`highlightCode` 在 lang 为空时会退回
+ * `hljs.highlightAuto()`，而那是 highlight.js 最慢的路径 —— 它要对**全部 192 个
+ * 已注册语言**各试一遍。实测（2026-09-21）**单次 1026 字符的代码：指定语言 11ms，
+ * highlightAuto 322ms（慢 29 倍）**。会话里一篇 135 个 Edit/Write 块，若 22 个
+ * 落到 auto 上 → 约 7 秒纯卡在高亮上，表现为"切换会话要等好几秒"。
+ * 所以这里宁可**多列常见扩展名**，也不让它们掉进 auto。
+ *
+ * 查漏方法：拿一个大会话的 jsonl，统计 Edit/Write 的 file_path 扩展名，
+ * 看哪些没在这张表里（`scripts/` 下没有现成脚本，临时写个 node 统计即可）。
+ */
+const EXT_TO_LANG: Record<string, string> = {
+  ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
+  js: "javascript", jsx: "javascript", cjs: "javascript", mjs: "javascript",
+  py: "python", pyi: "python", rs: "rust", go: "go",
+  java: "java", kt: "kotlin", scala: "scala", swift: "swift", dart: "dart",
+  c: "c", h: "c", cpp: "cpp", cc: "cpp", cxx: "cpp", hpp: "cpp", hh: "cpp",
+  cs: "csharp", php: "php", rb: "ruby", lua: "lua", pl: "perl", r: "r",
+  css: "css", scss: "scss", less: "less", html: "xml", htm: "xml",
+  vue: "xml", svelte: "xml", xml: "xml", svg: "xml",
+  json: "json", jsonc: "json", json5: "json",
+  yaml: "yaml", yml: "yaml", toml: "ini", ini: "ini", conf: "ini", cfg: "ini", env: "ini",
+  md: "markdown", markdown: "markdown", mdx: "markdown",
+  sql: "sql", graphql: "graphql", gql: "graphql",
+  sh: "bash", bash: "bash", zsh: "bash", fish: "bash",
+  ps1: "powershell", psm1: "powershell",
+  bat: "dos", cmd: "dos",
+  dockerfile: "dockerfile", makefile: "makefile", mk: "makefile",
+  diff: "diff", patch: "diff",
+  txt: "",         // 明确"不高亮"——**不要**让它掉进 auto
+  log: "", gitignore: "", gitattributes: "", editorconfig: "",
+};
+
+/** 无扩展名但有名的文件（`Dockerfile` / `Makefile`）。 */
+const NAME_TO_LANG: Record<string, string> = {
+  dockerfile: "dockerfile", makefile: "makefile", gnumakefile: "makefile",
+  ".gitignore": "", ".gitattributes": "", ".editorconfig": "", ".env": "ini",
+};
+
 function detectLang(filePath: string): string {
-  const ext = filePath.split(".").pop()?.toLowerCase() || "";
-  const map: Record<string, string> = {
-    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
-    py: "python", rs: "rust", go: "go", java: "java", c: "c", cpp: "cpp",
-    h: "c", hpp: "cpp", css: "css", scss: "scss", html: "xml", json: "json",
-    yaml: "yaml", yml: "yaml", toml: "ini", md: "markdown", sql: "sql",
-    sh: "bash", bash: "bash", ps1: "powershell", bat: "dos", cmd: "dos",
-    txt: "", xml: "xml", vue: "xml", svelte: "xml",
-  };
-  return map[ext] || "";
+  const name = (filePath.split(/[/\\]/).pop() || "").toLowerCase();
+  if (NAME_TO_LANG[name] !== undefined) return NAME_TO_LANG[name];
+  const ext = name.includes(".") ? name.split(".").pop() || "" : "";
+  // 未收录的扩展名返回 "" —— 与"明确不高亮"同义（见上：绝不能让未知落到 auto）
+  return EXT_TO_LANG[ext] ?? "";
 }
 
 function FileDiffView({ filePath, oldStr, newStr, writeContent }: {
@@ -394,6 +415,9 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
           >
             {message.thinking}
           </div>
+          {/* 翻译按钮放在**内容之后**（不在 summary 里）：summary 上的按钮会被
+              <details> 的展开/收起抢占点击，而译文也需要空间展开 */}
+          <TranslateButton text={message.thinking} style={{ marginTop: 2 }} />
         </details>
       )}
 
@@ -617,8 +641,8 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
                     ))}
                 </div>
               )}
-              {/* Action buttons */}
-              <div style={{ marginTop: 6, display: "flex", gap: 4, justifyContent: "flex-end", borderTop: "1px solid var(--border-light)", paddingTop: 4 }}>
+              {/* Action buttons（flexWrap: wrap 是给译文块换行用的，见 TranslateButton 的注释） */}
+              <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "flex-end", borderTop: "1px solid var(--border-light)", paddingTop: 4 }}>
                 <ActionBtn label={t("message.copy")} onClick={() => { navigator.clipboard.writeText(text).catch(() => {}); }} />
                 <ActionBtn label={t("message.sendToDesktop")}>
                   {getDesktops().map((d) => (
@@ -635,6 +659,9 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
                     }} />
                   ))}
                 </ActionBtn>
+                {/* 翻译按钮**跟复制/→桌面 同一行**（用户反馈：明明放得下，别另起一行）；
+                    译文块自己占下一行 —— 靠 TranslateButton 里的 flex-basis:100% */}
+                <TranslateButton text={text} />
               </div>
             </>
           ) : (

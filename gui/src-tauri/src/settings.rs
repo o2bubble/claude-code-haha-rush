@@ -134,6 +134,24 @@ pub struct AppSettings {
     pub session_folder_tree: Option<SessionFolderTree>,
     #[serde(rename = "messageTimeline", default)]
     pub message_timeline: Option<bool>,
+    /// 窗口标题里的先后顺序（多实例时靠标题区分）。
+    /// `"workspace-first"`（缺省）→ `工作区 · 会话`；`"session-first"` → `会话 · 工作区`。
+    ///
+    /// ⚠️ **纯全局 UI 偏好，刻意不进 `merge_workspace_overrides` 白名单** ——
+    /// 标题顺序跟"绑了哪个工作区"无关，不该按工作区各设一套。前端保存时也绕开
+    /// 面板的 scope 选择器、固定写 global（见 SettingsPanel 的 applyGlobalOnly）：
+    /// 否则用户选"工作区"保存会把它写进工作区文件，而白名单不含它 → 读不回来
+    /// → 重启静默回退（与 skillRegistryUrl 同一类坑）。
+    #[serde(rename = "windowTitleOrder", default)]
+    pub window_title_order: Option<String>,
+    /// 升级重启后**自动把其他实例恢复回来**（缺省开，即 None 视为 true）。
+    ///
+    /// 关掉后：升级只重启本实例，不再拉起其他窗口 —— 适合"宁可自己重开、也不想在
+    /// 升级瞬间启动一堆进程"的场景（2026-09-22 用户升级时系统服务成片崩溃后加的开关）。
+    ///
+    /// 与 windowTitleOrder 同样属于**纯全局偏好**，不进 `merge_workspace_overrides`。
+    #[serde(rename = "autoRestoreInstances", default)]
+    pub auto_restore_instances: Option<bool>,
     #[serde(rename = "customCompactPrompt", default)]
     pub custom_compact_prompt: Option<CompactPrompt>,
     #[serde(rename = "compactExtractScript", default)]
@@ -223,6 +241,8 @@ impl Default for AppSettings {
             session_folders: None,
             session_folder_tree: None,
             message_timeline: None,
+            window_title_order: None,
+            auto_restore_instances: None,
             custom_compact_prompt: None,
             compact_extract_script: None,
             stream_stall_wake_prompt: None,
@@ -1001,6 +1021,46 @@ mod tests {
         assert_eq!(base.quick_prompts.len(), 1, "workspace quickPrompts must replace global");
         assert_eq!(base.quick_prompts[0].id, "ws-1");
         assert_eq!(base.favorite_skills, vec!["ws-skill".to_string()], "workspace favoriteSkills must replace global");
+    }
+
+    /// `windowTitleOrder` 的 JSON 字段名是**跨端契约**：前端（settingsStore 的
+    /// `windowTitleOrder` / App.tsx / SettingsPanel）按这个名字读写。改名会让
+    /// 设置项**静默失效**（写得进、读不回，界面上还显示成缺省值）。
+    #[test]
+    fn window_title_order_json_key_is_contract() {
+        let mut s = AppSettings::default();
+        s.window_title_order = Some("session-first".into());
+        let gui = app_settings_to_gui(&s);
+        assert_eq!(
+            gui.get("windowTitleOrder").and_then(|v| v.as_str()),
+            Some("session-first"),
+            "前端按 windowTitleOrder 读写 —— 改了这里必须同步改前端"
+        );
+        // 缺省时写入 None（serde 序列化成 null），前端 `?? "workspace-first"` 兜底
+        let back: AppSettings = gui_to_app_settings(&gui);
+        assert_eq!(back.window_title_order.as_deref(), Some("session-first"));
+    }
+
+    /// ⚠️ **刻意不进 `merge_workspace_overrides` 白名单**。
+    ///
+    /// 标题顺序是纯 UI 偏好（跟"绑了哪个工作区"无关），不该按工作区各设一套 ——
+    /// 那样切换工作区标题会变来变去。前端保存时也固定写 global（applyGlobalOnly），
+    /// 两端一致。
+    ///
+    /// 这个测试锁住"**不加**白名单"这个决定：若有人顺手加进去，工作区文件里的值
+    /// 会开始压制全局值，而前端从不往工作区写它 → 用户切换工作区后设置莫名失效。
+    #[test]
+    fn window_title_order_is_global_only() {
+        let mut base = AppSettings::default();
+        base.window_title_order = Some("session-first".into());
+        let mut ws = AppSettings::default();
+        ws.window_title_order = Some("workspace-first".into());
+        merge_workspace_overrides(&mut base, &ws);
+        assert_eq!(
+            base.window_title_order.as_deref(),
+            Some("session-first"),
+            "工作区覆盖不该影响 windowTitleOrder —— 它是全局 UI 偏好"
+        );
     }
 
     /// SettingsPanel persists msgQueuePosition/msgQueueMaxItems with the default

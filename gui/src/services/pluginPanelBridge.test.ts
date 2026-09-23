@@ -202,3 +202,30 @@ describe("sanitizeChrome — 只放行已知键的布尔值", () => {
     expect(sanitizeChrome({ titleBar: null })).toBeUndefined();
   });
 });
+
+// ── dispatchPluginUplink：上行动作分派 ──
+//
+// 只锁"动作 → 正确的 Tauri command"这层映射（命令实现由 Rust 侧保证）。
+// drag-indicator 是挂件拖拽的关键一环：插件按住挂件 → 宿主调 start_indicator_drag
+// → 系统接管拖拽（见 Rust 该 command 的注释）。这条链断了，挂件就退回"拖动跟不上
+// 鼠标"的旧症状。
+describe("dispatchPluginUplink — 动作 → Tauri command", () => {
+  it("drag-indicator → start_indicator_drag（带插件名）", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { dispatchPluginUplink } = await import("./pluginPanelBridge");
+    const handled = await dispatchPluginUplink("rss-reader", "drag-indicator", {});
+    expect(handled).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("start_indicator_drag", { plugin: "rss-reader" });
+    vi.doUnmock("@tauri-apps/api/core");
+  });
+
+  it("未知 kind → false（不抛、不误调）", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const { dispatchPluginUplink } = await import("./pluginPanelBridge");
+    expect(await dispatchPluginUplink("p", "no-such-kind", {})).toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
+    vi.doUnmock("@tauri-apps/api/core");
+  });
+});

@@ -1,4 +1,4 @@
-import React, { memo, useState, useCallback, useMemo } from "react";
+import React, { memo, useState, useCallback, useEffect, useMemo } from "react";
 import { Search, User } from "lucide-react";
 import { getChatState } from "../../stores/chatStore";
 import { useChatBridge } from "./useChatBridge";
@@ -24,6 +24,8 @@ function ChatMessagesPanelImpl() {
   const [showSearch, setShowSearch] = useState(false);
   const [userOnly, setUserOnly] = useState(false);
   const [scrollTarget, setScrollTarget] = useState<{ index: number; seq: number } | null>(null);
+  /** 是否显示"正在切换会话"遮罩 —— 由 switchingTo 驱动，但要**延迟**才显示（见下）。 */
+  const [showSwitching, setShowSwitching] = useState(false);
 
   const jumpTo = useCallback((index: number) => {
     setScrollTarget((prev) => ({ index, seq: (prev?.seq ?? 0) + 1 }));
@@ -46,6 +48,22 @@ function ChatMessagesPanelImpl() {
   }, [state.messages]);
 
   useChatBridge(backend.port);
+
+  // 切换会话的"进行中"提示。
+  //
+  // **延迟 250ms 才显示**：正常切换（本地小会话、无慢 hook）在几百毫秒内完成，
+  // 立刻显示遮罩会闪一下 —— 那种闪烁比不提示更烦人。只有真的慢了才提示。
+  // 遮罩**叠在消息区之上**而不是替换它：切换期间旧会话内容还在，直接换成空白
+  // 反而更突兀；半透明遮罩既说明"在忙"，又保留上下文。
+  const switchingTo = state.switchingTo ?? null;
+  useEffect(() => {
+    if (!switchingTo) {
+      setShowSwitching(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowSwitching(true), 250);
+    return () => clearTimeout(timer);
+  }, [switchingTo]);
 
   const showBanner = backend.status === "starting" || backend.status === "stopped";
 
@@ -106,6 +124,30 @@ function ChatMessagesPanelImpl() {
             scrollTarget={scrollTarget}
             onlyUser={userOnly}
           />
+
+          {/* 切换会话进行中 —— 见上面 useEffect 的注释（延迟显示 + 叠加不替换） */}
+          {showSwitching && (
+            <div
+              style={{
+                position: "absolute", inset: 0, zIndex: 20,
+                display: "flex", flexDirection: "column",
+                alignItems: "center", justifyContent: "center", gap: 10,
+                backgroundColor: "color-mix(in srgb, var(--bg-root) 72%, transparent)",
+                backdropFilter: "blur(1px)",
+                fontFamily: "var(--font-sans)",
+                color: "var(--fg-secondary)",
+                fontSize: 13,
+                pointerEvents: "none", // 不挡住滚动/选择（用户还能翻看旧内容）
+              }}
+            >
+              <div style={{
+                width: 20, height: 20,
+                border: "2px solid var(--accent)", borderTopColor: "transparent",
+                borderRadius: "50%", animation: "spin 1s linear infinite",
+              }} />
+              <div>{t("chat.switchingSession")}</div>
+            </div>
+          )}
 
           {/* 浮动工具 — 消息区右上角：只看用户消息 toggle + 搜索。
               按钮会浮在消息之上，必须保证在**任何背景下**都看得见 ——

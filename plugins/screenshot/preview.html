@@ -4,6 +4,16 @@
 <meta charset="UTF-8">
 <title>截图预览</title>
 <style>
+  /* 亮色主题 —— 必须**自己定义**：preview 是独立文档的浮窗，**拿不到宿主的 CSS 变量**
+     （自定义属性不跨文档继承），`var(--bg-root, #0e0e12)` 只会取 fallback，
+     于是永远深色（2026-09-21 用户发现）。取值与宿主 tokens.css 的默认（亮色）一致；
+     深色不定义 —— 落到各处 fallback（深色），老宿主不推主题时行为不变。 */
+  [data-theme="light"] {
+    --bg-root: #ffffff; --bg-surface: #fafafa; --bg-hover: #f3f3f3;
+    --fg-primary: #333333; --fg-secondary: #666666; --fg-muted: #999999;
+    --accent: #007acc;
+    --border-light: #e0e0e0; --border-medium: #d4d4d4;
+  }
   /* 预览浮窗：宿主按传统浮窗渲染（有标题栏、可缩放），本页只管把图铺好。
      之所以做成**独立浮窗面板**而不是面板内覆盖层：面板本身多宽，覆盖层就多宽，
      缩略图看不清的细节在大图里还是看不清。浮窗可以拉大、可以摆到别处。 */

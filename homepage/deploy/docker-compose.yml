@@ -1,0 +1,27 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: 17lumen-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+    # 每 6 小时 reload 一次，让 certbot 续期后的新证书生效
+    command: >
+      /bin/sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+
+  certbot:
+    image: certbot/certbot
+    container_name: 17lumen-certbot
+    restart: unless-stopped
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+    # 每 12 小时尝试续期（certbot 自身只在到期前 30 天才真正续）
+    entrypoint: >
+      /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h & wait $${!}; done"

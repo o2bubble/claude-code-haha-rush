@@ -14,6 +14,7 @@ import {
   addMessage,
   updateLastAssistant,
   clearMessages,
+  type ChatState,
 } from "../stores/chatStore";
 import { updatePlan, clearPlan } from "../stores/planStore";
 import { upsertSubAgent, setTranscript, setTranscriptLoading } from "../stores/subAgentStore";
@@ -66,6 +67,11 @@ function syncChatModel(payload: string): void {
 
 function syncChatConnected(payload: boolean): void {
   updateChatState({ connected: payload });
+}
+
+/** 会话列表就绪（hub 侧 session_list 到达后置位）。叶子侧靠它才能通过 isChatReady()。 */
+function syncChatSessionsLoaded(payload: boolean): void {
+  updateChatState({ sessionsLoaded: payload });
 }
 
 function syncChatSessions(payload: unknown): void {
@@ -195,9 +201,27 @@ function syncDesktopItems(payload: unknown): void {
 
 // ── Startup ──
 
+/**
+ * 重置"已启动"标志（**子窗口关闭时必须调**）。
+ *
+ * 与 `bridge.resetLeaf` 同因（2026-09-22 用户实测："退出挂件再进来，消息列表是空的"）：
+ * 同一 GUI 进程内所有窗口共享一个 WebView2 数据目录，子窗口关闭后模块级状态不会
+ * 随 webview 清掉 —— 不重置的话第二次进入时 `_started` 仍是 true，**全部订阅都不再
+ * 注册**，新窗口收不到任何镜像数据（历史、增量、状态全无）。
+ *
+ * 与 `bridge.resetLeaf()` 一起调用（见 WidgetApp / FloatingApp 的卸载路径）。
+ */
+export function resetCrossWindowBusLeaf(): void {
+  _started = false;
+}
+
 export function startCrossWindowBusLeaf(subscriptions: string[]): void {
   if (_started) return;
   _started = true;
+  // try/catch 是**有意的**：一旦某个 subscribe 抛错，后面的订阅全都不会注册，
+  // 表现为"部分数据收不到"（极难排查 —— 2026-09-22 挂件历史回填就曾往这个方向误查）。
+  // 这里让它至少留下一条明确的错误日志。
+  try {
 
   // ── Chat topics ──
   crossWindowBus.subscribe("chat.delta.text", (p) => syncChatDeltaText(p as { text: string; index: number }));
@@ -207,6 +231,8 @@ export function startCrossWindowBusLeaf(subscriptions: string[]): void {
   crossWindowBus.subscribe("chat.context", (p) => syncChatContext(p as Record<string, unknown>));
   crossWindowBus.subscribe("chat.model", (p) => syncChatModel(p as string));
   crossWindowBus.subscribe("chat.connected", (p) => syncChatConnected(p as boolean));
+  // 就绪标志 —— 不镜像的话叶子侧 `isChatReady()` 恒 false，InputArea 的发送按钮永久灰
+  crossWindowBus.subscribe("chat.sessionsLoaded", (p) => syncChatSessionsLoaded(!!p));
   crossWindowBus.subscribe("chat.sessions", (p) => syncChatSessions(p));
   crossWindowBus.subscribe("chat.activeSession", (p) => syncChatActiveSession(p as string));
   crossWindowBus.subscribe("chat.tasks", (p) => syncChatTasks(p));
@@ -214,6 +240,14 @@ export function startCrossWindowBusLeaf(subscriptions: string[]): void {
   crossWindowBus.subscribe("chat.inputBlocked", (p) => syncChatInputBlocked(p as string | null));
   crossWindowBus.subscribe("chat.skills.dialog", (p) => syncChatSkillsDialog(p));
   crossWindowBus.subscribe("chat.session.loaded", (p) => syncSessionLoaded(p as any));
+  // 挂件历史回填：整批替换消息列表。
+  // ⚠️ 用 updateChatState 而不是 setMessages —— 后者会顺带把 streaming 清成 false，
+  // 而快照很可能正好取在流式过程中（setMessages 定义见 chatStore）。
+  crossWindowBus.subscribe("widget.history", (p) => {
+    const messages = (p as { messages?: unknown } | undefined)?.messages;
+    console.log("[widget] leaf 收到历史", { 条数: Array.isArray(messages) ? messages.length : `非数组(${typeof messages})` });
+    if (Array.isArray(messages)) updateChatState({ messages: messages as ChatState["messages"] });
+  });
 
   // ── Plan ──
   crossWindowBus.subscribe("plan.tasks", (p) => syncPlanTasks(p));
@@ -248,4 +282,8 @@ export function startCrossWindowBusLeaf(subscriptions: string[]): void {
   });
 
   console.log("[DataBus Leaf] Started — mirroring stores from DataBus");
+  } catch (e) {
+    console.error("[DataBus Leaf] 订阅过程中抛错:", e);
+    throw e;
+  }
 }

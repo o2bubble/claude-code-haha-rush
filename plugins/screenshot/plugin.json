@@ -1,7 +1,7 @@
 {
   "pluginName": "screenshot",
   "displayName": "截屏",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "apiVersion": "1.0",
   "description": "截屏工具：支持全屏 / 区域 / 窗口三种模式，截图时窗口自动让开位置。截完可直接插入聊天输入框、发送到超级桌面，或保存到当前工作区；AI 也能直接截屏看图。",
   "icon": "desktopItemView",

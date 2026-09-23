@@ -309,7 +309,9 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       // 没有 result 兜底，不复位会让 GUI 永远停在 streaming=true（状态栏"工作中"，
       // 用户只能手动中断+继续来"激活"——即"输出莫名卡死"）。result 仍会覆盖为 false。
       setStreaming(false);
-      set({ compacting: false, backendBusy: false, activeToolUses: 0 });
+      // 同时复位"切换中"：会话加载失败（文件没了/被删）走的就是 error 分支，
+      // 不清的话 loading 会一直转（用户以为还在切、实际早就失败了）。
+      set({ compacting: false, backendBusy: false, activeToolUses: 0, switchingTo: null });
       pushMessage({ id: uuid(), role: "assistant", content: `Error: ${inner.message || "Unknown error"}`, timestamp: now() });
       break;
     case "task_error":
@@ -483,6 +485,9 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
         compacting: false,
         sessionId: null,
         tasks: [],
+        // 到这里切换才算真正完成（消息列表即将被替换）——
+        // 见 chatStore.switchingTo 的注释：不能在 current_session 时清。
+        switchingTo: null,
       };
       if (inner.session_id) ns.sessionId = inner.session_id;
       if (Array.isArray(inner.messages)) {

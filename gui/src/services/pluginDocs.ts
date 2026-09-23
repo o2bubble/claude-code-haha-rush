@@ -72,8 +72,16 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
   \`dependencies\` 管的是「依赖是否可用」而不是「能力授予」
 - \`platforms\`: \`["windows","macos","linux"]\` —— 缺省/空 = 全平台
 - \`category\`: \`tool\` | \`integration\` | 自定义非空字符串（市场筛选用）
-- \`icon\`: 必须是合法 IconKey（源码见 \`gui/src/types/layout.ts\`）；**写非法值不报错、
-  静默兜底成 grid3x3**（曾见插件写 "compass" 显示成九宫格）。常用 "package"。
+- \`icon\`: 必须是**合法 IconKey**。⚠️ 写非法值**不报错、静默兜底成 \`default\`（盒子图标）**
+  —— 实现是 \`(key && Icons[key]) ? Icons[key] : Icons.default\`（\`gui/src/utils/icons.tsx\`）。
+  **容易踩的坑**：从别处抄字符串时抄到相邻类型 —— 如 \`"activity"\` 是 \`TabStyle\` 的值、
+  **不是** IconKey，写了就变盒子。
+  **合法值全表**（\`gui/src/types/layout.ts\` 的 IconKey，34 个）：
+  \`editor workers plan subagents messages input sessions skills files settings terminal
+  superDesktop askQuestion desktopItemView profileManager feedback update explorer search
+  outline compoundGroup file notes quickPrompts help diagnostics default user folderKanban
+  package grid3x3 layoutGrid combine gitBranch\`
+  常用：工具类 \`package\` / 信息流类 \`messages\` / 文档类 \`notes\`。
   ⚠️ **新插件要挑一个没被别的插件用过的** —— 拿现有插件的 manifest 当模板时最容易
   漏改这一项，结果是两个插件图标一模一样（用户一眼就看出来）。
   查已用：逐个 \`plugin_get\` 看已装插件的 icon（**别跑 \`grep plugins/*/plugin.json\`** ——
@@ -206,6 +214,44 @@ export const PLUGIN_DOCS = `# Claude Code GUI 插件系统 — AI 指南
 - **窗口不会给插件返回信息** —— 页面与进程通信走**插件自己的 HTTP 端口**（页面从
   \`params\` 拿到端口后轮询）；窗口几何（位置/尺寸）也要插件自己从进程侧查 Win32
 - 派发是**逐个 try** 的：某个动作失败不影响后续动作，失败会记 console
+
+## 主题（深浅色跟随）—— 插件面板必须自己处理
+
+🔴 **插件页面拿不到宿主的 CSS 变量**。面板是独立文档的 iframe，而 CSS 自定义属性
+**不跨文档继承** —— 写 \`var(--bg-root, #0e0e12)\` **永远取 fallback**（宿主那套值根本
+读不到）。这是最容易漏的一处：代码看着"用了主题变量"，实际插件从头到尾只有一种配色
+（2026-09-21 截屏插件就因为这个一直是深色，用户发现后修的）。
+
+**正确做法三步**（可直接抄 \`plugins/gui-manual/manual.html\` 或 \`plugins/screenshot/panel.html\`）：
+
+1. **自己定义一套亮色变量**（值抄宿主 \`gui/src/tokens.css\` 的默认亮色那一档，
+   保证与主界面一致）；深色**不用定义** —— 落在各处 fallback 上：
+   \`\`\`css
+   [data-theme="light"] {
+     --bg-root: #ffffff; --bg-surface: #fafafa; --bg-hover: #f3f3f3;
+     --fg-primary: #333333; --fg-secondary: #666666; --fg-muted: #999999;
+     --accent: #007acc;
+     --border-light: #e0e0e0; --border-medium: #d4d4d4;
+   }
+   \`\`\`
+2. **首帧自己读 URL**（宿主拼在 query 上：\`?theme=light\`）—— 别只等 postMessage：
+   宿主只在挂载时推一次，那一刻 iframe 可能还没加载完，消息就丢了。
+   \`\`\`js
+   function applyTheme(t) { document.documentElement.dataset.theme = t === "light" ? "light" : "dark"; }
+   applyTheme(new URLSearchParams(location.search).get("theme"));
+   \`\`\`
+   注意**归一化**：宿主主题有 \`dark\` / \`dark-b\` / \`dark-a\` 等变体，非 light 一律归到 \`dark\`。
+3. **监听后续推送**（用户切主题时不重载页面）：
+   \`\`\`js
+   window.addEventListener("message", (ev) => {
+     const d = ev.data;
+     if (d && d.source === "plugin:host" && d.kind === "theme") applyTheme(d.payload && d.payload.theme);
+   });
+   \`\`\`
+
+⚠️ **浮窗面板（\`open-panel\`）同样适用** —— 它是独立窗口里的独立文档，比 iframe 更隔离。
+⚠️ 例外：**画在截图/图像上的元素**（选区遮罩、白描边按钮）用固定色是对的 ——
+它们要压在图片内容上，不该跟随主题。
 
 ## MCP 工具
 

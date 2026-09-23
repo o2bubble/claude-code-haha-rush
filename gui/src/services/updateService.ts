@@ -118,4 +118,18 @@ export const updateService = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string>("get_install_dir_path");
   },
+
+  /** 升级前：把其他实例在跑什么存成恢复快照。返回写入的实例数。
+   *  升级后由新启动的 GUI 消费它并逐个拉起（见 Rust 侧 instances.rs）。 */
+  async prepareRestoreSnapshot(): Promise<number> {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<number>("prepare_restore_snapshot");
+  },
+
+  /** 其他正在运行的实例数（已绑定工作区的）。用于决定升级对话框是否提供
+   *  「升级并恢复」—— 只有一个实例时恢复没有意义，不显示那个按钮。 */
+  async countRestorableInstances(): Promise<number> {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<number>("count_restorable_instances");
+  },
 };

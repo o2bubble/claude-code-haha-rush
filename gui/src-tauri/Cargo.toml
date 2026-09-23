@@ -45,6 +45,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
+    # 插件挂件的**原生窗口拖拽**（ReleaseCapture）—— 见 start_indicator_drag
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 # ── 本地 patch：覆盖层透明所需的依赖修复 ──

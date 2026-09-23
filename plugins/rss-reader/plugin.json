@@ -1,0 +1,57 @@
+{
+  "pluginName": "rss-reader",
+  "displayName": "RSS 订阅",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "description": "订阅 RSS/Atom 源并集中查看（如各家模型 API 的状态页）。新条目有未读标记，可开一个常驻桌面小挂件盯着——API 出问题时第一时间知道。数据只存本地。",
+  "icon": "messages",
+  "category": "tool",
+  "dependencies": [
+    "nodejs"
+  ],
+  "installType": "standard",
+  "contributes": {
+    "panels": [
+      {
+        "id": "rss-panel",
+        "title": "RSS 订阅",
+        "panelKind": "in-main",
+        "userManaged": true,
+        "content": {
+          "type": "html",
+          "src": "panel.html"
+        },
+        "process": "rss-server"
+      }
+    ],
+    "commands": [
+      {
+        "id": "refresh",
+        "title": "RSS：刷新全部订阅",
+        "onInvoke": "refresh"
+      },
+      {
+        "id": "show-indicator",
+        "title": "RSS：显示/收起桌面挂件",
+        "onInvoke": "show-indicator"
+      }
+    ],
+    "events": []
+  },
+  "processes": [
+    {
+      "id": "rss-server",
+      "command": "node",
+      "args": [
+        "rss-server.cjs"
+      ],
+      "env": {},
+      "startOn": "workspace_bound"
+    }
+  ],
+  "platforms": [
+    "windows",
+    "macos",
+    "linux"
+  ]
+}

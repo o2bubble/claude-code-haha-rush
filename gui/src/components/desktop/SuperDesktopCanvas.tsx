@@ -9,7 +9,7 @@ import { ConnectionOverlay } from "./ConnectionOverlay";
 import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 import type { DesktopItemSelectedPayload, SettingsChangedPayload } from "../../services/events";
-import { saveClipboardItem, isRealFilePath, resolvePaste, collectPaste, defaultReadDir, defaultReadClipboardFiles } from "../../services/clipboardService";
+import { saveClipboardItem, isRealFilePath, resolvePaste, collectPaste, defaultReadDir, defaultReadClipboardFiles, ensurePlainPasteTracking, isPlainPasteHeld } from "../../services/clipboardService";
 import { useEvent } from "../../services/useService";
 import { isSelected, setSelection, clearSelection, getSelectedIds, useSelection } from "./selectionStore";
 import { setCurrentViewerItemId } from "../../services/desktopItemViewerRegistry";
@@ -463,6 +463,9 @@ function SuperDesktopCanvasImpl({ desktop, searchMatchedIds }: Props) {
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const workDir = settingsPayload?.settings?.workDir ?? "";
 
+  // Shift 键跟踪（"Ctrl+Shift+V = 强制纯文本"）—— 必须在挂载时就开始（详见 clipboardService）
+  useEffect(() => { ensurePlainPasteTracking(); }, []);
+
   // ── Drop / Paste → FileGroupItem or TextItem ──
 
   /** Get viewport center in canvas coords */
@@ -521,6 +524,8 @@ function SuperDesktopCanvasImpl({ desktop, searchMatchedIds }: Props) {
         readDir: defaultReadDir,
         // 粘贴的文件没有 .path（只有拖放有）→ 从系统剪贴板补源路径，走引用而非复制
         readClipboardFiles: defaultReadClipboardFiles,
+        // Ctrl+Shift+V = 强制纯文本（跳过路径探测与长文本折叠）—— 见 features.md 3.2。
+        forceText: isPlainPasteHeld(),
       });
 
       if (decision.kind === "refs") {

@@ -215,3 +215,94 @@ describe("ChatSession — backendBusy gate (authoritative busy beats optimistic 
     expect(getChatState().messages).toHaveLength(0); // 入队(无 activeSession) → 无用户气泡
   });
 });
+
+// ── 旁问（翻译按钮走的 /btw 通道）──
+//
+// 请求-响应式的独立通道：发 side_question（带 context_id），回 side_question_result。
+// 用 context_id 把响应配回发起的那次调用 —— 所以要能并发（同时翻译多段），
+// 且响应**绝不能进会话状态机**（它不是消息、不是状态变更）。
+describe("ChatSession — 旁问（askSideQuestion）", () => {
+  it("发出 side_question 并带上 question 与 context_id", async () => {
+    const s = createChatSession();
+    s.connect(8000);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+
+    const p = s.askSideQuestion("translate this");
+    const sent = ws.sent.map((d) => JSON.parse(d)).find((m) => m.type === "side_question");
+    expect(sent).toBeTruthy();
+    expect(sent.question).toBe("translate this");
+    expect(typeof sent.context_id).toBe("string");
+    expect(sent.context_id.length).toBeGreaterThan(0);
+
+    // 收尾（否则 Promise 悬着，测试会留 pending 定时器）
+    ws._msg({ type: "side_question_result", context_id: sent.context_id, response: "译文" });
+    await expect(p).resolves.toEqual({ response: "译文", error: undefined });
+  });
+
+  it("按 context_id 匹配 —— 并发两个请求各拿各的结果", async () => {
+    const s = createChatSession();
+    s.connect(8000);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+
+    const p1 = s.askSideQuestion("first");
+    const p2 = s.askSideQuestion("second");
+    const sent = ws.sent.map((d) => JSON.parse(d)).filter((m) => m.type === "side_question");
+    expect(sent).toHaveLength(2);
+    const [c1, c2] = [sent[0].context_id, sent[1].context_id];
+    expect(c1).not.toBe(c2);
+
+    // 故意**反序**回：先回第二个，验证不是靠到达顺序匹配
+    ws._msg({ type: "side_question_result", context_id: c2, response: "B" });
+    ws._msg({ type: "side_question_result", context_id: c1, response: "A" });
+    await expect(p1).resolves.toEqual({ response: "A", error: undefined });
+    await expect(p2).resolves.toEqual({ response: "B", error: undefined });
+  });
+
+  it("错误结果照常 resolve（带 error 字段）", async () => {
+    const s = createChatSession();
+    s.connect(8000);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+
+    const p = s.askSideQuestion("q");
+    const sent = ws.sent.map((d) => JSON.parse(d)).find((m) => m.type === "side_question");
+    ws._msg({ type: "side_question_result", context_id: sent.context_id, error: "boom" });
+    await expect(p).resolves.toEqual({ response: undefined, error: "boom" });
+  });
+
+  it("结果**不进会话状态机**（state 对象引用不变 = reducer 没跑）", async () => {
+    // 这条断言方式很关键：一开始我写的是"消息数不变"，但红验证（去掉 dispatch 的
+    // return）发现它**照样通过** —— chatReduce 对未知类型静默忽略，多跑一趟也看不出。
+    // 改断言 **state 对象引用**：dispatch 只要走到 reducer 就一定 replaceState（换新对象），
+    // 所以引用不变才能证明"真的在 reducer 之前被拦住了"。
+    const s = createChatSession();
+    s.connect(8000);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+
+    const p = s.askSideQuestion("q");
+    const sent = ws.sent.map((d) => JSON.parse(d)).find((m) => m.type === "side_question");
+    const stateBefore = getChatState();
+    ws._msg({ type: "side_question_result", context_id: sent.context_id, response: "译文" });
+    await p;
+
+    expect(getChatState()).toBe(stateBefore); // 同一对象 → 没进 reducer
+  });
+
+  it("不认识的 context_id 不会崩、也不误伤在等的请求", async () => {
+    const s = createChatSession();
+    s.connect(8000);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+
+    const p = s.askSideQuestion("q");
+    const sent = ws.sent.map((d) => JSON.parse(d)).find((m) => m.type === "side_question");
+    // 乱入一条不匹配的
+    ws._msg({ type: "side_question_result", context_id: "not-mine", response: "X" });
+    // 真正的响应仍然能配上
+    ws._msg({ type: "side_question_result", context_id: sent.context_id, response: "mine" });
+    await expect(p).resolves.toEqual({ response: "mine", error: undefined });
+  });
+});

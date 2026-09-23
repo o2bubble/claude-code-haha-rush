@@ -1,7 +1,11 @@
-// ── 消息划词工具栏：选区旁的小浮层（发送到聊天框 / 复制 / 路径资源管理器）──
+// ── 消息划词工具栏：选区旁的小浮层（发送到聊天框 / 复制 / 路径操作）──
 // 纯表现组件：父组件传入列表容器 ref，选区落点/出现/消失逻辑都在这里。
 // 发送复用 CHAT_INSERT_TEXT（纯文本插入 composer，保留可编辑性）；开关见设置 msgSelectionToolbar。
-// 路径检测：从选中文本中扫描所有路径片段，汇总按钮点击展开下拉列表
+// 路径检测：从选中文本中扫描所有路径片段，汇总按钮点击展开下拉列表。
+//
+// 每个路径给**两种**打开方式（用户反馈：选中一个能在编辑器里看的文件，却只能跳
+// 资源管理器，多此一举）：编辑器（走 openPathInEditor —— 图片/PDF 预览、文本进编辑）
+// 与资源管理器（兜底）。前者失败会自动退到后者，所以两项都不是死路。
 
 import React, { useLayoutEffect, useEffect, useRef, useState } from "react";
 import { getSettings } from "../../stores/settingsStore";
@@ -12,6 +16,7 @@ import { useEvent } from "../../services/useService";
 import { t } from "../../i18n";
 import { computeToolbarPosition, POPUP_SIZE, type Rect } from "./selectionToolbarPosition";
 import { findPathsWithWorkspace } from "../../utils/pathDetector";
+import { openPathInEditor } from "../../services/referenceActions";
 
 interface SelectionToolbarProps {
   /** 消息列表滚动容器；选区必须落在其中才弹出 */
@@ -22,6 +27,20 @@ interface SelState {
   text: string;
   rect: Rect;
 }
+
+/** 路径下拉项：动作文字 + 截断的路径（完整路径见 title）。 */
+const pathItemStyle: React.CSSProperties = {
+  padding: "5px 10px",
+  cursor: "pointer",
+  fontSize: 11,
+  fontFamily: "var(--font-sans)",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+/** 路径本身用弱色 —— 与前面的动作文字拉开层次，扫一眼先看到"能做什么"。 */
+const pathDimStyle: React.CSSProperties = { color: "var(--fg-muted)" };
 
 export function SelectionToolbar({ container }: SelectionToolbarProps) {
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
@@ -195,8 +214,9 @@ export function SelectionToolbar({ container }: SelectionToolbarProps) {
             <button
               onClick={() => setShowPaths(!showPaths)}
               style={btnStyle(false)}
+              title={t("files.pathActionsHint")}
             >
-              📂 {t("files.openInExplorer")} ({paths.length})
+              {t("files.pathActions")} ({paths.length})
             </button>
             {showPaths && (
               <div
@@ -217,34 +237,46 @@ export function SelectionToolbar({ container }: SelectionToolbarProps) {
                 }}
               >
                 {paths.map((p) => (
-                  <div
-                    key={p}
-                    onClick={async () => {
-                      try {
-                        const { invoke } = await import("@tauri-apps/api/core");
-                        await invoke("open_in_explorer", { path: p });
-                      } catch {
-                        // 路径不存在等 → 提示，不再打开资源管理器
-                        addStatusMessage(`${t("files.pathNotFound")}: ${p}`, "error");
-                      }
-                      clear();
-                    }}
-                    style={{
-                      padding: "5px 10px",
-                      cursor: "pointer",
-                      fontSize: 11,
-                      fontFamily: "var(--font-sans)",
-                      color: "var(--fg-primary)",
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-hover)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
-                    title={p}
-                  >
-                    📂 {p}
-                  </div>
+                  // 每个路径两项：**动作在前、路径在后**（两个动作对同一路径，
+                  // 路径放前面会把两项挤成两行重复的长文本，反而看不出区别）。
+                  // 路径过长由 ellipsis 截断，悬停看完整（title）。
+                  <React.Fragment key={p}>
+                    <div
+                      onClick={async () => {
+                        // 内部按类型分流（图片/PDF 走预览、文本走编辑），
+                        // 读失败会自动回退到资源管理器 —— 所以这里只管成功/失败提示
+                        const ok = await openPathInEditor(p);
+                        if (!ok) addStatusMessage(`${t("files.pathNotFound")}: ${p}`, "error");
+                        clear();
+                      }}
+                      style={{ ...pathItemStyle, color: "var(--fg-primary)" }}
+                      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-hover)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+                      title={`${t("files.openInEditor")} — ${p}`}
+                    >
+                      📝 {t("files.openInEditor")}
+                      <span style={pathDimStyle}> — {p}</span>
+                    </div>
+                    <div
+                      onClick={async () => {
+                        try {
+                          const { invoke } = await import("@tauri-apps/api/core");
+                          await invoke("open_in_explorer", { path: p });
+                        } catch {
+                          // 路径不存在等 → 提示，不再打开资源管理器
+                          addStatusMessage(`${t("files.pathNotFound")}: ${p}`, "error");
+                        }
+                        clear();
+                      }}
+                      style={{ ...pathItemStyle, color: "var(--fg-secondary)" }}
+                      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-hover)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+                      title={`${t("files.openInExplorer")} — ${p}`}
+                    >
+                      📂 {t("files.openInExplorer")}
+                      <span style={pathDimStyle}> — {p}</span>
+                    </div>
+                  </React.Fragment>
                 ))}
               </div>
             )}
