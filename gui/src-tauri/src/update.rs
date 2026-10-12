@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tauri::Manager; // app.path().app_data_dir()（清实例自述用）
 
 // ── Types ──
 
@@ -971,6 +972,13 @@ pub fn launch_updater_and_exit(app: tauri::AppHandle, updater_path: String) -> R
             if n > 0 {
                 log::info!("launch_updater_and_exit: killed {} orphan plugin processes", n);
             }
+        }
+
+        // 实例自述清空：此刻所有实例（含自己）已被杀 —— 残留自述在 pid 复用下会被
+        // 误判"还活着"（2026-09-21/22：恢复时"跳过（已有实例绑定该工作区）"，
+        // 少恢复窗口）。双因子存活判定已是治本，这里加一道兜底把残留清干净。
+        if let Ok(dir) = app.path().app_data_dir() {
+            crate::instances::clear_instance_records(&dir);
         }
 
         // Start-Process -Verb RunAs triggers UAC.

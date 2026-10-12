@@ -31,7 +31,20 @@ pub struct InstanceRecord {
     /// 当前加载的会话 id。空 = 还没加载会话（只有工作区）。
     #[serde(rename = "sessionId", default)]
     pub session_id: String,
-    /// 最后更新时刻（ms）。用于排序/诊断；判存活靠 pid 而不是它。
+    /// **进程启动时刻**（Unix ms，由 `GetProcessTimes` 得来）。
+    ///
+    /// 判存活的唯一正确姿势是 **pid + 启动时间**，因为 pid 会被系统复用：
+    /// 升级强杀实例后自述文件必然残留（强杀不走清理），若某个新进程恰好分到
+    /// 死实例的 pid，只看 pid 就会把残留误判成"还活着"。实测事故（2026-09-21/22）：
+    /// 恢复快照里绑同一工作区的残留被误判存活 → 「跳过（已有实例绑定该工作区）」
+    /// → **该工作区的窗口少恢复一个**（用户感知："有时没拉起新实例"）。
+    ///
+    /// 0 = 旧版本写的记录（无此字段）→ 一律视为**不可信**（当死处理）：
+    /// 本版本起记录必带启动时间；不带 = 本版本之前写的 = 其进程要么已被升级
+    /// 杀光、要么不是本版本能管理的实例。升级流程另有一道"清空自述目录"兜底。
+    #[serde(default)]
+    pub started_at: u64,
+    /// 最后更新时刻（ms）。用于排序/诊断；判存活不用它（见 `started_at`）。
     #[serde(default)]
     pub updated_at: u64,
 }
@@ -129,7 +142,7 @@ pub fn remove_instance_record(app_data_dir: &Path, pid: u32) {
 /// 也避免本模块依赖 prockill 的平台细节。
 pub fn collect_live_instances<F>(app_data_dir: &Path, alive: F) -> Vec<InstanceRecord>
 where
-    F: Fn(u32) -> bool,
+    F: Fn(&InstanceRecord) -> bool,
 {
     let dir = instances_dir(app_data_dir);
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -147,7 +160,7 @@ where
             let _ = std::fs::remove_file(&path);
             continue;
         };
-        if rec.pid == 0 || !alive(rec.pid) {
+        if rec.pid == 0 || !alive(&rec) {
             // 死实例 → 删文件（顺手清理，避免目录无限增长）
             let _ = std::fs::remove_file(&path);
             continue;
@@ -155,6 +168,29 @@ where
         out.push(rec);
     }
     out
+}
+
+/// **清空全部实例自述** —— 升级流程专用（杀掉所有实例之后调用）。
+///
+/// 为什么必须清：升级强杀不走优雅退出 → 自述文件**必然残留**；而 pid 复用会让
+/// 残留被后续的存活判定误判（2026-09-21/22 的"跳过（已有实例绑定该工作区）"
+/// 事故）。`is_instance_alive` 的双因子判定已是治本，这里再加一道兜底：
+/// 升级 = 全部实例确定死亡，记下的东西没有价值，直接清空最干净。
+pub fn clear_instance_records(app_data_dir: &Path) {
+    let dir = instances_dir(app_data_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut n = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json")
+            && std::fs::remove_file(&path).is_ok()
+        {
+            n += 1;
+        }
+    }
+    if n > 0 {
+        log::info!("[instances] 升级前清空 {n} 条实例自述（全部实例已杀）");
+    }
 }
 
 /// 单次恢复的实例数上限 —— 防止一次拉起十几个把机器拖死。
@@ -170,34 +206,27 @@ pub const INSTANCE_READY_TIMEOUT_MS: u64 = 90_000;
 /// 等就绪时的轮询间隔。
 const INSTANCE_READY_POLL_MS: u64 = 800;
 
-/// 写恢复快照（升级前）。
+/// **恢复选集**：从存活实例里挑出"升级后将被恢复的那些"，快照与计数共用本函数。
 ///
-/// 自己的状态存进 `self_record`（供 updater 重启出的无参实例认领，见 adopt_self_record），
-/// **其它**实例存进 `instances`（由新 GUI 逐个拉起）。
+/// 返回 `(自己, 其它实例)`：
+/// - 自己：有工作区才有值（供 updater 重启出的无参实例认领）
+/// - 其它：排除自己 + 排除无工作区 + **按工作区去重**（同一工作区只留一条）
+///   + 截断到 `MAX_RESTORE_INSTANCES`
 ///
-/// 只保留**有工作区**的实例：没有工作区的实例拉起后还是要弹选择器，
-/// 恢复它没有意义（反而多开一个空窗口）。
-///
-/// **按工作区去重**（同一工作区只留一条）：用户可能同时开着两个绑同一工作区的窗口
-/// （`2026-09-22` 实测确有 —— 那正是实例数只增不减、每次升级都要拉更多进程的原因之一）。
-/// 不去重的话每轮升级都会把它们原样恢复，数量永远降不下来。
-pub fn save_restore_snapshot(
-    app_data_dir: &Path,
+/// ⚠️ 计数按钮与快照**必须**共用本函数 —— 曾各自过滤（计数漏了去重），
+/// 按钮写着"恢复 3 个"而快照只写 1 个，是明确的错误信息。
+pub fn select_restorable(
     self_pid: u32,
     live: &[InstanceRecord],
-) -> Result<usize, String> {
+) -> (Option<InstanceRecord>, Vec<InstanceRecord>) {
     let has_ws = |r: &&InstanceRecord| !r.workspace.trim().is_empty();
-    let self_record = live
-        .iter()
-        .find(|r| r.pid == self_pid)
-        .filter(has_ws)
-        .cloned();
+    let self_record = live.iter().find(|r| r.pid == self_pid).filter(has_ws).cloned();
     let mut seen_ws: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 自己占用的工作区也算"已见" —— 否则会给自己那个工作区再拉一个
     if let Some(me) = &self_record {
         seen_ws.insert(me.workspace.clone());
     }
-    let instances: Vec<InstanceRecord> = live
+    let others: Vec<InstanceRecord> = live
         .iter()
         .filter(|r| r.pid != self_pid)
         .filter(has_ws)
@@ -205,6 +234,21 @@ pub fn save_restore_snapshot(
         .take(MAX_RESTORE_INSTANCES)
         .cloned()
         .collect();
+    (self_record, others)
+}
+
+/// 写恢复快照（升级前）。
+///
+/// 选集规则见 `select_restorable`（与本函数共用，保证"计数"与"快照"永不失配）。
+/// 返回值 = **本次升级将恢复的窗口总数**（含自己）—— 按钮与提示都按这个数展示，
+/// 与用户直觉一致（开 3 个窗口 → "恢复 3 个"）。
+pub fn save_restore_snapshot(
+    app_data_dir: &Path,
+    self_pid: u32,
+    live: &[InstanceRecord],
+) -> Result<usize, String> {
+    let (self_record, instances) = select_restorable(self_pid, live);
+    let total = instances.len() + usize::from(self_record.is_some());
     let snap = RestoreSnapshot {
         created_at: now_ms(),
         self_record,
@@ -215,7 +259,7 @@ pub fn save_restore_snapshot(
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| format!("写恢复快照失败: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("提交恢复快照失败: {e}"))?;
-    Ok(snap.instances.len())
+    Ok(total)
 }
 
 /// **认领自己**：无参数启动的实例（= updater 重启出来的那个）从快照里取回
@@ -269,29 +313,33 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 等一个**新拉起**的实例完成绑定（出现一条 pid 不在 `before_pids` 里的自述）。
+/// 等一个**新拉起**的实例完成绑定（出现一条不在 `before` 里的自述）。
 ///
 /// 为什么要等：spawn **只是启动进程**，实例真正占资源的是随后的初始化
 /// （建 WebView2 + 起 IDE 后端 + 起 5 个插件进程），要十几秒。只按固定间隔 spawn 的话，
 /// 上一个还在初始化、下一个就开始初始化 → **实际仍是并行**，瞬时峰值没降下来。
 /// 等它就绪再拉下一个，才是真正的串行。
 ///
-/// `before_pids` = 发起前的存活 pid 集合（用于区分"新起来的"和"本来就在的"）。
+/// `before` = 发起前的存活实例**身份集合**（pid + 启动时间）。用双因子而不是
+/// 裸 pid：pid 复用下，新实例可能恰好分到某个旧已死实例的 pid —— 裸 pid 集合
+/// 会把它误认为"本来就在的"，等待一直空转到超时。
 /// 返回 `false` 表示超时 —— 调用方记日志后**继续下一个**，不要卡住整轮恢复。
 pub fn wait_for_new_instance<F>(
     app_data_dir: &Path,
-    before_pids: &std::collections::HashSet<u32>,
+    before: &std::collections::HashSet<(u32, u64)>,
     alive: F,
     timeout_ms: u64,
 ) -> bool
 where
-    F: Fn(u32) -> bool,
+    F: Fn(&InstanceRecord) -> bool,
 {
     let deadline = now_ms().saturating_add(timeout_ms);
     loop {
         let fresh = collect_live_instances(app_data_dir, &alive)
             .into_iter()
-            .find(|r| !before_pids.contains(&r.pid) && !r.workspace.trim().is_empty());
+            .find(|r| {
+                !before.contains(&(r.pid, r.started_at)) && !r.workspace.trim().is_empty()
+            });
         if fresh.is_some() {
             return true;
         }
@@ -302,37 +350,58 @@ where
     }
 }
 
-/// 判断某 pid 是否**还活着**。
+/// 查询某 pid 的**进程启动时刻**（Unix ms）。进程不存在/无权限 → None。
 ///
-/// Windows：`OpenProcess` 拿到句柄且退出码仍是 `STILL_ACTIVE`。
-/// ⚠️ 不用"返回 0 就失败"这类简化判断 —— pid 复用会让刚死的进程"看起来活着"，
-/// 但这里只用于筛掉明显死掉的实例，偶发误判的后果仅是少恢复一个窗口。
-/// 其它平台：`/proc` 不存在即视为已退出。
-pub fn is_process_alive(pid: u32) -> bool {
+/// Windows：`OpenProcess` + `GetProcessTimes`。FILETIME 是 1601-01-01 起的
+/// 100ns 数，换算成 Unix ms：`(ft - 116444736000000000) / 10000`。
+/// 其它平台：读 `/proc/<pid>/stat` 的第 22 字段（starttime，时钟滴答）——
+/// 目前只在 Windows 用到，其它平台返回 None（功能降级为"当死"，保守少恢复）。
+pub fn process_start_time_ms(pid: u32) -> Option<u64> {
     if pid == 0 {
-        return false;
+        return None;
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
         use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
         unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if h.is_null() {
-                return false; // 已退出 / 无权限（后者对同用户进程几乎不会发生）
+                return None;
             }
-            let mut code: u32 = 0;
-            let ok = GetExitCodeProcess(h, &mut code);
+            let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let mut exit = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let ok = GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user);
             CloseHandle(h);
-            ok != 0 && code == STILL_ACTIVE as u32
+            if ok == 0 {
+                return None;
+            }
+            let raw = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+            // Windows FILETIME 纪元（1601）→ Unix 纪元的偏移，单位 100ns
+            const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
+            raw.checked_sub(EPOCH_DIFF_100NS).map(|v| v / 10_000)
         }
     }
     #[cfg(not(windows))]
     {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
+        None
     }
+}
+
+/// 判断一条实例自述对应的进程是否**还活着** —— **pid + 启动时间双因子**。
+///
+/// 只看 pid 会踩 pid 复用（见 `InstanceRecord::started_at` 的事故记录）；
+/// 启动时间不同 = 这是另一个进程（复用了同一个 pid），原实例已死。
+/// 记录缺启动时间（0，旧版本写的）→ 不可信，当死。
+pub fn is_instance_alive(rec: &InstanceRecord) -> bool {
+    if rec.started_at == 0 {
+        return false;
+    }
+    process_start_time_ms(rec.pid) == Some(rec.started_at)
 }
 
 /// 拉起一个新实例，带可选的工作区 / 会话。
@@ -381,6 +450,7 @@ mod tests {
             pid: 111,
             workspace: "C:/ws/a".into(),
             session_id: "sess-1".into(),
+            started_at: 12345,
             updated_at: now_ms(),
         };
         write_instance_record(&d, &rec).unwrap();
@@ -403,7 +473,7 @@ mod tests {
         write_instance_record(&d, &InstanceRecord { pid: 2, workspace: "C:/b".into(), ..Default::default() }).unwrap();
 
         // 只有 2 号活着
-        let live = collect_live_instances(&d, |pid| pid == 2);
+        let live = collect_live_instances(&d, |rec| rec.pid == 2);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].pid, 2);
         // 死掉的那个文件应已被删除（目录里只剩 2.json）
@@ -440,7 +510,9 @@ mod tests {
             InstanceRecord { pid: 3, workspace: "".into(), session_id: "s3".into(), ..Default::default() }, // 无工作区
         ];
         let n = save_restore_snapshot(&d, 2, &live).unwrap();
-        assert_eq!(n, 1, "instances 只含别人（自己走 self_record）");
+        // 返回的是**总数（含自己）**：别人 1 + self 1 = 2 —— 按钮按这个数展示
+        // （2026-10-12 用户反馈"开 3 个只显示 2"后改的口径）
+        assert_eq!(n, 2, "返回将恢复的窗口总数（含自己）");
 
         let snap = take_restore_snapshot(&d).unwrap();
         // 自己单独存 —— updater 会把它重启成无参实例，那个实例靠这个认领回来
@@ -563,7 +635,7 @@ mod tests {
         let d = tmp_dir("wait-ok");
         let existing = InstanceRecord { pid: 1, workspace: "C:/old".into(), ..Default::default() };
         write_instance_record(&d, &existing).unwrap();
-        let before: std::collections::HashSet<u32> = [1u32].into_iter().collect();
+        let before: std::collections::HashSet<(u32, u64)> = [(1u32, 0u64)].into_iter().collect();
 
         // 模拟"新实例已完成绑定"
         write_instance_record(&d, &InstanceRecord { pid: 2, workspace: "C:/new".into(), ..Default::default() }).unwrap();
@@ -577,7 +649,7 @@ mod tests {
     fn wait_for_new_instance_ignores_preexisting() {
         let d = tmp_dir("wait-old");
         write_instance_record(&d, &InstanceRecord { pid: 5, workspace: "C:/old".into(), ..Default::default() }).unwrap();
-        let before: std::collections::HashSet<u32> = [5u32].into_iter().collect();
+        let before: std::collections::HashSet<(u32, u64)> = [(5u32, 0u64)].into_iter().collect();
         // 超时设很短，避免测试变慢
         let ok = wait_for_new_instance(&d, &before, |_| true, 50);
         assert!(!ok, "只有旧实例时应超时返回 false");
@@ -591,6 +663,66 @@ mod tests {
         write_instance_record(&d, &InstanceRecord { pid: 9, workspace: "".into(), ..Default::default() }).unwrap();
         let ok = wait_for_new_instance(&d, &std::collections::HashSet::new(), |_| true, 50);
         assert!(!ok, "未绑定工作区不算就绪（初始化还在进行）");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **pid 复用免疫**：pid 相同但启动时间不同 = 另一个进程（复用了该 pid），
+    /// 原实例已死。这是 2026-09-21/22「跳过（已有实例绑定该工作区）」事故的直接
+    /// 回归测试 —— 只看 pid 时，死实例残留 + pid 复用会被误判"还活着"，
+    /// 导致该工作区的窗口少恢复一个。
+    #[test]
+    fn is_instance_alive_requires_matching_start_time() {
+        let me = std::process::id();
+        let started = process_start_time_ms(me).expect("查自己的启动时间必须成功");
+
+        // 真身：pid + 启动时间都对 → 活
+        assert!(is_instance_alive(&InstanceRecord {
+            pid: me, started_at: started, ..Default::default()
+        }));
+
+        // pid 复用模拟：同 pid、不同启动时间 → 另一个进程，判定已死
+        assert!(!is_instance_alive(&InstanceRecord {
+            pid: me, started_at: started + 1, ..Default::default()
+        }));
+
+        // 旧版本写的记录（无启动时间）→ 不可信，当死
+        assert!(!is_instance_alive(&InstanceRecord {
+            pid: me, started_at: 0, ..Default::default()
+        }));
+
+        // 不存在的 pid → 死
+        assert!(!is_instance_alive(&InstanceRecord {
+            pid: 0, started_at: started, ..Default::default()
+        }));
+    }
+
+    /// 升级流程的兜底：杀完实例后清空全部自述。
+    #[test]
+    fn clear_instance_records_removes_all() {
+        let d = tmp_dir("clear");
+        write_instance_record(&d, &InstanceRecord { pid: 1, workspace: "C:/a".into(), ..Default::default() }).unwrap();
+        write_instance_record(&d, &InstanceRecord { pid: 2, workspace: "C:/b".into(), ..Default::default() }).unwrap();
+        clear_instance_records(&d);
+        let remaining = std::fs::read_dir(instances_dir(&d)).unwrap().flatten().count();
+        assert_eq!(remaining, 0, "自述目录应被清空");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 计数与快照必须同口径（含去重）：曾各自过滤 → 按钮数与实际恢复数失配。
+    #[test]
+    fn count_and_snapshot_share_the_same_selection() {
+        let d = tmp_dir("same-sel");
+        let live = vec![
+            InstanceRecord { pid: 7, workspace: "C:/me".into(), ..Default::default() },   // 自己
+            InstanceRecord { pid: 8, workspace: "C:/b".into(), ..Default::default() },
+            InstanceRecord { pid: 9, workspace: "C:/b".into(), ..Default::default() },    // 同工作区 → 去重
+            InstanceRecord { pid: 10, workspace: "C:/c".into(), ..Default::default() },
+        ];
+        let (me, others) = select_restorable(7, &live);
+        let count_total = others.len() + usize::from(me.is_some());
+        let save_total = save_restore_snapshot(&d, 7, &live).unwrap();
+        assert_eq!(count_total, 3, "3 个不同工作区的窗口（含自己）→ 总数 3");
+        assert_eq!(count_total, save_total, "计数与快照必须同口径");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -620,7 +752,7 @@ mod keep_session_tests {
 
         write_instance_record(&d, &InstanceRecord {
             pid: 42, workspace: "C:/ws".into(), session_id: "sess-keep".into(),
-            updated_at: now_ms(),
+            started_at: 12345, updated_at: now_ms(),
         }).unwrap();
 
         let back = read_instance_record(&d, 42).expect("应读回");

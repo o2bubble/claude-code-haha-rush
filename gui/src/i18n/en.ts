@@ -1403,7 +1403,7 @@ const en: Locale = {
       retry: "Retry",
     },
     restartRequired: "GUI needs to restart to complete the update. Save your work and click restart.",
-    restoreHint: "After restart, reopen the other instances with their current workspaces and sessions",
+    restoreHint: "After restart, reopen all current windows (including this one) with their workspaces and sessions",
     restoreSnapshotSaved: "Recorded {count} instance(s) — they will be restored after restart",
     restoreSnapshotFailed: "Failed to record instance state ({err}) — the update still proceeds, but other instances won't be restored",
   },

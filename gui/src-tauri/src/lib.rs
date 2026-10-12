@@ -547,19 +547,23 @@ pub fn run() {
                         return;
                     }
                     let Ok(exe) = std::env::current_exe() else { return };
-                    // 发起前已在跑的 pid —— 用来区分"本来就在的"和"刚拉起的"（等就绪用）
-                    let before_pids: std::collections::HashSet<u32> =
-                        instances::collect_live_instances(&dir, instances::is_process_alive)
+                    // 发起前已在跑的**实例身份**（pid + 启动时间）—— 区分"本来就在的"
+                    // 和"刚拉起的"（等就绪用）。双因子：pid 复用下裸 pid 会把新实例
+                    // 误认成旧实例，等待空转到超时。
+                    let before: std::collections::HashSet<(u32, u64)> =
+                        instances::collect_live_instances(&dir, instances::is_instance_alive)
                             .into_iter()
-                            .map(|r| r.pid)
+                            .map(|r| (r.pid, r.started_at))
                             .collect();
 
                     let mut spawned = 0usize;
                     for rec in &snap.instances {
                         // 去重**每轮重新取**（不是循环外取一次）：刚拉起的实例绑定后
                         // 会写自述，重新取才能看到它；也能发现用户期间手工开的同工作区窗口。
+                        // 存活用双因子判定 —— 残留自述 + pid 复用曾让这里误判"已有实例"
+                        // 而跳过整个工作区（2026-09-21/22 实测三次）。
                         let live_workspaces: std::collections::HashSet<String> =
-                            instances::collect_live_instances(&dir, instances::is_process_alive)
+                            instances::collect_live_instances(&dir, instances::is_instance_alive)
                                 .into_iter()
                                 .map(|r| r.workspace)
                                 .filter(|w| !w.is_empty())
@@ -574,8 +578,8 @@ pub fn run() {
                                 // 等它真正绑定完成再拉下一个（超时不阻塞，继续下一个）
                                 let ready = instances::wait_for_new_instance(
                                     &dir,
-                                    &before_pids,
-                                    instances::is_process_alive,
+                                    &before,
+                                    instances::is_instance_alive,
                                     instances::INSTANCE_READY_TIMEOUT_MS,
                                 );
                                 if ready {
@@ -1692,6 +1696,9 @@ fn update_instance_record(
         pid,
         workspace: workspace.unwrap_or_default(),
         session_id: resolved_session,
+        // 双因子存活的另一半（见 InstanceRecord::started_at）：写自己的启动时刻。
+        // 查自己必然成功；万一失败记 0 = 不可信（保守当死），只是少恢复一个窗口。
+        started_at: instances::process_start_time_ms(pid).unwrap_or(0),
         updated_at: instances::now_ms(),
     };
     if let Err(e) = instances::write_instance_record(&dir, &rec) {
@@ -1699,30 +1706,32 @@ fn update_instance_record(
     }
 }
 
-/// 升级前调用：把所有**还活着**的实例状态存成恢复快照。返回写入的实例数。
+/// 升级前调用：把所有**还活着**的实例状态存成恢复快照。
+/// 返回**本次升级将恢复的窗口总数（含自己）** —— 与按钮/提示同一口径。
 #[tauri::command]
 fn prepare_restore_snapshot(app: tauri::AppHandle) -> Result<usize, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let live = instances::collect_live_instances(&dir, instances::is_process_alive);
+    let live = instances::collect_live_instances(&dir, instances::is_instance_alive);
     let n = instances::save_restore_snapshot(&dir, std::process::id(), &live)?;
     log::info!("[instances] 恢复快照已写入：{n} 个实例（共发现 {} 个存活）", live.len());
     Ok(n)
 }
 
-/// 「升级并恢复」按钮要显示的数量：**除自己以外**、已绑定工作区、且会真的被恢复的实例数。
+/// 「升级并恢复」按钮显示的数量：**本次升级将恢复的窗口总数（含自己）**。
 ///
-/// 与 `save_restore_snapshot` 用**同一套过滤规则**（排除自己 + 排除无工作区 +
-/// 截断到上限）——否则按钮写着"恢复 3 个"、实际只恢复 1 个，是明确的错误信息。
+/// 语义变化（2026-10-12，用户实测反馈"开了 3 个只显示 2"）：原实现只数**除自己
+/// 以外**的实例 —— 但自己也会被恢复（updater 重启的无参实例认领 self_record），
+/// 用户看到 3 个窗口却显示"恢复 2 个"必然困惑。现在返回总数：3 个窗口 → 3。
+/// 前端据 `> 1` 决定按钮是否出现（=1 只有自己，谈不上"恢复其他实例"）。
+///
+/// 与 `save_restore_snapshot` 共用 `select_restorable`（含按工作区去重）——
+/// 曾各自过滤（本函数漏了去重），按钮数与实际恢复数会失配。
 #[tauri::command]
 fn count_restorable_instances(app: tauri::AppHandle) -> Result<usize, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let live = instances::collect_live_instances(&dir, instances::is_process_alive);
-    let self_pid = std::process::id();
-    Ok(live
-        .iter()
-        .filter(|r| r.pid != self_pid && !r.workspace.trim().is_empty())
-        .count()
-        .min(instances::MAX_RESTORE_INSTANCES))
+    let live = instances::collect_live_instances(&dir, instances::is_instance_alive);
+    let (self_record, others) = instances::select_restorable(std::process::id(), &live);
+    Ok(others.len() + usize::from(self_record.is_some()))
 }
 
 /// True when this instance was launched with `--intent <id>` (intent mode).

@@ -553,8 +553,11 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
               {t("update.actions.skipAll")}
             </button>
             {/* 「升级并恢复」只在**确实有别的实例要恢复**时出现 —— 单实例用户
-                看到它只会困惑（"恢复什么？"）。数量取自与快照同一套过滤规则。 */}
-            {restorable > 0 && (
+                看到它只会困惑（"恢复什么？"）。
+                `restorable` = 将恢复的窗口**总数（含自己）**（2026-10-12 改：
+                原为"其他实例数"，用户开 3 个窗口却显示 2 造成困惑）；
+                所以判据是 `> 1`（=1 只有自己，谈不上"恢复其他实例"）。 */}
+            {restorable > 1 && (
               <button
                 type="button"
                 style={S.btn(true)}
@@ -564,7 +567,7 @@ export const UpdatePanel: React.FC = memo(function UpdatePanel() {
                 {t("update.actions.restartAndRestore", { count: String(restorable) })}
               </button>
             )}
-            <button type="button" style={S.btn(restorable === 0)} onClick={handleRestart}>
+            <button type="button" style={S.btn(restorable <= 1)} onClick={handleRestart}>
               {t("update.actions.restart")}
             </button>
           </>

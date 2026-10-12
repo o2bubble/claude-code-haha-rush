@@ -1402,7 +1402,7 @@ const zh = {
       retry: "重试",
     },
     restartRequired: "GUI 需要重启以完成更新。保存工作后点击重启。",
-    restoreHint: "重启后会按现在的工作区与会话，把其他实例一并开回来",
+    restoreHint: "重启后会把当前的窗口（含本窗口）按各自的工作区与会话重新打开",
     restoreSnapshotSaved: "已记录 {count} 个实例，重启后将一并恢复",
     restoreSnapshotFailed: "记录实例状态失败（{err}）—— 升级不受影响，但重启后不会自动恢复其他实例",
   },
