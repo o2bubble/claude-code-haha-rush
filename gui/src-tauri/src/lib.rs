@@ -493,7 +493,7 @@ pub fn run() {
                 let app_h = app.handle().clone();
                 main_window.on_window_event(move |event| {
                     if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                        close_plugin_windows(&app_h);
+                        close_secondary_windows(&app_h);
                     }
                 });
             }
@@ -2580,26 +2580,43 @@ fn overlay_label_prefix(plugin: &str) -> String {
     format!("overlay-{slug}-")
 }
 
-/// 关闭**本实例**开的所有插件窗口（挂件 / 覆盖层）。
+/// 关闭**本实例**开的所有次级窗口（插件窗口 / 挂件 / 浮窗 / 应用内 URL 窗）。
 ///
-/// 主窗口关闭时调用（见那里的长注释）——不这么做，插件窗口会让 Tauri 认为
-/// "还有窗口"而拖住进程不退，挂件就成了关不掉的孤儿。
+/// 主窗口关闭时调用（见那里的长注释）。两个理由，任一个都足以必须收：
+///
+/// 1. **进程退不了** —— Tauri 要等**所有**窗口关闭才退进程。留下任何一个，
+///    主窗没了而进程卡住。
+/// 2. **留下也是死的** —— 这些窗口都是**子功能**，生命周期必须短于主窗：
+///    · 浮窗 / 挂件是 **leaf**，数据全靠主窗（hub）镜像 —— 主窗一没，它们就是
+///      冻结的孤儿（看着还在，其实永远不再更新）。
+///    · URL 窗虽然做了 IPC 隔离（label 不在 capabilities 白名单），但它是主窗里
+///      点链接开出来的，主窗没了同样没有存在意义。
 ///
 /// 只遍历本进程的窗口 —— 多开时别的实例有自己的窗口，绝不能碰。
-/// label 规则：挂件 `indicator-<slug>`、覆盖层 `overlay-<slug>-<显示器序号>`。
-fn close_plugin_windows(app: &tauri::AppHandle) {
+///
+/// ⚠️ **新增窗口类型时必须同步这里**。踩过的坑：
+///   · `widget-` 是后补的（挂件上线时漏了）
+///   · `float-` / `urlview-` 长期漏着 —— 开着浮窗关主窗 → 主窗消失、浮窗留下、
+///     进程不退（2026-09-20 用户反馈后查出）
+/// 与其逐个补前缀，不如问一句：**这个新窗口该不该比主窗活得久？** 答案几乎
+/// 总是"不该"。
+///
+/// label 规则：`indicator-<slug>` / `overlay-<slug>-<n>` / `widget-<name>` /
+/// `float-<uuid>` / `urlview-<hash>`。
+fn close_secondary_windows(app: &tauri::AppHandle) {
+    const SECONDARY_PREFIXES: [&str; 5] = [
+        "indicator-", "overlay-", "widget-", "float-", "urlview-",
+    ];
     let mut closed = 0usize;
     for w in app.webview_windows().values() {
         let label = w.label().to_string();
-        // `widget-` 也要关：聊天挂件无装饰、没有系统关闭按钮，主窗关掉后它会变成
-        // 关不掉的孤儿，而 Tauri 要等**所有**窗口关闭才退进程 → 进程卡住不退出。
-        if label.starts_with("indicator-") || label.starts_with("overlay-") || label.starts_with("widget-") {
+        if SECONDARY_PREFIXES.iter().any(|p| label.starts_with(p)) {
             let _ = w.close();
             closed += 1;
         }
     }
     if closed > 0 {
-        log::info!("[Rust] close_plugin_windows: closed {closed} plugin window(s)");
+        log::info!("[Rust] close_secondary_windows: closed {closed} secondary window(s)");
     }
 }
 
@@ -3084,6 +3101,10 @@ fn close_plugin_indicator(app: tauri::AppHandle, plugin: String) -> Result<(), S
 /// 挂件窗的固定 label —— 单例。
 /// 挂件跟随主窗当前会话，不需要多实例；固定名让"重复进入"天然幂等。
 const WIDGET_LABEL: &str = "widget-main";
+/// 挂件模式开关广播（bool：true=主窗隐藏、挂件接管前台）。
+/// 前端据此决定"控制请求 UI 由谁渲染"——同一时刻只能有一个窗口响应权限/提问，
+/// 否则两窗都能点，会出现已消费的 request_id 被二次响应。
+const WIDGET_MODE_EVENT: &str = "widget-mode-changed";
 /// 挂件窗的兜底显示延迟：前端就绪信号（握手 + 历史回填完成）可能永不到达，
 /// 不能让用户干等 —— 到点无论就绪与否都亮出来（同 INDICATOR_SHOW_DELAY_MS 的思路，
 /// 但更长：挂件要等桥接握手与历史回填）。
@@ -3094,7 +3115,10 @@ const WIDGET_SHOW_FALLBACK_MS: u64 = 1500;
 /// 只建窗、**不隐藏主窗** —— 隐藏动作在 `show_chat_widget` 里做：那时挂件已完成
 /// 握手与历史回填、马上要显示，先亮挂件再藏主窗才不会出现"两个都没有"的空窗期。
 #[tauri::command]
-fn open_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
+fn open_chat_widget(
+    app: tauri::AppHandle,
+    settings: tauri::State<Mutex<settings::AppSettings>>,
+) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(WIDGET_LABEL) {
         // 幂等：已开着就亮它（主窗由调用方决定去留）
         let _ = w.show();
@@ -3102,9 +3126,36 @@ fn open_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    let w: u32 = 360;
-    let h: u32 = 560;
-    let (px, py) = {
+    // 几何：优先用上次保存的（用户拖过/拉过就记住），否则主屏右下角默认位。
+    // 保存位置存的是**物理像素**，与 set_position/set_size 的 Physical* 直接对齐。
+    let saved = {
+        let s = settings.lock().map_err(|e| format!("Lock error: {e}"))?;
+        (
+            s.widget_width, s.widget_height, s.widget_x, s.widget_y,
+        )
+    };
+    let w: f64 = saved.0.filter(|v| *v >= 240.0).unwrap_or(360.0);
+    let h: f64 = saved.1.filter(|v| *v >= 220.0).unwrap_or(560.0);
+    // 保存位置是否仍然**落在某块显示器上**。
+    //
+    // 只判 `-32000` 哨兵是不够的：挂件原来是开在副屏上的，副屏拔掉/改分辨率后，
+    // 那个坐标**依然是个合法数字**，只是落在了不存在的屏幕区域 —— 挂件会开到
+    // 看不见的地方（用户以为"没打开"）。主窗的 ensure_window_on_screen 同理，
+    // 这里用同一套矩形相交判据。
+    let saved_on_screen = match (saved.2, saved.3) {
+        (Some(x), Some(y)) if x > -30000.0 && y > -30000.0 => {
+            let r = (x as i32, y as i32, x as i32 + w as i32, y as i32 + h as i32);
+            app.available_monitors().unwrap_or_default().iter().any(|m| {
+                let p = m.position();
+                let s = m.size();
+                r.0 < p.x + s.width as i32 && r.2 > p.x && r.1 < p.y + s.height as i32 && r.3 > p.y
+            })
+        }
+        _ => false,
+    };
+    let (px, py) = if saved_on_screen {
+        (saved.2.unwrap() as i32, saved.3.unwrap() as i32)
+    } else {
         let m = app
             .primary_monitor()
             .map_err(|e| format!("取主显示器失败: {e}"))?
@@ -3138,7 +3189,7 @@ fn open_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
         .resizable(true)     // ⚠️ 与插件指示窗相反：挂件要能拉大小
         .visible(false)      // 先隐藏，等页面就绪（避免 WebView2 白底首帧）
         .transparent(true)   // 半透明的窗口层前提（页面层配合 overlay-clear=1）
-        .inner_size(w as f64, h as f64)
+        .inner_size(w, h)
         .min_inner_size(240.0, 220.0)
         .data_directory(webview_data_dir(&app2))
         // ⚠️ 与插件指示窗的关键分歧：**绝不** set_focusable(false)。
@@ -3149,7 +3200,28 @@ fn open_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
             Ok(win) => {
                 let _ = win.set_position(tauri::PhysicalPosition::new(px, py));
                 let app_ev = app2.clone();
+                // 几何持久化：拖动/拉大小后记住位置与尺寸，下次打开原样恢复。
+                //
+                // 为什么用 Moved/Resized 事件而不是"关闭时存一次"：窗口可能是被
+                // Alt+F4 / 隐藏主窗连带销毁的，Destroyed 时再读 outer_position 可能
+                // 已经拿不到有效值。事件里读最稳。
+                // 写入走 merge_gui_patch（全局设置），与主窗 window_* 的存法同一套路。
+                let win_geom = win.clone();
                 win.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
+                        let (Ok(pos), Ok(size)) = (win_geom.outer_position(), win_geom.outer_size()) else {
+                            return;
+                        };
+                        // 未定位窗口的哨兵值（同 ensure_window_on_screen 的判据）——别把 -32000 存进去
+                        if pos.x <= -30000 || pos.y <= -30000 {
+                            return;
+                        }
+                        let patch = serde_json::json!({
+                            "widgetX": pos.x, "widgetY": pos.y,
+                            "widgetWidth": size.width, "widgetHeight": size.height,
+                        });
+                        let _ = settings::merge_gui_patch(&settings::global_settings_path(), &patch);
+                    }
                     if matches!(event, tauri::WindowEvent::Destroyed) {
                         // 🔴 主窗恢复放在 **Rust 侧**，不依赖被隐藏页的 JS：
                         //    这样 Alt+F4、任务管理器结束、渲染进程崩溃……任何销毁路径
@@ -3160,6 +3232,8 @@ fn open_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
                             let _ = main.set_focus();
                         }
                         let _ = app_ev.emit("chat-widget-closed", ());
+                        // 挂件没了 → 前台交还主窗（UI 归位，别留在"挂件负责"的假设上）
+                        let _ = app_ev.emit(WIDGET_MODE_EVENT, false);
                         log::info!("[Rust] 聊天挂件已关闭，主窗已恢复");
                     }
                 });
@@ -3190,6 +3264,10 @@ fn show_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.hide();
     }
+    // 广播"主窗已隐藏、挂件接管前台" —— 前端据此把权限/提问 UI 从主窗**搬到挂件**，
+    // 保证同一时刻只有一个窗口在响应控制请求（否则两窗都能点，会出现"已消费的
+    // request_id 被二次响应"的竞态）。见 crossWindowBusHub 的 widgetForeground。
+    let _ = app.emit(WIDGET_MODE_EVENT, true);
     log::info!("[Rust] 进入挂件模式（主窗已隐藏）");
     Ok(())
 }
@@ -3222,6 +3300,8 @@ fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let _ = main.show();
     let _ = main.unminimize();
     let _ = main.set_focus();
+    // 主窗回到前台 → 控制请求 UI 交还主窗（挂件侧不再渲染）。见 WIDGET_MODE_EVENT。
+    let _ = app.emit(WIDGET_MODE_EVENT, false);
     Ok(())
 }
 

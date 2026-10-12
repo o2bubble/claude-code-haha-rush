@@ -25,9 +25,10 @@ import { Events, type ChatStateChangedPayload } from "../../services/events";
 import { getSettings } from "../../stores/settingsStore";
 import { normalizeTheme } from "../../utils/themeUtils";
 import { InputArea } from "../chat/InputArea";
+import { PermissionPrompt } from "../chat/ChatInputPanel";
 import { WidgetMessageList } from "./WidgetMessageList";
 import { t } from "../../i18n";
-import { X, ExternalLink } from "lucide-react";
+import { X } from "lucide-react";
 
 /**
  * 向主窗要多少条历史。
@@ -137,12 +138,33 @@ export default function WidgetApp() {
   const streaming = !!state?.streaming;
   const messages = state?.messages ?? [];
 
+  // ── 权限确认（挂件模式下的唯一出口）──
+  //
+  // AskUserQuestion 也走这里：它的选项 UI 在主窗的浮窗里，挂件不复刻（会额外引入
+  // 一套问答组件与回调注册）；但**至少要给用户一条明确出路**，否则同样是"卡住"。
+  const pending = state?.pendingControlRequest ?? null;
+  const isAsk = pending?.tool_name === "AskUserQuestion";
+  const respond = useCallback(
+    (allowed: boolean, always: boolean) => {
+      // 带上 requestId：主窗侧校验一次性，过期响应（用户已处理/已换新请求）会被丢弃
+      crossWindowBus.publish("cmd.respondPermission", {
+        requestId: pending?.request_id,
+        allowed,
+        always,
+      });
+    },
+    [pending?.request_id],
+  );
+
   return (
     <div
       style={{
         height: "100vh",
         display: "flex",
         flexDirection: "column",
+        // 定位上下文：PermissionPrompt 用 position:absolute 贴底，缺了它会相对
+        // 更外层定位（挂件是全屏尺寸，会飘出去）。
+        position: "relative",
         // 几乎不透明（0.97）——**可读性优先于"透明观感"**。
         //
         // 试过 0.78 / 0.93 + backdrop-filter：桌面上的正文字号与挂件接近，透上来就是
@@ -187,19 +209,10 @@ export default function WidgetApp() {
         <span data-tauri-drag-region style={{ flex: 1 }}>
           {t("widget.title")}
         </span>
-        {state?.inputBlockedReason && (
-          // 权限确认等弹窗渲染在（隐藏的）主窗里 —— 用户会以为"卡住了"。
-          // 这里给一条出路：切回主窗去处理，处理完可以再点挂件回来。
-          <button
-            type="button"
-            title={t("widget.backToMainHint")}
-            onClick={() => void invoke("focus_main_window").catch(() => {})}
-            style={barBtnStyle}
-          >
-            <ExternalLink size={11} />
-            {t("widget.backToMain")}
-          </button>
-        )}
+        {/* 权限/提问的出口放在窗口底部（askBar / PermissionPrompt），**不是因为
+            这里点不动** —— 拖动条是 `data-tauri-drag-region`（非 deep），只有直接
+            点在该元素上才拖，且 BUTTON 天然阻止拖拽（见 TitleBar.tsx 的文件头）。
+            放底部纯粹是因为权限条要占满宽度、贴底更顺手。 */}
         <button
           type="button"
           title={t("widget.exit")}
@@ -212,6 +225,35 @@ export default function WidgetApp() {
 
       {/* 消息区 */}
       <WidgetMessageList messages={messages} streaming={streaming} />
+
+      {/* 权限确认 —— 挂件模式下主窗被隐藏，这个弹窗若留在主窗用户根本看不见
+          （表现为"卡住"）。hub 只在挂件接管前台时把请求投递过来（见 chat.controlRequest），
+          所以这里出现即代表**本窗就是当前前台**，直接渲染即可。
+          响应经 cmd.respondPermission 回主窗执行（叶窗没有后端 WS）。 */}
+      {pending && isAsk && (
+        // AskUserQuestion：选项 UI 在主窗，挂件不复刻 —— 但必须给一条明确出路，
+        // 否则用户面对"输入被挡 + 不知道去哪"（同样是卡住）。
+        <div style={askBarStyle}>
+          <span style={{ flex: 1 }}>{state?.inputBlockedReason ?? t("widget.askPending")}</span>
+          <button
+            type="button"
+            style={askBtnStyle}
+            onClick={() => void invoke("focus_main_window").catch(() => {})}
+          >
+            {t("widget.backToMain")}
+          </button>
+          <button type="button" style={askBtnStyle} onClick={() => respond(false, false)}>
+            {t("permission.deny")}
+          </button>
+        </div>
+      )}
+      {pending && !isAsk && (
+        <PermissionPrompt
+          onAllow={() => respond(true, false)}
+          onAllowAlways={() => respond(true, true)}
+          onDeny={() => respond(false, false)}
+        />
+      )}
 
       {/* 输入区 —— 复用 InputArea（props 全受控、无布局依赖）。
           外层覆写几个 CSS 变量让它融进半透明底，**不改它一行代码**。 */}
@@ -232,6 +274,38 @@ export default function WidgetApp() {
     </div>
   );
 }
+
+/** AskUserQuestion 的出路条：贴底、不挡输入框的提示行。 */
+const askBarStyle: React.CSSProperties = {
+  position: "absolute",
+  bottom: 0,
+  left: 12,
+  right: 12,
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "8px 10px",
+  backgroundColor: "var(--bg-root)",
+  border: "1px solid var(--accent)",
+  borderRadius: 8,
+  boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
+  zIndex: 100,
+  fontSize: "calc(var(--font-scale, 1) * 11px)",
+  fontFamily: "var(--font-sans)",
+  color: "var(--fg-primary)",
+};
+
+const askBtnStyle: React.CSSProperties = {
+  padding: "3px 10px",
+  border: "1px solid var(--border-medium)",
+  borderRadius: 4,
+  backgroundColor: "var(--bg-root)",
+  color: "var(--fg-primary)",
+  cursor: "pointer",
+  fontSize: "calc(var(--font-scale, 1) * 11px)",
+  fontFamily: "var(--font-sans)",
+  flexShrink: 0,
+};
 
 const barBtnStyle: React.CSSProperties = {
   display: "inline-flex",

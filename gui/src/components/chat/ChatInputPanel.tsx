@@ -29,7 +29,9 @@ import {
 } from "../../utils/streamStallDecision";
 import { activeToolNames } from "../../chat/chatReduce";
 
-function PermissionPrompt({ onAllow, onAllowAlways, onDeny }: {
+/** 权限确认条。**导出**给聊天挂件复用 —— 挂件模式下主窗隐藏，权限 UI 必须由挂件渲染，
+ *  否则用户面对一个看不见的弹窗（表现为"卡住"，用户实测）。 */
+export function PermissionPrompt({ onAllow, onAllowAlways, onDeny }: {
   onAllow: () => void; onAllowAlways: () => void; onDeny: () => void;
 }) {
   const req = getChatState().pendingControlRequest;

@@ -79,6 +79,10 @@ export interface AppSettings {
    *  关掉后升级只重启本实例，不再拉起其他窗口。
    *  ⚠️ **全局字段**（同 windowTitleOrder）：不进 Rust 的 merge_workspace_overrides 白名单。 */
   autoRestoreInstances?: boolean;
+  /** 「建议从 DeepSeek Pro 换到 Flash」一次性提示是否已展示（任意选择后 true）。
+   *  ⚠️ **全局字段**（同 autoRestoreInstances）：不进 Rust 的 merge_workspace_overrides
+   *  白名单 —— 换模型建议只弹一次，不按工作区重复。 */
+  deepseekFlashNoticeShown?: boolean;
   /**
    * 快捷键用户覆盖：功能 ID → 规范化键位字符串（`"mod+shift+p"`）。
    * 空字符串 = 显式解绑。未出现的 id 用默认表的值。

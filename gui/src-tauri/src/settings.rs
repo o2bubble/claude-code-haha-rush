@@ -112,6 +112,19 @@ pub struct AppSettings {
     pub window_y: Option<f64>,
     #[serde(rename = "windowMaximized", default)]
     pub window_maximized: bool,
+    // ── 聊天挂件的几何（全局，不按工作区分）──
+    //
+    // 挂件是"跟随主窗当前会话"的辅助窗，不属于任何工作区；且它可被拖到任意位置，
+    // 所以几何存**全局**设置。缺省 None → 首次打开用"主屏右下角"。
+    // 存物理像素（与主窗 window_* 同一约定，避免 DPI 换算）。
+    #[serde(rename = "widgetX", default)]
+    pub widget_x: Option<f64>,
+    #[serde(rename = "widgetY", default)]
+    pub widget_y: Option<f64>,
+    #[serde(rename = "widgetWidth", default)]
+    pub widget_width: Option<f64>,
+    #[serde(rename = "widgetHeight", default)]
+    pub widget_height: Option<f64>,
     #[serde(rename = "updateServerUrl", default = "default_update_server_url")]
     pub update_server_url: String,
     #[serde(rename = "theme", default)]
@@ -152,6 +165,12 @@ pub struct AppSettings {
     /// 与 windowTitleOrder 同样属于**纯全局偏好**，不进 `merge_workspace_overrides`。
     #[serde(rename = "autoRestoreInstances", default)]
     pub auto_restore_instances: Option<bool>,
+    /// 「建议从 DeepSeek Pro 换到 Flash」一次性提示是否已展示过（任意选择后置 true）。
+    ///
+    /// 纯全局偏好（与 autoRestoreInstances 同），不进 `merge_workspace_overrides` ——
+    /// 换模型建议只该弹一次，不该按工作区各弹一遍。
+    #[serde(rename = "deepseekFlashNoticeShown", default)]
+    pub deepseek_flash_notice_shown: Option<bool>,
     #[serde(rename = "customCompactPrompt", default)]
     pub custom_compact_prompt: Option<CompactPrompt>,
     #[serde(rename = "compactExtractScript", default)]
@@ -230,6 +249,10 @@ impl Default for AppSettings {
             window_x: None,
             window_y: None,
             window_maximized: false,
+            widget_x: None,
+            widget_y: None,
+            widget_width: None,
+            widget_height: None,
             update_server_url: default_update_server_url(),
             theme: None,
             quick_prompts: vec![],
@@ -243,6 +266,7 @@ impl Default for AppSettings {
             message_timeline: None,
             window_title_order: None,
             auto_restore_instances: None,
+            deepseek_flash_notice_shown: None,
             custom_compact_prompt: None,
             compact_extract_script: None,
             stream_stall_wake_prompt: None,
@@ -769,6 +793,10 @@ fn merge_workspace_overrides(base: &mut AppSettings, o: &AppSettings) {
     if o.window_x.is_some() { base.window_x = o.window_x; }
     if o.window_y.is_some() { base.window_y = o.window_y; }
     if o.window_maximized { base.window_maximized = true; }
+    if o.widget_x.is_some() { base.widget_x = o.widget_x; }
+    if o.widget_y.is_some() { base.widget_y = o.widget_y; }
+    if o.widget_width.is_some() { base.widget_width = o.widget_width; }
+    if o.widget_height.is_some() { base.widget_height = o.widget_height; }
 }
 
 /// Effective settings for an instance bound to `work_dir`: global gui merged
@@ -930,6 +958,21 @@ mod tests {
         let back = gui_to_app_settings(&gui);
         assert_eq!(back.auto_enter_recent_workspace, Some(true));
         assert_eq!(back.recent_workspaces, vec!["C:/ws-a".to_string(), "C:/ws-b".to_string()]);
+    }
+
+    /// deepseekFlashNoticeShown 必须真正建模 —— 未建模字段会被
+    /// gui_to_app_settings 静默丢弃（shortcuts 字段曾因此"改了重启就回退"），
+    /// 结果会变成"一次性提示每次启动都弹"。
+    #[test]
+    fn deepseek_flash_notice_round_trips() {
+        let mut s = AppSettings::default();
+        s.deepseek_flash_notice_shown = Some(true);
+        let gui = app_settings_to_gui(&s);
+        assert_eq!(gui["deepseekFlashNoticeShown"], true);
+        let back = gui_to_app_settings(&gui);
+        assert_eq!(back.deepseek_flash_notice_shown, Some(true));
+        // 缺省（从未弹过）→ None，前端视为"该弹"
+        assert_eq!(AppSettings::default().deepseek_flash_notice_shown, None);
     }
 
     // server_url 迁移判定测试已随函数移至 src/migrations.rs

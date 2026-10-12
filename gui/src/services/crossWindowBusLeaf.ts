@@ -238,6 +238,12 @@ export function startCrossWindowBusLeaf(subscriptions: string[]): void {
   crossWindowBus.subscribe("chat.tasks", (p) => syncChatTasks(p));
   crossWindowBus.subscribe("chat.slashCommands", (p) => syncChatSlashCommands(p));
   crossWindowBus.subscribe("chat.inputBlocked", (p) => syncChatInputBlocked(p as string | null));
+  // 控制请求（权限确认 / AskUserQuestion）—— 挂件模式下由挂件渲染 UI。
+  // hub 只在"主窗隐藏、挂件接管前台"时发布非空值；本窗口据此显示权限按钮，
+  // 用户点了经 cmd.respondPermission 回主窗执行（叶窗没有后端 WS）。
+  crossWindowBus.subscribe("chat.controlRequest", (p) =>
+    updateChatState({ pendingControlRequest: (p ?? null) as ChatState["pendingControlRequest"] }),
+  );
   crossWindowBus.subscribe("chat.skills.dialog", (p) => syncChatSkillsDialog(p));
   crossWindowBus.subscribe("chat.session.loaded", (p) => syncSessionLoaded(p as any));
   // 挂件历史回填：整批替换消息列表。

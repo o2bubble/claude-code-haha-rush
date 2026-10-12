@@ -116,6 +116,20 @@ export function createChatSession(): ChatSession {
   // 使新实例一步打开意图目标而非先跳最近再切目标。
   let _intentTargeted = false;
 
+  // 意图目标会话 —— **跨连接粘住**，直到真的加载成功才清。
+  //
+  // 为什么必须有它（2026-09-20 用户实测，慢机器必现"进了工作区但没加载会话"）：
+  //   `resume_session` 是**一次性 WebSocket 消息**。新实例启动时 GUI 的 WS
+  //   常比后端先就绪 → 首连失败/闪断 → 那条 resume_session 打在死连接上**丢了**，
+  //   而重连（`ws.onopen`）只会重发 `messageQueue` 里的消息，**没人重发目标**。
+  //   此时 `_autoLoaded` 被 onopen 复位、`_intentTargeted` 仍是 true →
+  //   "最近会话"被抑制、目标又没发 → **两边都空**，用户看到就是"没加载目标会话"。
+  //
+  //   本机不复现是因为后端起得快、WS 一次连上；慢机器才踩。
+  //
+  // 修法：目标存成**粘性状态**，`onopen` 重放；`session_loaded` 确认到位后才清。
+  let _intentTargetSessionId: string | null = null;
+
   function relaySessionsChanged() {
     import("@tauri-apps/api/core").then(({ invoke }) => invoke("notify_sessions_changed").catch(() => {}));
   }
@@ -297,6 +311,12 @@ export function createChatSession(): ChatSession {
     }
     const prevStreaming = getChatState().streaming;
     const prevSessionId = getChatState().sessionId;
+    // 意图目标已**确认加载到位** → 解除粘性（否则断线重连会把它又 resume 一次）。
+    // 只认目标会话本身：会话待加载期间后端可能先回别的（如自动加载的最近会话），
+    // 那种 `session_loaded` 不能当作"目标已兑现"。
+    if (_intentTargetSessionId && (msg as { session_id?: string }).session_id === _intentTargetSessionId) {
+      _intentTargetSessionId = null;
+    }
     // 权威回合结束信号: result / status:ready(见 chatReduce message_stop 注释)。
     // 与 reducer 相同的 unwrap: 顶层都是 stream_event 包裹(见 ideMode broadcast),
     // 顶层永无裸 type:"result" —— 必须在 event 内判。
@@ -437,6 +457,12 @@ export function createChatSession(): ChatSession {
       _autoLoaded = false;
       while (messageQueue.length > 0) {
         ws!.send(messageQueue.shift()!);
+      }
+      // 重放粘性意图目标 —— 首连那条 `resume_session` 可能已随断线丢失（见
+      // `_intentTargetSessionId` 的注释）。放在队列之后发，保证顺序：队列里的
+      // 旧命令（若有）先落地。目标确认加载后（`session_loaded`）才清，见 dispatch。
+      if (_intentTargetSessionId && ws!.readyState === WebSocket.OPEN) {
+        ws!.send(JSON.stringify({ type: "resume_session", session_id: _intentTargetSessionId }));
       }
       updateChatState({ connected: true });
       addStatusMessage("WebSocket 已连接", "success");
@@ -732,6 +758,7 @@ export function createChatSession(): ChatSession {
     launchIntentSession: (sessionId: string) => {
       _autoLoaded = true;      // 意图已有明确目标, 之后不再自动切最近(防回跳)
       _intentTargeted = true;
+      _intentTargetSessionId = sessionId;   // 粘住: 断线重连时由 onopen 重放
       send("resume_session", { session_id: sessionId });
     },
     /**

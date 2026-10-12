@@ -616,7 +616,16 @@ class Project {
   }
 
   private scheduleDrain(): void {
-    if (this.flushTimer) {
+    // Never run two drains concurrently: each drain's appendToFile writes a
+    // slice of the queue, and if a slow append (AV scan of the growing
+    // transcript) outlives FLUSH_INTERVAL_MS, a second timer used to start a
+    // second drain whose append raced the first's — completing out of order
+    // and physically swapping adjacent JSONL entries in the file (observed
+    // 2026-10-09: a tool_use line landed before a text line enqueued ahead of
+    // it, breaking DeepSeek's block-adjacency check on resume). The guard on
+    // activeDrain keeps drains sequential; the tail below reschedules when
+    // entries arrived mid-drain.
+    if (this.flushTimer || this.activeDrain) {
       return
     }
     this.flushTimer = setTimeout(async () => {

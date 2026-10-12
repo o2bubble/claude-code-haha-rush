@@ -7,6 +7,7 @@ import StatusBar from "./components/StatusBar";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { WorkspaceSelector } from "./components/chat/WorkspaceSelector";
 import { WelcomeWizard, type WizardSettings } from "./components/chat/WelcomeWizard";
+import { DeepseekFlashDialog, isDeepseekProModel } from "./components/chat/DeepseekFlashDialog";
 import { registerPanel } from "./stores/panelRegistry";
 import { reloadPlugins, getActiveManifests, collectPluginHotkeys } from "./services/pluginRegistry";
 import { startPluginProcessListener } from "./services/pluginProcessBridge";
@@ -53,6 +54,8 @@ let lastPersistedLayout: string | null = null;
 export default function App() {
   const [showWorkspaceSelector, setShowWorkspaceSelector] = useState(false);
   const [showWelcomeWizard, setShowWelcomeWizard] = useState(false);
+  // 「建议换 Flash」一次性提示：命中的激活 profile（null = 不显示）
+  const [flashSuggestion, setFlashSuggestion] = useState<{ profileId: string; model: string } | null>(null);
   const [workspaceList, setWorkspaceList] = useState<string[]>([]);
   const [langKey, setLangKey] = useState(0);
   const needShowHelp = useRef(false);
@@ -380,6 +383,10 @@ export default function App() {
     s.forceChineseThinking = ws.forceChineseThinking;
     s.autoEnterRecentWorkspace = ws.autoEnterRecentWorkspace;
     s.isFirstLaunch = false;
+    // 首启向导里用户**刚刚主动挑过模型**（向导默认选 Flash，选 Pro 是明确选择）：
+    // 装完几秒就弹「建议换 Flash」等于立刻否定他的选择 —— 对新装用户豁免。
+    // 该提示面向的是升级上来的老 Pro 用户（他们配置 pro 时 Flash 还没上位）。
+    s.deepseekFlashNoticeShown = true;
 
     // Apply server profile（档位 → 地址的唯一映射在 utils/serverProfile）
     const serverUrls = serverProfileUrls(ws.serverProfile);
@@ -538,8 +545,14 @@ export default function App() {
       // open_session 意图：提前标记目标会话，抑制 backend connect 后 session_list
       // 到达时的"自动加载最近会话"——否则新实例先切最近、再被 runIntent 切目标，
       // 造成两次跳变（应一步到位）。必须在 bind/connect 之前设置。
+      //
+      // ⚠️ **必须 await 这个动态 import**（2026-09-20 修）：原来是 `.then(...)` 不等待，
+      // 而下面紧接着就 `await handleWorkspaceLaunch()` 起后端；慢机器上后端连上、
+      // session_list 到达**可能早于**这个 then 回调 → 抑制没生效 → 自动加载最近会话
+      // 顶掉目标。这正是"换台电脑经常不成功"的一处竞态。
       if (kind === "open_session") {
-        import("./components/chat/useChatBridge").then(({ setIntentTargeted }) => setIntentTargeted(true));
+        const { setIntentTargeted } = await import("./components/chat/useChatBridge");
+        setIntentTargeted(true);
       }
       // Bind the workspace the intent names (starts the backend). Reuse the
       // normal launch path so the bridge/data-layer setup is identical.
@@ -752,8 +765,35 @@ export default function App() {
           console.warn("[App] 启动插件后台进程失败:", e);
         }
       })();
+
+      // 一次性提示：激活 Profile 用的是 DeepSeek Pro → 建议换 Flash。
+      // 挂在 WORKSPACE_BOUND（sticky，晚注册也能收到）：active-profile 标记按
+      // 工作区存，绑定前读到的是全局 workDir 的标记，不可靠 —— 与 desktopStore
+      // 等 per-workspace 读取同一时序约束。任意选择后置全局标记，只弹一次。
+      if (!getSettings().deepseekFlashNoticeShown) {
+        void (async () => {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const result: any = await invoke("list_model_profiles");
+            const active: string | null = result.active ?? null;
+            if (!active) return;
+            const hit = (result.profiles || []).find((p: any) => p.id === active);
+            const model: string = hit?.model ?? "";
+            if (!isDeepseekProModel(model)) return;
+            setFlashSuggestion({ profileId: active, model });
+          } catch {
+            /* 检查失败静默跳过，不打扰用户 */
+          }
+        })();
+      }
     });
   }, []);
+
+  // ── 「建议换 Flash」一次性提示：关闭即置标记（继续用 Pro 也不再提示） ──
+  function handleFlashDismiss() {
+    setFlashSuggestion(null);
+    void saveSettings({ deepseekFlashNoticeShown: true }, "global");
+  }
 
   // ── Highlight.js theme manager ──
   useEffect(() => {
@@ -906,6 +946,13 @@ export default function App() {
       {phase === "leaving" && splashOverlay}
       {showWelcomeWizard && (
         <WelcomeWizard onComplete={handleWizardComplete} />
+      )}
+      {flashSuggestion && (
+        <DeepseekFlashDialog
+          profileId={flashSuggestion.profileId}
+          fromModel={flashSuggestion.model}
+          onClose={handleFlashDismiss}
+        />
       )}
       {showWorkspaceSelector && (
         <WorkspaceSelector

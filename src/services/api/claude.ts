@@ -75,6 +75,7 @@ import { captureAPIRequest, logError } from '../../utils/log.js'
 import {
   createAssistantAPIErrorMessage,
   createUserMessage,
+  enforceToolBlockOrdering,
   ensureToolResultPairing,
   normalizeContentFromAPI,
   normalizeMessagesForAPI,
@@ -1375,6 +1376,13 @@ async function* queryModel(
   // Strip assistant thinking blocks — some Anthropic-compatible relays (qnaigc/GLM
   // gateways) reject them ("content[0].type类型错误" → 502). Safe for Anthropic too.
   messagesForAPI = stripThinkingFromAssistantMessages(messagesForAPI)
+
+  // Self-heal block-level tool adjacency for strict endpoints (e.g. DeepSeek):
+  // tool_use must end its assistant message and tool_result must lead the next
+  // user message. Runs after the thinking strip so the "last block" reflects
+  // the final payload; no-op for well-formed history. See the function's doc
+  // for the 2026-10-09 transcript-out-of-order incident.
+  messagesForAPI = enforceToolBlockOrdering(messagesForAPI)
 
   // Strip advisor blocks — the API rejects them without the beta header.
   if (!betas.includes(ADVISOR_BETA_HEADER)) {

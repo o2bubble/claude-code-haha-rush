@@ -175,6 +175,66 @@ describe("ChatSession — session auto-resume", () => {
       expect(ws.sent.filter((d) => d.includes("resume_session"))).toHaveLength(1);
     });
   });
+
+  it("① 意图通路：先抑制自动加载、再收列表 → 只开目标会话", async () => {
+    // 生产时序（App.handleIntentLaunch，**顺序是契约**）：
+    //   ① setIntentTargeted(true)   ← 必须**早于**启动后端（慢机器上顺序会反转）
+    //   ② 绑工作区 → 后端连上 → session_list 到达
+    //   ③ launchIntentSession(target)
+    // 若 ① 晚于 ②（原来是 `.then()` 不等），列表一到就自动开了"最近会话"，
+    // 目标再叠上去 → 用户看到跳两次、且可能停在错的那个。
+    const s = createChatSession();
+    s.connect(8003);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+
+    s.setIntentTargeted(true);        // ①（App 侧已改为 await 后再启后端）
+    ws._msg({                          // ② 列表到达 —— 此时自动加载必须被抑制
+      type: "session_list",
+      sessions: [
+        { sessionId: "latest", title: "最近", timestamp: 99 },
+        { sessionId: "target", title: "目标", timestamp: 1 },
+      ],
+    });
+    s.launchIntentSession("target");   // ③
+    await new Promise((r) => setTimeout(r, 50));
+
+    const resumedIds = ws.sent
+      .filter((d) => d.includes("resume_session"))
+      .map((d) => JSON.parse(d).session_id);
+    expect(resumedIds).toContain("target");
+    // 抑制生效：不得把"最近会话"也 resume 进来
+    expect(resumedIds.filter((id) => id === "latest")).toHaveLength(0);
+  });
+
+  it("② 后端闪断重连后，意图目标会被**重发**（不因连接断开而丢失）", async () => {
+    // 真正的症状：慢机器上 GUI 的 WS 常比后端先就绪 → 首连失败/闪断 →
+    // 那条 resume_session 打在死连接上丢了 → 重连后**没人重发** →
+    // 「进了工作区但没加载目标会话」（用户原话）。
+    //
+    // ⚠️ 断言必须**正向**（目标被 resume）。只断言"没跳最近"是抓不住的：
+    // 抑制逻辑本身就能满足它，即使目标压根没发出去 —— 那种测试是假绿。
+    const s = createChatSession();
+    s.connect(8004);
+    let ws = FakeWebSocket.instances[0];
+    ws._open();
+    s.launchIntentSession("target");
+
+    // 闪断 → 重连（新连接）
+    ws.close();
+    s.connect(8004);
+    ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    ws._open();
+
+    const resumedIds = ws.sent
+      .filter((d) => d.includes("resume_session"))
+      .map((d) => JSON.parse(d).session_id);
+    // 新连接上必须收到目标（否则就是"进了工作区没加载会话"）
+    expect(resumedIds).toContain("target");
+
+    // 且不得把"最近会话"顶上来
+    expect(resumedIds.filter((id) => id === "latest")).toHaveLength(0);
+  });
 });
 
 describe("ChatSession — backendBusy gate (authoritative busy beats optimistic streaming)", () => {

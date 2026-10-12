@@ -35,6 +35,12 @@ interface LastSeen {
 
 let _lastSeen: LastSeen = { messagesLength: 0, lastContent: "", lastThinking: "", streaming: false };
 
+/// 挂件模式是否激活（主窗已隐藏、挂件接管前台）。由 Rust 的 widget-mode-changed 事件驱动。
+/// "谁在前台谁负责" 的唯一依据 —— 权限/提问 UI 只在挂件模式下投递给挂件。
+let widgetForeground = false;
+let _lastControlRequest: unknown = undefined;
+let _lastWidgetForeground = false;
+
 function syncChatState(state: ChatStateChangedPayload["state"]): void {
   const msgs = state.messages ?? [];
   const lastMsg = msgs[msgs.length - 1];
@@ -133,6 +139,26 @@ function syncChatState(state: ChatStateChangedPayload["state"]): void {
     crossWindowBus.publish("chat.inputBlocked", state.inputBlockedReason, { sticky: true });
   }
 
+  // ── 控制请求（权限确认 / AskUserQuestion）──
+  //
+  // ⚠️ **只在挂件模式激活时广播**（主窗隐藏 → 挂件是唯一可见窗口 → 由它渲染）。
+  //
+  // 谁在前台谁负责：挂件模式下主窗不可见，权限 UI 若留在那里，用户面对的是一个
+  // 看不见的弹窗 —— 表现为"卡住"（用户实测反馈）。反之主窗在前台时不广播，挂件
+  // 即便开着也不渲染 → **同一时刻只有一个窗口能响应**，避免两窗都点导致的
+  // "已消费的 request_id 被二次响应"。
+  //
+  // sticky：挂件打开时握手即拿到当前请求（无需额外请求）。`widgetForeground`
+  // 变化时**也要重发一次** —— 值没变但前台换了，新前台窗口必须补上当前请求。
+  if (state.pendingControlRequest !== undefined) {
+    const v = widgetForeground ? state.pendingControlRequest : null;
+    if (v !== _lastControlRequest || widgetForeground !== _lastWidgetForeground) {
+      _lastControlRequest = v;
+      _lastWidgetForeground = widgetForeground;
+      crossWindowBus.publish("chat.controlRequest", v, { sticky: true });
+    }
+  }
+
   // Skills dialog
   if (state.activeSkillDialog !== undefined) {
     crossWindowBus.publish("chat.skills.dialog", state.activeSkillDialog, { sticky: true });
@@ -192,6 +218,26 @@ export function startCrossWindowBusHub(): void {
     }
     if (cmdType === "interrupt") {
       import("../chat/chatSession").then((m) => m.chatSession.interrupt()).catch(() => {});
+      return;
+    }
+    // 权限/提问的响应。**必须走 respondToPermission 而不是裸转发** —— 它除了发
+    // control_response，还负责清本地 pendingControlRequest（否则两窗的弹窗都不消失）。
+    //
+    // 带 requestId 做**一次性校验**：叶窗的"允许"到达时，主窗可能已被先一步处理，
+    // 甚至已换成**新的**请求 —— 若不校验，这条迟到响应会被 respondToPermission
+    // 套用到新请求上（它只按当前 req 发 id，不认来源）。所以这里先比对再放行。
+    if (cmdType === "respondPermission") {
+      const p = payload as {
+        requestId?: string; allowed?: boolean; always?: boolean; updatedInput?: unknown;
+      } | undefined;
+      void import("../stores/chatStore").then(({ getChatState }) => {
+        const cur = getChatState().pendingControlRequest;
+        if (!cur) return;                                                  // 已无待响应 → 丢弃
+        if (p?.requestId && cur.request_id && p.requestId !== cur.request_id) return; // 过期响应
+        void import("../chat/chatSession").then((m) =>
+          m.chatSession.respondToPermission(!!p?.allowed, !!p?.always, p?.updatedInput),
+        ).catch(() => {});
+      });
       return;
     }
 
@@ -287,6 +333,22 @@ export function startCrossWindowBusHub(): void {
 
   // ── Push current settings immediately so Leaf init snapshots include them ──
   crossWindowBus.publish("settings", getSettings(), { sticky: true });
+
+  // ── 挂件模式开关（Rust 广播）→ 前台归属 ──
+  //
+  // Rust 侧在 show_chat_widget / focus_main_window / 挂件销毁时 emit。
+  // 收到后立刻重发一次控制请求快照（前台变了、值可能没变，新前台窗口必须补上）。
+  void Promise.all([import("@tauri-apps/api/event"), import("../stores/chatStore")])
+    .then(([{ listen }, { getChatState }]) =>
+      listen<boolean>("widget-mode-changed", (e) => {
+        widgetForeground = !!e.payload;
+        const req = getChatState().pendingControlRequest ?? null;
+        _lastControlRequest = widgetForeground ? req : null;
+        _lastWidgetForeground = widgetForeground;
+        crossWindowBus.publish("chat.controlRequest", _lastControlRequest, { sticky: true });
+      }),
+    )
+    .catch(() => {});
 
   console.log("[DataBus Hub] Started — bridging EventBus → DataBus");
 
