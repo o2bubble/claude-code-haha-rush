@@ -331,10 +331,14 @@ export default function App() {
                   // 必须在 bind 之前（见上）
                   bridge.setIntentTargeted(true);
                   enterWorkspace(cliWs);
+                  // ⚠️ 同 runIntent：预算必须盖住整条后端启动链（bind → 后端就绪
+                  // → WS → session_list，实测 11~24s），默认 12s 会在慢启动时
+                  // 提前放弃 —— 正是"升级恢复了实例但没进会话"的成因之一。
+                  // 90s 与 Rust INSTANCE_READY_TIMEOUT_MS 同标准。
                   const ready = await retryUntil(async () => {
                     const { getChatState } = await import("./stores/chatStore");
                     return getChatState().sessionsLoaded;
-                  });
+                  }, 300, 300);
                   if (!ready) {
                     bridge.setIntentTargeted(false);
                     // 这里失败 = 会话列表一直没来（后端没连上/没回 session_list）。
@@ -499,12 +503,26 @@ export default function App() {
     if (kind === "open_session" && payload.session_id) {
       const sessId = payload.session_id as string;
       // §6.2: wait for the session list to be loaded before resolving a session.
+      //
+      // ⚠️ 预算必须盖住**整条后端启动链**：bind → 后端进程就绪 → WS 建连 →
+      // session_list 到达。`handleWorkspaceLaunch` 里 `void BackendService.bind()`
+      // 是 fire-and-forget —— 本函数的等待与后端启动**并行计时**，而后端实测要
+      // 11~17s 才就绪（2026-10-12 日志实锤：bind 42:23 → 就绪 42:36），列表再晚
+      // 1~3s。原预算 40×300ms=12s 恰好在就绪前 1 秒放弃 → ack 失败、
+      // launchIntentSession 永不执行（用户原话：「等待 IDE 后台就绪后没有自动
+      // 选择目标」）。300×300ms=90s —— 与 Rust 侧 INSTANCE_READY_TIMEOUT_MS(90s)
+      // 同一标准：同一段启动链给同一个余量（那边注释也是"实测十几秒，给足余量"）。
       const ready = await retryUntil(async () => {
         const { getChatState } = await import("./stores/chatStore");
         return getChatState().sessionsLoaded;
-      });
+      }, 300, 300);
       if (!ready) {
         ack({ ok: false, kind, error: "sessions never loaded" });
+        // 放弃也要善后：释放"抑制自动加载最近会话"的标记。
+        // 不释放则窗口永久空白 —— 目标没人发、最近会话也被 _intentTargeted
+        // 挡着（auto-load 的门是 !_autoLoaded && !_intentTargeted）。
+        const { setIntentTargeted } = await import("./components/chat/useChatBridge");
+        setIntentTargeted(false);
         return;
       }
       import("./components/chat/useChatBridge").then(({ launchIntentSession, setIntentTargeted, requestSessionList }) => {

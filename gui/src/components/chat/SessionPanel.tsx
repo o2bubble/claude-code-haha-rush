@@ -145,11 +145,20 @@ function SessionPanelImpl() {
       await invoke("spawn_intent_gui", { intentId });
       addStatusMessage(t("sessions.openedInNewWindow"), "info");
       // 轮询：新实例 claim→执行→ack 后 status=done/expired。
-      for (let i = 0; i < 60; i++) {
+      // ⚠️ 预算要盖住新实例的整条启动链（后端 boot 实测 11~17s；新实例侧等
+      // session_list 的预算已放宽到 90s）—— 原 30s 会在慢启动时错过 ack。
+      // 240×500ms=120s。
+      for (let i = 0; i < 240; i++) {
         try {
           const st = await invoke<any>("query_intent_status", { intentId });
           if (st?.status === "done") {
-            addStatusMessage(t("sessions.targetOpened"), "info");
+            // status=done 但 result.ok=false = 新实例**放弃执行**（如会话列表
+            // 始终没到达）—— 不能报"已打开"。以前只看 status 会谎报成功。
+            if (st?.result?.ok === false) {
+              addStatusMessage(t("sessions.openFailed"), "warn");
+            } else {
+              addStatusMessage(t("sessions.targetOpened"), "info");
+            }
             return;
           }
           if (st?.status === "expired") return; // 新实例未能兑现
