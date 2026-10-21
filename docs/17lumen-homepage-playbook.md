@@ -183,7 +183,9 @@ HTTP-01 校验需要直接打到源站。
 - [x] ~~**公安备案图标**~~ —— **2026-10-21 已完成**：官方警徽图标存为
       `homepage/beian-icon.png`（62×67 RGBA，源 `beian.mps.gov.cn/web/assets/logo01.6189a29f.png`），
       页脚以 `.beian-icon` 类渲染（高 14px），云端 `site/beian-icon.png`，HTTP 200 image/png
-- [ ] 确认证书联系邮箱 `admin@17lumen.com` 是否需要改成真实邮箱
+- [ ] 证书联系邮箱 `admin@17lumen.com` 是占位值 —— **2026-10-21 用户明确"暂时留着，以后再说"**。
+      自动续期不依赖邮箱（certbot 照常跑）；唯一影响是续期失败时收不到 Let's Encrypt 的提醒邮件。
+      **不要再把它当待办反复提醒**，用户想起来自会提
 
 ## 9. 相关
 
