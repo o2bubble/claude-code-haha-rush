@@ -94,51 +94,84 @@ fn process_alive(_pid: u32) -> bool {
     false
 }
 
-/// 尝试成为「绑定工作区」的第一个实例：独占创建锁文件（写 PID）。
-/// 已存在则检查 PID 存活——活跃 → 非首个；已死（崩溃残留）→ 删锁接管。
+/// 尝试成为「绑定工作区」的第一个实例：独占创建锁文件。
+///
+/// 锁内容 = `pid 启动时刻`（双因子）。只比 pid 会在 **pid 复用**时把无关进程
+/// 当成持有者 → 该工作区永远被判"非首个" → 前端跳过自动加载最近会话。
+/// 启动时刻由 `process_start_time_ms` 取（与实例注册表同一套判定）。
+///
+/// 已存在则检查持有者是否还活着——活跃 → 非首个；已死（崩溃/升级残留）→ 删锁接管。
 /// 切换工作区时先释放本进程之前的锁。
 fn acquire_workspace_lock(workdir: &str) -> bool {
     let path = std::path::PathBuf::from(workdir).join(".claude").join("gui-instance.lock");
-    // 切换工作区：释放本进程之前的锁，避免它让另一实例误判该工作区仍被占用
-    if let Some(old) = HELD_WORKSPACE_LOCK.lock().unwrap().take() {
-        if old != path {
-            let _ = std::fs::remove_file(&old);
-        }
+
+    // ① 已持有**同一工作区**的锁 → 直接复用，别再去碰文件。
+    //
+    // `--workspace` 启动时 setup() 会预绑一次，前端随后再 bind 一次（日志实锤
+    // 同一秒出现 `is_first_instance = true` 紧接 `= false`）。原实现第二次会把
+    // 静态 take 走但不删文件（old == path），`create_new` 撞 AlreadyExists →
+    // 读到的 pid 恰好是自己 → 判"活着" → 不是 stale → 返回 **false** →
+    // IS_FIRST_INSTANCE 掉成 false → 前端跳过"自动加载最近会话"
+    // （2026-10-21 用户实测：进入工作区不加载最近会话）。
+    if HELD_WORKSPACE_LOCK.lock().unwrap().as_ref() == Some(&path) {
+        return true;
     }
+
+    // ② 切换工作区：释放本进程之前的锁，避免它让另一实例误判该工作区仍被占用
+    if let Some(old) = HELD_WORKSPACE_LOCK.lock().unwrap().take() {
+        let _ = std::fs::remove_file(&old);
+    }
+
+    // ③ 全新工作区可能还没有 .claude 目录 —— create_new 会因 NotFound 静默失败
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
     let pid = std::process::id();
-    let try_acquire = || -> std::io::Result<bool> {
+    let started = crate::instances::process_start_time_ms(pid).unwrap_or(0);
+    let payload = format!("{pid} {started}\n");
+    let try_acquire = || -> bool {
         use std::io::Write;
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut f) => {
-                let _ = writeln!(f, "{}", pid);
-                Ok(true)
+                let _ = f.write_all(payload.as_bytes());
+                true
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-            Err(_) => Ok(false),
+            Err(_) => false, // AlreadyExists / 其它 → 交给下面的存活判定
         }
     };
-    match try_acquire() {
-        Ok(true) => {
-            *HELD_WORKSPACE_LOCK.lock().unwrap() = Some(path);
-            true
-        }
-        Ok(false) => {
-            let stale = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                .map(|p| !process_alive(p))
-                .unwrap_or(false);
-            if stale {
-                let _ = std::fs::remove_file(&path);
-                if try_acquire().unwrap_or(false) {
-                    *HELD_WORKSPACE_LOCK.lock().unwrap() = Some(path);
-                    return true;
-                }
-            }
-            false
-        }
-        Err(_) => false,
+    if try_acquire() {
+        *HELD_WORKSPACE_LOCK.lock().unwrap() = Some(path);
+        return true;
     }
+
+    // ④ 锁已存在：判断持有者还是不是**那个**进程
+    let holder_alive = std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| {
+            let mut it = s.split_whitespace();
+            let p: Option<u32> = it.next().and_then(|x| x.parse().ok());
+            let st: Option<u64> = it.next().and_then(|x| x.parse().ok());
+            match (p, st) {
+                // 双因子：pid 相同但启动时刻不同 = 复用了该 pid 的另一个进程
+                (Some(p), Some(st)) if st > 0 => {
+                    crate::instances::process_start_time_ms(p) == Some(st)
+                }
+                // 旧格式锁（只有 pid）：退化为只比 pid（保守：当成活着，少抢锁）
+                (Some(p), _) => process_alive(p),
+                _ => false,
+            }
+        })
+        .unwrap_or(false);
+
+    if !holder_alive {
+        let _ = std::fs::remove_file(&path);
+        if try_acquire() {
+            *HELD_WORKSPACE_LOCK.lock().unwrap() = Some(path);
+            return true;
+        }
+    }
+    false
 }
 
 /// Return a locked DbState, re-initializing the DB if the bound workspace changed.
@@ -813,6 +846,11 @@ pub fn run() {
                 }
                 // T3: 插件后台进程随 GUI 退出 kill(防孤儿/占端口)。
                 crate::plugin_process::kill_all_plugin_processes();
+                // 释放本进程持有的工作区锁（正常退出路径）。异常退出/升级强杀不会
+                // 走到这里 —— 那种残留由锁内容里的"启动时刻"双因子判定兜底。
+                if let Some(p) = HELD_WORKSPACE_LOCK.lock().unwrap().take() {
+                    let _ = std::fs::remove_file(p);
+                }
                 // 删本实例的自述文件（升级路径走 exit(0) 绕过这里，但那种情况下
                 // 进程已死 → collect_live_instances 会按 pid 判死并清掉，不影响正确性）。
                 if let Ok(dir) = app_handle.path().app_data_dir() {
@@ -5739,6 +5777,57 @@ async fn note_get_all_tag_names(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **重复绑定同一工作区必须仍算"首个实例"**（2026-10-21 用户实测
+    /// "进入工作区后不自动加载最近会话"）。
+    ///
+    /// 真实时序（日志实锤）：`--workspace` 启动时 setup() 预绑一次，前端随后
+    /// 再 bind 一次（bind_workspace_internal 的注释也写明 "the frontend may call
+    /// bind twice for the same workspace"）。第二次调用时 `HELD_WORKSPACE_LOCK`
+    /// 被 take 走、锁文件却没删（old == path），try_acquire 撞 AlreadyExists →
+    /// 读到 pid 是自己 → 判"活着"→ 不是 stale → **返回 false** →
+    /// IS_FIRST_INSTANCE=false → 前端跳过自动加载最近会话。
+    #[test]
+    fn rebinding_same_workspace_stays_first_instance() {
+        let d = std::env::temp_dir().join(format!("ccgui-wslock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // 真实工作区在 bind 前已有 .claude（settings/DB 初始化会建）。锁文件写在
+        // 其下，故测试也要先建 —— 否则 create_new 撞 NotFound 直接 false。
+        std::fs::create_dir_all(d.join(".claude")).unwrap();
+        let ws = d.to_string_lossy().to_string();
+
+        assert!(acquire_workspace_lock(&ws), "首次绑定应为首个实例");
+        assert!(
+            acquire_workspace_lock(&ws),
+            "重复绑定同一工作区必须仍是首个实例（否则自动加载最近会话被跳过）"
+        );
+
+        // 清理：释放静态并删锁文件
+        if let Some(p) = HELD_WORKSPACE_LOCK.lock().unwrap().take() {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 残留锁（持有进程已死）必须能被接管 —— 升级强杀/崩溃的常态路径。
+    /// 同时锁格式升级为 `pid 启动时刻`，这里验证新格式的 stale 判定。
+    #[test]
+    fn stale_lock_is_taken_over() {
+        let d = std::env::temp_dir().join(format!("ccgui-wsstale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".claude")).unwrap();
+        // 死 pid（4 位数在正常机器上几乎必然是已退出/不存在）+ 任意启动时刻
+        std::fs::write(d.join(".claude").join("gui-instance.lock"), "999999 1\n").unwrap();
+
+        let ws = d.to_string_lossy().to_string();
+        assert!(acquire_workspace_lock(&ws), "残留锁应被接管（判首个实例）");
+
+        if let Some(p) = HELD_WORKSPACE_LOCK.lock().unwrap().take() {
+            let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     // ── prepend_tool_dirs: 安装目录子目录必须用相对后缀（Windows join 语义）──
 
