@@ -117,8 +117,12 @@ function RenameDialog({ title, initial, onConfirm, onCancel }: {
   };
 
   return (
+    // ⚠️ **点遮罩不关闭**（用户 2026-10-23 反馈"容易误操作导致自动关闭"）：
+    // 改名是个"输入到一半"的场景，误点一下外面就丢掉已输入内容，代价太大。
+    // 只认显式动作：取消按钮 / Escape / 提交。遮罩仅作为视觉分隔与点击拦截
+    // （拦住底下的会话行，避免误触切会话）。
     <div
-      onClick={onCancel}
+      onClick={(e) => e.stopPropagation()}
       style={{
         position: "fixed", inset: 0, zIndex: 9999,
         display: "flex", alignItems: "center", justifyContent: "center",
@@ -126,7 +130,6 @@ function RenameDialog({ title, initial, onConfirm, onCancel }: {
       }}
     >
       <div
-        onClick={(e) => e.stopPropagation()}
         style={{
           backgroundColor: "var(--bg-root)", borderRadius: 8,
           boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
