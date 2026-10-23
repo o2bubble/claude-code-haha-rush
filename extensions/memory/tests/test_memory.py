@@ -681,5 +681,55 @@ class TestUpdateAllEditableFields(unittest.TestCase):
         self.assertEqual(self.store.get_tags_for_memory(self.mem["id"]), ["alpha"])
 
 
+class TestDeleteReleasesWriteLock(unittest.TestCase):
+    """A DELETE must not leave the write lock held.
+
+    2026-10-23 事故：`_delete_orphan_tags()` 的 DELETE 没有包在
+    `with self._conn:` 里 → Python sqlite3 的隐式事务永不提交 → 该连接
+    永久持有 SQLITE_RESERVED → **其他所有连接写库都报
+    `database is locked`**（MCP 的 memory_store 直接不可用，直到重启容器）。
+
+    这里用**第二个连接**做哨兵：它在事务释放后必须能拿到写锁。
+    """
+
+    def setUp(self):
+        self.store, self.path = _new_store()
+
+    def tearDown(self):
+        self.store.close()
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def _write_lock_is_free(self) -> bool:
+        probe = sqlite3.connect(self.path, timeout=1)
+        try:
+            probe.execute("BEGIN IMMEDIATE")
+            probe.execute("COMMIT")
+            return True
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            probe.close()
+
+    def test_delete_and_orphan_tag_cleanup_release_lock(self):
+        mem = self.store.add_memory(
+            type="fact", title="待删除", content="内容",
+            scope="global", tags=["orphan-me"], importance=0.1,
+        )
+        self.store.delete_memory(mem["id"])
+        self.store._delete_orphan_tags()   # the historical offender
+
+        self.assertTrue(
+            self._write_lock_is_free(),
+            "DELETE / _delete_orphan_tags 之后写锁必须已释放",
+        )
+        # And a completely fresh store (what a restarted process would do)
+        # must be able to initialise.
+        other = MemoryStore(self.path)
+        other.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -647,10 +647,22 @@ class MemoryStore:
         return [{"tag": r[0], "count": r[1]} for r in cur.fetchall()]
 
     def _delete_orphan_tags(self) -> None:
-        self._conn.execute(
-            """DELETE FROM tags WHERE id NOT IN
-               (SELECT DISTINCT tag_id FROM memory_tags)"""
-        )
+        """Remove tags no memory references any more.
+
+        ⚠️ **Must run inside an explicit transaction.** With Python's sqlite3
+        (isolation_level="" — implicit BEGIN before DML) a bare `execute` here
+        started a transaction that was **never committed**, so this connection
+        kept SQLITE_RESERVED for the rest of the process's life. Every other
+        connection then failed writes with `database is locked` — including the
+        MCP server's own store and any freshly started process
+        (2026-10-23: after one REST DELETE, memory_store broke with
+        "database is locked" until the container was restarted).
+        """
+        with self._conn:
+            self._conn.execute(
+                """DELETE FROM tags WHERE id NOT IN
+                   (SELECT DISTINCT tag_id FROM memory_tags)"""
+            )
 
     # -- content refs -------------------------------------------------------
 
