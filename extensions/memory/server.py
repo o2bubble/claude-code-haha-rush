@@ -503,27 +503,18 @@ async def _handle_memory_update(arguments: dict) -> list[TextContent]:
     new_scope = arguments.get("scope")
     new_tags = arguments.get("tags")
 
-    if title is not None or content is not None or importance is not None:
-        store.update_memory(mid, title=title, content=content, importance=importance)
-
-    # Scope / type — direct update (not in store.update_memory yet)
-    if new_scope is not None or new_type is not None:
-        sets = []
-        params = []
-        if new_scope is not None:
-            sets.append("scope=?")
-            params.append(new_scope)
-        if new_type is not None:
-            sets.append("type=?")
-            params.append(new_type)
-        if sets:
-            params.append(mid)
-            store._conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=?", params)
-            store._conn.commit()
-
-    # Tags — full replacement
-    if new_tags is not None:
-        store.replace_tags(mid, new_tags)
+    # Single source of truth: store.update_memory handles every editable field
+    # (title/content/importance/type/scope/tags). The REST PUT calls the same
+    # method, so the two surfaces can't drift again.
+    store.update_memory(
+        mid,
+        title=title,
+        content=content,
+        importance=importance,
+        mtype=new_type,
+        scope=new_scope,
+        tags=new_tags,
+    )
 
     updated = store.get_memory(mid)
     if updated:

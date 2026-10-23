@@ -402,7 +402,21 @@ class MemoryStore:
         title: Optional[str] = None,
         content: Optional[str] = None,
         importance: Optional[float] = None,
+        mtype: Optional[str] = None,
+        scope: Optional[str] = None,
+        tags: Optional[list[str]] = None,
     ) -> bool:
+        """Update a memory. Only provided (non-None) fields change.
+
+        Covers **every** editable field — title / content / importance / type /
+        scope / tags. The REST API and the MCP tool both funnel through here.
+
+        ⚠️ History: this used to handle only title/content/importance, and the
+        REST PUT passed just those three, so the web UI's save **silently
+        dropped type/scope/tags** while returning `updated: true`
+        (2026-10-23, user: "修改资料好像不太成功"). Keep this in sync with the
+        form fields in web/src/components/MemoryDetail.jsx.
+        """
         row = self._conn.execute(
             "SELECT title, content FROM memories WHERE id=?", (memory_id,)
         ).fetchone()
@@ -420,7 +434,14 @@ class MemoryStore:
         if importance is not None:
             sets.append("importance=?")
             params.append(importance)
-        if not sets:
+        if mtype is not None:
+            sets.append("type=?")
+            params.append(mtype)
+        if scope is not None:
+            sets.append("scope=?")
+            params.append(scope)
+        tags_changed = tags is not None
+        if not sets and not tags_changed:
             return False
 
         new_title = title if title is not None else row["title"]
@@ -441,6 +462,8 @@ class MemoryStore:
             )
             if text_changed:
                 self._fts_upsert(memory_id, new_title, new_content)
+        if tags_changed:
+            self.replace_tags(memory_id, tags)
         return True
 
     def delete_memory(self, memory_id: str) -> bool:

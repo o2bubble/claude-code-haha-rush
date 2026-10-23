@@ -15,6 +15,20 @@
   display: flex;
   flex-direction: column;
   font-size: 14px;
+  /* Children handle their own scrolling (.sbScroll). Without this the
+     sidebar content overflows the app shell and gets clipped, pushing
+     .sbBottom (新建 / 统计) permanently out of reach. */
+  overflow: hidden;
+}
+
+/* The only scrollable region between the fixed search box and the fixed
+   bottom bar. Scope trees grow arbitrarily long; scrolling here means
+   类型 / 作用域 / 标签 never push 新建 off-screen. */
+.sbScroll {
+  flex: 1 1 auto;
+  min-height: 0;      /* required: flex items default to min-height:auto */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* ─── Main area ───────────────────────────────────────── */
@@ -109,6 +123,7 @@
 /* ─── Sidebar sections ────────────────────────────────── */
 .sbSearch {
   padding: 14px;
+  flex-shrink: 0;
 }
 .sbSearch input {
   width: 100%;
@@ -158,9 +173,10 @@
 .sbRow.active { color: var(--fg); font-weight: 600; }
 
 .sbTags {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 14px 12px;
+  /* No longer the scroll container — .sbScroll owns scrolling so that the
+     scope tree above it cannot push it (and everything below) off-screen. */
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-soft);
 }
 .sbTag {
   display: inline-flex;
@@ -184,6 +200,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex-shrink: 0;     /* always visible, never squeezed by a long tree */
 }
 .sbStats {
   font-size: 11px;

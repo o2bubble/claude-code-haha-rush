@@ -54,6 +54,11 @@ export default function Sidebar() {
         </div>
       )}
 
+      {/* Everything between the fixed search box and the fixed bottom bar
+          scrolls together. The scope tree can be very long; when it sat
+          outside a scroll container it pushed 新建/统计 below the fold and
+          made them unreachable (2026-10-23). */}
+      <div className={styles.sbScroll}>
       <div className={styles.sbSection}>
         <select
           value={filters.sort}
@@ -128,6 +133,7 @@ export default function Sidebar() {
           )}
         </div>
       )}
+      </div>{/* /sbScroll */}
 
       <div className={styles.sbBottom}>
         <button

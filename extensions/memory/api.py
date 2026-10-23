@@ -288,6 +288,10 @@ def _register_routes(app: FastAPI) -> None:
         if store.get_memory(memory_id) is None:
             return JSONResponse({"error": f"Memory {memory_id} not found"}, status_code=404)
         body = await request.json()
+        # The web form sends the full memory on save, so every editable field
+        # must be forwarded — the old version only passed title/content/
+        # importance, which silently dropped type/scope/tags while still
+        # answering `updated: true` (2026-10-23 用户实测「修改资料不成功」).
         kwargs = {}
         if "title" in body:
             kwargs["title"] = body["title"]
@@ -295,8 +299,19 @@ def _register_routes(app: FastAPI) -> None:
             kwargs["content"] = body["content"]
         if "importance" in body:
             kwargs["importance"] = body["importance"]
+        if "type" in body:
+            kwargs["mtype"] = body["type"]
+        if "scope" in body:
+            kwargs["scope"] = body["scope"]
+        if "tags" in body:
+            kwargs["tags"] = body["tags"] or []
         updated = store.update_memory(memory_id, **kwargs)
-        return {"id": memory_id, "updated": updated}
+        # Return the fresh record so the client can render without a re-fetch.
+        fresh = store.get_memory(memory_id)
+        if fresh:
+            fresh.pop("embedding", None)
+            fresh["tags"] = store.get_tags_for_memory(memory_id)
+        return {"id": memory_id, "updated": updated, "memory": fresh}
 
     @app.delete("/api/memories/{memory_id}")
     async def delete_memory(memory_id: str):

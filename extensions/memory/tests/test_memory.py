@@ -624,5 +624,62 @@ class TestLifecycle(unittest.TestCase):
         self.assertIsNone(self.store.get_memory(self.a["id"])["superseded_by"])
 
 
+class TestUpdateAllEditableFields(unittest.TestCase):
+    """`update_memory` must cover **every** field the web form can edit.
+
+    2026-10-23 用户实测「修改资料好像不太成功」：REST PUT 只转发
+    title/content/importance，type/scope/tags 被静默丢弃却仍返回
+    `updated: true`。这里锁死契约，防止 REST / MCP 两条路径再次分叉。
+    """
+
+    def setUp(self):
+        self.store, self.path = _new_store()
+        self.mem = self.store.add_memory(
+            type="fact", title="原标题", content="原内容",
+            scope="global", tags=["alpha"], importance=0.4,
+        )
+
+    def tearDown(self):
+        self.store.close()
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def test_update_applies_type_scope_and_tags(self):
+        ok = self.store.update_memory(
+            self.mem["id"],
+            title="新标题", content="新内容",
+            importance=0.9, mtype="lesson",
+            scope="project:demo", tags=["beta", "gamma"],
+        )
+        self.assertTrue(ok)
+
+        got = self.store.get_memory(self.mem["id"])
+        self.assertEqual(got["title"], "新标题")
+        self.assertEqual(got["content"], "新内容")
+        self.assertAlmostEqual(got["importance"], 0.9)
+        self.assertEqual(got["type"], "lesson")
+        self.assertEqual(got["scope"], "project:demo")
+        self.assertEqual(sorted(self.store.get_tags_for_memory(self.mem["id"])),
+                         ["beta", "gamma"])
+
+    def test_update_with_only_tags_still_bumps_version(self):
+        """Tags alone is a real change — it must not be treated as a no-op."""
+        before = self.store.get_memory(self.mem["id"])["version"]
+        self.assertTrue(self.store.update_memory(self.mem["id"], tags=["zeta"]))
+        got = self.store.get_memory(self.mem["id"])
+        self.assertGreater(got["version"], before)
+        self.assertEqual(self.store.get_tags_for_memory(self.mem["id"]), ["zeta"])
+
+    def test_update_omitted_fields_are_untouched(self):
+        self.store.update_memory(self.mem["id"], mtype="experience")
+        got = self.store.get_memory(self.mem["id"])
+        self.assertEqual(got["type"], "experience")
+        self.assertEqual(got["title"], "原标题")           # unchanged
+        self.assertEqual(got["scope"], "global")           # unchanged
+        self.assertEqual(self.store.get_tags_for_memory(self.mem["id"]), ["alpha"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

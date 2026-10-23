@@ -52,7 +52,15 @@ function reducer(state, action) {
     case 'SET_FILTER':
       return { ...state, filters: { ...state.filters, [action.key]: action.value } };
     case 'SET_SHOW_CREATE':
-      return { ...state, showCreate: action.payload };
+      // Opening "新建" must drop any selected memory. Otherwise MemoryDetail
+      // still sees `selectedMemory` and computes isNew = showCreate && !m =
+      // false, so saving overwrites the previously opened memory with the new
+      // blank form (2026-10-23).
+      return {
+        ...state,
+        showCreate: action.payload,
+        selectedMemory: action.payload ? null : state.selectedMemory,
+      };
     case 'SET_THEME':
       return { ...state, theme: action.payload };
     case 'RESET_FILTERS':
