@@ -125,6 +125,15 @@ export interface ChatState {
    * 提前清会让 loading 在"内容还没换"时就消失（闪一下更迷惑）。
    */
   switchingTo?: string | null;
+  /**
+   * 还在**等会话列表**（还没开始真正加载目标）。
+   *
+   * 用于把"等待期"与"切换中"区分开：新实例启动后到 `session_list` 到达之前，
+   * `switchingTo` 已指向目标、但后端其实什么都没在做 —— 此时提示应为
+   * 「正在等待会话列表…」而不是「正在切换会话…」，否则用户以为卡在切换上。
+   * 列表到达、真正发出 resume_session 时置 false。
+   */
+  waitingForSessionList?: boolean;
 }
 
 let state: ChatState = emptyChatState();

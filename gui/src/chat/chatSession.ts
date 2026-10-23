@@ -146,6 +146,9 @@ export function createChatSession(): ChatSession {
   // 修法：目标存成**粘性状态**，`onopen` 重放；`session_loaded` 确认到位后才清。
   let _intentTargetSessionId: string | null = null;
 
+  /** 自动加载的目标会话 id —— 它真加载完时给一条「会话已加载」提示，然后清空。 */
+  let _autoLoadTargetNoticeId: string | null = null;
+
   // ── 待加载的目标会话（等会话列表就绪后加载）──
   //
   // 为什么需要（2026-10-21 用户实测，两条体验问题）：
@@ -191,19 +194,38 @@ export function createChatSession(): ChatSession {
       // 标记，与修复前 `launchIntentSession + setIntentTargeted(false)`
       // 的等价语义保持一致。
       _intentTargeted = false;
+      // 遮罩由 applyIntentTarget 统一设置（等待文案 → 加载文案，同一遮罩不中断）。
     } else {
       // 放弃：不加载目标，把抑制标记交还给正常流程（保留用户的当前会话）
       _intentTargeted = false;
       _intentTargetSessionId = null;
+      _autoLoadTargetNoticeId = null; // 不会再有"已加载"提示
+      // 清掉遮罩：否则用户会一直看到「正在等待…」而其实已经放弃了。
+      // 只在 switchingTo 仍是本次目标时才清 —— 避免误清用户刚点开的另一个会话。
+      if (getChatState().switchingTo === p.id) {
+        updateChatState({ switchingTo: null, waitingForSessionList: false });
+      } else {
+        updateChatState({ waitingForSessionList: false });
+      }
     }
     p.resolve(result);
   }
 
   /** 一步打开目标会话：置 autoLoaded 防回跳 + 粘性目标（断线重连重放）。 */
   function applyIntentTarget(sessionId: string) {
+    // 记下"这条是自动加载的目标"，等它真加载完给一条成功提示（见 dispatch）。
+    _autoLoadTargetNoticeId = sessionId;
     _autoLoaded = true;
     _intentTargeted = true;
     _intentTargetSessionId = sessionId;
+    // 加载期**必须有可见反馈**：本地装了 SessionStart 类插件时，一次会话加载
+    // 要 5~6 秒（2026-10-23 日志实测）。这段静默期用户会以为"什么都没发生"、
+    // 进而怀疑自动加载根本没触发 —— 实际早就触发了，只是没有反馈。
+    //
+    // ⚠️ 放在这里而不是调用方：有两条路径都会走到本函数
+    //   ① 等列表后加载（settlePendingTarget）  ② 列表已就绪 → 立即加载
+    // 原来只在 ① 里设了遮罩，② 完全没有 —— 那正是"ready 后等半天没反应"。
+    updateChatState({ switchingTo: sessionId, waitingForSessionList: false });
     send("resume_session", { session_id: sessionId });
   }
 
@@ -394,6 +416,16 @@ export function createChatSession(): ChatSession {
     // 那种 `session_loaded` 不能当作"目标已兑现"。
     if (_intentTargetSessionId && (msg as { session_id?: string }).session_id === _intentTargetSessionId) {
       _intentTargetSessionId = null;
+    }
+    // 自动加载的**目标会话真的到位了** → 给一条成功提示，收尾那段等待。
+    // 只认目标本身（用户中途切走则 preempt 已清掉，不会误报）。
+    if (
+      msg.type === "session_loaded" &&
+      _autoLoadTargetNoticeId &&
+      (msg as { session_id?: string }).session_id === _autoLoadTargetNoticeId
+    ) {
+      _autoLoadTargetNoticeId = null;
+      addStatusMessage("会话已加载", "success");
     }
     // 权威回合结束信号: result / status:ready(见 chatReduce message_stop 注释)。
     // 与 reducer 相同的 unwrap: 顶层都是 stream_event 包裹(见 ideMode broadcast),
@@ -858,6 +890,10 @@ export function createChatSession(): ChatSession {
           Math.max(0, timeoutMs),
         );
         _pendingTargetLoad = { id: sessionId, timer, resolve, ensureRequested };
+        // 立刻给用户一个**可见**的"我在等"信号：复用切换遮罩（250ms 后显现），
+        // 但用 waitingForSessionList 区分文案 —— 这段空白期用户原本一脸茫然，
+        // 不知道是在启动、卡住、还是根本没在做事（2026-10-23 用户反馈）。
+        updateChatState({ switchingTo: sessionId, waitingForSessionList: true });
         // 立刻主动拉一次列表 —— 不依赖 useChatBridge 里那个 500ms 定时器
         // （那是"列表出来得慢"的另一半原因）。
         send("list_sessions");

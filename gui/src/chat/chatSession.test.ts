@@ -331,6 +331,49 @@ describe("ChatSession — awaitSessionListThenLoad（事件驱动，用户干预
     const outcome = await s.awaitSessionListThenLoad("target", 60_000);
     expect(outcome).toBe("loaded");
     expect(resumedIds(ws)).toContain("target");
+    // 立即路径同样要有加载反馈 —— 会话加载在装了 SessionStart 插件的机器上
+    // 要 5~6 秒，没有遮罩就是"ready 后等半天毫无反应"（2026-10-23 用户实测）。
+    expect(getChatState().switchingTo).toBe("target");
+    expect(getChatState().waitingForSessionList).toBe(false);
+  });
+
+  // 用户 2026-10-23：「空白期用户一脸茫然，不知道在干嘛」
+  it("⑥ 等待期有可见提示，加载成功后收尾", async () => {
+    const { getStatusMessages } = await import("../stores/statusMsgStore");
+
+    const s = createChatSession();
+    s.connect(8011);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+
+    const p = s.awaitSessionListThenLoad("target", 60_000);
+    // 等待期间：遮罩可见 + 明确是"等列表"（不是"在切换"）
+    expect(getChatState().switchingTo).toBe("target");
+    expect(getChatState().waitingForSessionList).toBe(true);
+
+    ws._msg({ type: "session_list", sessions: [{ sessionId: "target", timestamp: 1 }] });
+    await expect(p).resolves.toBe("loaded");
+    // 列表到了 → 进入"加载中"阶段
+    expect(getChatState().waitingForSessionList).toBe(false);
+
+    // 目标真正加载完 → 一条成功提示
+    ws._msg({ type: "session_loaded", session_id: "target", messages: [] });
+    expect(getStatusMessages().some((m) => m.text === "会话已加载")).toBe(true);
+    // 遮罩由 reducer 收掉，不会一直转
+    expect(getChatState().switchingTo).toBeNull();
+  });
+
+  it("⑥b 让位后不残留「等待」状态", async () => {
+    const s = createChatSession();
+    s.connect(8012);
+    FakeWebSocket.instances[0]._open();
+
+    const p = s.awaitSessionListThenLoad("target", 60_000);
+    expect(getChatState().waitingForSessionList).toBe(true);
+
+    s.preemptPendingTargetLoad();
+    await expect(p).resolves.toBe("preempted");
+    expect(getChatState().waitingForSessionList).toBe(false);
   });
 });
 

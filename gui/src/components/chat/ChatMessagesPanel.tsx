@@ -145,7 +145,13 @@ function ChatMessagesPanelImpl() {
                 border: "2px solid var(--accent)", borderTopColor: "transparent",
                 borderRadius: "50%", animation: "spin 1s linear infinite",
               }} />
-              <div>{t("chat.switchingSession")}</div>
+              {/* 两个阶段分开说：还在等会话列表 vs 已在加载目标。
+                  把"等列表"说成"切换会话"会让用户以为卡在切换上。 */}
+              <div>
+                {state.waitingForSessionList
+                  ? t("chat.waitingForSessionList")
+                  : t("chat.switchingSession")}
+              </div>
             </div>
           )}
 
