@@ -331,25 +331,19 @@ export default function App() {
                   // 必须在 bind 之前（见上）
                   bridge.setIntentTargeted(true);
                   enterWorkspace(cliWs);
-                  // ⚠️ 同 runIntent：预算必须盖住整条后端启动链（bind → 后端就绪
-                  // → WS → session_list，实测 11~24s），默认 12s 会在慢启动时
-                  // 提前放弃 —— 正是"升级恢复了实例但没进会话"的成因之一。
-                  // 90s 与 Rust INSTANCE_READY_TIMEOUT_MS 同标准。
-                  const ready = await retryUntil(async () => {
-                    const { getChatState } = await import("./stores/chatStore");
-                    return getChatState().sessionsLoaded;
-                  }, 300, 300);
-                  if (!ready) {
-                    bridge.setIntentTargeted(false);
-                    // 这里失败 = 会话列表一直没来（后端没连上/没回 session_list）。
-                    // 原来是静默 return，用户只看到"没加载会话"、查不出原因。
+                  // 事件驱动：会话列表一就绪立刻加载目标（不再 300ms 轮询）。
+                  // 等待期间用户若手动切了会话 → 让位，不把他切回去。
+                  // 超时 60s（用户 2026-10-21 定的上限）：本机启动链实测 11~24s，
+                  // 60s 足够覆盖慢机器，又不至于让窗口"守着旧意图"太久。
+                  const outcome = await bridge.awaitSessionListThenLoad(sess, 60_000);
+                  if (outcome === "loaded") {
+                    console.info("[restore] 已请求加载目标会话:", sess);
+                  } else if (outcome === "preempted") {
+                    console.info("[restore] 用户已手动切换会话，放弃自动加载目标:", sess);
+                  } else {
+                    // 超时 = 会话列表一直没来（后端没连上/没回 session_list）。
                     console.warn("[restore] 等待会话列表就绪超时，放弃自动加载目标会话");
-                    return;
                   }
-                  bridge.requestSessionList();
-                  bridge.launchIntentSession(sess); // 一步打开目标，不先切最近
-                  bridge.setIntentTargeted(false);
-                  console.info("[restore] 已请求加载目标会话:", sess);
                 } catch (e) {
                   console.warn("[restore] 加载目标会话失败:", e);
                   // 任何一步失败都别把抑制状态留着（否则"自动加载最近会话"被永久关掉）
@@ -504,33 +498,31 @@ export default function App() {
       const sessId = payload.session_id as string;
       // §6.2: wait for the session list to be loaded before resolving a session.
       //
-      // ⚠️ 预算必须盖住**整条后端启动链**：bind → 后端进程就绪 → WS 建连 →
-      // session_list 到达。`handleWorkspaceLaunch` 里 `void BackendService.bind()`
-      // 是 fire-and-forget —— 本函数的等待与后端启动**并行计时**，而后端实测要
-      // 11~17s 才就绪（2026-10-12 日志实锤：bind 42:23 → 就绪 42:36），列表再晚
-      // 1~3s。原预算 40×300ms=12s 恰好在就绪前 1 秒放弃 → ack 失败、
-      // launchIntentSession 永不执行（用户原话：「等待 IDE 后台就绪后没有自动
-      // 选择目标」）。300×300ms=90s —— 与 Rust 侧 INSTANCE_READY_TIMEOUT_MS(90s)
-      // 同一标准：同一段启动链给同一个余量（那边注释也是"实测十几秒，给足余量"）。
-      const ready = await retryUntil(async () => {
-        const { getChatState } = await import("./stores/chatStore");
-        return getChatState().sessionsLoaded;
-      }, 300, 300);
-      if (!ready) {
-        ack({ ok: false, kind, error: "sessions never loaded" });
-        // 放弃也要善后：释放"抑制自动加载最近会话"的标记。
-        // 不释放则窗口永久空白 —— 目标没人发、最近会话也被 _intentTargeted
-        // 挡着（auto-load 的门是 !_autoLoaded && !_intentTargeted）。
-        const { setIntentTargeted } = await import("./components/chat/useChatBridge");
-        setIntentTargeted(false);
-        return;
-      }
-      import("./components/chat/useChatBridge").then(({ launchIntentSession, setIntentTargeted, requestSessionList }) => {
-        requestSessionList();
-        launchIntentSession(sessId);   // 一步打开目标，不先切最近
-        setIntentTargeted(false);      // 目标已指定并加载，释放抑制
+      // 事件驱动：会话列表一就绪立刻加载目标（不再 300ms 轮询，也没有
+      // useChatBridge 那个 500ms 延迟）。
+      //
+      // 语义（2026-10-21 用户定）：
+      //   - 等待期间用户手动切了会话 → **让位**，不把他切回去；
+      //   - 上限 60s（本机启动链实测 11~24s，够覆盖慢机器）；
+      //   - 放弃时释放抑制标记，避免窗口永久空白。
+      const { awaitSessionListThenLoad } = await import("./components/chat/useChatBridge");
+      // 按顺序发起的会话请求：目标一发出就先 ack「已受理」。
+      // 发起方（会话列表所在的窗口）用 120s 轮询 intent 状态；若这里等到
+      // `loaded` 才 ack、而中途用户在新窗口里切了会话（`preempted`），
+      // 发起方会看到 ok:false 并提示"无法打开" —— 但目标其实**发出去过**、
+      // 只是被用户接管了。先 ack 受理，最后一步再补最终结果。
+      const outcome = await awaitSessionListThenLoad(sessId, 60_000, () =>
+        ack({ ok: true, kind, session_id: sessId }),
+      );
+      if (outcome === "loaded") {
         ack({ ok: true, kind, session_id: sessId });
-      }).catch(() => ack({ ok: false, kind, error: "no bridge" }));
+      } else if (outcome === "preempted") {
+        // 用户已自己切到别的会话 —— 意图不再适用，但也不算失败
+        ack({ ok: false, kind, error: "preempted" });
+      } else {
+        // 超时：等待器内部已释放抑制标记（见 settlePendingTarget），这里只报结果。
+        ack({ ok: false, kind, error: "sessions never loaded" });
+      }
     } else if (kind === "focus_panel" && payload.panel_id) {
       activatePanel(payload.panel_id as string);
       ack({ ok: true, kind, panel_id: payload.panel_id });

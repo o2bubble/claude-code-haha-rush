@@ -237,6 +237,103 @@ describe("ChatSession — session auto-resume", () => {
   });
 });
 
+describe("ChatSession — awaitSessionListThenLoad（事件驱动，用户干预让位）", () => {
+  // 用户 2026-10-21 实测的两条体验问题，各自一条回归：
+  //   ① 列表出来后才延迟加载（App 侧 300ms 轮询 + useChatBridge 500ms 定时器）
+  //   ② 等待期间手动切了会话，之后仍被切回目标
+  const resumedIds = (ws: FakeWebSocket) =>
+    ws.sent.filter((d) => d.includes("resume_session")).map((d) => JSON.parse(d).session_id);
+
+  it("① 会话列表一到达就立刻加载目标（不等轮询/定时器）", async () => {
+    const s = createChatSession();
+    s.connect(8005);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+
+    const p = s.awaitSessionListThenLoad("target", 60_000);
+    // 注册时立即主动拉列表（不依赖 useChatBridge 的 500ms 定时器）
+    expect(ws.sent.some((d) => d.includes("list_sessions"))).toBe(true);
+    expect(resumedIds(ws)).toHaveLength(0);
+
+    ws._msg({
+      type: "session_list",
+      sessions: [{ sessionId: "target", title: "目标", timestamp: 1 }],
+    });
+
+    await expect(p).resolves.toBe("loaded");
+    expect(resumedIds(ws)).toContain("target");
+  });
+
+  it("② 等待期间用户手动切了会话 → 放弃目标，不把他切回去", async () => {
+    const s = createChatSession();
+    s.connect(8006);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+
+    const p = s.awaitSessionListThenLoad("target", 60_000);
+    // 用户在此期间自己点了别的会话（switchSession 内部就是这两步）
+    s.preemptPendingTargetLoad();
+    await expect(p).resolves.toBe("preempted");
+
+    // 列表随后才到 —— 不得再把用户切回 target
+    ws._msg({
+      type: "session_list",
+      sessions: [
+        { sessionId: "target", title: "目标", timestamp: 1 },
+        { sessionId: "user-pick", title: "用户选的", timestamp: 2 },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(resumedIds(ws)).not.toContain("target");
+  });
+
+  it("③ 超时 → 放弃（不会无限期守着旧意图）", async () => {
+    const s = createChatSession();
+    s.connect(8007);
+    FakeWebSocket.instances[0]._open();
+
+    await expect(s.awaitSessionListThenLoad("target", 30)).resolves.toBe("timeout");
+  });
+
+  it("⑤ ensureRequested 只在目标真正发出时触发", async () => {
+    // (a) 正常兑现
+    const s1 = createChatSession();
+    s1.connect(8009);
+    const ws1 = FakeWebSocket.instances[0];
+    ws1._open();
+    const fired: string[] = [];
+    const p1 = s1.awaitSessionListThenLoad("target", 60_000, () => fired.push("req"));
+    expect(fired).toHaveLength(0);
+    ws1._msg({ type: "session_list", sessions: [{ sessionId: "target", timestamp: 1 }] });
+    await expect(p1).resolves.toBe("loaded");
+    expect(fired).toEqual(["req"]);
+  });
+
+  it("⑤b 让位时不触发 ensureRequested（否则发起方误以为已送达）", async () => {
+    const s2 = createChatSession();
+    s2.connect(8010);
+    const ws2 = FakeWebSocket.instances[0];
+    ws2._open();
+    const fired2: string[] = [];
+    const p2 = s2.awaitSessionListThenLoad("target2", 60_000, () => fired2.push("req"));
+    s2.preemptPendingTargetLoad(); // 列表尚未到达 → 用户先手选
+    await expect(p2).resolves.toBe("preempted");
+    expect(fired2).toHaveLength(0);
+  });
+
+  it("④ 列表已就绪 → 同步立即加载（无等待）", async () => {
+    const s = createChatSession();
+    s.connect(8008);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+    ws._msg({ type: "session_list", sessions: [{ sessionId: "latest", title: "L", timestamp: 1 }] });
+
+    const outcome = await s.awaitSessionListThenLoad("target", 60_000);
+    expect(outcome).toBe("loaded");
+    expect(resumedIds(ws)).toContain("target");
+  });
+});
+
 describe("ChatSession — backendBusy gate (authoritative busy beats optimistic streaming)", () => {
   it("interrupt 后 streaming 被乐观清 false 但 backendBusy 仍 true → sendMessage 入队不直发", () => {
     // 复现 bug: interrupt() 立即清 streaming，但后端 turn 未收尾 (busy=true)。

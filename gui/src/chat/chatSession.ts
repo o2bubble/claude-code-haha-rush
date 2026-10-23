@@ -66,6 +66,9 @@ async function checkFirstInstance(): Promise<boolean> {
   return _isFirstInstance ?? true;
 }
 
+/** `awaitSessionListThenLoad` 的结果。 */
+export type PendingTargetResult = "loaded" | "preempted" | "timeout";
+
 export interface ChatSession {
   connect(port: number): void;
   send(type: string, payload?: any): void;
@@ -91,6 +94,19 @@ export interface ChatSession {
   setIntentTargeted(v: boolean): void;
   /** 启动意图: 直接打开目标会话(不先切最近), 并置 autoLoaded 防后续回跳 */
   launchIntentSession(sessionId: string): void;
+  /**
+   * 等会话列表就绪后自动加载目标会话（事件驱动，无轮询）。
+   * - 列表已就绪 → 立即加载，返回 `loaded`
+   * - 等待期间用户手动切了会话 → 放弃，返回 `preempted`
+   * - 超过 `timeoutMs`（默认 60s）→ 放弃并释放抑制，返回 `timeout`
+   */
+  awaitSessionListThenLoad(
+    sessionId: string,
+    timeoutMs?: number,
+    ensureRequested?: () => void,
+  ): Promise<PendingTargetResult>;
+  /** 用户主动切会话时调用：取消待加载目标（尊重用户选择）。 */
+  preemptPendingTargetLoad(): void;
 }
 
 export function createChatSession(): ChatSession {
@@ -129,6 +145,67 @@ export function createChatSession(): ChatSession {
   //
   // 修法：目标存成**粘性状态**，`onopen` 重放；`session_loaded` 确认到位后才清。
   let _intentTargetSessionId: string | null = null;
+
+  // ── 待加载的目标会话（等会话列表就绪后加载）──
+  //
+  // 为什么需要（2026-10-21 用户实测，两条体验问题）：
+  //   ① **不及时**：App 侧原来用 `retryUntil(sessionsLoaded, 300ms)` 轮询 ——
+  //      列表到了也要等下一次轮询（最多 300ms）才加载目标，这段空窗里用户
+  //      已经能看到列表并开始点击了；
+  //   ② **抢回用户的选择**：等待期间用户手动点了别的会话，之后目标仍会发
+  //      一次 resume_session 把他**切回去**。
+  //
+  // 现在的语义（事件驱动）：
+  //   - 会话列表一到（dispatch 里 sessionsLoaded 翻 true 的同一 tick）立即加载；
+  //   - 等待期间用户主动切了会话（`switchSession` / `loadSession`）→ 放弃，
+  //     并释放 `_intentTargeted`（否则"自动加载最近会话"被永久抑制）；
+  //   - 整个等待有超时上限（默认 60s），超时同样放弃 + 释放。
+  let _pendingTargetLoad: {
+    id: string;
+    timer: ReturnType<typeof setTimeout>;
+    resolve: (r: PendingTargetResult) => void;
+    /**
+     * 发出目标 `resume_session` 的**同一时刻**同步调用（可选）。
+     *
+     * 解决"意图通路的晚到抢回"（2026-10-21）：
+     * 发起方用 120s 轮询 `query_intent_status`，而新实例等待上限已降到 60s。
+     * 若用户在 60s 之前**自己手选**了一个会话，本等待器会让位（`preempted`）——
+     * 但若用户是在**第 60s 之后**才选（此时早已 `timeout`、ack 已发），
+     * 轮询方早已结束，不会造成影响；真正的风险是**轮询仍在进行**时目标到位。
+     * 所以让发起方在"目标真正发出"的瞬间把意图标成已受理，之后轮询退出即退出，
+     * 但不会把一次"已加载"误报成"无法打开"。
+     */
+    ensureRequested?: () => void;
+  } | null = null;
+
+  /** 兑现/放弃待加载目标。幂等：没有 pending 时是 no-op。 */
+  function settlePendingTarget(result: PendingTargetResult) {
+    const p = _pendingTargetLoad;
+    if (!p) return;
+    _pendingTargetLoad = null;
+    clearTimeout(p.timer);
+    if (result === "loaded") {
+      applyIntentTarget(p.id);
+      p.ensureRequested?.();
+      // 目标已发出（`_autoLoaded` 已挡住后续自动加载）→ 释放"抑制自动加载"
+      // 标记，与修复前 `launchIntentSession + setIntentTargeted(false)`
+      // 的等价语义保持一致。
+      _intentTargeted = false;
+    } else {
+      // 放弃：不加载目标，把抑制标记交还给正常流程（保留用户的当前会话）
+      _intentTargeted = false;
+      _intentTargetSessionId = null;
+    }
+    p.resolve(result);
+  }
+
+  /** 一步打开目标会话：置 autoLoaded 防回跳 + 粘性目标（断线重连重放）。 */
+  function applyIntentTarget(sessionId: string) {
+    _autoLoaded = true;
+    _intentTargeted = true;
+    _intentTargetSessionId = sessionId;
+    send("resume_session", { session_id: sessionId });
+  }
 
   function relaySessionsChanged() {
     import("@tauri-apps/api/core").then(({ invoke }) => invoke("notify_sessions_changed").catch(() => {}));
@@ -311,6 +388,7 @@ export function createChatSession(): ChatSession {
     }
     const prevStreaming = getChatState().streaming;
     const prevSessionId = getChatState().sessionId;
+    const prevSessionsLoaded = getChatState().sessionsLoaded;
     // 意图目标已**确认加载到位** → 解除粘性（否则断线重连会把它又 resume 一次）。
     // 只认目标会话本身：会话待加载期间后端可能先回别的（如自动加载的最近会话），
     // 那种 `session_loaded` 不能当作"目标已兑现"。
@@ -328,6 +406,11 @@ export function createChatSession(): ChatSession {
       savedPermissionMode: getSettings().permissionMode,
     });
     replaceState(nextState);
+    // 会话列表**刚就绪** → 立即兑现待加载目标（同一 tick，没有轮询间隔）。
+    // 这是"进入工作区后自动加载目标会话"的唯一触发点 —— 事件驱动，越早越好。
+    if (!prevSessionsLoaded && nextState.sessionsLoaded && _pendingTargetLoad) {
+      settlePendingTarget("loaded");
+    }
     // 唤醒/守卫发送时序：等后端真正就绪(ready/result)再发，防撞 busy。
     // 必须在 replaceState 之后——reducer 已把 backendBusy 清 false，flush 读到
     // 权威空闲信号才直发（早于 replaceState 会读到旧的乐观 streaming）。
@@ -755,12 +838,32 @@ export function createChatSession(): ChatSession {
     queueResume,
     queueSendNow,
     setIntentTargeted: (v: boolean) => { _intentTargeted = v; },
-    launchIntentSession: (sessionId: string) => {
-      _autoLoaded = true;      // 意图已有明确目标, 之后不再自动切最近(防回跳)
-      _intentTargeted = true;
-      _intentTargetSessionId = sessionId;   // 粘住: 断线重连时由 onopen 重放
-      send("resume_session", { session_id: sessionId });
+    launchIntentSession: (sessionId: string) => applyIntentTarget(sessionId),
+    awaitSessionListThenLoad: (
+      sessionId: string,
+      timeoutMs = 60_000,
+      ensureRequested?: () => void,
+    ) => {
+      // 已有待加载目标 → 先放弃旧的（最后一次调用为准）
+      if (_pendingTargetLoad) settlePendingTarget("preempted");
+      // 列表已就绪 → 立即加载，没有任何等待
+      if (getChatState().sessionsLoaded) {
+        applyIntentTarget(sessionId);
+        ensureRequested?.();
+        return Promise.resolve<PendingTargetResult>("loaded");
+      }
+      return new Promise<PendingTargetResult>((resolve) => {
+        const timer = setTimeout(
+          () => settlePendingTarget("timeout"),
+          Math.max(0, timeoutMs),
+        );
+        _pendingTargetLoad = { id: sessionId, timer, resolve, ensureRequested };
+        // 立刻主动拉一次列表 —— 不依赖 useChatBridge 里那个 500ms 定时器
+        // （那是"列表出来得慢"的另一半原因）。
+        send("list_sessions");
+      });
     },
+    preemptPendingTargetLoad: () => settlePendingTarget("preempted"),
     /**
      * 旁问（`/btw`）—— 用后端**同一个进程**里 fork 的轻量 agent 回答，
      * 不新起 claude 实例、不打断主对话（见 ideMode 的 handleSideQuestion）。

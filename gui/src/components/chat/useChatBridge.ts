@@ -56,6 +56,10 @@ export function requestSessionList() {
   send("list_sessions");
 }
 export function switchSession(id: string) {
+  // 用户**主动**切会话 = 明确意图。若此时还有"等会话列表就绪后自动加载"的
+  // 待办目标，立刻放弃它 —— 否则列表一到就会把用户刚选的会话切走
+  // （2026-10-21 用户实测的"一会儿又给我加载回去"）。
+  chatSession.preemptPendingTargetLoad();
   // 标记"切换中" —— 后端可能要好几秒（读会话 + 跑 SessionStart hooks），
   // 期间消息区还是旧会话内容，不提示的话用户以为点了没反应。
   // 清空在 chatReduce 的 session_loaded / error（见 chatStore.switchingTo）。
@@ -70,7 +74,18 @@ export function setIntentTargeted(v: boolean) {
 export function launchIntentSession(id: string) {
   chatSession.launchIntentSession(id);
 }
+/** 等会话列表就绪后自动加载目标会话（事件驱动；用户干预会让位）。 */
+export function awaitSessionListThenLoad(
+  id: string,
+  timeoutMs?: number,
+  ensureRequested?: () => void,
+) {
+  return chatSession.awaitSessionListThenLoad(id, timeoutMs, ensureRequested);
+}
 export function createSession() {
+  // 新建会话同样属于用户明确意图 → 让"等列表后自动加载"的目标让位，
+  // 否则新建完一会儿又被切回旧目标。
+  chatSession.preemptPendingTargetLoad();
   chatSession.resetSession();
   send("new_session");
   setTimeout(() => send("list_sessions"), 2000);

@@ -154,8 +154,12 @@ function SessionPanelImpl() {
           if (st?.status === "done") {
             // status=done 但 result.ok=false = 新实例**放弃执行**（如会话列表
             // 始终没到达）—— 不能报"已打开"。以前只看 status 会谎报成功。
-            if (st?.result?.ok === false) {
+            // `preempted` = 用户在新窗口里自己切了别的会话，意图主动让位 ——
+            // 不是失败，不该弹警告（2026-10-21 加的"用户干预让位"语义）。
+            if (st?.result?.ok === false && st.result.error !== "preempted") {
               addStatusMessage(t("sessions.openFailed"), "warn");
+            } else if (st?.result?.ok === false) {
+              /* preempted：静默 */
             } else {
               addStatusMessage(t("sessions.targetOpened"), "info");
             }
