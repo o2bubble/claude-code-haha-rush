@@ -1,5 +1,5 @@
 import React, { memo, useState, useEffect, useCallback, useRef } from "react";
-import { ListChecks, Folder, FolderInput, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ArrowUpRight, MoreHorizontal } from "lucide-react";
+import { ListChecks, Folder, FolderInput, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ArrowUpRight, MoreHorizontal, Search } from "lucide-react";
 import type { Session } from "../../stores/chatStore";
 import { getChatState } from "../../stores/chatStore";
 import { isBackendBusy } from "../../chat/chatReduce";
@@ -9,7 +9,7 @@ import { partitionSessions } from "./sessionFavorites";
 import {
   createFolder, renameFolder, deleteFolder, moveFolder, assignSession, unassignSession, moveSessions,
   buildFolderTree, partitionSessions as partitionByFolder,
-  pruneOrphanAssignments, isSessionListComplete,
+  pruneOrphanAssignments, isSessionListComplete, folderPathLabel,
   type SessionFolderTree, type FolderNode, type SessionFolder,
 } from "./sessionFolders";
 import {
@@ -28,6 +28,15 @@ import { Commands } from "../../services/commands";
 import { useEvent } from "../../services/useService";
 import { Events, type ChatStateChangedPayload, type SettingsChangedPayload } from "../../services/events";
 import { subscribeSessionStatus, getSessionOpenElsewhere } from "../../stores/sessionStatusStore";
+import { clampRecentMax, pruneMissing, groupByDay } from "../../utils/sessionRecents";
+import { filterSessions, visibleFolders, sessionMatches } from "./sessionSearch";
+
+/** 本地时分的 `HH:MM`（「最近」行的打开时刻；日期由分组标题表达）。 */
+function hhmm(ts: number): string {
+  const d = new Date(ts);
+  const pad = (x: number) => String(x).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 // ── Confirm Dialog (single or batch) ──
 
@@ -79,6 +88,99 @@ function ConfirmDialog({ count, title, onConfirm, onCancel }: {
   );
 }
 
+// ── Rename Dialog ──
+//
+// 为什么用弹窗而不是行内 input（2026-10-23 用户反馈）：
+// 会话行是 `draggable={foldersEnabled && !selectMode}`，而行内 input 是它的
+// **子元素** —— 在部分机器（尤其 WebView2）上，在 draggable 父元素里的 input
+// 上用鼠标**拖选文字**会被当成"开始拖拽"，表现为选不中文字、像被禁用了一样。
+// 弹窗在独立遮罩层里，完全没有这个冲突。
+
+function RenameDialog({ title, initial, onConfirm, onCancel }: {
+  title: string;
+  initial: string;
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onCancel]);
+
+  const submit = () => {
+    const next = value.trim();
+    if (next) onConfirm(next);
+    else onCancel(); // 空名 = 无改动，安静关掉（不报错，符合"取消"预期）
+  };
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed", inset: 0, zIndex: 9999,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        backgroundColor: "rgba(0,0,0,0.3)",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          backgroundColor: "var(--bg-root)", borderRadius: 8,
+          boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
+          padding: 20, minWidth: 320, maxWidth: 460,
+          fontFamily: "var(--font-sans)",
+        }}
+      >
+        <div style={{ fontSize: "calc(var(--font-scale, 1) * 14px)", fontWeight: 600, color: "var(--fg-primary)", marginBottom: 12 }}>
+          {title}
+        </div>
+        <input
+          type="text"
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter 提交 / Escape 由全局监听处理；这里显式处理 Enter，
+            // 并 stopPropagation 防止触发外层的聊天输入快捷键。
+            if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); submit(); }
+          }}
+          onFocus={(e) => e.currentTarget.select()}
+          placeholder={t("sessions.renamePlaceholder")}
+          style={{
+            width: "100%", boxSizing: "border-box",
+            border: "1px solid var(--accent)", borderRadius: 4,
+            padding: "7px 10px",
+            fontSize: "calc(var(--font-scale, 1) * 13px)",
+            fontFamily: "inherit", outline: "none",
+            backgroundColor: "var(--bg-root)", color: "var(--fg-primary)",
+            marginBottom: 16,
+          }}
+        />
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" onClick={onCancel} style={dialogBtn("var(--bg-root)", "var(--border-medium)", "var(--fg-primary)")}>
+            {t("sessions.cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!value.trim()}
+            style={{
+              ...dialogBtn("var(--accent)", "none", "var(--fg-inverse)"),
+              opacity: value.trim() ? 1 : 0.5,
+              cursor: value.trim() ? "pointer" : "not-allowed",
+            }}
+          >
+            {t("sessions.rename")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function dialogBtn(bg: string, border: string, color: string): React.CSSProperties {
   return {
     padding: "6px 16px", border: `1px solid ${border}`, borderRadius: 4,
@@ -103,10 +205,14 @@ function SessionPanelImpl() {
   const [confirmOpenElsewhere, setConfirmOpenElsewhere] = useState<Session | null>(null);
   const [confirmBusySwitch, setConfirmBusySwitch] = useState<Session | null>(null);
   const [batchDeleteCount, setBatchDeleteCount] = useState(0);
+  /** 会话搜索：标题 + 文件夹名，简单包含匹配（见 sessionSearch.ts）。 */
+  const [query, setQuery] = useState("");
   const [selectMode, setSelectMode] = useState(false);
+  /** 「全部」= 原会话列表（收藏/文件夹）；「最近」= 按打开时间倒序的平铺时间线。 */
+  const [tab, setTab] = useState<"all" | "recent">("all");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editTitle, setEditTitle] = useState("");
+  /** 正在弹窗重命名的会话（null = 无）。见 RenameDialog 的注释：不用行内 input。 */
+  const [renameTarget, setRenameTarget] = useState<Session | null>(null);
   const [, setTick] = useState(0);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
@@ -179,6 +285,59 @@ function SessionPanelImpl() {
   const folderTree: SessionFolderTree = getSettings().sessionFolderTree ?? { folders: [], assignments: {} };
   const folderNodes = buildFolderTree(folderTree);
   const folderPartition = partitionByFolder(folderTree, sessions);
+
+  // ── 「最近」Tab 数据 ──
+  // MRU 池 → (列表完整时) 清掉已删除的会话 → 截断到上限 → 按打开日期分组。
+  // ⚠️ 清理必须要求列表**完整**：会话列表截断/尚未到达时"不在列表"≠"已删除"
+  // （新建的空会话也不在 session_list 里，故额外保护当前会话）。
+  const recentGroups = (() => {
+    const raw = getSettings().recentSessions ?? [];
+    const limit = clampRecentMax(getSettings().recentSessionMax);
+    const liveIds = new Set(sessions.map((s) => s.id));
+    if (chatState.sessionId) liveIds.add(chatState.sessionId);
+    const listComplete =
+      chatState.sessionsLoaded && isSessionListComplete(sessions.length, chatState.sessionTotal);
+    const entries = (listComplete ? pruneMissing(raw, liveIds) : raw).slice(0, limit);
+    return groupByDay(entries, Date.now(), {
+      today: t("sessions.dayToday"),
+      yesterday: t("sessions.dayYesterday"),
+    });
+  })();
+
+  // ── 搜索（标题 + 文件夹路径的简单包含匹配）──
+  // 搜索对两个 Tab 都生效：
+  //  · 「全部」：会话按标题/文件夹过滤，文件夹只留有命中的分支（自动展开）
+  //  · 「最近」：同样过滤，分组标题保持不变（时间线语义不受影响）
+  const searching = query.trim().length > 0;
+  const matchFolderLabel = (id: string) => folderPathLabel(folderTree, id);
+  const filteredAllSessions = filterSessions(sessions, query, matchFolderLabel);
+  const filteredRegular = filterSessions(regularSessions, query, matchFolderLabel);
+  const filteredFavs = filterSessions(favSessions, query, matchFolderLabel);
+  const filteredUncategorized = filterSessions(
+    folderPartition.uncategorized, query, matchFolderLabel,
+  );
+  // null = 不过滤（无查询串）；Set = 只渲染这些文件夹
+  const visibleFolderIds = visibleFolders(folderTree, sessions, query);
+  const folderHasVisibleSessions = (fid: string) => {
+    if (!visibleFolderIds) return true;
+    if (!visibleFolderIds.has(fid)) return false;
+    // 搜索时无条件展开，否则命中结果藏在折叠的文件夹里等于没搜到
+    return true;
+  };
+
+  // 「最近」的搜索：按同一规则过滤条目；分组标题保持不变（仍是时间线语义），
+  // 只是把不命中的会话剔除 —— 空组随之消失。
+  const visibleRecentGroups = recentGroups
+    .map((g) => ({
+      ...g,
+      items: g.items
+        .map((entry) => ({ entry, session: sessions.find((s) => s.id === entry.id) }))
+        .filter(
+          (x): x is { entry: typeof x.entry; session: NonNullable<typeof x.session> } =>
+            !!x.session && sessionMatches(x.session.title, matchFolderLabel(x.session.id), query),
+        ),
+    }))
+    .filter((g) => g.items.length > 0);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [newFolderParent, setNewFolderParent] = useState<string | null | undefined>(undefined);
   const [newFolderName, setNewFolderName] = useState("");
@@ -256,8 +415,12 @@ function SessionPanelImpl() {
 
   const renderFolderNode = (node: FolderNode, depth: number): React.ReactNode => {
     const fid = node.folder.id;
-    const expanded = expandedFolders.has(fid);
-    const folderSessions = folderPartition.byFolder[fid] ?? [];
+    // 搜索中：没有命中的分支整条隐藏；命中的无条件展开（否则等于没搜到）
+    if (!folderHasVisibleSessions(fid)) return null;
+    const expanded = searching ? true : expandedFolders.has(fid);
+    const folderSessions = filterSessions(
+      folderPartition.byFolder[fid] ?? [], query, matchFolderLabel,
+    );
     const indent = 8 + depth * 14;
     return (
       <div key={fid}>
@@ -381,7 +544,18 @@ function SessionPanelImpl() {
     return items;
   };
 
-  const renderSessionRow = (s: Session) => {
+  /**
+   * `opts.showTime`：「最近」Tab 用 —— 行尾显示打开时刻 HH:MM
+   *   （跨天信息由分组标题表达，所以这里只给时分）。
+   * `opts.showFolder`：「最近」Tab 用 —— 在标题后显示所属文件夹的层级路径。
+   *   该 Tab 刻意**不按文件夹分组**（要的就是一条平铺时间线），但会话散落在
+   *   文件夹里时，光看标题容易分不清是哪个分支的同名会话 —— 用一个小徽标补上
+   *   归属信息。窄面板里限宽 + 省略号，完整路径靠 hover（原生 title）。
+   */
+  const renderSessionRow = (
+    s: Session,
+    opts?: { showTime?: number; showFolder?: boolean },
+  ) => {
     // 当前会话高亮：优先后端 is_active，兜底前端 sessionId（后端不总是下发激活标记）
     const isCurrent = s.isActive || s.id === chatState.sessionId;
     const openElsewhere = getSessionOpenElsewhere(s.id, getSettings().workDir ?? "");
@@ -399,7 +573,11 @@ function SessionPanelImpl() {
           // 后端仍在跑（思考/工具中）→ 切换会 interruptCurrentTurn() 打断本回合，
           // 已消耗的 token 不可恢复。先确认，避免误点打断。
           setConfirmBusySwitch(s);
-        } else {
+        } else if (!isCurrent) {
+          // 已经是当前会话 → 不重复加载。
+          // ⚠️ 双击标题是"重命名"的入口，而 dblclick 之前会先发两次 click ——
+          // 没有这个判断的话，双击改名会顺带把会话**重新加载两遍**（清空消息区、
+          // 重跑 SessionStart 钩子）。这只是"点当前项"的无操作，不是功能缺失。
           switchSession(s.id);
           commandRegistry.execute(Commands.CHAT_FOCUS_INPUT);
         }
@@ -429,7 +607,7 @@ function SessionPanelImpl() {
       // 右键与 ⋯ 按钮共用同一份菜单，两处入口行为一致。
       // 多选模式下不弹（保持框选交互），正在改名时也不弹（避免打断输入）。
       onContextMenu={(e) => {
-        if (selectMode || editingId === s.id) return;
+        if (selectMode) return;
         e.preventDefault();
         e.stopPropagation();
         showCtxMenu(e.clientX, e.clientY, buildSessionMenu(s));
@@ -473,43 +651,57 @@ function SessionPanelImpl() {
           {!isCurrent && <ArrowUpRight size={11} style={{ color: "var(--fg-secondary)", opacity: 0.75 }} />}
         </span>
       )}
-      {editingId === s.id ? (
-        <input
-          type="text"
-          value={editTitle}
-          onChange={(e) => setEditTitle(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); commitRename(); }
-            if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancelRename(); }
-          }}
-          onBlur={commitRename}
-          onClick={(e) => e.stopPropagation()}
-          autoFocus
-          style={{
-            flex: 1, border: "1px solid var(--accent)", borderRadius: 3,
-            padding: "2px 6px", fontSize: "calc(var(--font-scale, 1) * 12px)",
-            fontFamily: "inherit", outline: "none",
-            backgroundColor: "var(--bg-root)", color: "var(--fg-primary)",
-          }}
-        />
-      ) : (
+      <span
+        style={{
+          overflow: "hidden", textOverflow: "ellipsis",
+          whiteSpace: "nowrap", flex: 1,
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          if (!selectMode) startRename(s);
+        }}
+        title={s.title}
+      >
+        {s.title}
+      </span>
+      {/* 所属文件夹徽标（仅「最近」Tab）：限宽 + 省略号，hover 看完整路径。
+          未归属任何文件夹时不渲染（否则每行都挂个"未归类"，噪声太大）。 */}
+      {opts?.showFolder && (() => {
+        const label = folderPathLabel(folderTree, s.id);
+        if (!label) return null;
+        return (
+          <span
+            title={label}
+            style={{
+              flexShrink: 0,
+              maxWidth: 88,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              fontSize: "calc(var(--font-scale, 1) * 10px)",
+              color: "var(--fg-muted)",
+              border: "1px solid var(--border-light)",
+              borderRadius: 3,
+              padding: "0 4px",
+              lineHeight: 1.6,
+              userSelect: "none",
+            }}
+          >
+            {label}
+          </span>
+        );
+      })()}
+      {opts?.showTime !== undefined && (
         <span
           style={{
-            overflow: "hidden", textOverflow: "ellipsis",
-            whiteSpace: "nowrap", flex: 1,
+            flexShrink: 0, fontSize: "calc(var(--font-scale, 1) * 10px)",
+            color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums",
           }}
-          onDoubleClick={(e) => {
-            e.stopPropagation();
-            if (!selectMode) startRename(s);
-          }}
-          title={t("sessions.rename")}
         >
-          {s.title}
+          {hhmm(opts.showTime)}
         </span>
       )}
       {/* 行内只留两个：收藏（最高频且需看到选中态）+ ⋯（其余操作）。
           重命名 / 移动 / 新窗口 / 删除 / 复制 / 分叉 全在菜单里（右键同样可达）。 */}
-      {!selectMode && editingId !== s.id && (
+      {!selectMode && (
         <>
           <button
             type="button"
@@ -630,22 +822,15 @@ function SessionPanelImpl() {
   const selCount = selectedIds.size;
 
   const startRename = useCallback((s: Session) => {
-    setEditingId(s.id);
-    setEditTitle(s.title);
+    setRenameTarget(s);
   }, []);
 
-  const commitRename = useCallback(() => {
-    if (editingId && editTitle.trim()) {
-      renameSession(editingId, editTitle.trim());
-    }
-    setEditingId(null);
-    setEditTitle("");
-  }, [editingId, editTitle]);
+  const commitRename = useCallback((name: string) => {
+    if (renameTarget) renameSession(renameTarget.id, name);
+    setRenameTarget(null);
+  }, [renameTarget]);
 
-  const cancelRename = useCallback(() => {
-    setEditingId(null);
-    setEditTitle("");
-  }, []);
+  const cancelRename = useCallback(() => setRenameTarget(null), []);
 
   return (
     <div
@@ -671,6 +856,14 @@ function SessionPanelImpl() {
         }
       `}</style>
       {/* Confirm modal */}
+      {renameTarget && (
+        <RenameDialog
+          title={t("sessions.rename")}
+          initial={renameTarget.title}
+          onConfirm={commitRename}
+          onCancel={cancelRename}
+        />
+      )}
       {deleteTarget && (
         <ConfirmDialog
           count={1}
@@ -787,6 +980,83 @@ function SessionPanelImpl() {
         </div>
       </div>
 
+      {/* Tab 条：全部（收藏/文件夹）/ 最近（打开时间倒序，平铺） */}
+      <div
+        style={{
+          display: "flex", gap: 6, padding: "6px 10px",
+          borderBottom: "1px solid var(--border-light)",
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => {
+            setSelectedIds(new Set());
+            setSelectMode(false);
+            setTab("all");
+          }}
+          aria-pressed={tab === "all"}
+          style={tabBtn(tab === "all")}
+        >
+          {t("sessions.tabAll")}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            // 切 Tab 时清掉多选：隐藏起来的选中项仍会被批量删除（危险）。
+            setSelectedIds(new Set());
+            setSelectMode(false);
+            setTab("recent");
+          }}
+          aria-pressed={tab === "recent"}
+          style={tabBtn(tab === "recent")}
+        >
+          {t("sessions.tabRecent")}
+        </button>
+      </div>
+
+      {/* 搜索框：标题 + 文件夹名，简单包含匹配（两个 Tab 都生效） */}
+      <div style={{ padding: "6px 10px", borderBottom: "1px solid var(--border-light)" }}>
+        <div
+          style={{
+            display: "flex", alignItems: "center", gap: 6,
+            border: "1px solid var(--border-light)", borderRadius: 6,
+            padding: "3px 7px", backgroundColor: "var(--bg-surface)",
+          }}
+        >
+          <Search size={12} style={{ color: "var(--fg-muted)", flexShrink: 0 }} />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") { e.stopPropagation(); setQuery(""); }
+            }}
+            placeholder={t("sessions.searchPlaceholder")}
+            spellCheck={false}
+            style={{
+              flex: 1, minWidth: 0, border: "none", background: "transparent",
+              color: "var(--fg-primary)", fontFamily: "inherit",
+              fontSize: "calc(var(--font-scale, 1) * 12px)", outline: "none",
+            }}
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              title={t("sessions.clearSearch")}
+              aria-label={t("sessions.clearSearch")}
+              style={{
+                border: "none", background: "none", cursor: "pointer",
+                color: "var(--fg-muted)", padding: 0, lineHeight: 1,
+                fontSize: "calc(var(--font-scale, 1) * 13px)", flexShrink: 0,
+              }}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* List */}
       <div style={{ flex: 1, overflow: "auto" }}>
         {!connected && (
@@ -794,11 +1064,39 @@ function SessionPanelImpl() {
             {t("sessions.notConnected")}
           </div>
         )}
-        {connected && sessions.length === 0 && !showFavs && (
+        {tab === "all" && connected && sessions.length === 0 && !showFavs && (
           <div style={{ padding: 16, color: "var(--fg-muted)", textAlign: "center" }}>
             {t("sessions.noSessions")}
           </div>
         )}
+        {/* 「最近」：一条按打开时间倒序的平铺时间线，刻意**忽略文件夹分组**
+            （这正是它的价值 —— 文件夹层级深时也能一眼找回刚用过的会话）。 */}
+        {tab === "recent" ? (
+          visibleRecentGroups.length === 0 ? (
+            <div style={{ padding: 16, color: "var(--fg-muted)", textAlign: "center" }}>
+              {searching ? t("sessions.searchNoMatch") : t("sessions.recentEmpty")}
+            </div>
+          ) : (
+            visibleRecentGroups.map((g) => (
+              <div key={g.key}>
+                <div style={{ padding: "4px 10px", fontSize: 10, color: "var(--fg-muted)", fontFamily: "var(--font-sans)", fontWeight: 600 }}>
+                  {g.label}
+                </div>
+                {g.items.map((item) => {
+                  const s = sessions.find((x) => x.id === item.entry.id);
+                  return s
+                    ? renderSessionRow(s, {
+                        showTime: item.entry.openedAt,
+                        // 只在开启文件夹时显示归属徽标（没开就没"文件夹"这个概念）
+                        showFolder: foldersEnabled,
+                      })
+                    : null;
+                })}
+              </div>
+            ))
+          )
+        ) : (
+          <>
         {showFavs && (
           <>
             <div style={{ padding: "4px 10px", fontSize: 10, color: "var(--fg-muted)", fontFamily: "var(--font-sans)", fontWeight: 600 }}>
@@ -831,7 +1129,7 @@ function SessionPanelImpl() {
                 </button>
               </div>
             ))}
-            {favSessions.map((s) => renderSessionRow(s))}
+            {filteredFavs.map((s) => renderSessionRow(s))}
             <div style={{ height: 1, backgroundColor: "var(--border-light)", margin: "4px 10px" }} />
           </>
         )}
@@ -869,11 +1167,22 @@ function SessionPanelImpl() {
             <div style={{ padding: "4px 10px", fontSize: 10, color: "var(--fg-muted)", fontFamily: "var(--font-sans)", fontWeight: 600 }}>
               {t("sessions.uncategorized")}
             </div>
-            {folderPartition.uncategorized.map((s) => renderSessionRow(s))}
+            {filteredUncategorized.map((s) => renderSessionRow(s))}
           </>
         ) : (
-          regularSessions.map((s) => renderSessionRow(s))
+          filteredRegular.map((s) => renderSessionRow(s))
         )}
+          </>
+        )}
+        {/* 搜索无结果：两个 Tab 共用（在分支之外，避免每个分支各写一遍） */}
+        {searching &&
+          tab === "all" &&
+          filteredAllSessions.length === 0 &&
+          (visibleFolderIds?.size ?? 0) === 0 && (
+            <div style={{ padding: 16, color: "var(--fg-muted)", textAlign: "center" }}>
+              {t("sessions.searchNoMatch")}
+            </div>
+          )}
         {selectMode && sessions.length > 0 && selCount > 0 && (
           <div
             style={{
@@ -1073,6 +1382,23 @@ const iconBtnStyle: React.CSSProperties = {
   border: "none", background: "none", cursor: "pointer",
   fontSize: "calc(var(--font-scale, 1) * 14px)", color: "var(--fg-secondary)", padding: "2px 6px", borderRadius: 3,
 };
+
+/** Tab 胶囊按钮（「全部」/「最近」）。选中态用 accent 边框 + 淡底，与设置面板的
+ *  作用域切换同一套视觉语言。 */
+function tabBtn(active: boolean): React.CSSProperties {
+  return {
+    padding: "3px 10px",
+    border: `1px solid ${active ? "var(--accent)" : "var(--border-medium)"}`,
+    borderRadius: 999,
+    backgroundColor: active ? "var(--accent-subtle, rgba(37,99,235,.12))" : "transparent",
+    color: active ? "var(--accent)" : "var(--fg-secondary)",
+    cursor: "pointer",
+    fontSize: "calc(var(--font-scale, 1) * 11px)",
+    fontWeight: active ? 600 : 400,
+    fontFamily: "var(--font-sans)",
+    lineHeight: 1.4,
+  };
+}
 
 function barBtn(bg: string, border: string, color: string): React.CSSProperties {
   return {

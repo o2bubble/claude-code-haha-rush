@@ -4,6 +4,9 @@ import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { migrateWorkspaceSeed } from "../migrations";
 import { INTRANET_SERVER_URL } from "../utils/serverProfile";
+import type { RecentSessionEntry } from "../utils/sessionRecents";
+
+export type { RecentSessionEntry };
 
 export interface QuickPrompt {
   id: string;
@@ -30,6 +33,14 @@ export interface AppSettings {
   quickPrompts?: QuickPrompt[];
   /** Favorite session ids — workspace-scoped, stored in the bound workspace's settings.local.json */
   favoriteSessionIds?: string[];
+  /**
+   * 「最近」Tab 的 MRU 池（工作区作用域，跨窗口共享）。
+   * 每条带 openedAt —— 只存 id 不够：按天分组要用打开时间（会话自带的
+   * timestamp 是文件 mtime，不是打开时间）。
+   */
+  recentSessions?: RecentSessionEntry[];
+  /** 「最近」池上限（全局偏好，缺省 25；写入前用 clampRecentMax 钳制） */
+  recentSessionMax?: number;
   editorFontSize?: number;
   editorTabSize?: number;
   editorWordWrap?: boolean;

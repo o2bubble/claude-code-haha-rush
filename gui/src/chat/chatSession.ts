@@ -25,6 +25,7 @@ import {
 } from "../stores/msgQueueStore";
 import type { QueuedMsg } from "../stores/msgQueueState";
 import { DEFAULT_STALL_WAKE_PROMPT } from "../utils/streamStallDecision";
+import { clampRecentMax, recordSessionRecent } from "../utils/sessionRecents";
 import { BackendService } from "../services/backendService";
 import {
   registerGuardChatApi, reportGuardTurnEnded, guardActive, guardStop as guardStopBridge,
@@ -442,6 +443,24 @@ export function createChatSession(): ChatSession {
     // 这是"进入工作区后自动加载目标会话"的唯一触发点 —— 事件驱动，越早越好。
     if (!prevSessionsLoaded && nextState.sessionsLoaded && _pendingTargetLoad) {
       settlePendingTarget("loaded");
+    }
+    // 「最近」Tab：sessionId 变了 = 打开了一个会话（切换 / 自动加载 / 意图 / 新建）。
+    //
+    // 在这里集中记录，覆盖全部路径且自动去重（同一会话反复下发 current_session
+    // 不会重复写盘）。存进**工作区作用域**设置 = 同工作区多窗口共享 + 重启保留。
+    const openedId = nextState.sessionId;
+    if (openedId && openedId !== prevSessionId) {
+      const max = clampRecentMax(getSettings().recentSessionMax);
+      const list = recordSessionRecent(
+        getSettings().recentSessions ?? [],
+        openedId,
+        Date.now(),
+        max,
+      );
+      // saveSettings 已含"更新内存 + 落盘 + 跨窗口广播"，不要再调 updateSettings
+      // （会二次 emit）。dispatch 是同步上下文 —— 用 void + catch 吞掉，
+      // 记录失败（如无 window 的测试环境）绝不能影响会话切换本身。
+      void saveSettings({ recentSessions: list }, "workspace").catch(() => {});
     }
     // 唤醒/守卫发送时序：等后端真正就绪(ready/result)再发，防撞 busy。
     // 必须在 replaceState 之后——reducer 已把 backendBusy 清 false，flush 读到

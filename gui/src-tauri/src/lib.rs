@@ -1395,10 +1395,18 @@ async fn notify_sessions_changed(
 async fn session_status_report(
     server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
     settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+    workspace: String,
     session_id: String,
     state: String,
 ) -> Result<(), String> {
-    let ws = bound_workdir(&settings)?;
+    // 优先用调用方显式给的工作区：本命令可能在 `bind_workspace` 完成之前被
+    // 调用（前端 `void BackendService.bind()` 不等待），此时 settings state
+    // 还是启动时的全局 workDir —— 依赖它会把这个实例的状态报进**别的工作区**。
+    let ws = if workspace.trim().is_empty() {
+        bound_workdir(&settings)?
+    } else {
+        workspace
+    };
     if let Some(client) = server_client_or(&server_state, &ws).await {
         let status = claude_gui_shared::presence::SessionStatus {
             workspace: ws.clone(),
@@ -1421,8 +1429,21 @@ async fn session_status_report(
 async fn get_session_statuses(
     server_state: tauri::State<'_, Mutex<Option<server_client::ServerClient>>>,
     settings: tauri::State<'_, Mutex<settings::AppSettings>>,
+    workspace: String,
 ) -> Result<Vec<claude_gui_shared::presence::SessionStatus>, String> {
-    let ws = bound_workdir(&settings)?;
+    // ⚠️ 必须接受调用方的工作区（2026-10-23 用户实测"新窗口没有其他会话圆点"）。
+    //
+    // 原实现用 `bound_workdir`（settings state），而前端的
+    // `void BackendService.bind(workDir)` 是 fire-and-forget —— 快照请求完全可能
+    // 先于绑定完成。新窗口（尤其 intent 启动的）此时 state 还停在**启动时的全局
+    // workDir**，于是查到了别的工作区：
+    //   · 就算查到条目，前端按本工作区匹配也不显示 → 看不到其他会话的圆点
+    //   · 其他实例此刻多为 idle，不会再发变更事件 → 永远不会自我纠正
+    let ws = if workspace.trim().is_empty() {
+        bound_workdir(&settings)?
+    } else {
+        workspace
+    };
     if let Some(client) = server_client_or(&server_state, &ws).await {
         // Snapshot is used as the "open elsewhere" index — drop our own entry
         // (the incremental stream already skips self) so our current session is
@@ -1431,7 +1452,14 @@ async fn get_session_statuses(
         return client
             .get_session_statuses(&ws)
             .await
-            .map(|v| v.into_iter().filter(|s| s.client_id != self_id).collect());
+            .map(|v| {
+                v.into_iter()
+                    .filter(|s| s.client_id != self_id)
+                    // 双保险：只保留本工作区的条目（服务端已按 workspace 过滤，
+                    // 这里再挡一次 —— 防止未来服务端语义变化再次串工作区）
+                    .filter(|s| s.workspace == ws)
+                    .collect()
+            });
     }
     Ok(Vec::new())
 }

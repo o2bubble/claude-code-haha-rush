@@ -11,6 +11,12 @@ import { t, setLanguage, getLanguage, type Language } from "../../i18n";
 import { DEFAULT_CONTEXT_WARNING_ENABLED, DEFAULT_CONTEXT_WARNING_PERCENT } from "../../utils/contextWarning";
 import { DEFAULT_STALL_WAKE_PROMPT } from "../../utils/streamStallDecision";
 import {
+  DEFAULT_RECENT_MAX,
+  MIN_RECENT_MAX,
+  MAX_RECENT_MAX,
+  clampRecentMax,
+} from "../../utils/sessionRecents";
+import {
   customServerUrlForDisplay,
   deriveServerProfile,
   serverProfileUrls,
@@ -650,6 +656,19 @@ function CategoryContent({ cat, settings, update, applyServer, applyWorkspaceOnl
             <Toggle value={settings.sessionFolders ?? false}
               onChange={(v) => applyWorkspaceOnly({ sessionFolders: v })} />
             <FieldHint text={t("settings.sessionFoldersDesc")} />
+          </div>
+          <div>
+            <Label text={t("settings.recentSessionMax")} />
+            {/* 纯全局偏好（同 windowTitleOrder）：跟随保存栏的作用域会写进工作区文件，
+                而 Rust merge 白名单刻意不含它 → 读不回来、重启静默回退。
+                ⚠️ IntField 不做数值钳制，这里显式 clampRecentMax。 */}
+            <IntField
+              value={settings.recentSessionMax ?? DEFAULT_RECENT_MAX}
+              min={MIN_RECENT_MAX}
+              max={MAX_RECENT_MAX}
+              onChange={(v) => applyGlobalOnly({ recentSessionMax: clampRecentMax(v) })}
+            />
+            <FieldHint text={t("settings.recentSessionMaxDesc")} />
           </div>
         </div>
       );

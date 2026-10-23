@@ -13,6 +13,7 @@ import { DEFAULT_SHORTCUTS, resolveBindings, displayKeys } from "../services/sho
 import { isMacPlatform } from "../services/shortcutDispatcher";
 import { updateSettings, saveSettings, getSettings } from "../stores/settingsStore";
 import { workspaceBasename } from "../utils/workspace";
+import { folderPathLabel } from "./chat/sessionFolders";
 import { isDarkTheme } from "../utils/themeUtils";
 import { t } from "../i18n";
 import { layoutMode } from "../stores/layoutMode";
@@ -1119,6 +1120,15 @@ export default function Toolbar() {
   const chatPayload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
   const state = chatPayload?.state ?? getChatState();
   const sessionTitle = state.sessions.find((s) => s.id === state.sessionId)?.title ?? "";
+  // 会话所属**文件夹**的层级路径（如「工作 / 项目A」）。
+  // 左边的工作区切换器只回答"哪个工作区"，答不了"这个工作区的哪个分支" ——
+  // 同名会话散在不同文件夹时，光看标题分不清是哪个（与「最近」Tab 的徽标同理）。
+  // 只在该工作区**开启文件夹**时显示：没开就没"文件夹"这个概念。
+  const folderLabel = (() => {
+    const st = getSettings();
+    if (!st.sessionFolders || !state.sessionId) return "";
+    return folderPathLabel(st.sessionFolderTree ?? { folders: [], assignments: {} }, state.sessionId);
+  })();
 
   useEffect(() => {
     const u2 = layoutMode.subscribe(() => setTick((t) => t + 1));
@@ -1255,6 +1265,29 @@ export default function Toolbar() {
         data-toolbar-flex="1"
         style={{ flex: 1, minWidth: DRAG_GUTTER_PX, display: "flex", alignItems: "center", gap: 8, marginLeft: 8 }}
       >
+        {/* 文件夹层级（前缀）：弱化色 + 限宽省略，完整路径靠 hover。
+            比会话名更早被压缩 —— 上下文信息，标题才是主标识。 */}
+        {folderLabel && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, minWidth: 0, flexShrink: 1 }}>
+            <span
+              title={folderLabel}
+              style={{
+                fontSize: "calc(var(--font-scale, 1) * 10px)",
+                color: "var(--fg-muted)",
+                maxWidth: 110, minWidth: 0,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}
+            >
+              {folderLabel}
+            </span>
+            <span
+              aria-hidden="true"
+              style={{ color: "var(--fg-muted)", fontSize: "calc(var(--font-scale, 1) * 10px)", flexShrink: 0 }}
+            >
+              ›
+            </span>
+          </span>
+        )}
         {sessionTitle && (
           <span title={`Session: ${sessionTitle}`} style={{
             fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-secondary)",

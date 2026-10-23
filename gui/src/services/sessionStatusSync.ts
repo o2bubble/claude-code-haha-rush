@@ -46,7 +46,13 @@ function reportIfChanged() {
   if (sid === lastReportedSessionId && state === lastReportedState) return;
   lastReportedSessionId = sid;
   lastReportedState = state;
-  void tauriInvoke("session_status_report", { sessionId: sid, state });
+  // 显式带工作区：不能依赖 Rust 端"已绑定"状态 —— `BackendService.bind()` 是
+  // fire-and-forget，本函数可能在绑定完成前触发（那样会报进**别的工作区**）。
+  void tauriInvoke("session_status_report", {
+    workspace: workDirRef,
+    sessionId: sid,
+    state,
+  });
 }
 
 function toEntry(s: any): SessionStatusEntry | null {
@@ -60,14 +66,20 @@ function toEntry(s: any): SessionStatusEntry | null {
 }
 
 function replaceFromSnapshot() {
-  void tauriInvoke("get_session_statuses").then((list: unknown) => {
-    if (Array.isArray(list)) {
-      replaceAllSessionStatus(
-        list
-          .map(toEntry)
-          .filter((e: SessionStatusEntry | null): e is SessionStatusEntry => !!e),
-      );
-    }
+  // 显式把工作区传给后端（见 get_session_statuses 的注释：不能依赖尚未完成的绑定）
+  const ws = workDirRef;
+  void tauriInvoke("get_session_statuses", { workspace: ws }).then((list: unknown) => {
+    if (!Array.isArray(list)) return;
+    // 只保留本工作区的条目 —— 即使后端因竞态返回了别的工作区（或将来语义变化），
+    // 也不能让它们把 store 覆盖成一份"一张圆点都匹配不上"的垃圾数据。
+    const entries = list
+      .map(toEntry)
+      .filter((e: SessionStatusEntry | null): e is SessionStatusEntry => !!e)
+      .filter((e) => e.workspace === ws);
+    // 竞态防护：等待期间若已切到别的工作区，这次结果作废（否则会把新工作区的
+    // 索引覆盖成旧工作区的）。
+    if (ws !== workDirRef) return;
+    replaceAllSessionStatus(entries);
   });
 }
 

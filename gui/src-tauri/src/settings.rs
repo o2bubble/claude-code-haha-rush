@@ -49,6 +49,18 @@ pub struct CompactPrompt {
 }
 fn default_compact_mode() -> String { "append".into() }
 
+/// 会话面板「最近」Tab 的一条记录：会话 id + 打开时刻。
+///
+/// ⚠️ **必须带 openedAt**：会话列表里的 `timestamp` 是会话文件 mtime（最后写消息），
+/// 不是"最后打开"。用它当分组依据会把 MRU 顺序切成碎块，也表达不了"只翻看没发消息"。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RecentSessionEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(rename = "openedAt", default)]
+    pub opened_at: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
     #[serde(rename = "workDir", default = "default_work_dir")]
@@ -135,6 +147,13 @@ pub struct AppSettings {
     pub favorite_skills: Vec<String>,
     #[serde(rename = "favoriteSessionIds", default)]
     pub favorite_session_ids: Vec<String>,
+    /// 「最近打开的会话」MRU 池（工作区作用域，跨窗口共享）。
+    #[serde(rename = "recentSessions", default)]
+    pub recent_sessions: Vec<RecentSessionEntry>,
+    /// 上述池的上限（全局偏好，**不进**工作区 merge 白名单）。
+    /// 默认由前端 `clampRecentMax` 兜底（25）；这里只负责存取。
+    #[serde(rename = "recentSessionMax", default)]
+    pub recent_session_max: Option<u32>,
     #[serde(rename = "msgQueuePosition", default)]
     pub msg_queue_position: Option<String>,
     #[serde(rename = "msgQueueMaxItems", default)]
@@ -258,6 +277,8 @@ impl Default for AppSettings {
             quick_prompts: vec![],
             favorite_skills: vec![],
             favorite_session_ids: vec![],
+            recent_sessions: vec![],
+            recent_session_max: None,
             msg_queue_position: None,
             msg_queue_max_items: None,
             msg_selection_toolbar: None,
@@ -777,6 +798,11 @@ fn merge_workspace_overrides(base: &mut AppSettings, o: &AppSettings) {
     if o.save_layout_to_global.is_some() { base.save_layout_to_global = o.save_layout_to_global; }
     if o.show_hidden_files { base.show_hidden_files = true; }
     if !o.favorite_session_ids.is_empty() { base.favorite_session_ids = o.favorite_session_ids.clone(); }
+    // 「最近」MRU 池是工作区作用域（会话 id 本就按工作区隔离）。
+    // ⚠️ recent_session_max **刻意不在此列** —— 它是纯全局偏好，
+    //    跟着工作区走会重演 skillRegistryUrl/windowTitleOrder 那类
+    //    "存进工作区却读不回来、重启静默回退"的坑。
+    if !o.recent_sessions.is_empty() { base.recent_sessions = o.recent_sessions.clone(); }
     if !o.quick_prompts.is_empty() { base.quick_prompts = o.quick_prompts.clone(); }
     if !o.favorite_skills.is_empty() { base.favorite_skills = o.favorite_skills.clone(); }
     if o.msg_queue_position.is_some() { base.msg_queue_position = o.msg_queue_position.clone(); }
@@ -1092,6 +1118,26 @@ mod tests {
     ///
     /// 这个测试锁住"**不加**白名单"这个决定：若有人顺手加进去，工作区文件里的值
     /// 会开始压制全局值，而前端从不往工作区写它 → 用户切换工作区后设置莫名失效。
+    #[test]
+    fn recent_sessions_merge_from_workspace_but_max_is_global_only() {
+        let mut base = AppSettings::default();
+        base.recent_session_max = Some(25);
+        let mut ws = AppSettings::default();
+        ws.recent_sessions = vec![RecentSessionEntry { id: "s1".into(), opened_at: 123 }];
+        ws.recent_session_max = Some(5);
+
+        merge_workspace_overrides(&mut base, &ws);
+
+        assert_eq!(base.recent_sessions.len(), 1, "最近会话池是工作区作用域，应能合并回来");
+        assert_eq!(base.recent_sessions[0].id, "s1");
+        assert_eq!(base.recent_sessions[0].opened_at, 123);
+        assert_eq!(
+            base.recent_session_max,
+            Some(25),
+            "池上限是全局偏好，工作区覆盖不该影响它（同 windowTitleOrder）"
+        );
+    }
+
     #[test]
     fn window_title_order_is_global_only() {
         let mut base = AppSettings::default();

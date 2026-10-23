@@ -1,4 +1,40 @@
-import React, { memo, useState, useEffect, useRef } from "react";
+import React, { memo, useState, useEffect, useLayoutEffect, useRef } from "react";
+
+/** 视口边缘留白：菜单贴边显得局促，也容易被窗口圆角/滚动条吃掉几个像素。 */
+const VIEWPORT_MARGIN = 4;
+
+/**
+ * 把弹层钳进视口 —— 优先保持原方向，放不下才翻到另一侧。
+ *
+ * 为什么必须做：菜单是 `position: fixed` 直接放在鼠标坐标上，而右键往往发生在
+ * **屏幕下半部**（长列表点最后几项）。不钳制就整个溢出视口，用户既看不到
+ * 也点不到 —— 实测用户反馈「溢出了都没法交互」（2026-10-23）。
+ *
+ * @param desiredX 期望的左上角 x（通常是鼠标位置）
+ * @param size     弹层**实际**尺寸（必须先量再定位，见 measureThenPlace）
+ * @param viewport 视口宽高
+ */
+export function clampMenuPosition(
+  desiredX: number,
+  desiredY: number,
+  size: { width: number; height: number },
+  viewport: { width: number; height: number },
+): { x: number; y: number } {
+  const { width: vw, height: vh } = viewport;
+  const { width: w, height: h } = size;
+
+  // 水平：放得下就保持；放不下先向左翻，仍超出则贴右边缘
+  let x = desiredX;
+  if (x + w > vw - VIEWPORT_MARGIN) x = desiredX - w;
+  x = Math.max(VIEWPORT_MARGIN, Math.min(x, vw - w - VIEWPORT_MARGIN));
+
+  // 垂直：同理，向下 → 向上翻（右键菜单的常见行为）
+  let y = desiredY;
+  if (y + h > vh - VIEWPORT_MARGIN) y = desiredY - h;
+  y = Math.max(VIEWPORT_MARGIN, Math.min(y, vh - h - VIEWPORT_MARGIN));
+
+  return { x, y };
+}
 
 /** 菜单项文字颜色：禁用态 muted，破坏性操作 error，其余默认 */
 function itemColor(item: ContextMenuItem): string {
@@ -60,14 +96,39 @@ function _ContextMenu() {
   const [subMenu, setSubMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
   const [subIdx, setSubIdx] = useState(-1);
   const menuRef = useRef<HTMLDivElement>(null);
+  /** 主菜单钳制后的位置。null = 还没量（此时按原坐标渲染但不可见）。 */
+  const [placed, setPlaced] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     return subscribeCtxMenu(() => {
       setCtx(_ctx ? { ..._ctx } : null);
+      setPlaced(null); // 新菜单 → 重新量
       setSubMenu(null);
       setSubIdx(-1);
     });
   }, []);
+
+  // **先量后定位**：菜单内容/行数决定它的高度，而高度决定要不要向上翻。
+  // 在 useLayoutEffect 里量（浏览器绘制前）→ 用户看不到中间态闪烁。
+  // 渲染时先以 visibility:hidden 挂在期望位置，量完再切到真实位置并显示。
+  useLayoutEffect(() => {
+    if (!ctx || placed || !menuRef.current) return;
+    const rect = menuRef.current.getBoundingClientRect();
+    setPlaced(
+      clampMenuPosition(ctx.x, ctx.y, rect, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      }),
+    );
+  }, [ctx, placed]);
+
+  // 窗口尺寸变化 → 已定位的菜单可能又溢出了，重新钳一次。
+  useEffect(() => {
+    if (!ctx) return;
+    const onResize = () => setPlaced(null);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [ctx]);
 
   // 点击外部关闭
   useEffect(() => {
@@ -98,10 +159,18 @@ function _ContextMenu() {
     const parentEl = menuRef.current?.children[idx] as HTMLElement | undefined;
     if (parentEl) {
       const rect = parentEl.getBoundingClientRect();
-      // Flip to left if submenu would overflow viewport right edge
-      const subW = 160;
-      const x = rect.right + subW > window.innerWidth ? rect.left - subW : rect.right;
-      setSubMenu({ x, y: rect.top, items: item.children });
+      // 子菜单是悬停时才创建的，来不及量 —— 按行高估算尺寸再钳进视口。
+      // 估算偏大一点无害（钳制只会把它往内挪），偏小才会溢出。
+      const estW = 200;
+      const estH = item.children.reduce(
+        (sum, c) => sum + (c.separator ? 7 : 24),
+        8,
+      );
+      const pos = clampMenuPosition(rect.right, rect.top, { width: estW, height: estH }, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+      setSubMenu({ x: pos.x, y: pos.y, items: item.children });
       setSubIdx(idx);
     }
   };
@@ -112,8 +181,10 @@ function _ContextMenu() {
       role="menu"
       style={{
         position: "fixed",
-        left: ctx.x,
-        top: ctx.y,
+        // 未量好前先挂在期望位置但不显示（避免"先画错位置再跳一下"）
+        left: placed?.x ?? ctx.x,
+        top: placed?.y ?? ctx.y,
+        visibility: placed ? "visible" : "hidden",
         zIndex: 99999,
         backgroundColor: "var(--bg-root)",
         opacity: 1,
