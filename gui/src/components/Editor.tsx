@@ -70,9 +70,13 @@ interface EditorProps {
   content: string;
   onChange: (content: string) => void;
   readOnly?: boolean;
+  /** 打开后滚到这一行（1-based）—— 文件搜索点中命中时用 */
+  revealLine?: number;
+  /** 递增即重新定位，使"再次点同一行"也能生效 */
+  revealNonce?: number;
 }
 
-export default memo(function MonacoEditor({ path, name, content, onChange, readOnly }: EditorProps) {
+export default memo(function MonacoEditor({ path, name, content, onChange, readOnly, revealLine, revealNonce }: EditorProps) {
   const [ready, setReady] = useState(monacoReady);
   const [isDark, setIsDark] = useState(
     () => typeof document !== "undefined" && isDarkTheme(document.documentElement.dataset.theme)
@@ -95,6 +99,25 @@ export default memo(function MonacoEditor({ path, name, content, onChange, readO
   // 卸载时清除活动编辑器引用，避免命令面板读到已销毁实例
   useEffect(() => () => { setActiveEditor(null); }, []);
 
+  // ── 跳转到指定行（文件搜索命中）──
+  // 存实例而不是用函数 ref：@monaco-editor/react 的 onMount 只触发一次，
+  // 需要实例才能在后续 revealNonce 变化时再次定位。
+  //
+  // ⚠️ `mountTick` 不可省：Monaco 是**懒加载**的（上面 ensureMonaco 完成才渲染
+  // 真正的编辑器）。首次打开文件时"带 revealLine 的那次 render"早于 onMount，
+  // 此时实例还不存在 → 只靠 revealLine/revealNonce 两个依赖会漏掉这一次跳转。
+  // mountTick 在 onMount 时 +1，让 effect 在实例就绪后**再跑一遍**。
+  const instRef = useRef<any>(null);
+  const [mountTick, setMountTick] = useState(0);
+  useEffect(() => {
+    if (!revealLine || !instRef.current) return;
+    const line = Math.max(1, revealLine);
+    instRef.current.revealLineInCenter(line);
+    instRef.current.setPosition({ lineNumber: line, column: 1 });
+    // 让光标真正落到编辑器里，用户可以直接接着编辑
+    instRef.current.focus();
+  }, [revealLine, revealNonce, mountTick]);
+
   const sp = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const s = sp?.settings ?? getSettings();
 
@@ -115,6 +138,8 @@ export default memo(function MonacoEditor({ path, name, content, onChange, readO
   const handleMount: OnMount = (editor, monaco) => {
     // 注册活动编辑器实例供命令面板读取 getSupportedActions
     setActiveEditor(editor);
+    instRef.current = editor;
+    setMountTick((t) => t + 1); // 实例就绪 → 让"跳转到行"的 effect 再跑一次
 
     // ── 覆盖 F1 / Ctrl+Shift+P → 打开统一命令面板 ──
     // Monaco 默认 F1 弹出编辑器原生命令面板；这里重定向到应用统一面板，

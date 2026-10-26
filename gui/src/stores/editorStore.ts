@@ -16,6 +16,13 @@ export interface FileTab {
   deleted?: boolean;
   /** Markdown 渲染预览态（编辑 Monaco ⇄ 预览渲染），按标签持久化 */
   previewMode?: boolean;
+  /**
+   * 待跳转的行（1-based）。来源：文件内容搜索点中某条命中。
+   * 单调递增的 `revealNonce` 让"再次点同一行"也能重新触发滚动 ——
+   * 只比 line 的话第二次点击没有任何状态变化。
+   */
+  revealLine?: number;
+  revealNonce?: number;
 }
 
 // Previewable file extensions
@@ -38,18 +45,23 @@ export const editorStore = {
   get activePath() { return _activePath; },
   get activeTab() { return _tabs.find((t) => t.path === _activePath) ?? null; },
 
-  openFile(path: string, name: string, content: string) {
+  /** `opts.line` = 打开后跳到该行（文件搜索命中时用）。 */
+  openFile(path: string, name: string, content: string, opts?: { line?: number }) {
     const existing = _tabs.find((t) => t.path === path);
     if (existing) {
       existing.externalChanged = false;
       existing.tabType = "text";
       _activePath = path;
-      notify();
     } else {
       _tabs.push({ path, name, content, dirty: false, externalChanged: false, tabType: "text" });
       _activePath = path;
-      notify();
     }
+    if (opts?.line) {
+      const tab = _tabs.find((t) => t.path === path)!;
+      tab.revealLine = opts.line;
+      tab.revealNonce = (tab.revealNonce ?? 0) + 1;
+    }
+    notify();
     activatePanel("editor");
   },
 

@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { Search, ListTree } from "lucide-react";
 import FileTree from "./FileTree";
+import { FileSearchPanel } from "./FileSearchPanel";
 import { getSettings } from "../stores/settingsStore";
 import { t } from "../i18n";
 import { editorStore, isPreviewable } from "../stores/editorStore";
@@ -9,12 +11,26 @@ import { useEvent, useEventHandler } from "../services/useService";
 import { windowBus } from "../services/windowBus";
 import { Events, type SettingsChangedPayload, type FileRevealPayload } from "../services/events";
 
+/** 打开文件；给了 line 就跳过去（搜索命中用）。 */
+async function openFileAt(path: string, line?: number) {
+  const name = path.split(/[/\\]/).pop() || path;
+  if (isPreviewable(path)) {
+    editorStore.openPreview(path, name);
+  } else {
+    const content = await fileService.readFile(path);
+    editorStore.openFile(path, name, content, line ? { line } : undefined);
+  }
+}
+
 export function FileBrowserPanel() {
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
   const rootPath = settingsPayload?.settings?.workDir ?? (getSettings().workDir || null);
   const showHidden = settingsPayload?.settings?.showHiddenFiles ?? getSettings().showHiddenFiles ?? false;
   const [treeKey, setTreeKey] = useState(0);
   const refreshTree = () => setTreeKey((k) => k + 1);
+  // 树 / 搜索 两种模式共用一个面板：找文件与找内容是同一件事的两半，放一起
+  // 就不用记"另一个面板叫什么"（用户 2026-10-26 需求）。
+  const [mode, setMode] = useState<"tree" | "search">("tree");
 
   // 编辑器"定位目录树" → 文件树展开祖先并选中目标(粘性事件, 面板延迟挂载也能收到)
   // 带 nonce：对同一文件再次定位时 path 不变，靠它让文件树重新滚动(见 events.ts)
@@ -59,24 +75,42 @@ export function FileBrowserPanel() {
       }}
     >
       <div style={{
+        display: "flex", alignItems: "center", gap: 6,
         padding: "4px 8px", borderBottom: "1px solid var(--border-light)",
         fontSize: 11, color: "var(--fg-muted)", fontFamily: "var(--font-sans)",
-        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
       }}>
-        {rootPath}
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {rootPath}
+        </span>
+        <button
+          type="button"
+          onClick={() => setMode((m) => (m === "tree" ? "search" : "tree"))}
+          title={mode === "tree" ? t("files.searchTitle") : t("files.backToTree")}
+          aria-label={mode === "tree" ? t("files.searchTitle") : t("files.backToTree")}
+          aria-pressed={mode === "search"}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center",
+            width: 20, height: 20, padding: 0, border: "none", borderRadius: 3,
+            cursor: "pointer", flexShrink: 0,
+            background: mode === "search" ? "var(--accent)" : "transparent",
+            color: mode === "search" ? "var(--fg-inverse)" : "var(--fg-secondary)",
+          }}
+        >
+          {mode === "tree" ? <Search size={14} /> : <ListTree size={14} />}
+        </button>
       </div>
-      {/* minHeight:0 + 不设 overflow —— 滚动交给 FileTree 内部的树区
+      {/* minHeight:0 + 不设 overflow —— 滚动交给 FileTree / FileSearchPanel 自己
           （否则工具栏会跟着一起滚） */}
       <div style={{ flex: 1, minHeight: 0 }}>
-        <FileTree forceRefresh={treeKey} rootPath={rootPath} showHidden={showHidden} revealPath={reveal?.path ?? null} revealNonce={reveal?.nonce ?? 0} onOpenFile={async (p) => {
-          const name = p.split(/[/\\]/).pop() || p;
-          if (isPreviewable(p)) {
-            editorStore.openPreview(p, name);
-          } else {
-            const content = await fileService.readFile(p);
-            editorStore.openFile(p, name, content);
-          }
-        }} />
+        {mode === "tree" ? (
+          <FileTree forceRefresh={treeKey} rootPath={rootPath} showHidden={showHidden} revealPath={reveal?.path ?? null} revealNonce={reveal?.nonce ?? 0} onOpenFile={openFileAt} />
+        ) : (
+          <FileSearchPanel
+            rootPath={rootPath}
+            showHidden={showHidden}
+            onOpenHit={(p, line) => void openFileAt(p, line)}
+          />
+        )}
       </div>
     </div>
   );

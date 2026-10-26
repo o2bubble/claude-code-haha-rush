@@ -198,6 +198,8 @@ export function EditorPanel() {
             content={activeTab.content}
             readOnly={activeTab.deleted === true}
             onChange={handleEditorChange}
+            revealLine={activeTab.revealLine}
+            revealNonce={activeTab.revealNonce}
           />
         )}
 

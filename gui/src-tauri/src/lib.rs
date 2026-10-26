@@ -768,6 +768,7 @@ pub fn run() {
             get_ide_port,
             read_dir,
             read_file,
+            search_in_files,
             read_bytes,
             list_plugin_manifests,
             get_plugins_base_dir,
@@ -917,6 +918,210 @@ fn read_dir(path: String, show_hidden_files: Option<bool>) -> Result<Vec<DirEntr
     }
     result.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
     Ok(result)
+}
+
+// ── 全文搜索（文件面板的搜索模式）──
+//
+// 为什么自己做递归遍历而不用 grep：不需要引第三方 crate，且**跳过规则要跟文件树
+// 一致**（Hidden / node_modules / target），复用外部工具还得再翻译一遍参数。
+//
+// 三条硬上限，保证再大的仓库也在秒级返回、不会把 UI 拖住：
+//   · 单文件 ≤ 2 MB（会话 jsonl 常几十 MB，搜它没有意义）
+//   · 最多返回 300 条命中
+//   · 最多扫描 2 万个文件
+// 超出任一上限 → `truncated = true`，前端明确告诉用户"结果被截断"，
+// 而不是让用户以为"就这么多"。
+
+/// 单个文件的读取上限。
+const SEARCH_MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
+/// 一次搜索最多返回的命中条数。
+const SEARCH_MAX_RESULTS: usize = 300;
+/// 一次搜索最多扫描的文件数（防止在超大目录树里空转）。
+const SEARCH_MAX_SCANNED: usize = 20_000;
+/// 判断"二进制文件"时检查的头部字节数。
+const SEARCH_SNIFF_BYTES: usize = 8 * 1024;
+/// 命中行预览的最大字符数（长行不塞爆界面）。
+const SEARCH_MAX_LINE_CHARS: usize = 300;
+
+/// 递归遍历时跳过的目录名 —— 与 `read_dir` 的直觉保持一致（第三方依赖 / 构建产物
+/// / VCS 内部），避免搜索被噪声淹没。
+const SEARCH_SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".git",
+    ".svn",
+    ".hg",
+    "dist",
+    "build",
+    "out",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".next",
+    ".nuxt",
+    ".pytest_cache",
+    ".mypy_cache",
+    "coverage",
+];
+
+#[derive(Debug, Serialize)]
+struct SearchHit {
+    /// 绝对路径（点击结果时直接用来打开文件）
+    path: String,
+    /// 相对 root 的路径（列表里显示，短且可读）
+    rel: String,
+    /// 1-based 行号
+    line: u32,
+    /// 命中行内容（已 trim，超长截断）
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SearchResult {
+    hits: Vec<SearchHit>,
+    /// 任一上限被触发 → 结果不完整
+    truncated: bool,
+    /// 实际扫描的文件数（用于「没有结果」时区分"确实没有"与"没扫到"）
+    scanned: u32,
+}
+
+/// 按字节切片做大小写不敏感的子串匹配（避免为一次搜索引入 regex 依赖）。
+fn find_in_line(haystack: &str, needle_lower: &str, case_sensitive: bool, needle: &str) -> bool {
+    if case_sensitive {
+        haystack.contains(needle)
+    } else {
+        haystack.to_lowercase().contains(needle_lower)
+    }
+}
+
+/// 同步的搜索实现 —— 抽出来便于单测（命令层只负责调度到阻塞线程）。
+fn search_in_files_blocking(
+    root: &std::path::Path,
+    query: &str,
+    show_hidden: bool,
+    case_sensitive: bool,
+    max_results: usize,
+) -> SearchResult {
+    let needle = query;
+    let needle_lower = needle.to_lowercase();
+    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut truncated = false;
+    let mut scanned: u32 = 0;
+
+    // 显式栈（不用递归）—— 目录层级再深也不会爆栈，且能随时提前退出。
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+
+    'walk: while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+
+            if ft.is_dir() {
+                if SEARCH_SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                if !show_hidden && name.starts_with('.') {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                continue; // 符号链接 / 设备文件等一律不进
+            }
+            if !show_hidden && name.starts_with('.') {
+                continue;
+            }
+
+            scanned += 1;
+            if scanned as usize > SEARCH_MAX_SCANNED {
+                truncated = true;
+                break 'walk;
+            }
+
+            // 大小超限直接跳过（不做部分搜索：半截文件容易漏掉后半段命中）
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.len() as usize > SEARCH_MAX_FILE_BYTES {
+                continue;
+            }
+
+            let Ok(mut f) = std::fs::File::open(&path) else { continue };
+            use std::io::Read;
+            let mut buf: Vec<u8> = Vec::new();
+            if f.by_ref()
+                .take(SEARCH_MAX_FILE_BYTES as u64)
+                .read_to_end(&mut buf)
+                .is_err()
+            {
+                continue;
+            }
+            // 含 NUL 字节 → 当二进制跳过（图片/编译产物/数据库）
+            if buf
+                .iter()
+                .take(SEARCH_SNIFF_BYTES)
+                .any(|&b| b == 0)
+            {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&buf);
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            for (i, line) in text.lines().enumerate() {
+                if !find_in_line(line, &needle_lower, case_sensitive, needle) {
+                    continue;
+                }
+                let trimmed = line.trim();
+                let preview: String = trimmed.chars().take(SEARCH_MAX_LINE_CHARS).collect();
+                hits.push(SearchHit {
+                    path: path.to_string_lossy().to_string(),
+                    rel: rel.clone(),
+                    line: (i + 1) as u32,
+                    text: preview,
+                });
+                if hits.len() >= max_results {
+                    truncated = true;
+                    break 'walk;
+                }
+            }
+        }
+    }
+
+    SearchResult { hits, truncated, scanned }
+}
+
+#[tauri::command]
+async fn search_in_files(
+    root: String,
+    query: String,
+    show_hidden: Option<bool>,
+    case_sensitive: Option<bool>,
+    max_results: Option<usize>,
+) -> Result<SearchResult, String> {
+    let q = query.trim().to_string();
+    // 空查询不扫盘 —— 前端通常已经拦住，这里是兜底
+    if q.is_empty() {
+        return Ok(SearchResult { hits: Vec::new(), truncated: false, scanned: 0 });
+    }
+    let root_path = std::path::PathBuf::from(&root);
+    if !root_path.is_dir() {
+        return Err(format!("Not a directory: {}", root));
+    }
+    let show_hidden = show_hidden.unwrap_or(false);
+    let case_sensitive = case_sensitive.unwrap_or(false);
+    let cap = max_results.unwrap_or(SEARCH_MAX_RESULTS).clamp(1, SEARCH_MAX_RESULTS);
+
+    // 走阻塞线程池：搜索可能要几百毫秒，绝不能占住 UI 线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        search_in_files_blocking(&root_path, &q, show_hidden, case_sensitive, cap)
+    })
+    .await
+    .map_err(|e| format!("Search task failed: {}", e))
 }
 
 #[tauri::command]
@@ -6200,6 +6405,155 @@ mod tests {
     fn nav_other_schemes_blocked() {
         assert!(!is_allowed_navigation(&u("mailto:a@b.c")));
         assert!(!is_allowed_navigation(&u("file:///C:/x")));
+    }
+
+    // ── 全文搜索 ──
+    //
+    // 用真实临时目录（不是 mock 文件系统）：跳过规则、二进制探测、行号这几条
+    // 全是和真实 fs 打交道的逻辑，mock 掉就测不到真东西。
+
+    struct TempTree(std::path::PathBuf);
+
+    impl TempTree {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "ccg-search-test-{}-{}",
+                tag,
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            TempTree(p)
+        }
+        fn write(&self, rel: &str, content: &str) {
+            let p = self.0.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(p, content).unwrap();
+        }
+        fn write_bytes(&self, rel: &str, content: &[u8]) {
+            let p = self.0.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(p, content).unwrap();
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn search_finds_matches_with_line_numbers() {
+        let t = TempTree::new("basic");
+        t.write("a.ts", "const x = 1;\nconst needle = 2;\n");
+        t.write("nested/b.md", "# Title\n还是 needle 在这里\n");
+
+        let r = search_in_files_blocking(&t.0, "needle", false, false, 100);
+        assert_eq!(r.hits.len(), 2, "两个文件各命中一次");
+        let a = r.hits.iter().find(|h| h.rel == "a.ts").expect("a.ts 应命中");
+        assert_eq!(a.line, 2, "行号是 1-based");
+        assert_eq!(a.text, "const needle = 2;");
+        let b = r.hits.iter().find(|h| h.rel == "nested/b.md").expect("nested/b.md 应命中");
+        assert_eq!(b.line, 2);
+        assert!(b.path.ends_with("b.md"));
+        assert!(!r.truncated);
+    }
+
+    #[test]
+    fn search_is_case_insensitive_by_default_and_respects_flag() {
+        let t = TempTree::new("case");
+        t.write("a.txt", "NeEdLe\n");
+
+        let ci = search_in_files_blocking(&t.0, "needle", false, false, 100);
+        assert_eq!(ci.hits.len(), 1, "默认大小写不敏感");
+
+        let cs = search_in_files_blocking(&t.0, "needle", false, true, 100);
+        assert_eq!(cs.hits.len(), 0, "开启大小写敏感后不命中");
+
+        let cs2 = search_in_files_blocking(&t.0, "NeEdLe", false, true, 100);
+        assert_eq!(cs2.hits.len(), 1, "大小写一致时命中");
+    }
+
+    #[test]
+    fn search_skips_noise_dirs_and_hidden_by_default() {
+        let t = TempTree::new("skip");
+        t.write("src/real.ts", "needle\n");
+        t.write("node_modules/pkg/index.js", "needle\n");
+        t.write("target/debug/out.rs", "needle\n");
+        t.write(".git/config", "needle\n");
+        t.write("dist/bundle.js", "needle\n");
+        t.write(".hidden/secret.ts", "needle\n");
+
+        let r = search_in_files_blocking(&t.0, "needle", false, false, 100);
+        assert_eq!(r.hits.len(), 1, "只应命中 src/real.ts，实际: {:?}",
+                   r.hits.iter().map(|h| h.rel.clone()).collect::<Vec<_>>());
+        assert_eq!(r.hits[0].rel, "src/real.ts");
+    }
+
+    #[test]
+    fn search_includes_hidden_when_enabled() {
+        let t = TempTree::new("hidden");
+        t.write(".hidden/secret.ts", "needle\n");
+
+        let r = search_in_files_blocking(&t.0, "needle", true, false, 100);
+        assert_eq!(r.hits.len(), 1, "开启隐藏文件后应命中");
+    }
+
+    #[test]
+    fn search_skips_binary_files() {
+        let t = TempTree::new("binary");
+        t.write("text.txt", "needle\n");
+        // 带 NUL 字节 → 视为二进制
+        t.write_bytes("blob.bin", b"needle\x00\x01\x02needle");
+
+        let r = search_in_files_blocking(&t.0, "needle", false, false, 100);
+        assert_eq!(r.hits.len(), 1);
+        assert_eq!(r.hits[0].rel, "text.txt");
+    }
+
+    #[test]
+    fn search_reports_truncation_at_result_cap() {
+        let t = TempTree::new("cap");
+        let mut body = String::new();
+        for i in 0..10 {
+            body.push_str(&format!("needle {}\n", i));
+        }
+        t.write("many.txt", &body);
+
+        let r = search_in_files_blocking(&t.0, "needle", false, false, 3);
+        assert_eq!(r.hits.len(), 3, "按上限截断");
+        assert!(r.truncated, "必须告诉调用方结果不完整");
+    }
+
+    #[test]
+    fn search_truncates_long_lines() {
+        let t = TempTree::new("longline");
+        let long = format!("{}needle{}", "x".repeat(500), "y".repeat(500));
+        t.write("a.txt", &format!("{}\n", long));
+
+        let r = search_in_files_blocking(&t.0, "needle", false, false, 100);
+        assert_eq!(r.hits.len(), 1);
+        assert!(
+            r.hits[0].text.chars().count() <= SEARCH_MAX_LINE_CHARS,
+            "长行必须截断，实际 {} 字符",
+            r.hits[0].text.chars().count()
+        );
+    }
+
+    #[test]
+    fn search_empty_query_returns_nothing() {
+        let t = TempTree::new("emptyq");
+        t.write("a.txt", "anything\n");
+        // 命令层拦空查询；这里验证底层对空串不会"全部命中"
+        let r = search_in_files_blocking(&t.0, "", false, false, 100);
+        // 空 needle 会命中每一行 —— 命令层必须挡住。此处锁住"底层行为已知"，
+        // 若将来有人绕开命令层直接调用，测试会提醒他这个前提。
+        assert!(r.hits.len() > 0);
     }
 }
 
