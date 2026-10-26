@@ -277,6 +277,49 @@
 
 - 每个编辑经 VS Code 插件记到 `~/.claude/projects/<slug>/edit-history.jsonl`（JSONL，带 diff + `gitCommit` hash）。回顾/撤销/清空均基于它。
 
+### 7.5 插件进程模型与能力边界
+
+**三种启动模式**（`plugin.json` → `processes[].startOn`）：
+
+| startOn | 何时启动 | 适用 |
+|---|---|---|
+| `workspace_bound` | 工作区绑定即常驻 | 随时待命（截屏/鼠标/git） |
+| `on_demand` | 首次被用到（打开面板 / AI 调 MCP 工具），空闲 5 分钟且无面板占用则回收 | 点一下才需要跑（配置导出） |
+| 缺省 | 从不自动启动 | — |
+
+`on_demand` 实现在 `pluginProcessBridge.ensurePluginProcess()`：并发调用共享同一个 Promise（防重复拉起抢端口）、6s 超时（宿主 MCP 调用只有 8s）、失败后可重试。
+
+**能力矩阵**——插件想做的事 → 需要什么：
+
+| 能力 | 需要进程？ | 说明 |
+|---|---|---|
+| 静态面板（只读展示） | ❌ | `content: {type:"html"}`，`gui-manual` 即此类 |
+| 面板 + 定时任务 | ✅ 常驻 | `workspace_bound`（rss-reader 的自动刷新） |
+| 面板 + 偶尔请求 | ✅ `on_demand` | 空闲自动回收 |
+| **面板 + 一次性计算** | ⚠️ **只能挂 server** | **已知缺口，见下** |
+| MCP 工具（AI 调用） | ✅ | 必须有常驻 server —— AI 侧通过 HTTP `/__mcp` 调用 |
+
+**已知缺口：面板需要「一次性执行插件内脚本」时没有轻量路径**
+
+现状：面板是跨源沙箱 iframe，调不到 Tauri IPC、跑不了 node，所以任何计算都得
+起一个 HTTP server——哪怕只算一次。
+
+**当时决定暂不实现**（2026-10-26）：
+- 尚无真实用例。清点全部插件，没有「有面板 + 无 MCP 工具 + 需要 fs/net + 非定时」的组合。
+- 成本不会随时间上涨：要补的地方都是现成的，只需把现有三样串起来。
+- 提前造通用协议有反向代价——协议发出去，插件作者会依赖，之后改形状要顾兼容。
+
+**若将来真出现该需求，最小实现路径**（不要从零设计）：
+
+1. `pluginPanelBridge.dispatchPluginUplink()` 加一个 `run-script` 分支
+   —— 与现有 `export-save` 完全同构（面板 postMessage → 宿主执行 → 按 requestId 回推）
+2. Rust 加 `run_plugin_script` 命令：spawn 短命进程，stdin 传参 / stdout 收 JSON，跑完即退
+3. `plugin.json` 加 `scripts: [{id, entry}]` **白名单**——面板只能请求已声明的脚本，不能传任意路径
+
+**三条硬约束**（缺一条就不该做）：manifest 白名单 + cwd 锁死在插件目录 + 超时与输出上限。
+
+**触发条件**：出现「有面板、无 MCP 工具、需要 fs/net 访问、且非定时」的插件时再动。
+
 ---
 
 ## 8. 关键功能模块 (Feature Modules)
