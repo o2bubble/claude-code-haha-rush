@@ -3,13 +3,13 @@
 // 测试直接调纯函数 (不 mock Tauri listen)。
 
 import { describe, it, expect } from "vitest";
-import { processStatusMeta, isProcessActive, buildPluginProcessEnv, pluginProcessCwd, selectProcessesToStart, selectProcessesToRebind, applyProcessStatus } from "./pluginProcessBridge";
+import { processStatusMeta, isProcessActive, buildPluginProcessEnv, pluginProcessCwd, selectProcessesToStart, selectProcessesToRebind, applyProcessStatus, selectIdleProcesses } from "./pluginProcessBridge";
 import type { PluginManifest } from "./pluginRegistry";
 import type { PluginProcessInfo } from "./pluginProcessBridge";
 
 
 // 最小 manifest 夹具 — selectProcessesToStart 只读 pluginName + processes
-function manifest(pluginName: string, processes: Array<{ id: string; startOn?: "workspace_bound" }>): PluginManifest {
+function manifest(pluginName: string, processes: Array<{ id: string; startOn?: "workspace_bound" | "on_demand" }>): PluginManifest {
   return {
     pluginName,
     processes: processes.map((p) => ({ command: "node", args: [`${p.id}.cjs`], ...p })),
@@ -228,5 +228,106 @@ describe("buildPluginProcessEnv — runtime PATH 注入", () => {
     expect(pluginProcessCwd(undefined, "git-viewer")).toBeUndefined();
     expect(pluginProcessCwd("C:/base/plugins", undefined)).toBeUndefined();
     expect(pluginProcessCwd(undefined, undefined)).toBeUndefined();
+  });
+});
+
+// ── 按需启动（startOn: "on_demand"）──
+//
+// 用户 2026-10-26：很多插件只在"点一下"的那一刻需要跑，却必须常驻。
+// 这里锁三条不变式：① 不随工作区自动起；② 空闲才回收；③ 拿不准就不回收。
+
+describe("selectProcessesToStart — on_demand 不随工作区启动", () => {
+  it("on_demand 的进程不会被 workspace_bound 那条路径拉起", () => {
+    const out = selectProcessesToStart(
+      [manifest("config-export", [{ id: "config-export-server", startOn: "on_demand" }])],
+      [],
+      new Set(),
+    );
+    expect(out).toHaveLength(0);
+  });
+
+  it("同一插件里常驻与按需混用时，只起常驻的", () => {
+    const out = selectProcessesToStart(
+      [manifest("mixed", [
+        { id: "always-srv", startOn: "workspace_bound" },
+        { id: "lazy-srv", startOn: "on_demand" },
+      ])],
+      [],
+      new Set(),
+    );
+    expect(out.map((d) => d.id)).toEqual(["always-srv"]);
+  });
+});
+
+describe("selectIdleProcesses — 空闲回收判定", () => {
+  const IDLE = 5 * 60_000;
+  const NOW = 1_000_000_000;
+
+  const manifestWith = (id: string, startOn: "workspace_bound" | "on_demand") => {
+    const m = manifest("p", [{ id }]);
+    (m.processes![0] as any).startOn = startOn;
+    return m;
+  };
+  const runningAt = (processId: string): PluginProcessInfo =>
+    ({ processId, status: "running", port: 1234 });
+
+  it("空闲够久 + 没面板在用 → 回收", () => {
+    expect(selectIdleProcesses(
+      [manifestWith("lazy", "on_demand")],
+      [runningAt("lazy")],
+      new Map(),
+      new Map([["lazy", NOW - IDLE - 1]]),
+      NOW, IDLE,
+    )).toEqual(["lazy"]);
+  });
+
+  it("面板还开着 → 绝不回收（开着被杀 = 界面突然失联）", () => {
+    expect(selectIdleProcesses(
+      [manifestWith("lazy", "on_demand")],
+      [runningAt("lazy")],
+      new Map([["lazy", 1]]),
+      new Map([["lazy", NOW - IDLE * 10]]), // 很久没调用，但面板开着
+      NOW, IDLE,
+    )).toEqual([]);
+  });
+
+  it("还没到空闲阈值 → 不回收", () => {
+    expect(selectIdleProcesses(
+      [manifestWith("lazy", "on_demand")],
+      [runningAt("lazy")],
+      new Map(),
+      new Map([["lazy", NOW - IDLE + 1]]),
+      NOW, IDLE,
+    )).toEqual([]);
+  });
+
+  it("常驻进程即使空闲也不回收", () => {
+    expect(selectIdleProcesses(
+      [manifestWith("always", "workspace_bound")],
+      [runningAt("always")],
+      new Map(),
+      new Map([["always", NOW - IDLE * 10]]),
+      NOW, IDLE,
+    )).toEqual([]);
+  });
+
+  it("没有使用记录（不是我们按需拉起的）→ 保守不动", () => {
+    expect(selectIdleProcesses(
+      [manifestWith("lazy", "on_demand")],
+      [runningAt("lazy")],
+      new Map(),
+      new Map(),
+      NOW, IDLE,
+    )).toEqual([]);
+  });
+
+  it("只在 running 状态才考虑回收（starting/error 不碰）", () => {
+    expect(selectIdleProcesses(
+      [manifestWith("lazy", "on_demand")],
+      [{ processId: "lazy", status: "starting" }, { processId: "lazy", status: "error" }],
+      new Map(),
+      new Map([["lazy", NOW - IDLE * 10]]),
+      NOW, IDLE,
+    )).toEqual([]);
   });
 });

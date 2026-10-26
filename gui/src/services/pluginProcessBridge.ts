@@ -101,7 +101,7 @@ export interface PluginProcessDecl {
   command: string;
   args?: string[];
   env?: Record<string, string>;
-  startOn?: "workspace_bound";
+  startOn?: "workspace_bound" | "on_demand";
   /** 归属插件名 —— 拼进程 cwd(插件目录)用; 缺失则不设 cwd。 */
   pluginName?: string;
 }
@@ -158,7 +158,8 @@ async function currentWorkspace(): Promise<string | undefined> {
 }
 
 /** 纯函数: 从活动 manifest 选出「该跑但没跑」的进程声明。
- *  排除三类: startOn 非 workspace_bound(别的时机启动) / 已 running|starting /
+ *  排除三类: startOn 非 workspace_bound(别的时机启动 —— **含 on_demand**,
+ *  它们由 ensurePluginProcess 首次使用时才拉起) / 已 running|starting /
  *  已请求 spawn 未回流(_spawning, 防重复 restart 打断启动中进程)。导出供单测。 */
 export function selectProcessesToStart(
   manifests: PluginManifest[],
@@ -212,6 +213,224 @@ export async function startPluginProcesses(decls: PluginProcessDecl[]): Promise<
     }
   }
   await refreshPluginProcesses();
+}
+
+// ── 按需启动（startOn: "on_demand"）──
+//
+// 为什么需要（用户 2026-10-26）：很多插件只在"点一下"的那一刻需要跑逻辑
+// （配置导出：只有点「扫描」时才要扫盘），却因为是 HTTP 服务端而必须常驻，
+// 白白占一个进程。`on_demand` 让它们**首次被用到时才出生**，空闲自动回收。
+//
+// 三个必须处理的问题（都实测过对应故障）：
+//   ① 并发重复拉起 —— 两个 MCP 调用同时进来会起两个进程抢同一端口 → 共享 Promise
+//   ② 冷启动延迟   —— node 启动几百 ms~2s，调用方必须等且有上限（宿主 MCP 8s 超时）
+//   ③ 崩溃恢复     —— 进程被杀后下次 ensure 必须能重新拉起（走 restart 路径）
+
+/** 空闲多久后回收（毫秒）。面板关着 + 这段时间没被调用 → 杀掉。 */
+const ON_DEMAND_IDLE_MS = 5 * 60_000;
+
+/** 空闲扫描周期。 */
+const ON_DEMAND_IDLE_SWEEP_MS = 60_000;
+
+/** 等待进程就绪的上限。宿主 MCP 调用有 8 秒超时，这里必须留出余量。 */
+const ENSURE_TIMEOUT_MS = 6_000;
+
+/** 进程 id → 进行中的 ensure Promise（并发去重，见 ①）。 */
+const _ensurePending = new Map<string, Promise<number>>();
+
+/** 进程 id → 当前打开的插件面板数。> 0 期间**绝不**回收。 */
+const _panelRefs = new Map<string, number>();
+
+/** 进程 id → 最后一次被使用（面板挂载 / MCP 调用）的时刻。 */
+const _lastUsed = new Map<string, number>();
+
+/** 订阅「进程表变化」（内部用；比 listeners 多一层空实现保护）。 */
+function onProcessesChanged(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => { listeners.delete(cb); };
+}
+
+/**
+ * 等到某进程 running（带端口）或明确失败。
+ * 拿不到就返回 null —— 调用方据此给出准确错误，而不是永远挂着。
+ *
+ * `sawActive` 的意义：拉起前进程表里可能还残留**上一次**的 killed/stopped，
+ * 直接把它当"失败"会让 ensure 立刻返回 null（明明马上就要起来了）。
+ * 只有"先看到 starting/running、之后又变 error/killed"才算真失败。
+ */
+function waitForRunning(processId: string, timeoutMs: number): Promise<PluginProcessInfo | null> {
+  const find = () => processes.find((p) => p.processId === processId);
+  const ready = (p?: PluginProcessInfo) => !!p && p.status === "running" && !!p.port;
+
+  const initial = find();
+  if (ready(initial)) return Promise.resolve(initial!);
+  let sawActive = initial?.status === "starting";
+
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v: PluginProcessInfo | null) => {
+      if (done) return;
+      done = true;
+      off();
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const off = onProcessesChanged(() => {
+      const p = find();
+      if (!p) return;
+      if (p.status === "starting" || p.status === "running") sawActive = true;
+      if (ready(p)) finish(p!);
+      else if (sawActive && (p.status === "error" || p.status === "killed")) finish(null);
+    });
+    const timer = setTimeout(() => finish(null), timeoutMs);
+  });
+}
+
+/** 记一次「被使用」—— 重新开始计算空闲时间。 */
+export function touchPluginProcess(processId: string): void {
+  _lastUsed.set(processId, Date.now());
+}
+
+/**
+ * 声明"我正在用这个进程"（面板挂载时调用），返回释放函数。
+ * 引用计数 > 0 期间不会被空闲回收杀掉 —— 面板开着却被回收 = 界面突然失联。
+ * 释放函数幂等：重复调用不会把计数减成负数。
+ */
+export function retainPluginProcess(processId: string): () => void {
+  _panelRefs.set(processId, (_panelRefs.get(processId) ?? 0) + 1);
+  touchPluginProcess(processId);
+  ensureIdleSweeper();
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const n = (_panelRefs.get(processId) ?? 1) - 1;
+    if (n <= 0) _panelRefs.delete(processId);
+    else _panelRefs.set(processId, n);
+    touchPluginProcess(processId); // 从"放手"那一刻开始计时
+    ensureIdleSweeper();
+  };
+}
+
+let _idleSweeper: ReturnType<typeof setInterval> | null = null;
+function ensureIdleSweeper(): void {
+  if (_idleSweeper) return;
+  _idleSweeper = setInterval(() => { void sweepIdlePluginProcesses(); }, ON_DEMAND_IDLE_SWEEP_MS);
+}
+
+/**
+ * 纯函数：选出此刻可以回收的进程 id。导出供单测。
+ *
+ * 三个条件同时满足才回收：① 声明了 on_demand；② 没有面板在用；
+ * ③ 距离最后一次使用已超过 idleMs。
+ */
+export function selectIdleProcesses(
+  manifests: PluginManifest[],
+  current: PluginProcessInfo[],
+  panelRefs: ReadonlyMap<string, number>,
+  lastUsed: ReadonlyMap<string, number>,
+  now: number,
+  idleMs: number,
+): string[] {
+  const onDemand = new Set<string>();
+  for (const m of manifests) {
+    for (const p of m.processes ?? []) {
+      if (p.startOn === "on_demand") onDemand.add(p.id);
+    }
+  }
+  return current
+    .filter((p) => onDemand.has(p.processId) && p.status === "running")
+    .filter((p) => (panelRefs.get(p.processId) ?? 0) === 0)
+    .filter((p) => {
+      const at = lastUsed.get(p.processId);
+      // 没有使用记录 = 不是我们按需拉起的 → 保守不动
+      return at !== undefined && now - at >= idleMs;
+    })
+    .map((p) => p.processId);
+}
+
+/** 扫描并回收空闲的 on_demand 进程。定时器每分钟调一次；也可手动调用。 */
+export async function sweepIdlePluginProcesses(now = Date.now()): Promise<void> {
+  const { getActiveManifests } = await import("./pluginRegistry");
+  const idle = selectIdleProcesses(
+    getActiveManifests(), processes, _panelRefs, _lastUsed, now, ON_DEMAND_IDLE_MS,
+  );
+  if (idle.length === 0) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  for (const id of idle) {
+    try {
+      await invoke("kill_plugin_process_cmd", { processId: id });
+      _lastUsed.delete(id);
+      _spawnedWorkspace.delete(id);
+    } catch {
+      // 单个失败不影响其余
+    }
+  }
+  await refreshPluginProcesses();
+}
+
+/**
+ * 确保某插件的后台进程正在运行，返回它的端口（按需启动的入口）。
+ *
+ * 幂等且并发安全：已在跑就直接返回端口；正在启动就等它；并发调用共享同一个
+ * Promise（否则两个调用会各自拉起一个进程、抢同一个端口）。
+ *
+ * 失败抛错（带插件名/进程 id），调用方据此给用户准确提示。
+ */
+export async function ensurePluginProcess(
+  pluginName: string,
+  processId: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<number> {
+  touchPluginProcess(processId);
+
+  const live = processes.find((p) => p.processId === processId);
+  if (live?.status === "running" && live.port) return live.port;
+
+  const inflight = _ensurePending.get(processId);
+  if (inflight) return inflight;
+
+  const timeoutMs = opts.timeoutMs ?? ENSURE_TIMEOUT_MS;
+
+  const task = (async (): Promise<number> => {
+    const { getActiveManifests } = await import("./pluginRegistry");
+    const manifest = getActiveManifests().find((m) => m.pluginName === pluginName);
+    if (!manifest) throw new Error(`插件「${pluginName}」未安装或已禁用`);
+    const decl = (manifest.processes ?? []).find((p) => p.id === processId);
+    if (!decl) throw new Error(`插件「${pluginName}」未声明后台进程「${processId}」`);
+
+    // 先挂上等待器再拉起 —— 拉起后状态可能瞬间流过 running，晚订阅会漏掉。
+    const waiter = waitForRunning(processId, timeoutMs);
+
+    const cur = processes.find((p) => p.processId === processId);
+    if (cur?.status !== "starting") {
+      await startPluginProcesses([{
+        id: decl.id,
+        command: decl.command,
+        args: decl.args,
+        env: decl.env,
+        startOn: decl.startOn,
+        pluginName: manifest.pluginName,
+      }]);
+    }
+
+    const ready = await waiter;
+    if (!ready?.port) {
+      throw new Error(
+        `插件「${pluginName}」的后台进程启动失败或超时（${processId}，${timeoutMs}ms）。` +
+        `可在「工作进程」面板查看错误详情。`,
+      );
+    }
+    return ready.port;
+  })();
+
+  _ensurePending.set(processId, task);
+  try {
+    return await task;
+  } finally {
+    _ensurePending.delete(processId);
+  }
 }
 
 /** 杀 + 遗忘这些插件声明的后台进程（禁用/卸载后调用——重扫已把它们从活动清单摘除,

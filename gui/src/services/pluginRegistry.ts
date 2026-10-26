@@ -58,7 +58,15 @@ export interface PluginProcess {
   args?: string[];
   env?: Record<string, string>;
   portProtocol?: string;
-  startOn?: "workspace_bound";
+  /**
+   * 何时启动：
+   * - `workspace_bound` —— 工作区一绑定就常驻（需要随时待命的服务型插件）
+   * - `on_demand` —— **首次被用到时才启动**（打开面板 / AI 调它的 MCP 工具），
+   *   空闲一段时间后自动回收。适合"点一下才需要跑一次"的功能
+   *   （如配置导出：只有点「扫描」那一刻需要跑）
+   * - 缺省 —— 从不自动启动（历史行为，保留）
+   */
+  startOn?: "workspace_bound" | "on_demand";
 }
 
 export interface PluginContributes {
@@ -267,7 +275,9 @@ export function parsePluginManifest(json: string, sourceDir: string): ParseResul
           args: Array.isArray(p.args) ? (p.args as unknown[]).map((a) => String(a)) : undefined,
           env: env as Record<string, string> | undefined,
           portProtocol: asString(p.portProtocol),
-          startOn: p.startOn === "workspace_bound" ? "workspace_bound" : undefined,
+          startOn: p.startOn === "workspace_bound" || p.startOn === "on_demand"
+            ? p.startOn
+            : undefined,
         }];
       })
     : [];

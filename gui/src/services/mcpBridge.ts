@@ -163,14 +163,22 @@ async function callPluginMcpTool(
   tool: CollectedMcpTool,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  const { getPluginProcesses } = await import("./pluginProcessBridge");
-  const proc = getPluginProcesses().find(
+  const { getPluginProcesses, ensurePluginProcess } = await import("./pluginProcessBridge");
+  let proc = getPluginProcesses().find(
     (p) => p.processId === tool.processId && p.status === "running" && p.port,
   );
   if (!proc?.port) {
+    // 没在跑 → 按需拉起（startOn: on_demand 的插件靠这一步"出生"；
+    // workspace_bound 的进程若崩溃，这里也顺带恢复）。
+    // 失败直接抛 ensure 的错（带插件名/进程 id/耗时），比笼统的"未运行"好排查。
+    await ensurePluginProcess(tool.pluginName, tool.processId);
+    proc = getPluginProcesses().find(
+      (p) => p.processId === tool.processId && p.status === "running" && p.port,
+    );
+  }
+  if (!proc?.port) {
     throw new Error(
-      `插件「${tool.pluginName}」的后台进程未运行（${tool.processId}）。` +
-      `该进程在工作区绑定时自动启动 —— 若刚启用插件，请稍候重试或重开会话。`,
+      `插件「${tool.pluginName}」的后台进程未运行（${tool.processId}）—— 已尝试自动启动但未就绪。`,
     );
   }
   const { getCachedPluginSettings } = await import("./pluginSettingsStore");

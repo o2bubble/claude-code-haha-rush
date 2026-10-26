@@ -112,6 +112,47 @@ function PluginIframePanel({ manifest, panel }: { manifest: PluginManifest; pane
   const port = panel.process
     ? processes.find((p) => p.processId === panel.process)?.port
     : undefined;
+
+  // ── 按需进程：面板打开时才把它拉起来 ──
+  //
+  // startOn: on_demand 的进程不随工作区启动（见 pluginProcessBridge），面板就是
+  // 它的"使用者"——打开这里即是它该出生的时刻。
+  const [spawnError, setSpawnError] = useState<string | null>(null);
+  // 端口到了就清掉上一次的启动失败 —— 否则进程后来被别的路径拉起，
+  // 面板仍会一直盖着"启动失败"的提示。
+  useEffect(() => { if (port) setSpawnError(null); }, [port]);
+  useEffect(() => {
+    if (!panel.process || port) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { ensurePluginProcess } = await import("./pluginProcessBridge");
+        await ensurePluginProcess(manifest.pluginName, panel.process!);
+      } catch (e: any) {
+        if (!cancelled) setSpawnError(String(e?.message ?? e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [panel.process, port, manifest.pluginName]);
+
+  // 面板开着期间禁止空闲回收（开着却被杀 = 界面突然失联）。
+  // ⚠️ 动态 import 可能在**卸载之后**才 resolve —— 那时再 retain 就永远没人释放了。
+  // 用 cancelled 标记：卸载后拿到的 release 要立刻调用一次。
+  useEffect(() => {
+    if (!panel.process) return;
+    let release: (() => void) | null = null;
+    let cancelled = false;
+    void import("./pluginProcessBridge").then((m) => {
+      const r = m.retainPluginProcess(panel.process!);
+      if (cancelled) r();
+      else release = r;
+    });
+    return () => {
+      cancelled = true;
+      release?.();
+    };
+  }, [panel.process]);
+
   const base = pluginIframeBase(manifest.pluginName, panel.content!.src, platform);
   // 初始 URL 带 theme（插件首帧就按主题配色）+ 面板参数（intent, 打开浮窗时由列表传入;
   // 首帧 postMessage 不可靠, URL query 最稳——params 是 base64(JSON)）。
@@ -205,14 +246,34 @@ function PluginIframePanel({ manifest, panel }: { manifest: PluginManifest; pane
     return () => obs.disconnect();
   }, []);
 
+  // 按需进程还没就绪 / 启动失败 → 盖一层提示。
+  // ⚠️ 不替换 iframe：iframeRef 在挂载时被登记进 panelFrames（宿主→面板推送用），
+  // 条件渲染会让 ref 变 null，推送目标丢失。
+  const starting = !!panel.process && !port && !spawnError;
+
   return (
-    <iframe
-      ref={iframeRef}
-      title={panel.title}
-      src={src}
-      sandbox="allow-scripts allow-same-origin"
-      style={{ width: "100%", height: "100%", border: "none", display: "block" }}
-    />
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      <iframe
+        ref={iframeRef}
+        title={panel.title}
+        src={src}
+        sandbox="allow-scripts allow-same-origin"
+        style={{ width: "100%", height: "100%", border: "none", display: "block" }}
+      />
+      {(starting || spawnError) && (
+        <div
+          style={{
+            position: "absolute", inset: 0, display: "flex",
+            alignItems: "center", justifyContent: "center",
+            background: "var(--bg-root)", color: "var(--fg-secondary)",
+            fontFamily: "var(--font-sans)", fontSize: "calc(var(--font-scale, 1) * 12px)",
+            padding: 16, textAlign: "center", lineHeight: 1.5,
+          }}
+        >
+          {spawnError ?? `正在启动「${panel.title}」…`}
+        </div>
+      )}
+    </div>
   );
 }
 

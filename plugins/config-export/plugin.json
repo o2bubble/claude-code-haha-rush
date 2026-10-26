@@ -1,14 +1,18 @@
 {
   "pluginName": "config-export",
   "displayName": "配置与资料导出",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "apiVersion": "1.0",
   "description": "把本机的 Claude 个人资料（CLAUDE.md、技能、记忆、笔记、计划、会话历史）与 GUI 配置（设置、超级桌面、插件设置）扫描分类后，勾选导出成一个 tar.gz。凭据类数据（登录态、签名私钥、API key）默认排除；包内含 manifest.json 描述每个文件的来源与恢复方式，为换机恢复做准备。",
   "icon": "folderKanban",
   "category": "tool",
   "installType": "standard",
-  "dependencies": ["nodejs"],
-  "platforms": ["windows"],
+  "dependencies": [
+    "nodejs"
+  ],
+  "platforms": [
+    "windows"
+  ],
   "contributes": {
     "panels": [
       {
@@ -16,7 +20,10 @@
         "title": "配置导出",
         "panelKind": "in-main",
         "userManaged": true,
-        "content": { "type": "html", "src": "panel.html" },
+        "content": {
+          "type": "html",
+          "src": "panel.html"
+        },
         "process": "config-export-server"
       }
     ],
@@ -27,7 +34,10 @@
         "name": "list_exportable",
         "process": "config-export-server",
         "description": "List every exportable category of personal data on this machine (CLAUDE.md, skills, memory, notes, plans, session history, GUI settings, super-desktop DBs, plugin settings) with file counts, byte sizes, and a `sensitive` flag. Read-only. Use this to tell the user what can be exported and to recommend a selection — they may want to skip the large session history. Call this before export_profile.",
-        "inputSchema": { "type": "object", "properties": {} }
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
       },
       {
         "name": "audit_custom_item",
@@ -36,10 +46,18 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "path": { "type": "string", "description": "Absolute path to the scheme's directory" },
-            "entryDoc": { "type": "string", "description": "Which file is the manual (e.g. '00_迁移总览.md'). Omit to have it report that the entry doc is missing." }
+            "path": {
+              "type": "string",
+              "description": "Absolute path to the scheme's directory"
+            },
+            "entryDoc": {
+              "type": "string",
+              "description": "Which file is the manual (e.g. '00_迁移总览.md'). Omit to have it report that the entry doc is missing."
+            }
           },
-          "required": ["path"]
+          "required": [
+            "path"
+          ]
         }
       },
       {
@@ -49,9 +67,14 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "path": { "type": "string", "description": "Absolute path to the .tar.gz" }
+            "path": {
+              "type": "string",
+              "description": "Absolute path to the .tar.gz"
+            }
           },
-          "required": ["path"]
+          "required": [
+            "path"
+          ]
         }
       },
       {
@@ -63,7 +86,9 @@
           "properties": {
             "categories": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Category ids to include (from list_exportable). Omit for the default selection."
             },
             "outputPath": {
@@ -76,16 +101,42 @@
               "items": {
                 "type": "object",
                 "properties": {
-                  "path": { "type": "string", "description": "Absolute path to the scheme's directory (or a single file)" },
-                  "label": { "type": "string", "description": "Human-readable name, e.g. 'X 盘两机同步方案'" },
-                  "id": { "type": "string", "description": "Optional stable id. Derived from the directory name when omitted." },
-                  "includeData": { "type": "boolean", "description": "Bundle the actual files (default false = description only). Set true only if this data isn't backed up by the user's own scheme and would otherwise be lost." },
-                  "entryDoc": { "type": "string", "description": "Which file the importing AI should read first (e.g. '00_迁移总览.md')" },
-                  "notes": { "type": "string", "description": "One-line context about what this is" },
-                  "importPrompt": { "type": "string", "description": "Instructions for the importing AI describing how to run this scheme" },
-                  "verifyPrompt": { "type": "string", "description": "How the importing AI should verify the import succeeded" }
+                  "path": {
+                    "type": "string",
+                    "description": "Absolute path to the scheme's directory (or a single file)"
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "Human-readable name, e.g. 'X 盘两机同步方案'"
+                  },
+                  "id": {
+                    "type": "string",
+                    "description": "Optional stable id. Derived from the directory name when omitted."
+                  },
+                  "includeData": {
+                    "type": "boolean",
+                    "description": "Bundle the actual files (default false = description only). Set true only if this data isn't backed up by the user's own scheme and would otherwise be lost."
+                  },
+                  "entryDoc": {
+                    "type": "string",
+                    "description": "Which file the importing AI should read first (e.g. '00_迁移总览.md')"
+                  },
+                  "notes": {
+                    "type": "string",
+                    "description": "One-line context about what this is"
+                  },
+                  "importPrompt": {
+                    "type": "string",
+                    "description": "Instructions for the importing AI describing how to run this scheme"
+                  },
+                  "verifyPrompt": {
+                    "type": "string",
+                    "description": "How the importing AI should verify the import succeeded"
+                  }
                 },
-                "required": ["path"]
+                "required": [
+                  "path"
+                ]
               }
             }
           }
@@ -97,11 +148,13 @@
     {
       "id": "config-export-server",
       "command": "node",
-      "args": ["export-server.cjs"],
+      "args": [
+        "export-server.cjs"
+      ],
       "env": {
         "CLAUDE_PLUGIN_WORKSPACE": "${workspace}"
       },
-      "startOn": "workspace_bound"
+      "startOn": "on_demand"
     }
   ]
 }
