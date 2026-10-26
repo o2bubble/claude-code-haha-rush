@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildLocalPkgs } from "./PluginMarketPanel";
+import { buildLocalPkgs, shouldShowUntrustedBadge } from "./PluginMarketPanel";
 import type { PackageSummary } from "../../services/skillMarketplace";
 
 // 「本地插件」分区（市场面板）的数据构造 —— 2026-09-21 用户实测反馈驱动：
@@ -85,5 +85,63 @@ describe("buildLocalPkgs — 本地插件伪包构造", () => {
   it("依赖照常带出（本地插件也有依赖，卡片要能显示）", () => {
     const installed = new Map([["rss", entry("rss", { version: "1", dependencies: ["nodejs"] })]]);
     expect(buildLocalPkgs(installed, [])[0].dependencies).toEqual(["nodejs"]);
+  });
+});
+
+// ── 「未受信任」徽标的三态判定 ──
+//
+// 2026-10-26 用户反馈「列表加载要过好多秒」。根因：签名验证（每个插件下载
+// 整个 zip 再校验，11 个串行 ≈4.5s）卡在 fetchPackages 里，列表要等它跑完。
+// 改成列表先渲染、验证转后台。
+//
+// 但后台期间 trustedSlugs 是空集 —— 若徽标还用 `!trustedSlugs.has(slug)`
+// 判断，所有插件会瞬间挂上「未受信任」（误报）。所以要有 verifying 这一态。
+
+describe("shouldShowUntrustedBadge（三态）", () => {
+  const S = (...xs: string[]) => new Set(xs);
+
+  it("验证中 → 不显示（不能把「还没结论」当成「不受信任」）", () => {
+    expect(shouldShowUntrustedBadge({
+      slug: "a", isInstalled: false,
+      trustedSlugs: S(), verifyingSlugs: S("a"),
+    })).toBe(false);
+  });
+
+  it("验证完且通过 → 不显示", () => {
+    expect(shouldShowUntrustedBadge({
+      slug: "a", isInstalled: false,
+      trustedSlugs: S("a"), verifyingSlugs: S(),
+    })).toBe(false);
+  });
+
+  it("验证完且未通过 → 显示", () => {
+    expect(shouldShowUntrustedBadge({
+      slug: "a", isInstalled: false,
+      trustedSlugs: S(), verifyingSlugs: S(),
+    })).toBe(true);
+  });
+
+  it("已安装 → 不显示（信任状态由「已安装」徽标承载）", () => {
+    expect(shouldShowUntrustedBadge({
+      slug: "a", isInstalled: true,
+      trustedSlugs: S(), verifyingSlugs: S(),
+    })).toBe(false);
+  });
+
+  it("已安装优先于验证中（两者都不显示）", () => {
+    expect(shouldShowUntrustedBadge({
+      slug: "a", isInstalled: true,
+      trustedSlugs: S(), verifyingSlugs: S("a"),
+    })).toBe(false);
+  });
+
+  it("同一批里验证中的不影响已完成的", () => {
+    // a 验证完了（通过），b 还在验证 → b 不该显示徽标
+    const trusted = S("a");
+    const verifying = S("b");
+    expect(shouldShowUntrustedBadge({ slug: "a", isInstalled: false, trustedSlugs: trusted, verifyingSlugs: verifying })).toBe(false);
+    expect(shouldShowUntrustedBadge({ slug: "b", isInstalled: false, trustedSlugs: trusted, verifyingSlugs: verifying })).toBe(false);
+    // c 既没通过也不在验证 → 显示
+    expect(shouldShowUntrustedBadge({ slug: "c", isInstalled: false, trustedSlugs: trusted, verifyingSlugs: verifying })).toBe(true);
   });
 });

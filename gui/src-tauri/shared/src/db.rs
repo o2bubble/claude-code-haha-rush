@@ -271,8 +271,20 @@ pub struct ConnectionRecord {
 // ── Desktop CRUD ──
 
 pub fn save_desktop(conn: &Connection, rec: &DesktopRecord) -> Result<(), String> {
+    // ⚠️ **整批必须在一个事务里**（2026-10-24 修）。
+    //
+    // 这里是一串写语句：upsert 桌面 → 清空 items/connections → 逐条重插。
+    // 没有事务时，任一条失败（锁超时 / 磁盘满 / 进程被杀）都会留下**半写状态**：
+    // 名字已改、items 却只插了一半；或旧 items 删光了、新的一条没进去
+    // （用户视角："桌面上的东西突然没了"）。
+    //
+    // 用 `unchecked_transaction()` 而不是 `transaction()`：后者要 `&mut Connection`，
+    // 而调用方（GUI / daemon）持有的是 `Arc<Mutex<Connection>>` 里的 `&Connection`。
+    // 本函数本就不假设外部并发访问同一连接（那由外层的 Mutex 保证）。
+    let tx = conn.unchecked_transaction().map_err(|e| format!("begin: {e}"))?;
+
     let now = chrono_now();
-    conn.execute(
+    tx.execute(
         "INSERT INTO desktops (id, name, pan_x, pan_y, zoom, show_grid, grid_size, snap_to_grid, sort_order, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(id) DO UPDATE SET
@@ -286,17 +298,19 @@ pub fn save_desktop(conn: &Connection, rec: &DesktopRecord) -> Result<(), String
     ).map_err(|e| format!("Failed to save desktop: {}", e))?;
 
     // Delete old items and connections for this desktop, then re-insert
-    conn.execute("DELETE FROM desktop_items WHERE desktop_id = ?1", params![rec.id])
+    tx.execute("DELETE FROM desktop_items WHERE desktop_id = ?1", params![rec.id])
         .map_err(|e| format!("Failed to clear items: {}", e))?;
-    conn.execute("DELETE FROM desktop_connections WHERE desktop_id = ?1", params![rec.id])
+    tx.execute("DELETE FROM desktop_connections WHERE desktop_id = ?1", params![rec.id])
         .map_err(|e| format!("Failed to clear connections: {}", e))?;
 
     for item in &rec.items {
-        save_item(conn, item)?;
+        save_item(&tx, item)?;
     }
     for conn_rec in &rec.connections {
-        save_connection(conn, conn_rec)?;
+        save_connection(&tx, conn_rec)?;
     }
+
+    tx.commit().map_err(|e| format!("commit: {e}"))?;
     Ok(())
 }
 
@@ -436,13 +450,19 @@ fn get_connections_for_desktop(conn: &Connection, desktop_id: &str) -> Result<Ve
 }
 
 pub fn delete_desktop(conn: &Connection, id: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM desktop_connections WHERE desktop_id = ?1", params![id])
+    // ⚠️ **整批必须在一个事务里**（同 save_desktop 的理由）。
+    // 没有事务时，若最后一步 `DELETE FROM desktops` 失败，前面的
+    // connections/items 已经删掉了 → 用户看到"桌面还在，但里面空了"
+    // （半删）。配合前端 refetch 覆盖，就会表现成「删了又回来」。
+    let tx = conn.unchecked_transaction().map_err(|e| format!("begin: {e}"))?;
+    tx.execute("DELETE FROM desktop_connections WHERE desktop_id = ?1", params![id])
         .map_err(|e| format!("Failed to delete connections: {}", e))?;
-    conn.execute("DELETE FROM desktop_items WHERE desktop_id = ?1", params![id])
+    tx.execute("DELETE FROM desktop_items WHERE desktop_id = ?1", params![id])
         .map_err(|e| format!("Failed to delete items: {}", e))?;
-    conn.execute("DELETE FROM desktops WHERE id = ?1", params![id])
+    tx.execute("DELETE FROM desktops WHERE id = ?1", params![id])
         .map_err(|e| format!("Failed to delete desktop: {}", e))?;
-    delete_desktop_history(conn, id)?;
+    delete_desktop_history(&tx, id)?;
+    tx.commit().map_err(|e| format!("commit: {e}"))?;
     Ok(())
 }
 
@@ -584,5 +604,185 @@ mod tests {
         assert_eq!(h.undo_json, "[1]");
         assert_eq!(h.redo_json, "[2]");
         assert!(load_desktop_history(&conn, "nope").unwrap().is_none());
+    }
+
+    // ── 锁竞争（"database is locked" 的真实来源）──
+
+    /// 唯一临时文件路径（不引 tempfile：dev-deps 为空，加依赖要动 Cargo.lock）。
+    fn temp_db_path(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "cgui-dual-{}-{}-{}.db",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        p
+    }
+
+    /// 旁路连接**持写锁**时，主连接仍应能写入。
+    ///
+    /// ⚠️ 这条**本来就过** —— rusqlite 默认 `sqlite3_busy_timeout(db, 5000)`，
+    /// 撞锁会等 5 秒而不是立即失败。我一度以为这是 `database is locked` 的根源，
+    /// 是错的。留着它作为回归哨兵：万一有人改成 `busy_timeout(0)`，
+    /// 跨进程（GUI + daemon 同写一个 data.db）的写就会开始偶发失败。
+    #[test]
+    fn write_survives_concurrent_lock_holder() {
+        let path = temp_db_path("save");
+        let path_s = path.to_string_lossy().to_string();
+
+        let conn = init_db(&path_s).unwrap();
+        let rec = sample_desktop();
+
+        // 第二个连接抢写锁并持有一会儿（模拟 daemon 正在写）
+        let holder = Connection::open(&path_s).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            holder.execute_batch("COMMIT").unwrap();
+        });
+
+        let res = save_desktop(&conn, &rec);
+        handle.join().unwrap();
+
+        assert!(
+            res.is_ok(),
+            "旁路连接短暂持锁时，save_desktop 应等待后成功，实际: {:?}",
+            res.err()
+        );
+        assert_eq!(get_desktops(&conn).unwrap().len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 删除同理：旁路持锁时不应半途失败。
+    #[test]
+    fn delete_survives_concurrent_lock_holder() {
+        let path = temp_db_path("delete");
+        let path_s = path.to_string_lossy().to_string();
+
+        let conn = init_db(&path_s).unwrap();
+        let rec = sample_desktop();
+        save_desktop(&conn, &rec).unwrap();
+
+        let holder = Connection::open(&path_s).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            holder.execute_batch("COMMIT").unwrap();
+        });
+
+        let res = delete_desktop(&conn, &rec.id);
+        handle.join().unwrap();
+
+        assert!(
+            res.is_ok(),
+            "旁路连接短暂持锁时，delete_desktop 应等待后成功，实际: {:?}",
+            res.err()
+        );
+        assert_eq!(get_desktops(&conn).unwrap().len(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── 原子性（真正的缺陷）──
+    //
+    // `save_desktop` / `delete_desktop` 是一串**裸语句**，没有事务。任一中间语句
+    // 失败（锁超时 / 磁盘满 / 进程被杀），前面的已提交、后面的没执行 →
+    // **半写状态**：桌面还在但 items 被清空；或桌面删了但 items 残留。
+    //
+    // 用户可见后果：桌面上"东西突然没了"、或删了之后列表又冒出一条空桌面 ——
+    // 配合前端的 refetch 覆盖，就表现为「删了又回来」。
+    //
+    // 用一个**会失败的中间写入**来验证：给 items 表加一个触发器，让第二次
+    // 插入失败。有事务 → 整批回滚（桌面和 items 都不变）；没事务 → 半写。
+
+    /// 建一张"写入必然失败"的触发器，模拟保存中途出错。
+    fn poison_items_insert(conn: &Connection, fail_on_id: &str) {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER poison_item BEFORE INSERT ON desktop_items
+             WHEN NEW.id = '{fail_on_id}'
+             BEGIN SELECT RAISE(ABORT, 'simulated disk full'); END;"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn save_desktop_is_atomic_on_midway_failure() {
+        let path = temp_db_path("atomic-save");
+        let path_s = path.to_string_lossy().to_string();
+        let conn = init_db(&path_s).unwrap();
+
+        // 先存一版"完好"的桌面（1 个 item）
+        let good = sample_desktop();
+        save_desktop(&conn, &good).unwrap();
+        assert_eq!(get_desktops(&conn).unwrap()[0].items.len(), 1);
+
+        // 再存一版"里含一个必然插入失败的 item"
+        poison_items_insert(&conn, "i-boom");
+        let mut bad = sample_desktop();
+        bad.name = "改名了".into();
+        bad.items.push(ItemRecord {
+            id: "i-boom".into(),
+            desktop_id: "d1".into(),
+            ..bad.items[0].clone()
+        });
+
+        let res = save_desktop(&conn, &bad);
+        assert!(res.is_err(), "这条保存本应失败（模拟磁盘满）");
+
+        // ⚠️ 关键断言：失败后**必须整体不变**。
+        //    没有事务时：desktops.name 已更新、items 被 DELETE 清空、i1 重插、
+        //    i-boom 失败 → 留下"改了名但 items 少一半"的坏状态。
+        let after = get_desktops(&conn).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].name, "test",
+            "保存失败后 name 不应被改 —— 说明没有事务（半写）"
+        );
+        assert_eq!(
+            after[0].items.len(),
+            1,
+            "保存失败后 items 应保持原样（1 个），实际 {}",
+            after[0].items.len()
+        );
+        assert_eq!(after[0].items[0].id, "i1");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_desktop_is_atomic_on_midway_failure() {
+        let path = temp_db_path("atomic-del");
+        let path_s = path.to_string_lossy().to_string();
+        let conn = init_db(&path_s).unwrap();
+        save_desktop(&conn, &sample_desktop()).unwrap();
+
+        // 让删除最后一步（desktops 表）失败
+        conn.execute_batch(
+            "CREATE TRIGGER poison_del BEFORE DELETE ON desktops
+             BEGIN SELECT RAISE(ABORT, 'simulated crash'); END;",
+        )
+        .unwrap();
+
+        let res = delete_desktop(&conn, "d1");
+        assert!(res.is_err(), "这条删除本应失败");
+
+        // ⚠️ 关键：失败后**什么都不该删掉**。
+        //    没有事务时：connections/items 已被删，desktops 还在 →
+        //    用户看到"桌面还在，但里面的东西全没了"。
+        let after = get_desktops(&conn).unwrap();
+        assert_eq!(after.len(), 1, "删除失败后桌面应还在");
+        assert_eq!(
+            after[0].items.len(),
+            1,
+            "删除失败后 items 不应被清空（半删），实际 {}",
+            after[0].items.len()
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -229,3 +229,71 @@ describe("dispatchPluginUplink — 动作 → Tauri command", () => {
     vi.doUnmock("@tauri-apps/api/core");
   });
 });
+
+// ── 导出类插件：保存路径请求的输入校验 ──
+//
+// payload 来自**第三方插件**（跨信任边界）—— 这里用纯函数测边界，
+// 不依赖真实 dialog。
+
+describe("sanitizeExportSaveRequest — 保存对话框请求校验", () => {
+  it("正常请求透传", async () => {
+    const { sanitizeExportSaveRequest } = await import("./pluginPanelBridge");
+    expect(
+      sanitizeExportSaveRequest({ requestId: "r1", suggestedName: "backup.tar.gz" }),
+    ).toEqual({ requestId: "r1", suggestedName: "backup.tar.gz", pick: "file" });
+  });
+
+  it("suggestedName 里的路径被剥成 basename（插件不能指定目录）", async () => {
+    const { sanitizeExportSaveRequest } = await import("./pluginPanelBridge");
+    expect(
+      sanitizeExportSaveRequest({
+        requestId: "r1",
+        suggestedName: "../../../etc/evil.tar.gz",
+      }),
+    ).toEqual({ requestId: "r1", suggestedName: "evil.tar.gz", pick: "file" });
+    expect(
+      sanitizeExportSaveRequest({ requestId: "r2", suggestedName: "C:\\Windows\\x.tar.gz" }),
+    ).toEqual({ requestId: "r2", suggestedName: "x.tar.gz", pick: "file" });
+  });
+
+  it("缺 requestId / 空名 / 超长 → 拒绝", async () => {
+    const { sanitizeExportSaveRequest } = await import("./pluginPanelBridge");
+    expect(sanitizeExportSaveRequest({ suggestedName: "a.tar.gz" })).toBeNull();
+    expect(sanitizeExportSaveRequest({ requestId: "", suggestedName: "a" })).toBeNull();
+    expect(sanitizeExportSaveRequest({ requestId: "r", suggestedName: "" })).toBeNull();
+    expect(sanitizeExportSaveRequest({ requestId: "r", suggestedName: "a".repeat(300) })).toBeNull();
+    expect(sanitizeExportSaveRequest({ requestId: "r".repeat(200), suggestedName: "a" })).toBeNull();
+    expect(sanitizeExportSaveRequest(null)).toBeNull();
+    expect(sanitizeExportSaveRequest("x")).toBeNull();
+  });
+
+  it("只有 .. / . 的名字 → 拒绝（剥完 basename 后是占位）", async () => {
+    const { sanitizeExportSaveRequest } = await import("./pluginPanelBridge");
+    expect(sanitizeExportSaveRequest({ requestId: "r", suggestedName: ".." })).toBeNull();
+    expect(sanitizeExportSaveRequest({ requestId: "r", suggestedName: "." })).toBeNull();
+  });
+});
+
+describe("sanitizeRevealPath — 打开文件位置校验", () => {
+  it("接受绝对路径（Windows 盘符 / POSIX）", async () => {
+    const { sanitizeRevealPath } = await import("./pluginPanelBridge");
+    expect(sanitizeRevealPath({ path: "C:\\Users\\x\\out.tar.gz" })).toBe("C:\\Users\\x\\out.tar.gz");
+    expect(sanitizeRevealPath({ path: "/home/x/out.tar.gz" })).toBe("/home/x/out.tar.gz");
+  });
+
+  it("拒绝相对路径 / 空 / 含 NUL", async () => {
+    const { sanitizeRevealPath } = await import("./pluginPanelBridge");
+    expect(sanitizeRevealPath({ path: "relative/out.tar.gz" })).toBeNull();
+    expect(sanitizeRevealPath({ path: "" })).toBeNull();
+    expect(sanitizeRevealPath({ path: "C:\\a\u0000b" })).toBeNull();
+    expect(sanitizeRevealPath({})).toBeNull();
+    expect(sanitizeRevealPath(null)).toBeNull();
+  });
+});
+
+describe("PANEL_CAPS — 能力声明", () => {
+  it("包含 export-save（面板据此决定是否弹框）", async () => {
+    const { PANEL_CAPS } = await import("./pluginPanelBridge");
+    expect(PANEL_CAPS).toContain("export-save");
+  });
+});

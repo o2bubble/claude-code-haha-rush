@@ -29,7 +29,10 @@ export function SuperDesktopPanel() {
       if (getDesktopLoadError()) {
         setLoadFailed(true);
       } else if (getDesktops().length === 0) {
-        createDesktop("Desktop 1");
+        // 名字用 `desktop.newDesktop`（"桌面 {n}"）而不是写死 "Desktop 1" ——
+        // 写死时一旦走到这里两次（加载失败/为空两次、或旧数据残留），就会留下
+        // 两个**同名**桌面，用户看到"多个 Desktop 1"却分不清哪个是真。
+        createDesktop(t("desktop.newDesktop", { n: getDesktops().length + 1 }));
       }
       setLoading(false);
     });

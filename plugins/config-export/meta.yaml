@@ -1,0 +1,5 @@
+name: "config-export"
+author: "官方"
+version: "0.2.0"
+description: "把本机的 Claude 个人资料（CLAUDE.md / 技能 / 记忆 / 笔记 / 计划 / 会话历史）与 GUI 配置（设置、超级桌面、插件设置）扫描分类后勾选导出成一个 tar.gz。凭据类数据（登录态、签名私钥、API key）默认排除；包内附带 manifest.json 描述每个文件的来源与恢复方式，为换机恢复做准备。"
+tags: ["tool", "backup", "export", "migration", "导出", "备份", "迁移"]

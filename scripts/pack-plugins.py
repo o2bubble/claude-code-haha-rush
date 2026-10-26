@@ -69,6 +69,14 @@ DEV_ONLY = {
     "git-viewer": set(),
     "nodejs": set(),
     "playwright-mcp": set(),
+    # 测试文件不进包 —— 用户下载到一堆 .test.cjs 没意义，只占体积
+    "config-export": {
+        "export.test.cjs", "export.e2e.test.cjs",
+        "custom.test.cjs", "custom.e2e.test.cjs",
+        "rehearsal.test.cjs", "restore-guide.test.cjs",
+        "tools.test.cjs", "audit.test.cjs", "ai-flow.test.cjs",
+        "cors.test.cjs", "single-file.test.cjs", "panel-static.test.cjs", "tar-writer.test.cjs",
+    },
 }
 
 # 每个插件**必须**在包里的关键文件（缺了就是坏包）。

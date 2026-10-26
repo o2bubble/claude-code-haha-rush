@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>配置与资料导出</title>
+<style>
+  /* ── 主题：宿主 CSS 变量不跨文档，必须自备一套 ──
+     亮色定义在 body.theme-light 上；深色走 :root 的默认值。 */
+  :root {
+    --bg: #1e1e24; --bg2: #26262e; --bg3: #2f2f38;
+    --fg: #e4e4e7; --fg-muted: #9a9aa3;
+    --border: #3a3a44; --accent: #5aa8ff;
+    --danger: #f0666e; --warn: #eab308; --success: #4ecb71;
+  }
+  body.theme-light {
+    --bg: #ffffff; --bg2: #fafafa; --bg3: #f3f3f5;
+    --fg: #27272a; --fg-muted: #6b6b74;
+    --border: #e0e0e4; --accent: #007acc;
+    --danger: #dc2626; --warn: #b45309; --success: #15803d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 12px;
+  }
+
+  /* ── 顶栏 ── */
+  .head {
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  }
+  .head h1 { font-size: 13px; font-weight: 600; margin: 0; flex: 1; }
+  .head .sub { font-size: 11px; color: var(--fg-muted); font-weight: 400; }
+  .btn {
+    background: var(--bg3); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 5px; padding: 5px 12px; cursor: pointer; font-size: 11px;
+    font-family: inherit;
+  }
+  .btn:hover:not(:disabled) { border-color: var(--accent); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+
+  /* ── 列表 ── */
+  .list { flex: 1; overflow: auto; padding: 8px 0; }
+  .group-title {
+    padding: 8px 14px 4px; font-size: 10px; font-weight: 600;
+    color: var(--fg-muted); text-transform: uppercase; letter-spacing: .04em;
+  }
+  .row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px; cursor: pointer; border-left: 2px solid transparent;
+  }
+  .row:hover { background: var(--bg2); }
+  .row.on { border-left-color: var(--accent); }
+  .row input[type=checkbox] { width: 14px; height: 14px; flex-shrink: 0; cursor: pointer; }
+  .row .label { flex: 1; min-width: 0; }
+  .row .label .name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .meta { font-size: 10px; color: var(--fg-muted); flex-shrink: 0; }
+  .badge {
+    font-size: 9px; padding: 1px 5px; border-radius: 3px; flex-shrink: 0;
+    font-weight: 600;
+  }
+  .badge.warn { background: rgba(234,179,8,.16); color: var(--warn); }
+  .badge.danger { background: rgba(240,102,110,.16); color: var(--danger); }
+
+  /* ── 恢复入口 ── */
+  .restore-sec {
+    border-top: 1px solid var(--border); flex-shrink: 0; background: var(--bg2);
+    display: flex; flex-direction: column; max-height: 30vh;
+  }
+  #restoreBox { overflow: auto; }
+  .rbox { padding: 8px 14px; font-size: 11px; }
+  .rbox .row2 { display: flex; gap: 8px; align-items: baseline; margin-top: 3px; }
+  .rbox .k { color: var(--fg-muted); flex-shrink: 0; min-width: 56px; }
+  .rbox .v { word-break: break-all; }
+  .rbox .go {
+    margin-top: 8px; display: flex; gap: 8px; align-items: center;
+  }
+  .rbox .warnline { color: var(--warn); font-size: 10px; margin-top: 6px; }
+  .rbox .bad { color: var(--danger); }
+
+  /* ── 自定义项区 ── */
+  .custom-sec {
+    border-top: 1px solid var(--border); flex-shrink: 0;
+    max-height: 34vh; display: flex; flex-direction: column; background: var(--bg2);
+  }
+  .custom-head {
+    padding: 7px 14px; display: flex; align-items: center; gap: 8px;
+    font-size: 11px; font-weight: 600; color: var(--fg-muted); flex-shrink: 0;
+  }
+  .custom-head span { flex: 1; }
+  #customList { overflow: auto; }
+  .citem {
+    padding: 7px 14px; border-top: 1px solid var(--border);
+    display: flex; align-items: flex-start; gap: 8px;
+  }
+  .citem .body { flex: 1; min-width: 0; }
+  .citem .nm { font-size: 11px; }
+  .citem .pth {
+    font-size: 10px; color: var(--fg-muted); word-break: break-all;
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  .citem .warnbox {
+    margin-top: 4px; font-size: 10px; color: var(--warn);
+    background: rgba(234,179,8,.10); border-left: 2px solid var(--warn);
+    padding: 3px 7px; border-radius: 0 3px 3px 0;
+  }
+  .citem .x {
+    background: none; border: none; color: var(--fg-muted); cursor: pointer;
+    font-size: 14px; line-height: 1; padding: 0 2px; flex-shrink: 0;
+  }
+  .citem .x:hover { color: var(--danger); }
+  .citem .tag {
+    display: inline-block; font-size: 9px; padding: 0 4px; margin-right: 5px;
+    border-radius: 3px; background: var(--bg3); color: var(--fg-muted);
+    border: 1px solid var(--border); vertical-align: 1px;
+  }
+  .citem-empty { padding: 10px 14px; font-size: 10px; color: var(--fg-muted); }
+
+  /* ── 底栏 ── */
+  .foot {
+    padding: 10px 14px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+    background: var(--bg2);
+  }
+  .foot .summary { flex: 1; font-size: 11px; color: var(--fg-muted); }
+  .foot .summary b { color: var(--fg); }
+
+  /* ── 状态 ── */
+  .empty { padding: 40px 20px; text-align: center; color: var(--fg-muted); }
+  .err { color: var(--danger); }
+  .progress {
+    height: 3px; background: var(--bg3); overflow: hidden; flex-shrink: 0;
+  }
+  .progress .bar {
+    height: 100%; width: 0; background: var(--accent);
+    transition: width .25s;
+  }
+  .progress.indeterminate .bar {
+    width: 35%; animation: slide 1.1s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(390%); }
+  }
+  .done {
+    padding: 10px 14px; background: rgba(78,203,113,.10);
+    border-top: 1px solid rgba(78,203,113,.28); color: var(--success);
+    font-size: 11px; flex-shrink: 0;
+  }
+  .done .path {
+    display: block; margin-top: 4px; color: var(--fg);
+    font-family: ui-monospace, Consolas, monospace; font-size: 10px;
+    word-break: break-all;
+  }
+</style>
+</head>
+<body>
+  <div class="head">
+    <h1>配置与资料导出 <span class="sub" id="sub"></span></h1>
+    <button class="btn" id="reloadBtn">重新扫描</button>
+  </div>
+
+  <div class="list" id="list">
+    <div class="empty">正在扫描…</div>
+  </div>
+
+  <!-- 恢复入口：选一个备份包 → 交给 AI 走恢复流程 -->
+  <div class="restore-sec">
+    <div class="custom-head">
+      <span>从备份恢复</span>
+      <button class="btn" id="pickPkgBtn">选择备份包…</button>
+    </div>
+    <div id="restoreBox"></div>
+  </div>
+
+  <!-- 自定义项：用户自己的一套方案（插件不解析内容，只原样打包 + 记录） -->
+  <div class="custom-sec">
+    <div class="custom-head">
+      <span>自定义项（你自己的备份方案）</span>
+      <button class="btn" id="addCustomBtn">+ 添加文件</button>
+      <button class="btn" id="addCustomDirBtn">+ 添加目录</button>
+    </div>
+    <div id="customList"></div>
+  </div>
+
+  <div class="progress" id="progress" style="display:none"><div class="bar"></div></div>
+
+  <div class="foot">
+    <div class="summary" id="summary">—</div>
+    <button class="btn primary" id="exportBtn" disabled>导出</button>
+  </div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// 启动参数
+// ══════════════════════════════════════════════════════════════
+var params = new URLSearchParams(location.search);
+var port = params.get("port");
+var API = port ? "http://127.0.0.1:" + port : null;
+
+// ══════════════════════════════════════════════════════════════
+// 主题（独立文档，宿主 CSS 变量读不到 —— 见 PRD）
+// ══════════════════════════════════════════════════════════════
+function applyTheme(t) {
+  // 宿主有 dark / dark-b / dark-a 等变体，非 light 一律归到 dark
+  if (t === "light") document.body.classList.add("theme-light");
+  else document.body.classList.remove("theme-light");
+}
+applyTheme(params.get("theme"));                 // 首帧读 URL（别只等 postMessage）
+window.addEventListener("message", function (ev) {
+  var d = ev.data;
+  if (d && d.source === "plugin:host" && d.kind === "theme" && d.payload) {
+    applyTheme(d.payload.theme);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// 能力探测（决定用 A 弹框 还是 B 存 Downloads）
+// ══════════════════════════════════════════════════════════════
+var CAPS = (params.get("caps") || "").split(",").filter(Boolean);
+var canPickPath = CAPS.indexOf("export-save") >= 0;
+
+// ══════════════════════════════════════════════════════════════
+// 状态
+// ══════════════════════════════════════════════════════════════
+var allCategories = [];
+var selected = new Set();
+var busy = false;
+/** 自定义项：用户自选的目录 + 元信息。{ id, label, path, entryDoc, notes } */
+var customItems = [];
+
+var $list = document.getElementById("list");
+var $summary = document.getElementById("summary");
+var $exportBtn = document.getElementById("exportBtn");
+var $reloadBtn = document.getElementById("reloadBtn");
+var $progress = document.getElementById("progress");
+var $sub = document.getElementById("sub");
+
+// ══════════════════════════════════════════════════════════════
+// 工具
+// ══════════════════════════════════════════════════════════════
+function fmtSize(n) {
+  if (!n) return "0 B";
+  var u = ["B", "KB", "MB", "GB"], i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + " " + u[i];
+}
+
+var GROUP_LABEL = {
+  claude: "Claude 个人资料",
+  gui: "GUI 配置",
+  workspace: "工作区",
+};
+
+function render() {
+  if (!allCategories.length) {
+    $list.innerHTML = '<div class="empty">没有可导出的内容</div>';
+    return;
+  }
+  var groups = {};
+  allCategories.forEach(function (c) {
+    (groups[c.group] = groups[c.group] || []).push(c);
+  });
+
+  var html = "";
+  Object.keys(groups).forEach(function (g) {
+    html += '<div class="group-title">' + (GROUP_LABEL[g] || g) + "</div>";
+    groups[g].forEach(function (c) {
+      var on = selected.has(c.id);
+      var badge = "";
+      if (c.sensitive) {
+        // 敏感分两档：含凭据风险的（settings/config）用红，其余（会话历史）用黄
+        var isCred = c.id === "claude-settings" || c.id === "claude-config";
+        badge = '<span class="badge ' + (isCred ? "danger" : "warn") + '">' +
+          (isCred ? "含敏感项" : "敏感") + "</span>";
+      }
+      html +=
+        '<div class="row' + (on ? " on" : "") + '" data-id="' + c.id + '">' +
+          '<input type="checkbox" ' + (on ? "checked" : "") + ' data-id="' + c.id + '" />' +
+          '<span class="label"><span class="name">' + escapeHtml(c.label) + "</span></span>" +
+          badge +
+          '<span class="meta">' + c.fileCount + " 个 · " + fmtSize(c.size) + "</span>" +
+        "</div>";
+    });
+  });
+  $list.innerHTML = html;
+  updateSummary();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, function (ch) {
+    return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch];
+  });
+}
+
+function updateSummary() {
+  var picked = allCategories.filter(function (c) { return selected.has(c.id); });
+  var total = picked.reduce(function (a, c) { return a + c.size; }, 0);
+  var files = picked.reduce(function (a, c) { return a + c.fileCount; }, 0);
+  var parts = [];
+  if (picked.length) {
+    parts.push("已选 <b>" + picked.length + "</b> 类 · <b>" + files + "</b> 个文件 · 约 <b>" + fmtSize(total) + "</b>");
+  }
+  if (customItems.length) {
+    parts.push("自定义项 <b>" + customItems.length + "</b> 个");
+  }
+  $summary.innerHTML = parts.length ? parts.join("　+　") : "未选择任何内容";
+  $exportBtn.disabled = busy || (picked.length === 0 && customItems.length === 0);
+}
+
+// ══════════════════════════════════════════════════════════════
+// 自定义项
+// ══════════════════════════════════════════════════════════════
+
+var $customList = document.getElementById("customList");
+var $addCustomBtn = document.getElementById("addCustomBtn");
+var $addCustomDirBtn = document.getElementById("addCustomDirBtn");
+
+function renderCustom() {
+  if (!customItems.length) {
+    $customList.innerHTML = '<div class="citem-empty">' +
+      "没有自定义项。如果你有自己的一套备份方案（手册 / 脚本 / 私有数据），" +
+      "用上面两个按钮把它加进来 —— <b>单个文件或整个目录都行</b>。" +
+      "插件不会解析内容，只在包里记一笔，导入时交给 AI 按你的文档执行。" +
+      "</div>";
+    return;
+  }
+  $customList.innerHTML = customItems.map(function (c, i) {
+    var kindTag = c.kind === "file"
+      ? '<span class="tag">文件</span>'
+      : (c.kind === "directory" ? '<span class="tag">目录</span>' : "");
+    return '<div class="citem">' +
+      '<div class="body">' +
+        '<div class="nm">' + kindTag + escapeHtml(c.label) + "</div>" +
+        '<div class="pth">' + escapeHtml(c.path) + "</div>" +
+        (c.entryDoc ? '<div class="pth">入口：' + escapeHtml(c.entryDoc) + "</div>" : "") +
+        '<div class="warnbox">⚠️ ' +
+          (c.includeData
+            ? "数据已打进包。"
+            : "**只记说明，数据不进包** —— 由你自己的方案负责备份。") +
+          "导入时由 AI 读入口文档执行；若与内置项重叠，包内 IMPORT_GUIDE.md 会提示它先问你。</div>" +
+      "</div>" +
+      '<button class="x" data-i="' + i + '" title="移除">×</button>' +
+    "</div>";
+  }).join("");
+}
+
+$customList.addEventListener("click", function (e) {
+  var b = e.target.closest(".x");
+  if (!b) return;
+  customItems.splice(Number(b.getAttribute("data-i")), 1);
+  renderCustom();
+  updateSummary();
+});
+
+/**
+ * 添加一个自定义项。**文件或目录都行** —— 后端 `normalizeCustomItem` 本来就两种都支持
+ * （目录递归收集、单文件按文件处理），之前只是面板把按钮写死成"添加目录"。
+ *
+ * @param {"file"|"directory"} kind
+ */
+function addCustomItem(kind) {
+  if (!canPickPath) {
+    alert("当前 GUI 版本不支持选择" + (kind === "directory" ? "目录" : "文件") + "。\n\n" +
+      "请升级 GUI，或用 AI 帮你加：\n「把 <路径> 作为自定义项导出」");
+    return;
+  }
+  var pick = kind === "directory" ? pickDirectory() : pickFile();
+
+  pick.then(function (picked) {
+    if (!picked) return;
+    var base = picked.split(/[\\/]/).filter(Boolean).pop() || picked;
+
+    // ── 名字 ──
+    var label = prompt(
+      kind === "directory" ? "给这个目录起个名字：" : "给这个文件起个名字：",
+      base,
+    );
+    if (label === null) return; // 用户取消
+    label = (label || "").trim() || base;
+
+    // ── 入口文档 ──
+    // 单文件：它自己就是入口，不用再问（省一步）
+    var entry = "";
+    if (kind === "directory") {
+      entry = prompt(
+        "入口文档（可选）：\n\n" +
+        "如果这个目录里有你自己的操作手册，填它的文件名（如 00_迁移总览.md）。\n" +
+        "导入时 AI 会从这里读起。留空则 AI 会问你。",
+        ""
+      ) || "";
+    } else {
+      // 只有看起来像文档的文件才当入口
+      entry = /\.(md|txt|ya?ml|json)$/i.test(base) ? base : "";
+    }
+
+    // ── 是否把数据打进包 ──
+    // 默认不带；单文件通常是"说明文档"，也不带。
+    var withData = confirm(
+      (kind === "directory"
+        ? "要把这个目录里的**文件**也打进包吗？"
+        : "要把这个**文件**本身也打进包吗？") + "\n\n" +
+      "· 确定 = 带上（包会变大，但换机时它一定在）\n" +
+      "· 取消 = 只记说明（数据由你自己的方案负责，换机时 AI 会按说明去找）\n\n" +
+      "如果你的方案已经把数据备份到别处（如移动硬盘），选「取消」即可。"
+    );
+
+    customItems.push({
+      id: label.replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]/g, "-").slice(0, 64) || "custom",
+      label: label,
+      path: picked,
+      kind: kind,          // 给渲染用，区分显示
+      entryDoc: (entry || "").trim(),
+      includeData: withData,
+    });
+    renderCustom();
+    updateSummary();
+  });
+}
+
+$addCustomBtn.addEventListener("click", function () { addCustomItem("file"); });
+$addCustomDirBtn.addEventListener("click", function () { addCustomItem("directory"); });
+
+/** 请求宿主弹"打开文件"框（选单个文件） */
+function pickFile() {
+  return new Promise(function (resolve) {
+    var requestId = "file-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    var timer = setTimeout(function () {
+      window.removeEventListener("message", onMsg);
+      resolve(null);
+    }, 180000);
+
+    function onMsg(ev) {
+      var d = ev.data;
+      if (!d || d.source !== "plugin:host" || d.kind !== "pick-open-file-result") return;
+      if (!d.payload || d.payload.requestId !== requestId) return;
+      clearTimeout(timer);
+      window.removeEventListener("message", onMsg);
+      resolve(d.payload.path || null);
+    }
+    window.addEventListener("message", onMsg);
+
+    window.parent.postMessage({
+      source: "plugin:viewer:config-export",
+      kind: "pick-open-file",
+      payload: {
+        requestId: requestId,
+        filters: [{ name: "全部文件", extensions: ["*"] }],
+      },
+    }, "*");
+  });
+}
+
+/** 请求宿主弹目录选择框 */
+function pickDirectory() {
+  return new Promise(function (resolve) {
+    var requestId = "dir-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    var timer = setTimeout(function () {
+      window.removeEventListener("message", onMsg);
+      resolve(null);
+    }, 180000);
+
+    function onMsg(ev) {
+      var d = ev.data;
+      if (!d || d.source !== "plugin:host" || d.kind !== "export-save-result") return;
+      if (!d.payload || d.payload.requestId !== requestId) return;
+      clearTimeout(timer);
+      window.removeEventListener("message", onMsg);
+      resolve(d.payload.path || null);
+    }
+    window.addEventListener("message", onMsg);
+
+    window.parent.postMessage({
+      source: "plugin:viewer:config-export",
+      kind: "export-save",
+      payload: { requestId: requestId, suggestedName: "", pick: "directory" },
+    }, "*");
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+// 事件
+// ══════════════════════════════════════════════════════════════
+$list.addEventListener("click", function (e) {
+  var t = e.target.closest(".row");
+  if (!t) return;
+  var id = t.getAttribute("data-id");
+  var cat = allCategories.find(function (c) { return c.id === id; });
+  if (!cat) return;
+
+  if (selected.has(id)) {
+    selected.delete(id);
+  } else {
+    // 敏感项：二次确认（这是"知情决定"的唯一机会）
+    if (cat.sensitive) {
+      var isCred = id === "claude-settings" || id === "claude-config";
+      var msg = isCred
+        ? "「" + cat.label + "」可能包含凭据（API key、MCP token 等）。\n\n" +
+          "导出时会自动剥离 settings.json 的 env 段，" +
+          "但其余字段仍会进包。确定要导出吗？"
+        : "「" + cat.label + "」包含敏感内容（全部对话记录）。\n\n" +
+          "压缩包未加密，请确认存放位置安全。确定要导出吗？";
+      if (!confirm(msg)) return;
+    }
+    selected.add(id);
+  }
+  render();
+});
+
+$reloadBtn.addEventListener("click", function () { scan(); });
+
+// ══════════════════════════════════════════════════════════════
+// 扫描
+// ══════════════════════════════════════════════════════════════
+function scan() {
+  if (!API) {
+    $list.innerHTML = '<div class="empty err">未拿到插件进程端口（panel 的 port 参数缺失）</div>';
+    return;
+  }
+  $reloadBtn.disabled = true;
+  $sub.textContent = "扫描中…";
+  fetch(API + "/api/scan")
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      allCategories = d.categories || [];
+      // 默认勾选 = 服务端给的 defaultOn
+      selected = new Set(allCategories.filter(function (c) { return c.defaultOn; }).map(function (c) { return c.id; }));
+      render();
+      $sub.textContent = allCategories.length + " 类可导出";
+    })
+    .catch(function (e) {
+      $list.innerHTML = '<div class="empty err">扫描失败：' + escapeHtml(e.message) + "</div>";
+      $sub.textContent = "";
+    })
+    .finally(function () { $reloadBtn.disabled = false; });
+}
+
+// ══════════════════════════════════════════════════════════════
+// 导出
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * 请求宿主弹保存对话框，拿回用户选的路径。
+ * 宿主不支持（无 caps）时返回 null → 走降级：进程自己写 Downloads。
+ *
+ * 协议：
+ *   面板 → { kind:"export-save", payload:{ requestId, suggestedName } }
+ *   宿主 → { kind:"export-save-result", payload:{ requestId, path|null } }
+ */
+function pickSavePath(suggestedName) {
+  return new Promise(function (resolve) {
+    if (!canPickPath) return resolve(null);
+    var requestId = "exp-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    var timer = setTimeout(function () {
+      window.removeEventListener("message", onMsg);
+      resolve(null); // 超时 → 降级，不能让用户干等
+    }, 120000);
+
+    function onMsg(ev) {
+      var d = ev.data;
+      if (!d || d.source !== "plugin:host" || d.kind !== "export-save-result") return;
+      if (!d.payload || d.payload.requestId !== requestId) return;
+      clearTimeout(timer);
+      window.removeEventListener("message", onMsg);
+      resolve(d.payload.path || null);
+    }
+    window.addEventListener("message", onMsg);
+
+    window.parent.postMessage({
+      source: "plugin:viewer:config-export",
+      kind: "export-save",
+      payload: { requestId: requestId, suggestedName: suggestedName },
+    }, "*");
+  });
+}
+
+function guessName() {
+  var d = new Date();
+  var p = function (n) { return String(n).padStart(2, "0"); };
+  var stamp = "" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) +
+    "-" + p(d.getHours()) + p(d.getMinutes());
+  return "claude-profile-export-" + stamp + ".tar.gz";
+}
+
+function setBusy(v) {
+  busy = v;
+  $progress.style.display = v ? "block" : "none";
+  $progress.classList.toggle("indeterminate", v);
+  $exportBtn.disabled = v || selected.size === 0;
+  $reloadBtn.disabled = v;
+}
+
+$exportBtn.addEventListener("click", function () {
+  if (busy || !selected.size) return;
+  doExport();
+});
+
+/**
+ * 导出前体检自定义项 —— 用户的方案文档自己可能不全
+ * （文档提到的脚本不在目录里 → 换了机器恢复不了）。
+ * 有问题就摊给用户，让他决定补不补。
+ */
+function auditCustomItems() {
+  if (!customItems.length || !API) return Promise.resolve(true);
+  return fetch(API + "/api/audit-custom", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ customItems: customItems }),
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d || !d.ok) return true; // 体检失败不阻断导出
+      var blocking = (d.reports || []).filter(function (rep) {
+        return (rep.issues || []).some(function (i) { return i.severity === "high"; });
+      });
+      if (!blocking.length) return true;
+
+      // 把问题摊给用户 —— 这是**知情决定**的机会
+      var lines = [];
+      blocking.forEach(function (rep) {
+        lines.push("【" + rep.label + "】");
+        (rep.issues || []).forEach(function (i) {
+          if (i.severity !== "high") return;
+          lines.push("  · " + i.message);
+          if (i.missing && i.missing.length) {
+            lines.push("    缺：" + i.missing.slice(0, 6).join("、") +
+              (i.missing.length > 6 ? "…（共 " + i.missing.length + " 个）" : ""));
+          }
+        });
+        lines.push("");
+      });
+      return confirm(
+        "⚠️ 你的自定义方案文档可能不完整：\n\n" +
+        lines.join("\n") +
+        "\n这意味着：换机器时按这份文档恢复，会**找不到上述文件**。\n\n" +
+        "选择：\n" +
+        "· 确定 = 我知道不完整，仍然导出（会记进包里的体检报告）\n" +
+        "· 取消 = 先不导，我去补齐那些文件"
+      );
+    })
+    .catch(function () { return true; }); // 体检本身出错不阻断
+}
+
+function doExport() {
+  setBusy(true);
+  $sub.textContent = "导出前体检…";
+
+  auditCustomItems().then(function (go) {
+    if (!go) {
+      setBusy(false);
+      $sub.textContent = "已取消（先去补齐文件）";
+      return;
+    }
+    doExportInner();
+  });
+}
+
+function doExportInner() {
+  $sub.textContent = "准备导出…";
+
+  var oldDone = document.querySelector(".done");
+  if (oldDone) oldDone.remove();
+
+  pickSavePath(guessName()).then(function (chosenPath) {
+    $sub.textContent = chosenPath ? "打包中…" : "打包中（完成后存到下载文件夹）…";
+
+    return fetch(API + "/api/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        categories: Array.from(selected),
+        outputPath: chosenPath || undefined,
+        customItems: customItems.map(function (c) {
+          return {
+            id: c.id, label: c.label, path: c.path,
+            includeData: !!c.includeData,
+            entryDoc: c.entryDoc || undefined,
+            notes: c.notes || undefined,
+            importPrompt: c.importPrompt || undefined,
+            verifyPrompt: c.verifyPrompt || undefined,
+          };
+        }),
+      }),
+    });
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d || !d.ok) throw new Error((d && d.error) || "导出失败");
+      var el = document.createElement("div");
+      el.className = "done";
+      var noData = customItems.filter(function (c) { return !c.includeData; });
+      var failedChecks = (d.autoChecks || []).filter(function (c) { return !c.ok; });
+      el.innerHTML =
+        (failedChecks.length
+          ? "⚠️ 导出完成，但**有检查未通过** —— "
+          : "✓ 文件已生成 · ") +
+        d.itemCount + " 个文件 · " + fmtSize(d.size) +
+        '<span class="path">' + escapeHtml(d.path) + "</span>" +
+        // 自动检查结果（机器能验的部分）
+        ((d.autoChecks || []).length
+          ? '<span class="path" style="margin-top:6px">检查结果：</span>' +
+            d.autoChecks.map(function (c) {
+              return '<span class="path" style="color:' +
+                (c.ok ? "var(--success)" : "var(--danger)") + '">' +
+                (c.ok ? "✓ " : "✗ ") + escapeHtml(c.name) + " — " + escapeHtml(c.detail) + "</span>";
+            }).join("")
+          : "") +
+        // ⚠️ 门控：不显示"完成"，显示"待验证"
+        '<span class="path" style="color:var(--warn);margin-top:6px">' +
+          "⚠️ **备份尚未验证** —— 需要做一次恢复推演才算数：" +
+          "</span>" +
+        '<span class="path">让 AI 执行：「读包里的 RESTORE_REHEARSAL.md，' +
+          '按里面的问题逐条推演这份备份在新机器上能否恢复」</span>' +
+        (d.redactions && d.redactions.length
+          ? '<span class="path">已剥离：' +
+            d.redactions.map(function (x) { return escapeHtml(x.item + " › " + x.path); }).join("、") +
+            "</span>"
+          : "") +
+        // 提示用户去跑自己的备份 —— 这一步我们**不做**，那是用户方案的事
+        (noData.length
+          ? '<span class="path" style="color:var(--warn)">⚠️ 以下自定义项的数据不在包里，' +
+            "请现在跑你自己的备份：</span>" +
+            noData.map(function (c) {
+              return '<span class="path">· ' + escapeHtml(c.label) + "（" + escapeHtml(c.path) + "）</span>";
+            }).join("")
+          : "");
+      document.body.insertBefore(el, document.querySelector(".foot"));
+      $sub.textContent = "完成";
+      // 降级路径：没有弹框，用户不知道文件在哪 → 让宿主打开所在文件夹
+      if (!canPickPath) openInExplorer(d.path);
+    })
+    .catch(function (e) {
+      $sub.textContent = "";
+      var el = document.createElement("div");
+      el.className = "done";
+      el.style.background = "rgba(240,102,110,.10)";
+      el.style.borderTopColor = "rgba(240,102,110,.28)";
+      el.style.color = "var(--danger)";
+      el.textContent = "导出失败：" + (e && e.message ? e.message : String(e));
+      document.body.insertBefore(el, document.querySelector(".foot"));
+    })
+    .finally(function () { setBusy(false); });
+}
+
+/** 降级路径用：请求宿主打开文件所在目录（读不到 caps 时才有意义） */
+function openInExplorer(p) {
+  if (!p) return;
+  window.parent.postMessage({
+    source: "plugin:viewer:config-export",
+    kind: "reveal-path",
+    payload: { path: p },
+  }, "*");
+}
+
+// ══════════════════════════════════════════════════════════════
+// 恢复入口：选包 → 预览 → 交给 AI 走流程
+// ══════════════════════════════════════════════════════════════
+//
+// 为什么要这个入口：新机器上的 AI 拿到一个 tar.gz **不会自己知道**
+// 它有配套的恢复协议（IMPORT_GUIDE / RESTORE_REHEARSAL / tools）。
+// 让用户从插件里"点一下"，就把整条链路（含协议）交给 AI。
+
+var $pickPkgBtn = document.getElementById("pickPkgBtn");
+var $restoreBox = document.getElementById("restoreBox");
+var pickedPkg = null;
+
+function renderRestore() {
+  if (!pickedPkg) {
+    $restoreBox.innerHTML = '<div class="citem-empty">' +
+      "选一个之前导出的备份包（.tar.gz）。选好会先显示它是什么，确认后再交给 AI 走恢复流程。" +
+      "</div>";
+    return;
+  }
+  var p = pickedPkg;
+  var age = p.exportedAt ? new Date(p.exportedAt) : null;
+  var ageStr = age ? age.toLocaleString() : "未知";
+  var days = age ? Math.floor((Date.now() - age.getTime()) / 86400000) : null;
+
+  var selfDesc = p.selfDescribing || {};
+  var missing = [];
+  if (!selfDesc.hasGuide) missing.push("IMPORT_GUIDE.md");
+  if (!selfDesc.hasRehearsal) missing.push("RESTORE_REHEARSAL.md");
+  if (!selfDesc.hasTools) missing.push("tools/restore-tools.cjs");
+
+  $restoreBox.innerHTML = '<div class="rbox">' +
+    '<div class="row2"><span class="k">包</span><span class="v">' + escapeHtml(p.path) + "</span></div>" +
+    '<div class="row2"><span class="k">导出时间</span><span class="v">' + escapeHtml(ageStr) +
+      (days !== null ? "（" + days + " 天前）" : "") + "</span></div>" +
+    '<div class="row2"><span class="k">来源</span><span class="v">' +
+      escapeHtml((p.source && p.source.hostname) || "未知") + " · " +
+      escapeHtml(String(p.formatVersion || "?")) + " 版格式</span></div>" +
+    '<div class="row2"><span class="k">内容</span><span class="v">' +
+      p.totals.files + " 个文件 · " + fmtSize(p.totals.bytes) +
+      (p.totals.customItems ? " · " + p.totals.customItems + " 个自定义项" : "") +
+      (p.redactions ? " · " + p.redactions + " 处凭据已剥离" : "") +
+      "</span></div>" +
+    (missing.length
+      ? '<div class="warnline bad">⚠️ 这个包缺少：' + escapeHtml(missing.join("、")) +
+        " —— 可能是旧版本导出的，AI 只能靠 manifest.json 自己判断</div>"
+      : '<div class="warnline">✓ 包内自带完整恢复协议（指南 / 推演清单 / 工具）</div>') +
+    '<div class="go">' +
+      '<button class="btn primary" id="startRestoreBtn">交给 AI 开始恢复</button>' +
+      '<button class="btn" id="clearPkgBtn">换一个</button>' +
+    "</div>" +
+  "</div>";
+
+  document.getElementById("startRestoreBtn").onclick = function () { startRestore(p); };
+  document.getElementById("clearPkgBtn").onclick = function () { pickedPkg = null; renderRestore(); };
+}
+
+/** 生成交给 AI 的恢复提示词 —— **这是整条链路的入口** */
+function buildRestorePrompt(p) {
+  var lines = [];
+  lines.push("请帮我用这个备份包恢复配置：");
+  lines.push("");
+  lines.push("备份包：" + p.path);
+  lines.push("（" + p.totals.files + " 个文件" +
+    (p.totals.customItems ? " + " + p.totals.customItems + " 个自定义项" : "") +
+    "，导出时间 " + (p.exportedAt || "未知") + "）");
+  lines.push("");
+  lines.push("**按这个流程走，不要跳过：**");
+  lines.push("");
+  lines.push("1. 先把包解到一个临时目录，读里面的 `IMPORT_GUIDE.md` 和 `RESTORE_REHEARSAL.md`");
+  lines.push("   （包里应该还有 `tools/restore-tools.cjs`，用它，别临时写脚本）");
+  lines.push("2. **恢复前先评估这台机器的现状**（GUIDE 第 0 步）——");
+  lines.push("   我这边可能已经装过插件 / 聊过几个会话 / 改过设置，请查清楚再动手");
+  lines.push("3. 把恢复方案给我看，**我确认后**再执行");
+  lines.push("4. 遇到冲突按内容类型分别处理（会话按 uuid 合并、设置按键合并、");
+  lines.push("   记忆和桌面数据库要问我）—— 别用一条规则套全部");
+  lines.push("5. 恢复完用 `restore-tools.cjs rate` 算恢复率，出一份报告：");
+  lines.push("   **两个数都要报**（自动验证通过率 / 整体覆盖率），");
+  lines.push("   并说明哪些没验、为什么");
+  lines.push("");
+  lines.push("如果包里缺 IMPORT_GUIDE.md，就先看 manifest.json，然后告诉我情况。");
+  return lines.join("\n");
+}
+
+function startRestore(p) {
+  var prompt = buildRestorePrompt(p);
+  window.parent.postMessage({
+    source: "plugin:viewer:config-export",
+    kind: "chat-prompt",
+    payload: { text: prompt },
+  }, "*");
+}
+
+$pickPkgBtn.addEventListener("click", function () {
+  if (!canPickPath) {
+    alert("当前 GUI 版本不支持选文件。请升级 GUI，或直接告诉 AI：\n\n" +
+      "「帮我用 xxx.tar.gz 恢复配置，按包里的 IMPORT_GUIDE 走」");
+    return;
+  }
+  pickOpenFile().then(function (p) {
+    if (!p) return;
+    $restoreBox.innerHTML = '<div class="citem-empty">正在读取包…</div>';
+    if (!API) {
+      $restoreBox.innerHTML = '<div class="citem-empty bad">插件进程未就绪</div>';
+      return;
+    }
+    fetch(API + "/api/inspect-package", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: p }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.ok) {
+          $restoreBox.innerHTML = '<div class="citem-empty bad">读不了这个包：' +
+            escapeHtml((d && d.error) || "未知错误") + "</div>";
+          return;
+        }
+        pickedPkg = d;
+        renderRestore();
+      })
+      .catch(function (e) {
+        $restoreBox.innerHTML = '<div class="citem-empty bad">读取失败：' +
+          escapeHtml(e.message) + "</div>";
+      });
+  });
+});
+
+/** 请求宿主弹"打开文件"框 */
+function pickOpenFile() {
+  return new Promise(function (resolve) {
+    var requestId = "open-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    var timer = setTimeout(function () {
+      window.removeEventListener("message", onMsg);
+      resolve(null);
+    }, 180000);
+    function onMsg(ev) {
+      var d = ev.data;
+      if (!d || d.source !== "plugin:host" || d.kind !== "pick-open-file-result") return;
+      if (!d.payload || d.payload.requestId !== requestId) return;
+      clearTimeout(timer);
+      window.removeEventListener("message", onMsg);
+      resolve(d.payload.path || null);
+    }
+    window.addEventListener("message", onMsg);
+    window.parent.postMessage({
+      source: "plugin:viewer:config-export",
+      kind: "pick-open-file",
+      payload: {
+        requestId: requestId,
+        filters: [
+          { name: "备份包", extensions: ["gz", "tgz"] },
+          { name: "全部文件", extensions: ["*"] },
+        ],
+      },
+    }, "*");
+  });
+}
+
+// ⚠️ 启动包一层 try/catch。
+//
+// 2026-10-25 踩坑：上面某行（`$addCustomDirBtn.addEventListener`）因变量漏声明
+// 抛 ReferenceError → **整个脚本中止** → 末尾的 `scan()` 永远不执行
+// → 页面永远停在初始 HTML 的「正在扫描…」，**没有任何错误提示**。
+//
+// 这类"静默卡死"比报错难查得多。所以：
+//  · 初始化失败 → 把错误直接打在列表区（用户/AI 一眼看到）
+//  · 每一步独立 try，前面的失败不阻断后面的（尤其 scan）
+function initStep(name, fn) {
+  try {
+    fn();
+  } catch (e) {
+    console.error("[config-export panel] " + name + " failed:", e);
+    var box = document.getElementById("list");
+    if (box) {
+      box.innerHTML = '<div class="empty err">面板初始化失败（' + escapeHtml(name) + '）：' +
+        escapeHtml(e && e.message ? e.message : String(e)) + "</div>";
+    }
+  }
+}
+
+initStep("renderRestore", renderRestore);
+initStep("renderCustom", renderCustom);
+initStep("scan", scan);
+</script>
+</body>
+</html>

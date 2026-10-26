@@ -23,6 +23,24 @@ export interface PackageSummary {
   /** 支持平台 (windows/macos/linux)。undefined/空 = 全平台。GUI 按编译结果展示支持状态 */
   platforms?: string[];
   /**
+   * 签名元数据 —— 让客户端**不必下载 zip** 就能判定信任状态。
+   *
+   * 签名覆盖的是 `SHA256(原始 zip 字节)`，所以服务端直接把 digest + 签名给出，
+   * 客户端用内嵌公钥本地验一下即可（仍不盲信服务端，见
+   * `plugin_signature::verify_digest_signature`）。
+   *
+   * `undefined` = 老服务端没提供 → 客户端回退到下载 zip 验证。
+   */
+  signature?: {
+    signed: boolean;
+    /** hex；signed=true 时存在 */
+    sha256?: string;
+    /** base64，64 字节签名；signed=true 时存在 */
+    signature?: string;
+    alg?: string;
+    reason?: string;
+  };
+  /**
    * **本机侧载 / 本地开发的插件**（不出自市场）。
    *
    * 市场面板的「本地插件」分区靠它在**同一张卡片**上分流：这类包没有下载量、

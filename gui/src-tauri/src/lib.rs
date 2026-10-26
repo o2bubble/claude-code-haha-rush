@@ -146,21 +146,41 @@ fn acquire_workspace_lock(workdir: &str) -> bool {
     }
 
     // ④ 锁已存在：判断持有者还是不是**那个**进程
-    let holder_alive = std::fs::read_to_string(&path)
-        .ok()
-        .map(|s| {
-            let mut it = s.split_whitespace();
-            let p: Option<u32> = it.next().and_then(|x| x.parse().ok());
-            let st: Option<u64> = it.next().and_then(|x| x.parse().ok());
-            match (p, st) {
-                // 双因子：pid 相同但启动时刻不同 = 复用了该 pid 的另一个进程
-                (Some(p), Some(st)) if st > 0 => {
-                    crate::instances::process_start_time_ms(p) == Some(st)
-                }
-                // 旧格式锁（只有 pid）：退化为只比 pid（保守：当成活着，少抢锁）
-                (Some(p), _) => process_alive(p),
-                _ => false,
-            }
+    let holder = std::fs::read_to_string(&path).ok().map(|s| {
+        let mut it = s.split_whitespace();
+        let p: Option<u32> = it.next().and_then(|x| x.parse().ok());
+        let st: Option<u64> = it.next().and_then(|x| x.parse().ok());
+        (p, st)
+    });
+
+    // ⑤ 锁的持有者**就是我们自己** → 必然不是"另一个实例"，直接接管。
+    //
+    // 何时会出现：pid 被系统复用（上一任同名进程已退出，锁文件留在盘上），
+    // 或本进程先前写锁后没来得及登记 `HELD_WORKSPACE_LOCK`。原实现会拿
+    // `(pid, started)` 双因子比对，启动时刻对不上就判"持有者已死"→ 走到下面的
+    // 删除重抢；但若 `process_start_time_ms` 在我们自己身上取不到值（0 → 降级为
+    // 只比 pid），就会判成"活着"→ 返回 false → 前端跳过自动加载。
+    // 自己永远不会和自己抢锁，所以这里无条件接管（顺带把 pid/started 写正）。
+    if let Some((Some(hp), hst)) = holder {
+        if hp == pid {
+            let _ = std::fs::write(&path, payload.as_bytes());
+            *HELD_WORKSPACE_LOCK.lock().unwrap() = Some(path);
+            return true;
+        }
+        // 记下是谁占着 —— 用户报"明明没有其他实例"时，这行日志是唯一的线索。
+        log::info!(
+            "workspace lock held by pid={} started={:?} (this pid={} started={})",
+            hp, hst, pid, started
+        );
+    }
+
+    let holder_alive = holder
+        .map(|(p, st)| match (p, st) {
+            // 双因子：pid 相同但启动时刻不同 = 复用了该 pid 的另一个进程
+            (Some(p), Some(st)) if st > 0 => crate::instances::process_start_time_ms(p) == Some(st),
+            // 旧格式锁（只有 pid）：退化为只比 pid（保守：当成活着，少抢锁）
+            (Some(p), _) => process_alive(p),
+            _ => false,
         })
         .unwrap_or(false);
 
@@ -171,6 +191,10 @@ fn acquire_workspace_lock(workdir: &str) -> bool {
             return true;
         }
     }
+    log::warn!(
+        "not first instance for {} — lock held by a live process; auto-load of latest session will be skipped",
+        workdir
+    );
     false
 }
 
@@ -751,6 +775,7 @@ pub fn run() {
             get_plugin_settings,
             save_plugin_settings,
             verify_plugin_signature,
+            verify_plugin_digest,
             app_relaunch,
             list_plugin_processes,
             kill_plugin_process_cmd,
@@ -5380,6 +5405,22 @@ fn cleanup_plugin_residue(app: &tauri::AppHandle, plugin: &str) {
 /// 验证市场插件包签名(Ed25519)。下载 zip 原始字节 + 拉 `<slug>/signature` 端点,
 /// 用嵌入式官方公钥验证 (zip, sig)。
 /// 返回 { trusted: bool, status: "verified" | "unsigned" | "invalid" | "fetch_failed", detail? }
+/// 用服务端给的 (sha256, signature) 本地验签 —— **零下载**。
+///
+/// 列表页的信任判定走这条（2026-10-26）：原来每个插件都要下载整个 zip 才能验，
+/// 11 个串行合计 4.5 秒，列表被拖住。签名覆盖的只是 `SHA256(zip_bytes)`，
+/// 所以服务端在 `/api/plugins` 里直接给 digest + 签名，这里本地验一下就够了。
+///
+/// 安全性：仍用内嵌公钥独立验证，不盲信服务端（没有私钥伪造不出签名）。
+#[tauri::command]
+async fn verify_plugin_digest(digest_hex: String, signature_b64: String) -> Result<serde_json::Value, String> {
+    Ok(match crate::plugin_signature::verify_digest_signature(&digest_hex, &signature_b64) {
+        Ok(true) => serde_json::json!({ "trusted": true, "status": "verified" }),
+        Ok(false) => serde_json::json!({ "trusted": false, "status": "invalid" }),
+        Err(e) => serde_json::json!({ "trusted": false, "status": "invalid", "detail": e }),
+    })
+}
+
 /// 前端: trusted(true)=可「安装」; 否则只「AI 安装」+ AI 安全审查。
 #[tauri::command]
 async fn verify_plugin_signature(zip_url: String) -> Result<serde_json::Value, String> {

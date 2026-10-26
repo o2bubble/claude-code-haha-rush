@@ -38,10 +38,6 @@ import { chatReduce, isBackendBusy } from "./chatReduce";
 import { applyStoreEffects } from "./effects";
 import type { WireMessage } from "./types";
 
-// 本实例是否是第一个 GUI 实例（缓存）。第二个实例跳过"自动加载最近会话"，
-// 避免与已在运行（可能同一工作区）的实例争抢同一会话。
-let _isFirstInstance: boolean | null = null;
-
 // ── 旁问（/btw）的请求-响应登记表 ──
 //
 // 后端的 side_question 通道是**一问一答**式的（见 ideMode 的 handleSideQuestion）：
@@ -56,15 +52,23 @@ const pendingSideQuestions = new Map<
 /** 旁问超时（毫秒）。后端要起一次 API 调用，给足时间；超时后 UI 不会永远转圈。 */
 const SIDE_QUESTION_TIMEOUT_MS = 120_000;
 
+/**
+ * 本实例是否是**当前绑定工作区**的第一个 GUI 实例。
+ *
+ * ⚠️ **不能缓存**（2026-10-26 用户实测：切到没有其他实例的工作区仍不自动加载）。
+ * Rust 侧 `is_first_instance` 是**按工作区**算的（每次 bind_workspace 重算锁），
+ * 而这里曾把它缓存成模块级常量 —— 第一个工作区里若有别的实例（false），
+ * 之后用户切到任何工作区都永远拿到 false，"自动加载最近会话"被永久关掉。
+ * 这个 IPC 只是一次内存读，每次问一次即可。
+ */
 async function checkFirstInstance(): Promise<boolean> {
-  if (_isFirstInstance !== null) return _isFirstInstance;
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    _isFirstInstance = await invoke("is_first_instance");
+    return await invoke("is_first_instance");
   } catch {
-    _isFirstInstance = true;
+    // 非 Tauri 环境（浏览器/单测）—— 没有多实例概念，按"首个"处理
+    return true;
   }
-  return _isFirstInstance ?? true;
 }
 
 /** `awaitSessionListThenLoad` 的结果。 */

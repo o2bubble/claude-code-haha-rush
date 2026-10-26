@@ -18,8 +18,17 @@ export type PresetServerProfile = Exclude<ServerProfile, "custom">;
 /** 内网 96（同局域网直连，比绕公网隧道快）。 */
 export const INTRANET_SERVER_URL = "http://192.168.186.96:8765";
 
-/** 公网云（Cloudflare Tunnel）。 */
-export const CLOUD_SERVER_URL = "https://release.17lumen.cloud";
+/**
+ * 公网云（自有域名，2026-10-25 起）。
+ *
+ * 之前走 Cloudflare 隧道（`release.17lumen.cloud`）—— 当时企业网络封禁
+ * 对云主机 IP 的直接访问，只能让云主动连出来。该限制现已不存在，
+ * 改为直连自有域名：国内访问 ~0.37s vs 隧道 ~2.4s；且不受 CF 免费版
+ * 100MB 单请求体上限约束（发版上传组件包会超）。
+ *
+ * 旧域名仍可用（CF 隧道在线），老客户端靠 `migrate_cloud_url_to_own_domain` 切过来。
+ */
+export const CLOUD_SERVER_URL = "https://release.17lumen.com";
 
 /**
  * 档位 → 两个设置字段的值。

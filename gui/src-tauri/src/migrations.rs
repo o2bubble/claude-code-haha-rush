@@ -154,28 +154,59 @@ pub fn should_migrate_server_url(skill_registry_url: &str) -> bool {
     skill_registry_url.contains("localhost")
 }
 
-// ── 云服务器地址：裸 IP → Cloudflare Tunnel 域名（一次性） ──
+// ── 云服务器地址迁移链（按时间顺序，逐段重写） ──
+//
+//   [1] 裸 IP            http://123.56.66.84:8765
+//         ↓ 2026-09（企业网封 IP，只能让云主动连出）
+//   [2] CF 隧道域名       https://release.17lumen.cloud
+//         ↓ 2026-10-25（备案下发，可直连；隧道慢 6 倍 + 卡 100MB 上传）
+//   [3] 自有域名          https://release.17lumen.com      ← 当前默认
+//
+// 每一段只改写**恰好等于上一代默认值**的地址，用户自定义的一律不动。
 
-/// 云服务器的旧发布默认地址（云主机裸 IP）。
-const LEGACY_CLOUD_SERVER_URL: &str = "http://123.56.66.84:8765";
-/// 云服务器的新地址（Cloudflare Tunnel 域名）。
-const CLOUD_SERVER_URL: &str = "https://release.17lumen.cloud";
+/// [1] 初代默认：云主机裸 IP。
+const LEGACY_BARE_IP_URL: &str = "http://123.56.66.84:8765";
+/// [2] 二代默认：Cloudflare 隧道域名（现已降级为"旧值"）。
+const LEGACY_CF_TUNNEL_URL: &str = "https://release.17lumen.cloud";
+/// [3] 当前默认：自有域名。
+pub(crate) const CLOUD_SERVER_URL: &str = "https://release.17lumen.com";
 
-/// 把旧的云主机裸 IP 改写成 Cloudflare Tunnel 域名。返回是否发生改写。
+/// [1] → [3]：把最老的云主机裸 IP 改写成**当前**默认地址。
 ///
-/// 为什么迁移：裸 IP 在受限网络（企业网等）访问云主机是被静默丢包的，用户选了
-/// 「公网」档却完全连不上；域名走 CF 边缘则处处可达。代价是国内访问绕境外边缘
-/// 多约 200ms，对更新检查无感。
+/// 为什么仍保留：极老的用户可能从没更新过，设置里还是裸 IP。
+/// 直接跳到当前默认（而不是停在中间的 CF 域名），少跑一次迁移。
 ///
 /// 只改写**精确等于旧发布默认值**的地址 —— 用户自定义的任何其它地址一律不动
 /// （与 [`should_migrate_server_url`] 的克制风格一致）。
 pub fn migrate_legacy_cloud_url(settings: &mut AppSettings) -> bool {
     let mut changed = false;
-    if settings.skill_registry_url == LEGACY_CLOUD_SERVER_URL {
+    if settings.skill_registry_url == LEGACY_BARE_IP_URL {
         settings.skill_registry_url = CLOUD_SERVER_URL.to_string();
         changed = true;
     }
-    if settings.update_server_url == LEGACY_CLOUD_SERVER_URL {
+    if settings.update_server_url == LEGACY_BARE_IP_URL {
+        settings.update_server_url = CLOUD_SERVER_URL.to_string();
+        changed = true;
+    }
+    changed
+}
+
+/// [2] → [3]：把 Cloudflare 隧道域名改写成自有域名。
+///
+/// 为什么迁移：备案下发后可以直连自有域名 ——
+///   · 国内访问 ~0.37s，隧道要 ~2.4s（绕境外边缘）
+///   · CF 免费版单请求体上限 100MB，**发版上传组件包会直接 413**
+///     （2026-10-25 实测：git.zip 161MB 被拦）
+///
+/// 旧域名**保留在线**（CF 隧道不拆），所以这次迁移失败也不至于把用户弄断网；
+/// 它只是让新版本走更快的路径。
+pub fn migrate_cloud_url_to_own_domain(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+    if settings.skill_registry_url == LEGACY_CF_TUNNEL_URL {
+        settings.skill_registry_url = CLOUD_SERVER_URL.to_string();
+        changed = true;
+    }
+    if settings.update_server_url == LEGACY_CF_TUNNEL_URL {
         settings.update_server_url = CLOUD_SERVER_URL.to_string();
         changed = true;
     }
@@ -767,19 +798,19 @@ mod tests {
         }
     }
 
-    /// 旧发布默认（裸 IP）两处都被改写成 CF 域名。
+    /// 最老的裸 IP 两处都被改写成**当前**默认（直接跳到自有域名，不停在中间的 CF 域名）。
     #[test]
-    fn legacy_cloud_url_is_migrated_to_tunnel_domain() {
-        let mut s = settings_with_urls(LEGACY_CLOUD_SERVER_URL, LEGACY_CLOUD_SERVER_URL);
+    fn legacy_bare_ip_is_migrated_to_current_domain() {
+        let mut s = settings_with_urls(LEGACY_BARE_IP_URL, LEGACY_BARE_IP_URL);
         assert!(migrate_legacy_cloud_url(&mut s));
-        assert_eq!(s.skill_registry_url, "https://release.17lumen.cloud");
-        assert_eq!(s.update_server_url, "https://release.17lumen.cloud");
+        assert_eq!(s.skill_registry_url, CLOUD_SERVER_URL);
+        assert_eq!(s.update_server_url, CLOUD_SERVER_URL);
     }
 
     /// 幂等：迁移过再跑一次不该有变化（否则每次加载都会重写磁盘）。
     #[test]
     fn legacy_cloud_url_migration_is_idempotent() {
-        let mut s = settings_with_urls(LEGACY_CLOUD_SERVER_URL, LEGACY_CLOUD_SERVER_URL);
+        let mut s = settings_with_urls(LEGACY_BARE_IP_URL, LEGACY_BARE_IP_URL);
         migrate_legacy_cloud_url(&mut s);
         assert!(!migrate_legacy_cloud_url(&mut s), "第二次不应再改写");
     }
@@ -804,10 +835,70 @@ mod tests {
     /// 两个字段各自独立判定：只动与旧默认值相等的那一个。
     #[test]
     fn legacy_cloud_url_migration_is_per_field() {
-        let mut s = settings_with_urls(LEGACY_CLOUD_SERVER_URL, "http://192.168.186.96:8765");
+        let mut s = settings_with_urls(LEGACY_BARE_IP_URL, "http://192.168.186.96:8765");
         assert!(migrate_legacy_cloud_url(&mut s));
-        assert_eq!(s.skill_registry_url, "https://release.17lumen.cloud");
+        assert_eq!(s.skill_registry_url, CLOUD_SERVER_URL);
         assert_eq!(s.update_server_url, "http://192.168.186.96:8765", "自定义的内网地址不该被改");
+    }
+
+    // ── [2] → [3]：CF 隧道域名 → 自有域名（2026-10-25）──
+
+    /// CF 隧道域名两处都被改写成自有域名。
+    #[test]
+    fn cf_tunnel_url_is_migrated_to_own_domain() {
+        let mut s = settings_with_urls(LEGACY_CF_TUNNEL_URL, LEGACY_CF_TUNNEL_URL);
+        assert!(migrate_cloud_url_to_own_domain(&mut s));
+        assert_eq!(s.skill_registry_url, "https://release.17lumen.com");
+        assert_eq!(s.update_server_url, "https://release.17lumen.com");
+    }
+
+    /// 幂等：迁移过再跑一次不该有变化。
+    #[test]
+    fn cf_tunnel_migration_is_idempotent() {
+        let mut s = settings_with_urls(LEGACY_CF_TUNNEL_URL, LEGACY_CF_TUNNEL_URL);
+        migrate_cloud_url_to_own_domain(&mut s);
+        assert!(!migrate_cloud_url_to_own_domain(&mut s), "第二次不应再改写");
+    }
+
+    /// 已经是自有域名（当前默认）→ 不动。
+    #[test]
+    fn cf_tunnel_migration_leaves_current_domain_alone() {
+        let mut s = settings_with_urls(CLOUD_SERVER_URL, CLOUD_SERVER_URL);
+        assert!(!migrate_cloud_url_to_own_domain(&mut s));
+        assert_eq!(s.update_server_url, CLOUD_SERVER_URL);
+    }
+
+    /// 自定义地址（内网 96 / 用户自建）一律不动。
+    #[test]
+    fn cf_tunnel_migration_leaves_custom_urls_alone() {
+        for custom in [
+            "http://192.168.186.96:8765",
+            "https://my-own-server.example.com:8765",
+            "https://release.example.com",
+        ] {
+            let mut s = settings_with_urls(custom, custom);
+            assert!(!migrate_cloud_url_to_own_domain(&mut s), "{custom} 不应被迁移");
+            assert_eq!(s.skill_registry_url, custom);
+        }
+    }
+
+    /// 两个字段各自独立判定。
+    #[test]
+    fn cf_tunnel_migration_is_per_field() {
+        let mut s = settings_with_urls(LEGACY_CF_TUNNEL_URL, "http://192.168.186.96:8765");
+        assert!(migrate_cloud_url_to_own_domain(&mut s));
+        assert_eq!(s.skill_registry_url, CLOUD_SERVER_URL);
+        assert_eq!(s.update_server_url, "http://192.168.186.96:8765");
+    }
+
+    /// **完整迁移链**：裸 IP → 自有域名（两段串联后一步到位）。
+    #[test]
+    fn full_chain_bare_ip_ends_at_own_domain() {
+        let mut s = settings_with_urls(LEGACY_BARE_IP_URL, LEGACY_BARE_IP_URL);
+        migrate_legacy_cloud_url(&mut s);
+        migrate_cloud_url_to_own_domain(&mut s); // 第二段对已迁移值无操作
+        assert_eq!(s.skill_registry_url, "https://release.17lumen.com");
+        assert_eq!(s.update_server_url, "https://release.17lumen.com");
     }
 
     // ── DeepSeek 模型下线：profile 合并迁移（临时目录，绝不碰真实 ~/.claude）──

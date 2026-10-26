@@ -597,10 +597,9 @@ pub fn check_profile_injected(inject_var_count: usize, active: Option<&str>) -> 
     DiagnosticCheck::new("profile_injected", status, "后端注入", detail)
 }
 
-/// 云服务器地址（Cloudflare Tunnel 域名，非云主机裸 IP）。
-/// 裸 IP 在受限网络（如企业网）会被静默拦掉；走 CF 边缘则各处可达。
+/// 云服务器地址（自有域名，2026-10-25 起；此前是 Cloudflare 隧道域名）。
 /// 前端 `services/diagnosticsService.ts` 的同名常量必须与此保持一致。
-const CLOUD_SERVER_URL: &str = "https://release.17lumen.cloud";
+const CLOUD_SERVER_URL: &str = "https://release.17lumen.com";
 /// 内网更新/注册服务器（skillRegistryUrl）：可达 → 通过，否则失败。
 pub fn check_update_server(reachable: bool, url: &str) -> DiagnosticCheck {
     let (status, detail) = if reachable {

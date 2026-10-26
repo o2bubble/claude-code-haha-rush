@@ -1,0 +1,107 @@
+{
+  "pluginName": "config-export",
+  "displayName": "配置与资料导出",
+  "version": "0.2.0",
+  "apiVersion": "1.0",
+  "description": "把本机的 Claude 个人资料（CLAUDE.md、技能、记忆、笔记、计划、会话历史）与 GUI 配置（设置、超级桌面、插件设置）扫描分类后，勾选导出成一个 tar.gz。凭据类数据（登录态、签名私钥、API key）默认排除；包内含 manifest.json 描述每个文件的来源与恢复方式，为换机恢复做准备。",
+  "icon": "folderKanban",
+  "category": "tool",
+  "installType": "standard",
+  "dependencies": ["nodejs"],
+  "platforms": ["windows"],
+  "contributes": {
+    "panels": [
+      {
+        "id": "config-export-panel",
+        "title": "配置导出",
+        "panelKind": "in-main",
+        "userManaged": true,
+        "content": { "type": "html", "src": "panel.html" },
+        "process": "config-export-server"
+      }
+    ],
+    "commands": [],
+    "events": [],
+    "mcpTools": [
+      {
+        "name": "list_exportable",
+        "process": "config-export-server",
+        "description": "List every exportable category of personal data on this machine (CLAUDE.md, skills, memory, notes, plans, session history, GUI settings, super-desktop DBs, plugin settings) with file counts, byte sizes, and a `sensitive` flag. Read-only. Use this to tell the user what can be exported and to recommend a selection — they may want to skip the large session history. Call this before export_profile.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "audit_custom_item",
+        "process": "config-export-server",
+        "description": "Check whether a user's OWN backup scheme is complete BEFORE exporting it. It reads that scheme's entry document, extracts the file names it mentions, and cross-checks them against what's actually in the directory. This catches the most common real failure: the manual says 'run 01_sync.bat / 06_fix_paths.py' but those files live somewhere else — so the backup would be silently incomplete. Call this whenever the user asks to include their own migration folder, then show them the missing list and ask whether those files are elsewhere. Returns per-item issues with severity (high blocks export, medium/low are advisory).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "Absolute path to the scheme's directory" },
+            "entryDoc": { "type": "string", "description": "Which file is the manual (e.g. '00_迁移总览.md'). Omit to have it report that the entry doc is missing." }
+          },
+          "required": ["path"]
+        }
+      },
+      {
+        "name": "inspect_package",
+        "process": "config-export-server",
+        "description": "Inspect an existing backup package (.tar.gz produced by this plugin) without restoring anything: shows what it contains, when it was exported, which host it came from, which categories and custom items it holds, what credentials were stripped, and whether it carries its own restore protocol (IMPORT_GUIDE.md / RESTORE_REHEARSAL.md / tools/restore-tools.cjs). Use this FIRST when the user hands you a backup file to restore — it tells you whether you can follow the package's own guide or must reason from manifest.json alone.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string", "description": "Absolute path to the .tar.gz" }
+          },
+          "required": ["path"]
+        }
+      },
+      {
+        "name": "export_profile",
+        "process": "config-export-server",
+        "description": "Export the selected categories into a single .tar.gz plus a manifest.json describing every file (source path, size, sha256, restore mode). Credentials (login state, plugin signing key, API keys inside settings env) are NEVER included — settings.json always has its `env` block stripped. Pass `categories` to choose what goes in; omit it to use the default selection (everything except session history and credentials). Returns the archive path and a summary.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "categories": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Category ids to include (from list_exportable). Omit for the default selection."
+            },
+            "outputPath": {
+              "type": "string",
+              "description": "Where to write the .tar.gz. Omit to use ~/Downloads/claude-profile-export-<timestamp>.tar.gz"
+            },
+            "customItems": {
+              "type": "array",
+              "description": "User-authored backup schemes the plugin cannot enumerate (their own migration manual + scripts + private data). Default behaviour: the plugin records ONLY a description (what it is, its entry document, how to run/verify it) and does NOT bundle the files — because the user's own scheme usually handles its own backup, and bundling could violate the rules that scheme defines. Pass `includeData: true` only when that scheme's data is NOT covered anywhere else and would otherwise be unrecoverable. Overlaps with built-in categories are computed automatically (only when data is bundled) and written into IMPORT_GUIDE.md so the importing AI warns the user instead of silently overwriting. Use this when the user says things like \"also back up my own migration folder\".",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": { "type": "string", "description": "Absolute path to the scheme's directory (or a single file)" },
+                  "label": { "type": "string", "description": "Human-readable name, e.g. 'X 盘两机同步方案'" },
+                  "id": { "type": "string", "description": "Optional stable id. Derived from the directory name when omitted." },
+                  "includeData": { "type": "boolean", "description": "Bundle the actual files (default false = description only). Set true only if this data isn't backed up by the user's own scheme and would otherwise be lost." },
+                  "entryDoc": { "type": "string", "description": "Which file the importing AI should read first (e.g. '00_迁移总览.md')" },
+                  "notes": { "type": "string", "description": "One-line context about what this is" },
+                  "importPrompt": { "type": "string", "description": "Instructions for the importing AI describing how to run this scheme" },
+                  "verifyPrompt": { "type": "string", "description": "How the importing AI should verify the import succeeded" }
+                },
+                "required": ["path"]
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "config-export-server",
+      "command": "node",
+      "args": ["export-server.cjs"],
+      "env": {
+        "CLAUDE_PLUGIN_WORKSPACE": "${workspace}"
+      },
+      "startOn": "workspace_bound"
+    }
+  ]
+}

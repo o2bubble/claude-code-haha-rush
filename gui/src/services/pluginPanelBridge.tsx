@@ -124,6 +124,10 @@ function PluginIframePanel({ manifest, panel }: { manifest: PluginManifest; pane
   const query: string[] = [];
   if (port) query.push(`port=${port}`);
   query.push(`theme=${theme}`);
+  // 能力声明：插件据此决定走"新路径"还是"降级路径"。
+  // 例：config-export 看到 export-save → 弹保存对话框；看不到 → 存到 Downloads。
+  // 这样**旧版 GUI 也能跑新插件**，只是少了那点体验。
+  query.push(`caps=${PANEL_CAPS.join(",")}`);
   if (intentRef.current) {
     try {
       query.push(`params=${encodePanelParams(intentRef.current)}`);
@@ -553,6 +557,49 @@ export async function dispatchPluginUplink(
     case "write-workspace-file":
       await writeWorkspaceFile(payload);
       return true;
+    // ── 导出类插件用：让宿主弹系统保存对话框 ──
+    //
+    // 为什么必须由宿主代劳：插件面板是**跨源 iframe**（plugins:// 或
+    // plugins.localhost），调不到 Tauri 的 dialog 插件（capability 只授给
+    // main / float-* 等窗口）。"选一个保存路径"只能走这条路。
+    //
+    // 结果回推给**发起请求的那个面板**（按 requestId 匹配），取消则为 null。
+    case "export-save": {
+      const req = sanitizeExportSaveRequest(payload);
+      if (!req) return true; // 非法请求：当作已处理 —— 别落进兜底（那会往输入框塞文本）
+      const chosen = await pickSavePath(req.suggestedName, req.pick);
+      pushToPluginPanel(pluginName, {
+        kind: "export-save-result",
+        payload: { requestId: req.requestId, path: chosen },
+      });
+      return true;
+    }
+    // 选一个**已存在**的文件（恢复流程：选备份包）
+    case "pick-open-file": {
+      const req = sanitizePickOpenRequest(payload);
+      if (!req) return true;
+      const chosen = await pickOpenFile(req.filters);
+      pushToPluginPanel(pluginName, {
+        kind: "pick-open-file-result",
+        payload: { requestId: req.requestId, path: chosen },
+      });
+      return true;
+    }
+    // 把一段提示词填进聊天输入框（插件把流程交给 AI，但**由用户按发送**）
+    case "chat-prompt": {
+      const req = sanitizeChatPrompt(payload);
+      if (!req) return true;
+      const { Events } = await import("./events");
+      const { windowBus } = await import("./windowBus");
+      windowBus.emit(Events.CHAT_INSERT_TEXT, { text: req.text, atStart: true });
+      return true;
+    }
+    // 在文件管理器里选中某个文件（降级路径：没弹框时告诉用户包在哪）
+    case "reveal-path": {
+      const p = sanitizeRevealPath(payload);
+      if (p) await revealPath(p);
+      return true;
+    }
     default:
       return false;
   }
@@ -747,6 +794,16 @@ async function startPluginFloatDrag(
   document.addEventListener("mouseup", onUp, { once: true });
 }
 
+/** 面板能力声明（经 URL 的 `caps=` 传给 iframe）。
+ *
+ *  **新增能力就往这里加一个名字** —— 插件面板据此判断宿主支不支持某条上行，
+ *  不支持就自己降级。这样老 GUI 装新插件不会"点了没反应"。
+ *
+ *  当前：
+ *   · `export-save` —— 宿主支持弹系统保存对话框（`kind:"export-save"` 上行）
+ */
+export const PANEL_CAPS = ["export-save"] as const;
+
 /** 向"已挂载的该插件面板 iframe"推送参数（跨源 postMessage, 目标 = plugins:// iframe）。
  *  用 window 上存储的 iframe 引用（PluginIframePanel 注册）——避免全局 query 扫描。 */
 function pushParamsToPanelFrames(pluginName: string, panelId: string, params?: Record<string, unknown>): void {
@@ -761,6 +818,163 @@ function pushParamsToPanelFrames(pluginName: string, panelId: string, params?: R
         "*",
       );
     } catch { /* iframe 未就绪/已卸载 */ }
+  }
+}
+
+/** 向该插件的**所有**已挂载面板推一条消息（不指定 panelId —— 用于"回推请求结果"）。
+ *
+ *  为什么遍历全部而不是精确到某一 panel：上行消息里只有 pluginName，没有 panelId；
+ *  而结果里带 requestId，面板自己按 id 过滤，多发一份无害（同一面板可能因
+ *  StrictMode/重挂载存在多个 iframe 实例）。 */
+function pushToPluginPanel(pluginName: string, msg: { kind: string; payload?: unknown }): void {
+  const prefix = `plugin:${pluginName}:`;
+  for (const [key, frames] of panelFrames) {
+    if (!key.startsWith(prefix)) continue;
+    for (const f of frames) {
+      try {
+        f.contentWindow?.postMessage({ source: "plugin:host", ...msg }, "*");
+      } catch { /* iframe 未就绪/已卸载 */ }
+    }
+  }
+}
+
+// ── 导出类插件：保存对话框 ──
+
+/** 校验 export-save 请求 —— payload 来自第三方插件，**跨信任边界**。
+ *  suggestedName 只允许纯文件名（禁路径分隔符 / 盘符 / `..`），非空且 ≤ 200 字符；
+ *  requestId 非空 ≤ 100。不合规 → null（调用方当作已处理，不落兜底）。 */
+export function sanitizeExportSaveRequest(
+  raw: unknown,
+): { requestId: string; suggestedName: string; pick: "file" | "directory" } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const requestId = typeof r.requestId === "string" ? r.requestId.trim() : "";
+  if (!requestId || requestId.length > 100) return null;
+  // pick=directory：让用户选一个目录（自定义项用）。此时 suggestedName 可空。
+  const pick = r.pick === "directory" ? "directory" : "file";
+  const rawName = typeof r.suggestedName === "string" ? r.suggestedName.trim() : "";
+  if (pick === "directory") {
+    return { requestId, suggestedName: "", pick };
+  }
+  // 只取 basename：插件给什么路径都行，落盘时只认文件名
+  const name = rawName.split(/[\\/]/).pop() ?? "";
+  if (!name || name.length > 200) return null;
+  if (name === "." || name === "..") return null;
+  if (/^[a-zA-Z]:/.test(name)) return null;
+  return { requestId, suggestedName: name, pick };
+}
+
+/** 弹系统保存对话框（pick=file）或目录选择框（pick=directory）。用户取消 → null。 */
+async function pickSavePath(
+  suggestedName: string,
+  pick: "file" | "directory" = "file",
+): Promise<string | null> {
+  try {
+    const dlg = await import("@tauri-apps/plugin-dialog");
+    if (pick === "directory") {
+      const chosen = await dlg.open({ directory: true, multiple: false });
+      return typeof chosen === "string" && chosen ? chosen : null;
+    }
+    const chosen = await dlg.save({
+      defaultPath: suggestedName,
+      filters: [
+        { name: "压缩包", extensions: ["tar.gz", "tgz"] },
+        { name: "全部文件", extensions: ["*"] },
+      ],
+    });
+    return typeof chosen === "string" && chosen ? chosen : null;
+  } catch (e) {
+    console.warn("[plugin] dialog failed:", e);
+    return null;
+  }
+}
+
+/** 校验 reveal-path 的输入 —— 必须是绝对路径（绝对路径来自**宿主自己**产生的
+ *  导出结果，不是插件随便给的；仍做最基本的形状校验）。 */
+export function sanitizeRevealPath(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = (raw as Record<string, unknown>).path;
+  if (typeof p !== "string") return null;
+  const trimmed = p.trim();
+  if (!trimmed || trimmed.length > 4096) return null;
+  if (trimmed.includes("\0")) return null;
+  // Windows 盘符 或 POSIX 绝对路径
+  if (!/^[a-zA-Z]:[\\/]/.test(trimmed) && !trimmed.startsWith("/")) return null;
+  return trimmed;
+}
+
+/** 校验 `chat-prompt` 请求 —— 插件把自己的一段提示词**填进聊天输入框**。
+ *
+ *  为什么给插件这个能力：导出/恢复类插件需要"把流程交给 AI"，
+ *  但插件面板不能直接跟 AI 对话。填进输入框后**由用户按发送**，
+ *  用户始终掌握"要不要执行"这个决定（与 `chat_send_command` 同一哲学）。
+ *
+ *  安全边界：只是**文本**，不自动发送；长度上限防滥用。 */
+export function sanitizeChatPrompt(raw: unknown): { text: string } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const t = (raw as Record<string, unknown>).text;
+  if (typeof t !== "string") return null;
+  const text = t.trim();
+  if (!text || text.length > 20000) return null;
+  return { text };
+}
+
+/** 校验"选一个**已存在的文件**"的请求（恢复流程用：选备份包）。 */
+export function sanitizePickOpenRequest(
+  raw: unknown,
+): { requestId: string; filters?: { name: string; extensions: string[] }[] } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const requestId = typeof r.requestId === "string" ? r.requestId.trim() : "";
+  if (!requestId || requestId.length > 100) return null;
+  let filters: { name: string; extensions: string[] }[] | undefined;
+  if (Array.isArray(r.filters)) {
+    filters = r.filters
+      .filter((f): f is Record<string, unknown> => !!f && typeof f === "object")
+      .map((f) => ({
+        name: typeof f.name === "string" ? f.name.slice(0, 60) : "文件",
+        // 扩展名只允许字母数字（防奇怪输入传给 dialog）
+        extensions: Array.isArray(f.extensions)
+          ? f.extensions.filter((e): e is string => typeof e === "string" && /^[a-zA-Z0-9.*]+$/.test(e)).slice(0, 10)
+          : [],
+      }))
+      .filter((f) => f.extensions.length > 0)
+      .slice(0, 5);
+    if (!filters.length) filters = undefined;
+  }
+  return { requestId, filters };
+}
+
+/** 弹"打开文件"对话框（选已有的备份包）。取消 → null。 */
+async function pickOpenFile(filters?: { name: string; extensions: string[] }[]): Promise<string | null> {
+  try {
+    const dlg = await import("@tauri-apps/plugin-dialog");
+    const chosen = await dlg.open({
+      multiple: false,
+      directory: false,
+      filters: filters && filters.length ? filters : [{ name: "备份包", extensions: ["gz", "tgz", "tar"] }],
+    });
+    return typeof chosen === "string" && chosen ? chosen : null;
+  } catch (e) {
+    console.warn("[plugin] open dialog failed:", e);
+    return null;
+  }
+}
+
+/** 在文件管理器里选中该文件（失败静默 —— 这只是便利功能）。
+ *
+ *  用 `plugin-shell` 的 `open`（本仓已装、`shell:allow-open` 在白名单）。
+ *  **不用 opener 插件** —— 它没装；也别为此加依赖（一个只为降级路径服务的便利功能不值得）。
+ *
+ *  Windows 上传目录路径给 `open` 会**打开该文件夹**（不是选中文件）——
+ *  对"告诉你包在哪"这个目的够用。 */
+async function revealPath(absPath: string): Promise<void> {
+  try {
+    const { open } = await import("@tauri-apps/plugin-shell");
+    const dir = absPath.replace(/[\\/][^\\/]+$/, ""); // 取其所在目录
+    await open(dir || absPath);
+  } catch (e) {
+    console.warn("[plugin] reveal in dir failed:", e);
   }
 }
 

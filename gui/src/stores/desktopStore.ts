@@ -59,6 +59,18 @@ let _saveTimer: ReturnType<typeof setTimeout> | null = null;
 // 非激活桌面，只存激活桌面会让那些条目"内存有、盘上无"且 API 照样返回成功。
 const _dirtyDesktops = new Set<string>();
 
+// ── "写未落库"的追踪（治「删了又回来 / 刚建的不见了」）──
+//
+// 写是**防抖异步**（scheduleSave 500ms → flush），读是**即时**（fetchDesktops
+// 整体覆盖）。两者之间有个窗口，任何一次 refetch（跨实例 db_changed、
+// WORKSPACE_BOUND 重放）都会拿 DB 旧状态覆盖内存。所以必须记住"哪些改动还
+// 没落地"，在覆盖时把它们保住：
+//   · `_pendingCreates` —— 本地新建、尚未确认写到 DB 的桌面 id → 覆盖时**补回**
+//   · `_pendingDeletes` —— 本地已删、尚未确认从 DB 删掉的桌面 id → 覆盖时**滤掉**
+// 两者在不同阶段清空：写成功（或确认失败后重试）后移除。
+const _pendingCreates = new Set<string>();
+const _pendingDeletes = new Set<string>();
+
 // ─── History helpers (wrap desktopHistoryStore, passing internal state) ───
 
 function _push(desktopId: string): void {
@@ -157,7 +169,15 @@ async function fetchDesktops(): Promise<void> {
       LOAD_TIMEOUT_MS,
       "加载桌面数据超时"
     );
-    if (records && Array.isArray(records) && records.length > 0) {
+    // 删除尚未落库的 id —— 读回来的记录里若有它们，要**过滤掉**。
+    // 否则「删了又回来」（用户实测）：deleteDesktop 之后到 DB 真正删完之间，
+    // 任何一次 refetch（db_changed / WORKSPACE_BOUND）都会把它捞回内存。
+    const pendingDel = new Set(_pendingDeletes);
+    const filtered = Array.isArray(records)
+      ? (records as any[]).filter((r) => !pendingDel.has(r?.id))
+      : records;
+
+    if (filtered && Array.isArray(filtered) && filtered.length > 0) {
       // 保留本地已存在桌面的视口（pan/zoom + 网格）——跨 GUI refetch（server:data-changed）
       // 或自 echo 时，服务端记录的 view 可能比本地旧（500ms 防抖保存尚未落库 / 他窗并发
       // 改动）。无条件用服务端 view 重建会让用户刚做的缩放/平移"闪回"回旧值。items/
@@ -168,7 +188,7 @@ async function fetchDesktops(): Promise<void> {
       // refetch，无条件写回 desktops[0] 会让用户看到"点完自己跳回桌面 1"，
       // 像是点击没生效。只有当原选中已不存在（被删 / 换了工作区）才回退第一张。
       const prevActive = activeDesktopId;
-      desktops = records.map((r: any) => {
+      desktops = (filtered as any[]).map((r: any) => {
         const rec = recordToDesktop(r);
         const prev = prevById.get(rec.id);
         if (prev) {
@@ -181,6 +201,22 @@ async function fetchDesktops(): Promise<void> {
         }
         return rec;
       });
+      // 再补回**本地新建、但还没落库**的桌面（内存有、服务端没有）。
+      //
+      // 与 `pendingDel` 对称，同一个根因：写是防抖异步的，读是即时的。
+      // 不加这一步 → 新建后 500ms 内来一次 refetch，新桌面被整体覆盖丢掉
+      // （用户视角"刚建的桌面没了"），随后"列表为空"分支又自动建一个 ——
+      // 这就是**多个同名 "Desktop 1"** 的由来。
+      //
+      // ⚠️ 只认 `_pendingCreates`（本地建、尚未确认落库），**不能**用"服务端没有
+      // 就补回"—— 那会把别的实例正常删掉的桌面也捞回来。
+      const seen = new Set(desktops.map((d) => d.id));
+      for (const d of prevById.values()) {
+        if (!seen.has(d.id) && _pendingCreates.has(d.id)) {
+          desktops = [...desktops, d];
+          seen.add(d.id);
+        }
+      }
       activeDesktopId = desktops.some((d) => d.id === prevActive)
         ? prevActive
         : desktops[0].id;
@@ -193,9 +229,12 @@ async function fetchDesktops(): Promise<void> {
       }
       _lastLoadError = null;
     } else {
-      // Bound workspace has no desktops — don't keep stale data from another DB
-      desktops = [];
-      activeDesktopId = null;
+      // 服务端说"没有桌面"。但**本地可能刚建了一个还没落库**（防抖窗口内）——
+      // 那种情况不能整体清空，否则用户看到"刚建的桌面没了"，面板的
+      // `length === 0 → createDesktop` 又会再建一个 → 同名重复。
+      const keepCreate = desktops.filter((d) => _pendingCreates.has(d.id));
+      desktops = keepCreate;
+      activeDesktopId = keepCreate[0]?.id ?? null;
       _nextZIndex = 100;
       _lastLoadError = null;
     }
@@ -354,13 +393,25 @@ export function createDesktop(name: string): Desktop {
     updatedAt: Date.now(),
   };
   desktops = [...desktops, d];
+  // 标记"尚未落库"—— refetch 覆盖时据此补回（见 _pendingCreates 的注释）
+  _pendingCreates.add(d.id);
   if (!activeDesktopId) activeDesktopId = d.id;
   notifyDesktopChanged(d.id);
   return d;
 }
 
 export function deleteDesktop(id: string): void {
-  tauriInvoke("db_delete_desktop", { id });
+  // 标记"删除尚未落库"—— refetch 覆盖时据此滤掉，否则删掉的会被捞回来
+  _pendingDeletes.add(id);
+  _pendingCreates.delete(id);
+  void tauriInvoke("db_delete_desktop", { id })
+    .then(() => { _pendingDeletes.delete(id); })
+    .catch((e) => {
+      // 删除失败：**保留 pending 标记**（下次 refetch 仍会滤掉它，不让它诈尸），
+      // 但要如实告诉用户 —— 否则"删了又回来"永远查不出原因。
+      console.error("[desktop] delete failed:", e);
+      addStatusMessage("删除桌面失败，重启后可能重新出现", "warn");
+    });
   desktops = desktops.filter((d) => d.id !== id);
   if (activeDesktopId === id) {
     activeDesktopId = desktops[0]?.id ?? null;
@@ -794,6 +845,8 @@ async function flushDirtyDesktops(): Promise<void> {
     try {
       const record = desktopToRecord(d);
       const superseded = (await tauriInvoke("db_save_desktop", { desktop: record })) as boolean;
+      // 落库成功 → 不再是"待创建"（之后 refetch 以 DB 为准即可）
+      _pendingCreates.delete(id);
       if (superseded) {
         addStatusMessage("该桌面已被其他窗口修改，已用最新覆盖", "warn");
       }

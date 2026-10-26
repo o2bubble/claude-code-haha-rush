@@ -2,6 +2,7 @@
 
 import os
 import io
+import hashlib
 import time
 import zipfile
 import shutil
@@ -96,9 +97,54 @@ async def list_packages():
     return {"ok": True, "data": packages}
 
 
+def _signature_meta(slug: str) -> dict:
+    """把「这个包能不能验签」所需的最小信息给出去 —— **不暴露 zip 本身**。
+
+    为什么要有这个（2026-10-26）：
+    客户端为了判断"是否受信任"，原来必须**下载整个 zip** 再算 SHA256 并在本地
+    用 Ed25519 验签。11 个插件串行下载合计 4.5 秒 —— 插件列表因此卡住。
+
+    但签名覆盖的只是 `SHA256(zip_bytes)`。所以服务端把
+    **digest + signature** 直接给客户端，客户端用**内嵌公钥**本地验一下就行。
+
+    安全性：这里给出的是"官方对这个 digest 的背书"，客户端仍会用内置公钥
+    **独立验证签名**，不盲信服务端 —— 没有私钥的服务端伪造不出有效签名。
+    """
+    sig_path = SKILLS_STORE / f"{slug}.sig"
+    if not sig_path.exists():
+        return {"signed": False}
+    try:
+        signature = sig_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return {"signed": False}
+    if not signature:
+        return {"signed": False}
+
+    # digest 对应的是**原始上传的 zip 字节**（签名绑死原始字节，不能重打包）。
+    # 没有原始 zip 说明这包靠重打包兜底 —— 那种情况的签名无法验证
+    # （见 plugin_signature.rs 的说明），保守报 unsigned。
+    raw_zip = SKILLS_STORE / f"{slug}.zip"
+    if not raw_zip.exists():
+        return {"signed": False, "reason": "no-raw-zip"}
+
+    h = hashlib.sha256()
+    with raw_zip.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return {
+        "signed": True,
+        "sha256": h.hexdigest(),
+        "signature": signature,
+        "alg": "ed25519",
+    }
+
+
 @router.get("/plugins")
 async def list_plugins():
     packages = models.list_packages(pkg_type="plugin")
+    # 附带签名元数据 —— 客户端不必下载 zip 就能判断信任状态（见 _signature_meta）
+    for p in packages:
+        p["signature"] = _signature_meta(p.get("slug", ""))
     return {"ok": True, "data": packages}
 
 

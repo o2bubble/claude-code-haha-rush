@@ -734,12 +734,21 @@ pub fn load_global_settings() -> AppSettings {
         save_global_settings(&s).ok();
     }
 
-    // Migrate the legacy cloud default (bare IP → Cloudflare Tunnel domain).
+    // Migrate the legacy cloud default (bare IP → current domain).
     // The bare IP is unreachable from restricted networks (the whole point of
     // the switch); only the exact legacy default is rewritten, custom URLs are
     // left alone. See `migrations::migrate_legacy_cloud_url`.
     if migrate_legacy_cloud_url(&mut s) {
-        log::info!("Migrating cloud server URL from bare IP to tunnel domain");
+        log::info!("Migrating cloud server URL from bare IP to current domain");
+        save_global_settings(&s).ok();
+    }
+
+    // Migrate the Cloudflare Tunnel default → own domain (2026-10-25).
+    // Faster domestically (~0.37s vs ~2.4s) and removes CF's 100MB request-body
+    // cap that breaks release uploads. The old tunnel stays online, so this is
+    // a pure upgrade — see `migrations::migrate_cloud_url_to_own_domain`.
+    if migrate_cloud_url_to_own_domain(&mut s) {
+        log::info!("Migrating cloud server URL from CF tunnel to own domain");
         save_global_settings(&s).ok();
     }
 
@@ -757,7 +766,8 @@ pub fn load_global_settings() -> AppSettings {
 // 本体已集中到 src/migrations.rs（全清单见其 MIGRATION_REGISTRY）。
 // re-export 保持原有 `settings::xxx` 调用路径与测试不变。
 pub use crate::migrations::{
-    migrate_legacy_cloud_url, migrate_quick_prompts_to_global, should_migrate_server_url,
+    migrate_cloud_url_to_own_domain, migrate_legacy_cloud_url,
+    migrate_quick_prompts_to_global, should_migrate_server_url,
 };
 
 /// Merge `extra` prompts into `base`, dedup by id (first occurrence wins).

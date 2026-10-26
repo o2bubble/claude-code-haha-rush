@@ -85,9 +85,78 @@ export default function PluginMarketPanel() {
   useEffect(() => { void getGuiPlatform().then(setPlatform); }, []);
   // 受信任包(slug): Rust Ed25519 签名验证通过。未受信任 → 只「AI 安装」+ AI 安全审查
   const [trustedSlugs, setTrustedSlugs] = useState<Set<string>>(new Set());
+  // 仍在验证签名中的 slug。
+  //
+  // ⚠️ **必须和「确实不受信任」区分开**：签名验证要下载每个插件的 zip 再校验，
+  // 11 个插件串行约 4.5 秒。以前这段卡在 fetchPackages 里，列表要等它跑完才显示
+  // （用户实测「要过好多秒才出来」）。
+  // 现在列表先渲染、验证转后台；但后台期间 `trustedSlugs` 是空的 ——
+  // 若直接拿它判断，会瞬间给**所有**插件挂上「未受信任」徽标（误报）。
+  // 所以用这个集合表示"还没结论"，界面对它什么都不显示。
+  const [verifyingSlugs, setVerifyingSlugs] = useState<Set<string>>(new Set());
 
   const refreshInstalled = useCallback(async () => {
     setInstalledMap(await getInstalledPlugins());
+  }, []);
+
+  /**
+   * 后台验证签名 —— **不阻塞列表显示**。
+   *
+   * 两条路径：
+   *  ① **服务端给了 `signature` 元数据** → 本地验 `verify_plugin_digest`，
+   *     **零下载**（毫秒级）。2026-10-26 起服务端在 `/api/plugins` 里直接带
+   *     sha256 + 签名 —— 这才是快的那条路。
+   *  ② 老服务端没给元数据 → 回退到下载 zip 验证（`verify_plugin_signature`）。
+   *     保留是为了**向后兼容**：用户可能连的是旧版 96 内网服务。
+   *
+   * 并发 4：回退路径要下载，串行太慢；全并发又可能把带宽挤爆。
+   * 每个完成后立刻回填，用户能看到徽标一个个出现。
+   */
+  const verifySignatures = useCallback(async (pkgs: PackageSummary[]) => {
+    if (!pkgs.length) return;
+    setVerifyingSlugs(new Set(pkgs.map((p) => p.slug)));
+
+    const { invoke } = await import("@tauri-apps/api/core");
+    const CONCURRENCY = 4;
+    let cursor = 0;
+
+    const worker = async () => {
+      while (cursor < pkgs.length) {
+        const p = pkgs[cursor++];
+        let trusted = false;
+        try {
+          const sig = p.signature;
+          if (sig?.signed && sig.sha256 && sig.signature) {
+            // ① 零下载路径
+            const r = await invoke<{ trusted: boolean }>("verify_plugin_digest", {
+              digestHex: sig.sha256,
+              signatureB64: sig.signature,
+            });
+            trusted = r.trusted;
+          } else {
+            // ② 回退：老服务端（元数据缺失，或该包确实没有签名）
+            const r = await invoke<{ trusted: boolean }>("verify_plugin_signature", {
+              zipUrl: skillMarketplace.getPackageDownloadUrl(p.slug),
+            });
+            trusted = r.trusted;
+          }
+        } catch {
+          trusted = false; // 验证失败 → 按未受信任处理（宁可保守）
+        }
+        if (trusted) setTrustedSlugs((prev) => new Set(prev).add(p.slug));
+        // 逐个回填：用户可能在全部验证完成前就点开了详情页
+        setPluginDetailTrusted(p.slug, trusted);
+        setVerifyingSlugs((prev) => {
+          const next = new Set(prev);
+          next.delete(p.slug);
+          return next;
+        });
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, pkgs.length) }, worker),
+    );
   }, []);
 
   const fetchPackages = useCallback(async () => {
@@ -98,26 +167,15 @@ export default function PluginMarketPanel() {
       // 服务端 /api/plugins 已按 type=plugin 过滤; 保留客户端过滤作旧服务端防御
       const pkgs = list.filter((p) => p.type === "plugin");
       setPackages(pkgs);
-      // 批量验证签名（信任判定）— 串行逐个 verify(Rust 下载 zip 校验), 失败即未受信任
-      const { invoke } = await import("@tauri-apps/api/core");
-      const trusted = new Set<string>();
-      for (const p of pkgs) {
-        try {
-          const r = await invoke<{ trusted: boolean }>("verify_plugin_signature", {
-            zipUrl: skillMarketplace.getPackageDownloadUrl(p.slug),
-          });
-          if (r.trusted) trusted.add(p.slug);
-          // 逐个回填: 用户可能在全部验证完成前就点开了详情页
-          setPluginDetailTrusted(p.slug, r.trusted);
-        } catch { /* 验证失败 → 不加入 trusted */ }
-      }
-      setTrustedSlugs(trusted);
+      // ⚠️ 列表**立刻**渲染；签名验证转后台（见 verifySignatures 注释）。
+      // 不 await —— 否则要等 4.5 秒才看到列表。
+      void verifySignatures(pkgs);
     } catch (e: any) {
       setError(e.message ?? "Unknown error");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [verifySignatures]);
 
   useEffect(() => { refreshInstalled(); fetchPackages(); }, [refreshInstalled, fetchPackages]);
 
@@ -336,6 +394,7 @@ export default function PluginMarketPanel() {
     requestAiUninstall,
     platform,
     trustedSlugs,
+    verifyingSlugs,
   };
 
   return (
@@ -491,6 +550,29 @@ export interface PkgCardCtx {
   platform: GuiPlatform;
   /** 签名验证通过的 slug 集（Ed25519 Rust 校验）— 非集内只能 AI 安装 */
   trustedSlugs: Set<string>;
+  /** 签名**仍在验证中**的 slug。这些不急下「未受信任」结论，界面不显示徽标 */
+  verifyingSlugs: Set<string>;
+}
+
+/**
+ * 是否该显示「未受信任」徽标。
+ *
+ * 纯粹为了把三态说清楚（已装 / 验证中 / 未受信任）：
+ *   · 已装的信任状态由「已安装」徽标承载，这里不管
+ *   · **验证中 → 不显示**（否则后台验证那 4.5 秒里，所有插件都会闪一下"未受信任"）
+ *   · 验证完且不在 trusted 里 → 才是不受信任
+ *
+ * 抽成独立函数是为了能单测 —— 这个条件写错过一次（列表转后台时忘了加 verifying）。
+ */
+export function shouldShowUntrustedBadge(args: {
+  slug: string;
+  isInstalled: boolean;
+  trustedSlugs: Set<string>;
+  verifyingSlugs: Set<string>;
+}): boolean {
+  if (args.isInstalled) return false;
+  if (args.verifyingSlugs.has(args.slug)) return false;
+  return !args.trustedSlugs.has(args.slug);
 }
 
 export function PkgCard({ pkg, ctx }: { pkg: PackageSummary; ctx: PkgCardCtx }) {
@@ -554,8 +636,13 @@ export function PkgCard({ pkg, ctx }: { pkg: PackageSummary; ctx: PkgCardCtx }) 
         {needsUpdate && (
           <span style={badgeStyle("info", 10)}>{i18nT("pluginMarket.badgeUpdatable")}</span>
         )}
-        {/* 未受信任徽标: 未装(已装的信任状态由「已安装」徽标承载, 避免徽标行过挤) */}
-        {!installedName && !ctx.trustedSlugs.has(pkg.slug) && (
+        {/* 未受信任徽标 —— 判据见 shouldShowUntrustedBadge（三态，验证中不显示） */}
+        {shouldShowUntrustedBadge({
+          slug: pkg.slug,
+          isInstalled: installedName != null,
+          trustedSlugs: ctx.trustedSlugs,
+          verifyingSlugs: ctx.verifyingSlugs,
+        }) && (
           <span style={badgeStyle("warn", 10)} title={i18nT("pluginMarket.untrustedTip")}>
             {i18nT("pluginMarket.untrusted")}
           </span>
