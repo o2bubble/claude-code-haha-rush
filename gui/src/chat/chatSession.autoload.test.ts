@@ -98,6 +98,11 @@ beforeEach(() => {
   tauri.calls.length = 0;
 });
 
+// ⚠️ 显式放宽超时：每个用例都要 `vi.resetModules()` 再**动态 import** 整个
+// chatSession 模块图。单独跑 0.5s，但全量并行（89 个测试文件）时模块解析竞争
+// 会让它涨到 5s 以上 —— 默认 5s 超时会偶发误报成"测试挂了"，其实只是慢。
+const SLOW_MODULE_RELOAD = 20_000;
+
 describe("自动加载最近会话 —— 工作区切换", () => {
   it("单工作区 + 首个实例 → 正常自动加载", async () => {
     const s = await freshSession();
@@ -110,7 +115,7 @@ describe("自动加载最近会话 —— 工作区切换", () => {
       expect(resumed(ws)).toHaveLength(1);
     });
     expect(resumed(ws)[0]).toContain('"session_id":"s1"');
-  });
+  }, SLOW_MODULE_RELOAD);
 
   it("首个实例判定是**按工作区**的：切到没有其他实例的工作区仍应自动加载", async () => {
     const s = await freshSession();
@@ -137,5 +142,5 @@ describe("自动加载最近会话 —— 工作区切换", () => {
       expect(resumed(wsB)).toHaveLength(1);
     });
     expect(resumed(wsB)[0]).toContain('"session_id":"b1"');
-  });
+  }, SLOW_MODULE_RELOAD);
 });

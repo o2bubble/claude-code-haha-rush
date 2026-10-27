@@ -12,6 +12,23 @@ export interface PackageSummary {
   tags: string[];
   download_count: number;
   skill_count: number;
+  /**
+   * 包内每个技能的**内容哈希** `{技能名: sha256hex}`。
+   *
+   * 服务端发布时算好（算法见 docs/skill-content-hash.md）。客户端对本地技能
+   * 目录用同一算法算一遍就能判断是否过期 —— **不用下载 zip，也不依赖版本号**。
+   *
+   * 老服务端没有该字段 → undefined → 面板显示"无法判断"，而不是误报要更新。
+   */
+  skill_hashes?: Record<string, string>;
+  /**
+   * 算哈希时**额外排除**的子目录名（服务端下发）。
+   *
+   * 有的包子目录体积巨大且几乎不变（`ppt-master/templates` 有 12450 个文件），
+   * 参与哈希会把耗时从几十 ms 拉到秒级。客户端必须用**同一份名单**算本地哈希，
+   * 否则两边结果永远不同 → 满屏误报"可更新"。
+   */
+  hash_exclude?: string[];
   /** 包类型: "skill"(技能市场) | "plugin"(插件市场)。server 无该字段时默认 "skill" */
   type?: "skill" | "plugin";
   /** 插件分类: component(基础组件)/tool(工具)/guide(指导)/integration(集成)。server 无该字段时 undefined */

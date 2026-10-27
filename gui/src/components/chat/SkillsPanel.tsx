@@ -8,7 +8,8 @@ import { getSettings, updateSettings, saveSettings } from "../../stores/settings
 import { addFloatingPanel, getFloatingPanels, bringFloatingToFront } from "../../stores/layoutStore";
 import { commandRegistry } from "../../services/windowBus";
 import { setSkillDialogCallbacks } from "./SkillDialogFloating";
-import { skillMarketplace, type PackageSummary, type PackageDetail } from "../../services/skillMarketplace";
+import { skillMarketplace, type PackageDetail } from "../../services/skillMarketplace";
+import { skillUpdateStore } from "../../stores/skillUpdateStore";
 import { requestPluginRefresh } from "./useChatBridge";
 import { addStatusMessage } from "../../stores/statusMsgStore";
 
@@ -17,9 +18,17 @@ type I18nMap = Record<string, { title?: string; desc?: string }>;
 // ── Marketplace Tab (inline sub-component) ──
 
 function MarketplaceTab() {
-  const [packages, setPackages] = useState<PackageSummary[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  // 市场数据与更新状态都放在 store 里共享 —— 父组件在面板首次打开时
+  // 就拉过一次，这里直接读（切页签不再重复请求）。
+  const [, forceRender] = useState(0);
+  useEffect(() => skillUpdateStore.subscribe(() => forceRender((v) => v + 1)), []);
+
+  const packages = skillUpdateStore.getPackages();
+  const loading = skillUpdateStore.isLoading();
+  const error = skillUpdateStore.getError();
+  // 逐技能的更新状态（store 里已算好）—— 包级统计与单项按钮都基于它
+  const skillStates = skillUpdateStore.get();
+
   const [expandedPkg, setExpandedPkg] = useState<string | null>(null);
   const [installing, setInstalling] = useState<Set<string>>(new Set());
   const [installedSkills, setInstalledSkills] = useState<Set<string>>(new Set());
@@ -35,20 +44,7 @@ function MarketplaceTab() {
     } catch { /* ignore */ }
   }, []);
 
-  const fetchPackages = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const list = await skillMarketplace.listPackages();
-      setPackages(list);
-    } catch (e: any) {
-      setError(e.message ?? "Unknown error");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { refreshInstalled(); fetchPackages(); }, [refreshInstalled, fetchPackages]);
+  useEffect(() => { refreshInstalled(); }, [refreshInstalled]);
 
   const loadPkgDetail = async (slug: string) => {
     if (pkgDetails[slug]) return;
@@ -71,6 +67,9 @@ function MarketplaceTab() {
       addStatusMessage(`"${skillName}" ${i18nT("skills.installSuccess")}`, "success");
       requestPluginRefresh();
       await refreshInstalled();
+      // 🔴 **必须重算哈希**，否则「可更新」徽标不会消失（用户实测反馈）。
+      // 之前只刷新了目录列表，更新状态还是安装前的旧值。
+      await skillUpdateStore.refreshLocal();
       await mergeTranslations(slug);
     } catch (e: any) {
       addStatusMessage(`${i18nT("skills.installFailed")}: ${e}`, "error");
@@ -100,6 +99,7 @@ function MarketplaceTab() {
       addStatusMessage(`${i18nT("skills.installSuccess")}`, "success");
       requestPluginRefresh();
       await refreshInstalled();
+      await skillUpdateStore.refreshLocal(); // 同上：重算哈希，徽标才会消失
       await mergeTranslations(slug);
     } catch (e: any) {
       addStatusMessage(`${i18nT("skills.installFailed")}: ${e}`, "error");
@@ -112,7 +112,7 @@ function MarketplaceTab() {
   if (error) return (
     <div style={emptyStyle}>
       <div>{i18nT("skills.marketplaceError")}: {error}</div>
-      <button onClick={fetchPackages} style={retryBtnStyle}>{i18nT("skills.marketplaceRetry")}</button>
+      <button onClick={() => void skillUpdateStore.load()} style={retryBtnStyle}>{i18nT("skills.marketplaceRetry")}</button>
     </div>
   );
   if (packages.length === 0) return <div style={emptyStyle}>{i18nT("skills.marketplaceEmpty")}</div>;
@@ -123,10 +123,32 @@ function MarketplaceTab() {
         const isExpanded = expandedPkg === pkg.slug;
         const pkgInstalling = installing.has(`pkg:${pkg.slug}`);
         const detail = pkgDetails[pkg.slug];
+        // 包内已装技能里有几个内容过期 —— 直接用 store 算好的状态，
+        // 不再自己比对哈希（那份数据已在 store 里，避免重复计算）
+        const pkgSkillNames = (detail?.skills ?? []).map((s) => s.name);
+        const pkgOutdated = pkgSkillNames.filter((n) => skillStates[n] === "outdated").length;
         return (
           <div key={pkg.slug} style={pkgCardStyle}>
             <div style={pkgHeaderStyle} onClick={() => { if (!isExpanded) loadPkgDetail(pkg.slug); setExpandedPkg(isExpanded ? null : pkg.slug); }}>
               <span style={{ fontWeight: 600, fontSize: "calc(var(--font-scale, 1) * 13px)", flex: 1 }}>{pkg.name}</span>
+              {/* 可更新徽标：包内已装的技能里，有几个内容与市场不同 */}
+              {pkgOutdated > 0 && (
+                <span
+                  style={{
+                    fontSize: "calc(var(--font-scale, 1) * 10px)",
+                    padding: "1px 6px",
+                    borderRadius: 3,
+                    backgroundColor: "var(--semantic-warning-subtle)",
+                    color: "var(--semantic-warning)",
+                    border: "1px solid var(--semantic-warning)",
+                    flexShrink: 0,
+                    fontWeight: 600,
+                  }}
+                  title={i18nT("skills.outdatedTip")}
+                >
+                  {i18nT("skills.outdatedCount", { count: pkgOutdated })}
+                </span>
+              )}
               <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>
                 {i18nT("skills.skillsCount", { count: pkg.skill_count })} · {i18nT("skills.downloads", { count: pkg.download_count })}
               </span>
@@ -156,6 +178,9 @@ function MarketplaceTab() {
                   detail.skills.map((skill) => {
                     const isInstalled = installedSkills.has(skill.name);
                     const isInstalling = installing.has(`${pkg.slug}/${skill.name}`);
+                    // 已装技能的内容状态（store 里算好）：outdated / up-to-date / unknown
+                    const upd = skillStates[skill.name];
+                    const canUpdate = upd === "outdated";
                     const key = "/" + skill.name;
                     const t = pkgTrans[pkg.slug]?.[key];
                     const transTitle = t?.title;
@@ -165,10 +190,23 @@ function MarketplaceTab() {
                         <span style={{ fontWeight: 600, fontSize: "calc(var(--font-scale, 1) * 12px)", flexShrink: 0 }}>/{skill.name}</span>
                         {transTitle && <span style={{ fontWeight: 400, color: "var(--fg-muted)", fontSize: "calc(var(--font-scale, 1) * 12px)", flexShrink: 0 }}>{transTitle}</span>}
                         <span style={{ color: "var(--fg-muted)", fontSize: "calc(var(--font-scale, 1) * 11px)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }} title={displayDesc}>{displayDesc}</span>
-                        {isInstalled ? (
-                          <span style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--semantic-success)", flexShrink: 0, minWidth: 42, textAlign: "right" }}>{i18nT("skills.installed")}</span>
-                        ) : isInstalling ? (
+                        {isInstalling ? (
                           <span style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--accent)", flexShrink: 0, minWidth: 42, textAlign: "right" }}>{i18nT("skills.installing")}</span>
+                        ) : canUpdate ? (
+                          // 已装但内容不同 → 直接给"更新"按钮（不是"安装"，避免歧义）
+                          <button
+                            onClick={() => handleInstall(pkg.slug, skill.name, skillMarketplace.getSkillDownloadUrl(pkg.slug, skill.name))}
+                            style={{
+                              ...installBtnStyle,
+                              color: "var(--semantic-warning)",
+                              borderColor: "var(--semantic-warning)",
+                            }}
+                            title={i18nT("skills.outdatedTip")}
+                          >
+                            {i18nT("skills.update")}
+                          </button>
+                        ) : isInstalled ? (
+                          <span style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--semantic-success)", flexShrink: 0, minWidth: 42, textAlign: "right" }}>{i18nT("skills.installed")}</span>
                         ) : (
                           <button onClick={() => handleInstall(pkg.slug, skill.name, skillMarketplace.getSkillDownloadUrl(pkg.slug, skill.name))}
                             style={installBtnStyle}>{i18nT("skills.install")}</button>
@@ -193,6 +231,19 @@ function _SkillsPanel() {
 
   const [search, setSearch] = useState("");
   const [, setTick] = useState(0);
+  // 本机技能列表也要显示「可更新」—— 订阅共享的更新状态
+  // （市场标签页算完哈希后广播，这里跟着刷新）
+  const [updStates, setUpdStates] = useState(skillUpdateStore.get());
+  useEffect(() => skillUpdateStore.subscribe(() => setUpdStates({ ...skillUpdateStore.get() })), []);
+
+  // 🎯 **面板一打开就拉线上数据**，不必等用户切到「市场」页签。
+  //
+  // 之前拉取逻辑在 `MarketplaceTab` 内部，而默认停在「已安装」→ 那个组件
+  // 根本没挂载 → 不切过去就永远不知道有没有更新（用户反馈）。
+  //
+  // `load()` 内部有 inflight 去重，切页签/重复打开都不会重复请求。
+  useEffect(() => { void skillUpdateStore.load(); }, []);
+
   const floatRef = useRef<string | null>(null);
 
   // ── Translations ──
@@ -449,6 +500,7 @@ ${skillsList}`;
                     {desc}
                     {!st.translated && s.desc && <span style={{ fontSize: 9, color: "#bbb", marginLeft: 4 }}>(未翻译)</span>}
                   </span>
+                  {updStates[s.cmd] === "outdated" && <UpdatableBadge />}
                 </div>
               );
             })}
@@ -459,6 +511,7 @@ ${skillsList}`;
         {skills.regular.map((s) => {
           const st = skillTitle(s);
           const desc = skillDesc(s);
+          const outdated = updStates[s.cmd] === "outdated";
           return (
             <div key={s.cmd} style={itemStyle} onClick={() => openSkillDialog(s)}>
               <span style={{ width: 14, flexShrink: 0 }} />
@@ -468,6 +521,7 @@ ${skillsList}`;
                 {desc}
                 {!st.translated && s.desc && <span style={{ fontSize: 9, color: "#bbb", marginLeft: 4 }}>(未翻译)</span>}
               </span>
+              {outdated && <UpdatableBadge />}
             </div>
           );
         })}
@@ -483,6 +537,29 @@ ${skillsList}`;
         <MarketplaceTab />
       )}
     </div>
+  );
+}
+
+/** 「可更新」小徽标 —— 本机技能列表用（市场页有整包统计，这里逐个标） */
+function UpdatableBadge() {
+  return (
+    <span
+      title={i18nT("skills.outdatedTip")}
+      style={{
+        marginLeft: "auto",
+        flexShrink: 0,
+        fontSize: "calc(var(--font-scale, 1) * 9.5px)",
+        padding: "1px 5px",
+        borderRadius: 3,
+        backgroundColor: "var(--semantic-warning-subtle)",
+        color: "var(--semantic-warning)",
+        border: "1px solid var(--semantic-warning)",
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {i18nT("skills.update")}
+    </span>
   );
 }
 

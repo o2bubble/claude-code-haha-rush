@@ -41,6 +41,11 @@ def init_db() -> None:
     cols = [r[1] for r in conn.execute("PRAGMA table_info(packages)").fetchall()]
     if "type" not in cols:
         conn.execute("ALTER TABLE packages ADD COLUMN type TEXT DEFAULT 'skill'")
+    # 迁移: 技能内容哈希（2026-10-26）。存 {技能名: sha256hex}，
+    # 客户端据此判断本地技能是否需要更新 —— 不用下载 zip，也不依赖版本号。
+    # 老库为空 → 由回填任务补齐（见 routes 的 /admin 触发点）。
+    if "skill_hashes" not in cols:
+        conn.execute("ALTER TABLE packages ADD COLUMN skill_hashes TEXT DEFAULT '{}'")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS api_keys (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,19 +105,31 @@ def get_package(slug: str) -> dict | None:
 
 def insert_package(slug: str, name: str, description: str, author: str,
                    version: str, tags: list[str], skill_count: int,
-                   pkg_type: str = "skill") -> dict:
+                   pkg_type: str = "skill",
+                   skill_hashes: dict[str, str] | None = None) -> dict:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn = get_conn()
     conn.execute(
         """INSERT INTO packages (slug, name, description, author, version, tags,
-           skill_count, type, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           skill_count, type, created_at, updated_at, skill_hashes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (slug, name, description, author, version, json.dumps(tags),
-         skill_count, pkg_type, now, now),
+         skill_count, pkg_type, now, now, json.dumps(skill_hashes or {}, ensure_ascii=False)),
     )
     conn.commit()
     conn.close()
     return get_package(slug)
+
+
+def set_skill_hashes(slug: str, hashes: dict[str, str]) -> None:
+    """回填/更新某包的技能内容哈希。"""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE packages SET skill_hashes = ? WHERE slug = ?",
+        (json.dumps(hashes or {}, ensure_ascii=False), slug),
+    )
+    conn.commit()
+    conn.close()
 
 
 def update_package(slug: str, name: str, description: str, author: str,
@@ -434,6 +451,13 @@ def _plugin_meta(slug: str) -> dict:
         return {}
 
 
+def _hash_exclude(slug: str) -> list[str]:
+    """该包算哈希时额外排除的子目录名（延迟导入避免循环依赖）。"""
+    from .skill_hash import hash_exclude_for
+
+    return hash_exclude_for(slug)
+
+
 def _row_to_pkg(row: sqlite3.Row) -> dict:
     pkg = {
         "slug": row["slug"],
@@ -447,6 +471,14 @@ def _row_to_pkg(row: sqlite3.Row) -> dict:
         "type": row["type"] if "type" in row.keys() else "skill",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        # 技能内容哈希 {技能名: sha256}。客户端用它判断本地技能是否过期。
+        # 老库无此列/为空时给 {}，客户端会退化成"无法判断"而不是误报要更新。
+        "skill_hashes": json.loads(row["skill_hashes"] or "{}")
+        if "skill_hashes" in row.keys()
+        else {},
+        # 该包算哈希时**额外排除**的子目录名。客户端必须用同一份名单，
+        # 否则两边结果不同 → 满屏误报"可更新"。见 server/skill_hash.py。
+        "hash_exclude": _hash_exclude(row["slug"]),
     }
     # 插件包 enrich 扩展字段（读包内 plugin.json, 不入库——schema 零迁移, 旧包自动兼容）
     if pkg["type"] == "plugin":

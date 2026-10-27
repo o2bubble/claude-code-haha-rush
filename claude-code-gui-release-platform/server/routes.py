@@ -14,6 +14,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Q
 from fastapi.responses import JSONResponse, FileResponse, Response
 from . import models
 from .auth import client_ip, require_auth
+from .skill_hash import find_skill_dirs, hash_exclude_for, skill_hash
 
 router = APIRouter(prefix="/api")
 
@@ -146,6 +147,32 @@ async def list_plugins():
     for p in packages:
         p["signature"] = _signature_meta(p.get("slug", ""))
     return {"ok": True, "data": packages}
+
+
+@router.post("/admin/backfill-skill-hashes")
+async def backfill_skill_hashes(_auth=Depends(require_auth)):
+    """给**存量**技能包回填内容哈希（2026-10-26 新增字段）。
+
+    新发布的包会在 upload 时自动算好；这个端点用于处理已有数据。
+    幂等：重算一遍覆盖写，结果相同。
+    """
+    updated = []
+    errors = []
+    for p in models.list_packages(pkg_type="skill"):
+        slug = p.get("slug")
+        pkg_dir = SKILLS_STORE / slug
+        if not pkg_dir.is_dir():
+            errors.append({"slug": slug, "error": "包目录不存在"})
+            continue
+        try:
+            dirs = find_skill_dirs(str(pkg_dir))
+            extra = set(hash_exclude_for(slug))
+            hashes = {name: skill_hash(path, extra) for name, path in dirs.items()}
+            models.set_skill_hashes(slug, hashes)
+            updated.append({"slug": slug, "skills": len(hashes)})
+        except Exception as e:
+            errors.append({"slug": slug, "error": str(e)[:120]})
+    return {"ok": True, "updated": updated, "errors": errors}
 
 
 @router.get("/packages/{slug}")
@@ -343,12 +370,12 @@ async def upload_package(
             raise HTTPException(status_code=400, detail="plugin.json missing pluginName")
         skill_count = 0  # 插件包无 skill 数
     else:
-        # 技能包: 必须含 SKILL.md 子目录
-        skill_count = 0
-        if pkg_dir.exists():
-            for entry in pkg_dir.iterdir():
-                if entry.is_dir() and (entry / "SKILL.md").exists():
-                    skill_count += 1
+        # 技能包: 必须有含 SKILL.md 的目录。
+        # ⚠️ 不能只数**第一层**（2026-10-26）：patent-disclosure-skill 的布局是
+        # `<pkg>/patent-disclosure-skill/skills/<skill>/SKILL.md` —— 深三层，
+        # 旧逻辑数出来是 0，会被误判成"没有技能"直接 500。
+        skill_dirs = find_skill_dirs(str(pkg_dir))
+        skill_count = len(skill_dirs)
         if skill_count == 0:
             shutil.rmtree(pkg_dir)
             raise HTTPException(status_code=400, detail="No skills found in zip (need SKILL.md in each skill dir)")
@@ -356,6 +383,15 @@ async def upload_package(
     # Write manifest.yaml for later reference
     manifest_path = pkg_dir / "manifest.yaml"
     manifest_path.write_text(manifest, encoding="utf-8")
+
+    # 技能内容哈希 —— 客户端靠它判断本地技能是否需要更新（无需下载 zip）。
+    # 算法见 docs/skill-content-hash.md，必须与客户端 Rust 实现逐字节一致。
+    skill_hashes = {}
+    if type == "skill" and skill_dirs:
+        # 每包可排除体积巨大且几乎不变的目录（如 ppt-master/templates）。
+        # 名单随 API 下发，客户端据此用同一套算法。
+        extra = set(hash_exclude_for(slug))
+        skill_hashes = {name: skill_hash(path, extra) for name, path in skill_dirs.items()}
 
     # Insert or update DB (force 覆盖重签场景)
     if existing:
@@ -368,6 +404,10 @@ async def upload_package(
             tags=meta.get("tags", []),
             skill_count=skill_count,
         )
+        # 更新场景：哈希随内容变，必须覆盖写（update_package 不带这个字段）
+        if skill_hashes:
+            models.set_skill_hashes(slug, skill_hashes)
+            pkg = models.get_package(slug) or pkg
     else:
         pkg = models.insert_package(
             slug=slug,
@@ -378,6 +418,7 @@ async def upload_package(
             tags=meta.get("tags", []),
             skill_count=skill_count,
             pkg_type=type,
+            skill_hashes=skill_hashes,
         )
 
     return {"ok": True, "data": pkg}

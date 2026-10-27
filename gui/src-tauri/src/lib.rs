@@ -36,6 +36,7 @@ mod settings;
 #[path = "plugin_pubkey.rs"]
 mod plugin_pubkey;
 mod plugin_signature;
+mod skill_hash;
 
 /// Holds the SQLite connection and the workspace it was opened for.
 struct DbState {
@@ -834,6 +835,7 @@ pub fn run() {
             load_skills_i18n,
             close_me,
             get_skills_dir,
+            local_skill_hashes,
             sync_plugin_skill_links,
             install_skill,
             install_package,
@@ -3593,10 +3595,14 @@ fn close_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 把主窗亮出来并聚焦，**但不关挂件**。
+/// 把主窗亮出来并聚焦，同时**隐藏挂件**。
 ///
-/// 用途：挂件模式下若 AI 触发权限确认，弹窗渲染在（不可见的）主窗里 —— 用户会看到
-/// "卡住"。挂件检测到输入被阻止时给出「回主窗确认」按钮，用户确认完可以再切回挂件。
+/// ⚠️ 必须成对隐藏挂件：挂件是 always-on-top 窗，只显示主窗会让两个窗口同时
+/// 在前台抢焦点 —— 用户实测「点了回主窗，挂件没关，交互就乱了」。
+/// 这与 `show_chat_widget`（进挂件时隐藏主窗）保持对称。
+///
+/// 2026-10-27 起权限/提问都直接在挂件里响应，挂件内不再调用本命令；保留它是为了
+/// 让"回主窗"这个动作本身语义正确（将来任何入口调用都不会留两个窗口）。
 #[tauri::command]
 fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let Some(main) = app.get_webview_window("main") else {
@@ -3605,6 +3611,9 @@ fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let _ = main.show();
     let _ = main.unminimize();
     let _ = main.set_focus();
+    if let Some(widget) = app.get_webview_window(WIDGET_LABEL) {
+        let _ = widget.hide();
+    }
     // 主窗回到前台 → 控制请求 UI 交还主窗（挂件侧不再渲染）。见 WIDGET_MODE_EVENT。
     let _ = app.emit(WIDGET_MODE_EVENT, false);
     Ok(())
@@ -5064,6 +5073,53 @@ fn get_skills_dir() -> Result<String, String> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Cannot create skills directory: {}", e))?;
     Ok(dir.to_string_lossy().to_string())
+}
+
+/// 算本地已装技能的**内容哈希**，供技能面板判断是否需要更新。
+///
+/// 与市场端 `/api/packages` 返回的 `skill_hashes` 用**同一算法**
+/// （见 `docs/skill-content-hash.md`），所以直接比字符串即可 ——
+/// 不需要版本号，也不需要下载 zip。
+///
+/// 返回 `{技能名: sha256hex}`。目录不存在/读不了就跳过（不报错），
+/// 让面板显示"无法判断"而不是整体失败。
+#[tauri::command]
+async fn local_skill_hashes(
+    skills: Vec<String>,
+    exclude: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    // 🔴 **必须是 async 命令**（2026-10-26 踩坑，用户实测「卡半天」）。
+    //
+    // 之前写成同步 `fn` —— Tauri 的同步命令跑在**主线程**上，
+    // 而这里要遍历并读取上万个文件（ppt-master 一个技能就有 12450 个模板），
+    // 结果**整个界面卡死**到算完为止。
+    //
+    // 现在：async + 后台线程（与 install_skill 同模式），UI 立刻返回。
+    //
+    // 另外两处优化（同一轮反馈）：
+    //   1. **只算传入的 `skills`** —— 调用方先拿到线上库的清单再决定算哪些，
+    //      本地有但市场上没有的技能根本不用算。
+    //   2. `exclude` 是服务端下发的排除目录（如 ppt-master/templates），
+    //      上万模板文件直接跳过。
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let base = user_home().join(".claude").join("skills");
+        let mut map = serde_json::Map::new();
+        for name in skills {
+            if name.is_empty() || name.starts_with('.') {
+                continue;
+            }
+            let path = base.join(&name);
+            if !path.join("SKILL.md").exists() {
+                continue; // 没装或不是技能目录
+            }
+            if let Ok(h) = crate::skill_hash::skill_hash_excluding(&path, &exclude) {
+                map.insert(name, serde_json::Value::String(h));
+            }
+        }
+        let _ = tx.send(serde_json::Value::Object(map));
+    });
+    Ok(rx.recv().map_err(|e| format!("hash channel: {}", e))?)
 }
 
 #[tauri::command]

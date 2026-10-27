@@ -21,12 +21,15 @@ import { bridge } from "../../services/bridge";
 import { startCrossWindowBusLeaf } from "../../services/crossWindowBusLeaf";
 import { crossWindowBus } from "../../services/crossWindowBus";
 import { useEvent } from "../../services/useService";
-import { Events, type ChatStateChangedPayload } from "../../services/events";
+import { Events, type ChatStateChangedPayload, type SettingsChangedPayload } from "../../services/events";
 import { getSettings } from "../../stores/settingsStore";
 import { normalizeTheme } from "../../utils/themeUtils";
 import { InputArea } from "../chat/InputArea";
 import { PermissionPrompt } from "../chat/ChatInputPanel";
+import { AskQuestionOverlay, type Question } from "../chat/AskQuestionOverlay";
 import { WidgetMessageList } from "./WidgetMessageList";
+import { buildAskAnswerPayload, buildAskSkipPayload } from "./widgetAskResponse";
+import { formatWidgetTitle } from "./widgetTitle";
 import { t } from "../../i18n";
 import { X } from "lucide-react";
 
@@ -43,6 +46,13 @@ const HEARTBEAT_MS = 5000;
 
 export default function WidgetApp() {
   const state = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED)?.state;
+  // 标题栏的「工作区 · 会话名」：多开实例时挂件长得一样，靠它区分是哪个。
+  // 工作区来自 leaf 同步过来的 settings（DataBus `settings` → updateSettings →
+  // 这里重新渲染）；会话名来自会话列表（与主窗标题同一数据源）。
+  const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
+  const workDir = settingsPayload?.settings?.workDir ?? getSettings().workDir;
+  const sessionTitle = state?.sessions?.find((s) => s.id === state.sessionId)?.title;
+  const widgetTitle = formatWidgetTitle(workDir, sessionTitle, t("widget.title"));
   const [ready, setReady] = useState(false);
   const askedRef = useRef<string | null | undefined>(undefined);
 
@@ -138,12 +148,19 @@ export default function WidgetApp() {
   const streaming = !!state?.streaming;
   const messages = state?.messages ?? [];
 
-  // ── 权限确认（挂件模式下的唯一出口）──
+  // ── 权限确认 / 提问（挂件模式下的唯一出口）──
   //
-  // AskUserQuestion 也走这里：它的选项 UI 在主窗的浮窗里，挂件不复刻（会额外引入
-  // 一套问答组件与回调注册）；但**至少要给用户一条明确出路**，否则同样是"卡住"。
+  // 主窗在挂件模式下被隐藏，控制请求 UI 若留在主窗就是"看不见的弹窗"（表现为卡住）。
+  // hub 只在挂件接管前台时才把请求投递过来（见 chat.controlRequest），所以这里
+  // 出现即代表**本窗就是当前前台**。
+  //
+  // 2026-10-27：AskUserQuestion 也**在挂件里直接回答**，不再提供"回主窗"——
+  // 那条路只显示主窗却不隐藏挂件，两窗争焦点（用户实测"交互乱了"）。而且中途
+  // 切窗口本身就割裂。overlay 是纯展示组件，答案经 cmd.respondPermission 带回。
   const pending = state?.pendingControlRequest ?? null;
   const isAsk = pending?.tool_name === "AskUserQuestion";
+  const askQuestions: Question[] =
+    isAsk ? (((pending?.tool_input as any)?.questions as Question[]) ?? []) : [];
   const respond = useCallback(
     (allowed: boolean, always: boolean) => {
       // 带上 requestId：主窗侧校验一次性，过期响应（用户已处理/已换新请求）会被丢弃
@@ -155,6 +172,22 @@ export default function WidgetApp() {
     },
     [pending?.request_id],
   );
+  const answerAsk = useCallback(
+    (answers: Record<string, string>, annotations: Record<string, { notes?: string }>) => {
+      crossWindowBus.publish("cmd.respondPermission", buildAskAnswerPayload(pending, answers, annotations));
+    },
+    [pending],
+  );
+  const skipAsk = useCallback(() => {
+    crossWindowBus.publish("cmd.respondPermission", buildAskSkipPayload(pending));
+  }, [pending]);
+
+  // 提问层出现时把键盘焦点从输入框抢过来 —— 否则用户打字会落进**被遮住**的
+  // 输入框（看不见自己打了什么，答完才发现聊天框里多了一段）。
+  const askModalRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (pending && isAsk) askModalRef.current?.focus();
+  }, [pending?.request_id, isAsk]);
 
   return (
     <div
@@ -206,8 +239,19 @@ export default function WidgetApp() {
           userSelect: "none",
         }}
       >
-        <span data-tauri-drag-region style={{ flex: 1 }}>
-          {t("widget.title")}
+        <span
+          data-tauri-drag-region
+          // 悬停看完整信息：条形区只有 360px，长名必然被截断
+          title={[workDir, sessionTitle].filter(Boolean).join("\n") || t("widget.title")}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {widgetTitle}
         </span>
         {/* 权限/提问的出口放在窗口底部（askBar / PermissionPrompt），**不是因为
             这里点不动** —— 拖动条是 `data-tauri-drag-region`（非 deep），只有直接
@@ -230,21 +274,15 @@ export default function WidgetApp() {
           （表现为"卡住"）。hub 只在挂件接管前台时把请求投递过来（见 chat.controlRequest），
           所以这里出现即代表**本窗就是当前前台**，直接渲染即可。
           响应经 cmd.respondPermission 回主窗执行（叶窗没有后端 WS）。 */}
-      {pending && isAsk && (
-        // AskUserQuestion：选项 UI 在主窗，挂件不复刻 —— 但必须给一条明确出路，
-        // 否则用户面对"输入被挡 + 不知道去哪"（同样是卡住）。
-        <div style={askBarStyle}>
-          <span style={{ flex: 1 }}>{state?.inputBlockedReason ?? t("widget.askPending")}</span>
-          <button
-            type="button"
-            style={askBtnStyle}
-            onClick={() => void invoke("focus_main_window").catch(() => {})}
-          >
-            {t("widget.backToMain")}
-          </button>
-          <button type="button" style={askBtnStyle} onClick={() => respond(false, false)}>
-            {t("permission.deny")}
-          </button>
+      {pending && isAsk && askQuestions.length > 0 && (
+        // 提问直接在本窗回答 —— 用不透明层整块盖住（含输入框）：提问期间用户
+        // 本来也不该继续打字，露出的输入框只会引导误操作。
+        <div ref={askModalRef} tabIndex={-1} style={askModalStyle}>
+          <AskQuestionOverlay
+            questions={askQuestions}
+            onSubmit={answerAsk}
+            onSkip={skipAsk}
+          />
         </div>
       )}
       {pending && !isAsk && (
@@ -275,36 +313,17 @@ export default function WidgetApp() {
   );
 }
 
-/** AskUserQuestion 的出路条：贴底、不挡输入框的提示行。 */
-const askBarStyle: React.CSSProperties = {
+/** AskUserQuestion 在挂件内的模态层：盖住拖动条以外的整块区域（含输入框）。
+ *  top 30 = 拖动条高度（保留拖动能力，窗口再小也能挪开）。 */
+const askModalStyle: React.CSSProperties = {
   position: "absolute",
+  top: 30,
+  left: 0,
+  right: 0,
   bottom: 0,
-  left: 12,
-  right: 12,
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "8px 10px",
+  zIndex: 200,
   backgroundColor: "var(--bg-root)",
-  border: "1px solid var(--accent)",
-  borderRadius: 8,
-  boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
-  zIndex: 100,
-  fontSize: "calc(var(--font-scale, 1) * 11px)",
-  fontFamily: "var(--font-sans)",
-  color: "var(--fg-primary)",
-};
-
-const askBtnStyle: React.CSSProperties = {
-  padding: "3px 10px",
-  border: "1px solid var(--border-medium)",
-  borderRadius: 4,
-  backgroundColor: "var(--bg-root)",
-  color: "var(--fg-primary)",
-  cursor: "pointer",
-  fontSize: "calc(var(--font-scale, 1) * 11px)",
-  fontFamily: "var(--font-sans)",
-  flexShrink: 0,
+  outline: "none", // tabIndex=-1 只为接收键盘焦点，不要焦点环
 };
 
 const barBtnStyle: React.CSSProperties = {
