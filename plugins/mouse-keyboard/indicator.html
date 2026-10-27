@@ -144,8 +144,8 @@
    *
    * 为什么要这个：本页 250ms 轮询一次（操作只有几百毫秒，慢了就看不见变化），
    * 而下面重建 logEl 是 `textContent="" + 逐条 append` —— 每 250ms 重来一次会**闪**。
-   * 指纹里用 `Math.floor(uptimeMs/1000)`（秒级）而不是原始毫秒，否则"运行时长的
-   * 数字"每秒变动 4 次，等于没比较。
+   * 指纹里用 `Math.floor(runMs/1000)`（秒级）而不是原始毫秒，否则"计时数字"
+   * 每秒变动 4 次，等于没比较。
    */
   var lastSig = "";
   /** 上次渲染时最新动作的时间戳 —— 用来判断"有没有新动作"（见下面的 .fresh） */
@@ -178,8 +178,8 @@
     var lockRemainS = Math.max(0, Math.ceil((s.lockRemainMs || 0) / 1000));
 
     var sig = JSON.stringify([
-      s.currentAction, s.aborted, active, s.count, locked, lockRemainS,
-      Math.floor((s.uptimeMs || 0) / 1000),
+      s.currentAction, s.aborted, active, s.runCount, locked, lockRemainS,
+      Math.floor((s.runMs || 0) / 1000),
       (s.log || []).map(function (x) { return x.t + "|" + ago(x.t); }),
     ]);
     if (sig === lastSig) return;
@@ -234,8 +234,14 @@
       lastNewestT = newestT;
     }
 
-    var secs = Math.round((s.uptimeMs || 0) / 1000);
-    statEl.textContent = "累计 " + (s.count || 0) + " 个动作 · " + fmtDur(secs);
+    // 「本次」= 这一轮操作（距本轮第一个动作多久），**不是进程运行时长**。
+    // 曾经显示 uptimeMs，于是常驻的插件进程会给出「累计 5 个动作 · 31m57s」这种
+    // 用户看不懂的数字 —— 那 32 分钟是进程活了多久，跟这 5 个动作无关。
+    var runCount = s.runCount || 0;
+    var runSecs = Math.round((s.runMs || 0) / 1000);
+    statEl.textContent = runCount > 0
+      ? "本次 " + runCount + " 个动作 · " + fmtDur(runSecs)
+      : "尚未操作";
   }
 
   function fmtDur(sec) {

@@ -255,9 +255,28 @@ function describeStep(action, args) {
 // ── 活动记录（指示窗展示用）──
 const ACTIVITY_MAX = 20;
 let activityLog = [];        // `{ t, text }[]`，最近在后
-let actionCount = 0;         // 本次进程生命周期内累计执行的动作数
+let actionCount = 0;         // 进程生命周期内累计执行的动作数（诊断用；指示窗不显示它）
 const sessionStart = Date.now();
 let lastActivityAt = 0;
+
+/**
+ * 「本轮操作」—— 指示窗底部那个数字量的是它。
+ *
+ * ⚠️ **曾经量的是进程运行时长**（`Date.now() - sessionStart`），标签却写成
+ * 「累计 5 个动作 · 31m57s」。用户读到的是"这 5 个动作花了 32 分钟"，而实际那
+ * 32 分钟是**插件进程活了多久** —— 它是 `workspace_bound`，随工作区常驻，
+ * 从开机跑到现在都有可能。用户实测反馈：「有时计时都是几十分钟啊」。
+ * 语义错了，数字再精确也没用。
+ *
+ * 现在的语义：**距本轮第一个动作多久**。静默超过 `RUN_GAP_MS` 就翻篇，
+ * 于是窗口里看到的数字与"眼前这批操作"对得上。
+ *
+ * 取 30 秒 = 指示窗的 `IDLE_CLOSE_MS`（见 indicator.html）：窗口关掉再重开的
+ * 天然就是新一轮，两处阈值必须一致，否则会出现"窗口是新开的、计时却接着上一轮"。
+ */
+const RUN_GAP_MS = 30000;
+let runStartedAt = 0;        // 本轮第一个动作的时刻（0 = 还没操作过）
+let runCount = 0;            // 本轮动作数
 
 /**
  * 距上次操作多久还算"活跃"（指示窗据此显示「AI 操作中 / AI 空闲」）。
@@ -281,8 +300,31 @@ let lastActivityAt = 0;
  */
 const ACTIVE_WINDOW_MS = 10000;
 
+/**
+ * 纯函数：给「上一次的动作时刻 + 上一轮状态」和「本次动作时刻」，算出本轮状态。
+ *
+ * 抽出来是为了能测 —— "静默超过 RUN_GAP_MS 就翻篇"这条靠真实时间流逝才能触发，
+ * 写在测试里就要等 30 秒。纯函数可以直接喂时间戳。
+ *
+ * @param {{runStartedAt:number, runCount:number, lastActivityAt:number}} prev
+ * @param {number} now
+ * @returns {{runStartedAt:number, runCount:number}}
+ */
+function nextRunState(prev, now) {
+  // `!prev.runStartedAt` = 进程启动后还没有任何动作 → 本次就是第一个
+  const fresh = !prev.runStartedAt || now - prev.lastActivityAt > RUN_GAP_MS;
+  return fresh
+    ? { runStartedAt: now, runCount: 1 }
+    : { runStartedAt: prev.runStartedAt, runCount: prev.runCount + 1 };
+}
+
 function noteActivity(action, args) {
-  lastActivityAt = Date.now();
+  const now = Date.now();
+  // ⚠️ 判定必须用**上一次**的 lastActivityAt —— 所以要先算再覆盖它。
+  const next = nextRunState({ runStartedAt, runCount, lastActivityAt }, now);
+  runStartedAt = next.runStartedAt;
+  runCount = next.runCount;
+  lastActivityAt = now;
   actionCount++;
   activityLog.push({ t: lastActivityAt, text: describeStep(action, args) });
   if (activityLog.length > ACTIVITY_MAX) activityLog.shift();
@@ -1528,6 +1570,11 @@ const server = http.createServer(async (req, res) => {
         // 那玩意在窗口出现时早就空了（原因见 ACTIVE_WINDOW_MS 注释）。
         active: !!currentAction || (lastActivityAt > 0 && Date.now() - lastActivityAt < ACTIVE_WINDOW_MS),
         log: activityLog.slice(-8).reverse(),      // 最近几条，新的在前
+        // 「本轮操作」—— 指示窗底部显示的就是这两个（语义见 RUN_GAP_MS 注释）
+        runCount,
+        runMs: runStartedAt ? Date.now() - runStartedAt : 0,
+        // 进程级累计：诊断用，**指示窗不显示**。曾经把它俩当"本次操作"展示，
+        // 于是窗口上出现「31m57s」这种用户看不懂的数字（见 RUN_GAP_MS 注释）。
         count: actionCount,
         uptimeMs: Date.now() - sessionStart,
         lastActivityMs: lastActivityAt ? Date.now() - lastActivityAt : null,
@@ -1673,6 +1720,16 @@ if (TEST_MODE) {
     isPhysicalEvent, LLKHF_INJECTED, LLMHF_INJECTED,
     // 动作描述（指示窗列表显示的内容）
     describeStep,
+    // 「本轮操作」计时（指示窗底部那个数字的语义）
+    nextRunState, RUN_GAP_MS,
+    // 活动记账的完整路径（noteActivity → run 状态），供集成测试用
+    noteActivity,
+    runSnapshot: () => ({
+      runCount,
+      runMs: runStartedAt ? Date.now() - runStartedAt : 0,
+      total: actionCount,
+      activities: activityLog.length,
+    }),
     // 常量（测试用）
     ESCAPE_VK, VK_CONTROL, CTRL_VKS,
     // 测试模式开关本身
