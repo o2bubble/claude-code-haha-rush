@@ -71,3 +71,48 @@ export function createRenderScheduler(
 function defaultSchedule(fn: () => void): void {
   Promise.resolve().then(fn);
 }
+
+// ── 文本行格式化（终端面板回显）──
+//
+// 为什么需要（用户反馈 2026-10-28「终端面板排版看着费劲」）：
+// 面板把**多行命令**整条塞进一次 `writeln`，而命令里的换行是裸 `\n`。
+// xterm 默认 `convertEol: false`（"\n 只下移、不回车"），于是每一行都从
+// 上一行结束的那一列开始 —— 阶梯状错位，真实换行和自动换行完全分不清。
+//
+// 两道防线：
+//   1. Terminal 开 `convertEol: true`（源数据不是 PTY，官方文档就说该开）
+//   2. 命令按行拆开、逐行 `writeln`，续行缩进对齐 —— 顺带去掉行尾空白，
+//      否则行尾一堆空格会把本来放得下的内容挤到下一行
+
+/** 行尾空白（含残留的 `\r`）。行首缩进是有意义的，不能动。 */
+const TRAILING_WS = /[ \t\r]+$/;
+
+/**
+ * 命令行回显：首行 `$ `，续行缩进对齐到命令起始列。
+ *
+ * 多行命令（heredoc / 多行脚本）很常见，整条一次写入必然错位，所以这里拆行。
+ * 首尾的空行去掉 —— 多行命令常以换行起止，留着只会让终端里多出空档。
+ */
+export function formatCommandLines(command: string): string[] {
+  const lines = command.split("\n").map((l) => l.replace(TRAILING_WS, ""));
+  while (lines.length > 1 && lines[0] === "") lines.shift();
+  while (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines.map((l, i) => {
+    if (i === 0) return `$ ${l}`;
+    // 空行保持空 —— 给它补两格缩进等于凭空造行尾空白（见 TRAILING_WS 的说明）
+    return l ? `  ${l}` : "";
+  });
+}
+
+/**
+ * 输出行：去掉行尾空白，保留行首缩进（缩进本身是内容的一部分）。
+ *
+ * 行尾空白对阅读全是坏处：看不见，却会让本来刚好放得下的一行被自动换行
+ * 拆成两行，看起来像是多了个空行。
+ */
+export function formatOutputLines(output: string): string[] {
+  if (!output) return [];
+  const raw = output.split("\n");
+  if (raw.length > 1 && raw[raw.length - 1] === "") raw.pop();
+  return raw.map((l) => l.replace(TRAILING_WS, ""));
+}

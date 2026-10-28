@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { formatCommandLines, formatOutputLines } from "./terminalRender";
 import { createRenderScheduler } from "./terminalRender";
 
 // 收集所有排入"微任务"的回调，由测试手动 flush —— 模拟 xterm 内部异步队列。
@@ -95,5 +96,76 @@ describe("createRenderScheduler — 合并重绘", () => {
 
     expect(rendered).toHaveLength(1);          // 只渲染一次，不堆 20 份
     expect(rendered[0]).toBe(snapshot);        // 且渲染的是最新内容
+  });
+});
+
+// ── 行格式化（终端面板回显排版）──
+//
+// 用户截图里的症状：多行命令回显成**阶梯状** —— 每行从上一行结束的列开始。
+// 根因是命令里的裸 `\n` 被一次性 writeln 送进 xterm（convertEol=false）。
+// 下面锁住"按行拆开 + 续行缩进"这个修法。
+
+describe("formatCommandLines — 命令行回显", () => {
+  it("单行命令：加 `$ ` 前缀", () => {
+    expect(formatCommandLines("git status")).toEqual(["$ git status"]);
+  });
+
+  it("多行命令：续行缩进两格，不再出现裸换行", () => {
+    const cmd = `git commit -m "$(cat <<'EOF'\nfix: 修好了\n\n正文\nEOF\n)" 2>&1 | tail -3`;
+    const out = formatCommandLines(cmd);
+    expect(out).toEqual([
+      `$ git commit -m "$(cat <<'EOF'`,
+      "  fix: 修好了",
+      "", // 空行保持空（不加缩进，免得凭空造行尾空白）
+      "  正文",
+      "  EOF",
+      `  )" 2>&1 | tail -3`,
+    ]);
+    // 关键性质：任何一行都不能再含换行符（否则 xterm 又会阶梯）
+    expect(out.every((l) => !l.includes("\n"))).toBe(true);
+  });
+
+  it("去掉行尾空白 —— 否则会把放得下的内容挤到下一行", () => {
+    expect(formatCommandLines("echo hi   ")).toEqual(["$ echo hi"]);
+    expect(formatCommandLines("a\nb\t \nc")).toEqual(["$ a", "  b", "  c"]);
+  });
+
+  it("吃掉 CRLF 残留的 \r", () => {
+    expect(formatCommandLines("a\r\nb\r\n")).toEqual(["$ a", "  b"]);
+  });
+
+  it("首尾的空行去掉（heredoc 常以换行起止）", () => {
+    expect(formatCommandLines("\n\nls\n\n")).toEqual(["$ ls"]);
+  });
+
+  it("空命令不炸", () => {
+    expect(formatCommandLines("")).toEqual(["$ "]);
+  });
+});
+
+describe("formatOutputLines — 输出行", () => {
+  it("保留行首缩进（缩进是内容的一部分）", () => {
+    expect(formatOutputLines("    indented\nplain")).toEqual(["    indented", "plain"]);
+  });
+
+  it("去掉行尾空白与 \r", () => {
+    expect(formatOutputLines("abc   \ndef\r\n")).toEqual(["abc", "def"]);
+  });
+
+  it("保留中间空行（输出里的段落分隔是有意义的）", () => {
+    expect(formatOutputLines("a\n\nb")).toEqual(["a", "", "b"]);
+  });
+
+  it("末尾单独的换行不产生多余空行", () => {
+    expect(formatOutputLines("a\n")).toEqual(["a"]);
+    expect(formatOutputLines("a\n\n")).toEqual(["a", ""]);
+  });
+
+  it("空输出 → 空数组（不写任何行）", () => {
+    expect(formatOutputLines("")).toEqual([]);
+  });
+
+  it("只有空白的行变成空行（而不是留着看不见的空格）", () => {
+    expect(formatOutputLines("a\n   \nb")).toEqual(["a", "", "b"]);
   });
 });

@@ -631,6 +631,20 @@ pub fn run() {
                     if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                         close_secondary_windows(&app_h);
                     }
+                    // 「隐藏任务栏图标」的**兜底纠正**：tao 在 show/hide/最大化等
+                    // 操作里会按它内部缓存的 WindowFlags **整份重算** GWL_EXSTYLE
+                    // （ON_TASKBAR → WS_EX_APPWINDOW），把我们设的 TOOLWINDOW 擦掉。
+                    // 典型触发：进/出挂件模式时主窗 hide() → show()，回来图标就有了。
+                    //
+                    // 只在样式**真的不符**时动手（见 enforce_taskbar_visibility），
+                    // 所以这里多调几次不会闪、也不会形成焦点循环。
+                    #[cfg(windows)]
+                    if matches!(
+                        event,
+                        tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Resized(_)
+                    ) {
+                        enforce_taskbar_visibility(&app_h);
+                    }
                 });
             }
 
@@ -3634,8 +3648,10 @@ fn open_chat_widget(
                         // 🔴 主窗恢复放在 **Rust 侧**，不依赖被隐藏页的 JS：
                         //    这样 Alt+F4、任务管理器结束、渲染进程崩溃……任何销毁路径
                         //    都能把主窗亮回来。（隐藏页的定时器会被 Chromium 节流。）
+                        // 走 show_main_window：它会在 show() 之后重新应用
+                        // 「隐藏任务栏图标」（tao 的 show 会擦掉这些样式位）
+                        show_main_window(&app_ev);
                         if let Some(main) = app_ev.get_webview_window("main") {
-                            let _ = main.show();
                             let _ = main.unminimize();
                             let _ = main.set_focus();
                         }
@@ -3689,8 +3705,8 @@ fn close_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window(WIDGET_LABEL) {
         let _ = win.close();
     }
+    show_main_window(&app);
     if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
         let _ = main.set_focus();
     }
     Ok(())
@@ -3718,12 +3734,14 @@ fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
 /// 与 `show_chat_widget` 对称。用户从「另一个实例把我唤醒」的路径进来时，
 /// 期望看到的是完整主界面，而不是还停在挂件形态。
 pub(crate) fn focus_main_window_impl(app: tauri::AppHandle) -> Result<(), String> {
-    let Some(main) = app.get_webview_window("main") else {
+    if app.get_webview_window("main").is_none() {
         return Err("主窗不存在".into());
-    };
-    let _ = main.show();
-    let _ = main.unminimize();
-    let _ = main.set_focus();
+    }
+    show_main_window(&app);
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
     if let Some(widget) = app.get_webview_window(WIDGET_LABEL) {
         let _ = widget.hide();
     }
@@ -3757,16 +3775,17 @@ fn set_main_window_taskbar(app: tauri::AppHandle, hidden: bool) -> Result<(), St
 /// 所以隐藏 = 置 TOOLWINDOW 且**清掉** APPWINDOW；恢复 = 反过来。
 /// 只置 TOOLWINDOW 而不清 APPWINDOW 是无效的（实测建窗后 APPWINDOW 是开着的）。
 ///
-/// ⚠️ 改完样式要**隐藏再显示**一次，任务栏才会立刻刷新 —— 只改样式位的话，
-/// 已经画出来的任务栏按钮不会消失（要等下次 show）。这里有 1 帧的隐藏，
-/// 肉眼几乎不可见，比"点了没反应、必须重启"好得多。
+/// ⚠️ **只改样式位就够了，不要加 ShowWindow(SW_HIDE/SW_SHOW) 去"刷"任务栏**。
+/// 实测（2026-10-28）改完样式位后任务栏按钮**立刻**跟着变（两个方向都验过）。
+/// 而那次 hide/show 有实际危害：本函数现在会在窗口事件里被调用，一旦窗口正处于
+/// **最小化或隐藏**状态（挂件模式），SW_SHOW 会把它强行弹出 —— 用户点了最小化
+/// 却被弹回来，比图标没藏住更糟。
 ///
 /// 非 Windows 平台是空实现（mac/Linux 没有这套样式位）。
 #[cfg(windows)]
 fn apply_taskbar_visibility(win: &tauri::WebviewWindow, hidden: bool) -> Result<(), String> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, SW_HIDE, SW_SHOW,
-        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
     let hwnd = win.hwnd().map_err(|e| e.to_string())?.0 as *mut core::ffi::c_void;
@@ -3779,9 +3798,6 @@ fn apply_taskbar_visibility(win: &tauri::WebviewWindow, hidden: bool) -> Result<
         };
         if new_ex != ex {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
-            // 强制任务栏重算这个窗口的按钮（见上面的说明）
-            ShowWindow(hwnd, SW_HIDE);
-            ShowWindow(hwnd, SW_SHOW);
             log::info!(
                 "[taskbar] ex {ex:#x} -> {:#x} (hidden={hidden})",
                 GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
@@ -3794,6 +3810,36 @@ fn apply_taskbar_visibility(win: &tauri::WebviewWindow, hidden: bool) -> Result<
 #[cfg(not(windows))]
 fn apply_taskbar_visibility(_win: &tauri::WebviewWindow, _hidden: bool) -> Result<(), String> {
     Ok(())
+}
+
+/// 按**当前设置**纠正主窗的任务栏样式。
+///
+/// 只在样式真的不符时才动作（`apply_taskbar_visibility` 内部先比对），所以可以
+/// 在窗口事件里放心高频调用：不闪、不抢焦点、不会形成事件循环。
+///
+/// 为什么需要（2026-10-28 用户反馈「第一次试图标消失了，后面最小化后又回到任务栏」）：
+/// tao 在 show/hide/最大化 等操作里会用内部缓存的 WindowFlags **整份重算**
+/// GWL_EXSTYLE（`ON_TASKBAR` → `WS_EX_APPWINDOW`），把我们设的 TOOLWINDOW 擦掉。
+/// 挂件模式（主窗 hide → 再 show）就是一条必经路径。
+fn enforce_taskbar_visibility(app: &tauri::AppHandle) {
+    let Some(win) = app.get_webview_window("main") else { return };
+    let hidden = crate::settings::load_settings().hide_taskbar_icon.unwrap_or(false);
+    if let Err(e) = apply_taskbar_visibility(&win, hidden) {
+        log::warn!("[taskbar] 纠正失败: {e}");
+    }
+}
+
+/// 把主窗亮出来 —— 并**保证「隐藏任务栏图标」在此之后仍然成立**。
+///
+/// 所有"重新显示主窗"的路径都必须走这个函数，不要直接 `main.show()`：
+/// tao 的 `show()` 会用内部缓存的 WindowFlags 重算 GWL_EXSTYLE（`ON_TASKBAR`
+/// → `WS_EX_APPWINDOW`），把设置里要求的 TOOLWINDOW 擦掉 —— 表现为"图标本该
+/// 藏着却回来了"。进/出挂件模式是必经路径（用户 2026-10-28 反馈的就是这个）。
+pub(crate) fn show_main_window(app: &tauri::AppHandle) {
+    let Some(main) = app.get_webview_window("main") else { return };
+    let _ = main.show();
+    #[cfg(windows)]
+    enforce_taskbar_visibility(app);
 }
 
 /// 关闭某插件的全部 overlay 窗口（插件主动收起 / 禁用 / 退出时清理）。

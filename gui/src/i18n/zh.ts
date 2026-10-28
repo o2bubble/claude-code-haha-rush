@@ -83,6 +83,10 @@ const zh = {
     // 用户提示刻度（回溯定位）
     userPrompt: "我的提问",
     emptyPrompt: "(空)",
+    // 聚合点浮层（多条提问挤在一起时逐条选）
+    clusterTitle: "这里挤了 {n} 条提问",
+    clusterHint: "点一条跳到它",
+    clusterAria: "{n} 条提问，点击展开选择",
   },
   layoutPreset: {
     default: "默认布局",

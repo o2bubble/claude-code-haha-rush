@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useCallback, useState } from "react";
 import { shouldScrollTabBar } from "./terminalTabBar";
-import { createRenderScheduler } from "./chat/terminalRender";
+import { createRenderScheduler, formatCommandLines, formatOutputLines } from "./chat/terminalRender";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Trash2, X } from "lucide-react";
@@ -66,6 +66,27 @@ function getTerminalTheme() {
   };
 }
 
+/**
+ * xterm 构造选项。抽成纯函数是为了能直接单测（`convertEol` 这条尤其重要，
+ * 见下方注释）—— 项目里没有 jsdom，装不了组件来断言构造函数参数。
+ */
+export function terminalOptions() {
+  return {
+    cursorBlink: false,
+    disableStdin: true,
+    // 源数据不是 PTY 输出，而是我们捕获的字符串 —— 官方文档对此明确建议开
+    // convertEol：把每个 `\n` 当成 `\r\n`。
+    //
+    // 不开的后果（实测 2026-10-28，用户截图里的「阶梯状」排版）：任何带裸 `\n`
+    // 的文本（多行命令、工具输出）都会「只下移不回左」，下一行从上一行结束的
+    // 那一列开始写。这是兜底防线：即使某处忘了按行拆开，也不会错位。
+    convertEol: true,
+    fontSize: getSettings().terminalFontSize ?? 13,
+    fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace",
+    theme: getTerminalTheme(),
+  };
+}
+
 export default function TerminalPanel() {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -99,13 +120,7 @@ export default function TerminalPanel() {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const term = new Terminal({
-      cursorBlink: false,
-      disableStdin: true,
-      fontSize: getSettings().terminalFontSize ?? 13,
-      fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, 'Courier New', monospace",
-      theme: getTerminalTheme(),
-    });
+    const term = new Terminal(terminalOptions());
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
@@ -305,14 +320,20 @@ export default function TerminalPanel() {
   );
 }
 
-function renderEntry(term: Terminal, entry: TerminalEntry) {
-  term.writeln(`\x1b[1;36m$\x1b[0m \x1b[1;33m${entry.command}\x1b[0m`);
-  if (entry.output) {
-    const raw = entry.output.split("\n");
-    const lines = raw.length > 1 && raw[raw.length - 1] === "" ? raw.slice(0, -1) : raw;
-    for (const line of lines) {
-      term.writeln(`  ${line}`);
+export function renderEntry(term: Pick<Terminal, "writeln">, entry: TerminalEntry) {
+  // 命令按行拆开写 —— 多行命令（heredoc 等）整条一次写入会因裸 `\n` 阶梯错位，
+  // 详见 terminalRender.ts 的 formatCommandLines 注释。
+  const cmdLines = formatCommandLines(entry.command);
+  cmdLines.forEach((line, i) => {
+    if (i === 0) {
+      // 首行：`$ ` 提示符 + 命令（着色只覆盖命令部分）
+      term.writeln(`\x1b[1;36m$\x1b[0m \x1b[1;33m${line.slice(2)}\x1b[0m`);
+    } else {
+      term.writeln(`\x1b[1;33m${line}\x1b[0m`);
     }
+  });
+  for (const line of formatOutputLines(entry.output)) {
+    term.writeln(`  ${line}`);
   }
   if (entry.exitCode !== null) {
     const color = entry.exitCode === 0 ? "\x1b[32m" : "\x1b[31m";

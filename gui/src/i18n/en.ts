@@ -85,6 +85,10 @@ const en: Locale = {
     // User-prompt ticks (backtracking)
     userPrompt: "My prompt",
     emptyPrompt: "(empty)",
+    // Cluster popover (pick one of several prompts squeezed together)
+    clusterTitle: "{n} prompts in this spot",
+    clusterHint: "Click one to jump",
+    clusterAria: "{n} prompts — click to expand and choose",
   },
   layoutPreset: {
     default: "Default",

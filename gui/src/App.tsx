@@ -13,6 +13,7 @@ import { reloadPlugins, getActiveManifests, collectPluginHotkeys } from "./servi
 import { startPluginProcessListener } from "./services/pluginProcessBridge";
 import { ALL_PANEL_DEFS } from "./services/panelDefs";
 import { getSettings, loadSettings, reloadSettings, saveSettings, updateSettings } from "./stores/settingsStore";
+import { syncTaskbarFromSettings } from "./services/taskbarVisibility";
 import { syncWindowTitle, DEFAULT_WINDOW_TITLE, type WindowTitleOrder } from "./services/windowTitle";
 import { workspaceBasename } from "./utils/workspace";
 import { normalizeTheme, isDarkTheme } from "./utils/themeUtils";
@@ -583,6 +584,17 @@ export default function App() {
   useEventHandler<{ settings: { uiFontSize?: number } }>(Events.SETTINGS_CHANGED, (data) => {
     setUiFontSize(data.settings.uiFontSize ?? 100);
   });
+
+  // 隐藏任务栏图标：跟随设置（含**其他实例广播来的**改动）。
+  //
+  // 这个设置存在全局文件里。A 实例改完后，B/C 只在 reloadSettings 后拿到新值 ——
+  // 若不在这里应用，B/C 的窗口仍带着任务栏图标，用户会以为"开关没生效 / 又跑回来了"
+  // （2026-10-28 用户反馈，他自己猜到"是不是没下发给所有实例"）。
+  // 去重与幂等见 services/taskbarVisibility.ts。
+  useEventHandler<{ settings: { hideTaskbarIcon?: boolean } }>(
+    Events.SETTINGS_CHANGED,
+    (data) => syncTaskbarFromSettings(data.settings.hideTaskbarIcon),
+  );
 
   // ── 主窗口标题：跟随「当前工作区 + 当前会话」──
   //

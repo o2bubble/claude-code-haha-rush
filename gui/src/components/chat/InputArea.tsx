@@ -7,6 +7,7 @@ import { formatReference } from "../../utils/referenceParser";
 import { saveClipboardItem, resolvePaste, collectPaste, isRealFilePath, defaultReadDir, defaultReadClipboardFiles, ensurePlainPasteTracking, isPlainPasteHeld } from "../../services/clipboardService";
 import { getChatState, isChatReady } from "../../stores/chatStore";
 import { getSettings } from "../../stores/settingsStore";
+import { createComposerUndo, type ComposerSnapshot, type SnapshotKind } from "../../services/composerUndo";
 import type { SlashCommand } from "../../stores/chatStore";
 import { SlashCommandDropdown } from "./SlashCommandDropdown";
 
@@ -70,9 +71,9 @@ function insertChipAtCursor(container: HTMLElement, refText: string, label: stri
     verticalAlign: "middle", margin: "0 2px",
   });
 
-  // Add click-to-remove
-  chip.addEventListener("click", () => chip.remove());
-
+  // ⚠️ 这里**不**挂 per-chip 的 click 监听：撤销恢复 innerHTML 后新造出来的
+  // chip 不会有监听器（"点 chip 删不掉"就是这么来的）。改在容器上做事件委托，
+  // 见 InputArea 的 handleComposerClick。
   container.focus();
   const sel = window.getSelection();
   // 1) 面板发送时 composer 可能已失焦（实时 selection 不在容器内）——用缓存的光标锚点
@@ -212,6 +213,22 @@ function getCaretRect(container: HTMLElement): { top: number; left: number } | n
   return { top: cr.bottom + 4, left: cr.left };
 }
 
+/**
+ * 撤销栈**放在模块级**，不随组件卸载消失。
+ *
+ * 为什么（2026-10-28 用户反馈「切到终端面板再切回来，输入的内容没了」）：
+ * 布局渲染器只挂载**当前激活**的标签页（LayoutRenderer 的 contentRender），
+ * 切到「终端」→ ChatInputPanel 整个卸载 → InputArea 的 DOM 连同未发送的内容
+ * 一起没了。这不是撤销功能引入的（上一版同样如此），是老问题。
+ *
+ * 把栈放模块级，`current()` 就是草稿的唯一事实来源：卸载不丢、重挂载时
+ * 原样贴回，连撤销历史一起活过来（回来还能接着 Ctrl+Z）。
+ *
+ * 同一 JS 上下文里只会有一个 composer（App 与 WidgetApp 二选一渲染，
+ * 见 main.tsx），且不同 Tauri 窗口是不同上下文 —— 单例安全。
+ */
+const composerUndo = createComposerUndo();
+
 export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, footerSlot }: InputAreaProps) {
   const divRef = useRef<HTMLDivElement>(null);
   const slashPosRef = useRef<number>(-1);
@@ -223,6 +240,9 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
   const [slashHighlight, setSlashHighlight] = useState(0);
   // 光标锚点：composer 聚焦时随时记住光标字符偏移，供面板"发送到聊天"引用（失焦时也能插到记忆位置）
   const cursorOffsetRef = useRef<number>(-1);
+
+  // 撤销栈是模块级单例（见上面的 composerUndo 注释），这里只做别名。
+  const undo = composerUndo;
 
   // Reactive slash commands from chatStore
   const chatPayload = useEvent<ChatStateChangedPayload>(Events.CHAT_STATE_CHANGED);
@@ -241,6 +261,89 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
   const updateHasText = useCallback(() => {
     if (divRef.current) setHasText(hasContent(divRef.current));
   }, []);
+
+  /**
+   * 把编辑器当前状态记进撤销栈。
+   *
+   * `kind`：`typing`（用户键入，按时间合并）/ `edit`（chip、粘贴、命令补全、
+   * 面板插入 —— 永远独立成步）。
+   *
+   * ⚠️ **所有改动 DOM 的地方都要调**（除了 onInput）：程序化写入不会触发
+   * onInput，漏一处就会让撤销栈与真实内容脱节 —— 那正是原生 undo 坏掉的原因，
+   * 不能在自己实现里重犯。
+   */
+  const snapshotNow = useCallback((kind: SnapshotKind) => {
+    const el = divRef.current;
+    if (!el) return;
+    undo.record(
+      { html: el.innerHTML, caret: getCursorTextOffset(el) },
+      kind,
+      Date.now(),
+    );
+  }, []);
+
+  /** 把快照贴回编辑器（含光标位置） */
+  const applySnapshot = useCallback((snap: ComposerSnapshot) => {
+    const el = divRef.current;
+    if (!el) return;
+    el.innerHTML = snap.html;
+    if (!setCaretAtCharOffset(el, snap.caret)) {
+      // 偏移未记录（-1）或越界 → 光标放到末尾，总比停在开头让人接着打字更自然
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      r.collapse(false);
+      const s = window.getSelection();
+      s?.removeAllRanges();
+      s?.addRange(r);
+    }
+    el.focus();
+    // 撤销后的内容多半不再匹配之前打开的斜杠面板 —— 先关掉，下次输入会自然重算
+    setSlashOpen(false);
+    updateHasText();
+  }, [updateHasText]);
+
+  // 挂载：先贴上"上次离开时的草稿"，再把结果记为基线。
+  //
+  // 为什么要有这一步：切到「终端」标签会把本面板整个卸载（布局只渲染激活标签），
+  // 未发送的内容只存在 DOM 里 → 切回来就没了（用户反馈 2026-10-28）。
+  // 撤销栈在模块级，`current()` 就是那份草稿。
+  //
+  // 没有草稿时记一条空基线：这样第一段键入之后 Ctrl+Z 能退回空，
+  // 而不是因为"没有更早的状态"什么也不做。
+  useEffect(() => {
+    const el = divRef.current;
+    if (!el) return;
+    const draft = undo.current();
+    if (draft && draft.html && draft.html !== el.innerHTML) {
+      el.innerHTML = draft.html;
+      updateHasText();
+      // 光标接回草稿里记的位置 —— 否则重新挂载后 caret 在开头，
+      // 用户接着打字会插到最前面（而不是他离开时停的地方）。
+      if (setCaretAtCharOffset(el, draft.caret)) {
+        // 用户从终端切回来，本意多半是继续写 —— 直接把焦点交还给输入框。
+        // 只有"有草稿"时才抢焦点：空状态切过来不该打断用户。
+        el.focus();
+      }
+    }
+    snapshotNow("edit");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * 点 chip 删除（事件委托 —— 撤销恢复 innerHTML 后新造的 chip 也有效）。
+   * 删除本身要记一步撤销，否则删错了没法用 Ctrl+Z 找回。
+   */
+  const handleComposerClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement | null;
+      const chip = target?.closest?.("[data-ref]") as HTMLElement | null;
+      if (!chip || !divRef.current?.contains(chip)) return;
+      chip.remove();
+      updateHasText();
+      snapshotNow("edit");
+    },
+    [snapshotNow, updateHasText],
+  );
 
   // 光标锚点更新：composer 处于 activeElement 时（聚焦态），selectionchange 随时记录偏移
   useEffect(() => {
@@ -274,6 +377,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
       sel?.removeAllRanges();
       sel?.addRange(range);
       updateHasText();
+      snapshotNow("edit");
       return;
     }
     el.focus();
@@ -308,6 +412,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
       el.appendChild(document.createTextNode(insertText));
     }
     updateHasText();
+    snapshotNow("edit");
   });
 
   // Handle reference → chip at cursor (skip if SkillDialog is open)
@@ -319,6 +424,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
     const label = reference.label || reference.path.split(/[/\\]/).pop() || reference.path;
     insertChipAtCursor(el, refText, label, cursorOffsetRef.current);
     updateHasText();
+    snapshotNow("edit");
   });
 
   const handleSend = useCallback(() => {
@@ -331,6 +437,9 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
     el.innerHTML = "";
     setHasText(false);
     cursorOffsetRef.current = -1; // 内容清空 → 锚点作废
+    // 发出去的内容不再算"可撤销的编辑"（与主流聊天框一致）：
+    // 保留它会让 Ctrl+Z 把已发送的话原样搬回输入框。
+    undo.reset({ html: "", caret: -1 });
   }, [onSend]);
 
   const handleSlashSelect = useCallback((cmd: string) => {
@@ -361,10 +470,28 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
     }
     el.focus();
     updateHasText();
-  }, [updateHasText]);
+    snapshotNow("edit"); // 补全是一次结构性改写（整段 innerHTML 重建）
+  }, [updateHasText, snapshotNow]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // ── 撤销 / 重做 ──
+      // 必须**自己接管**：原生 undo 与程序化写入（chip / innerHTML 重建）混在
+      // 一起会还原出半截内容（用户反馈「乱七八糟」的根因）。
+      // 输入法组字期间不接管 —— 撤销半截拼音是 IME 自己的事。
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+      const isUndo = mod && !e.altKey && !e.shiftKey && key === "z";
+      const isRedo = mod && !e.altKey && ((key === "z" && e.shiftKey) || (key === "y" && !e.shiftKey));
+      if ((isUndo || isRedo) && !e.nativeEvent.isComposing) {
+        // 始终 preventDefault：即使栈空也不让浏览器原生 undo 插手 ——
+        // 它可能把我们早已替换掉的旧 DOM 状态翻出来。
+        e.preventDefault();
+        const snap = isRedo ? undo.redo() : undo.undo();
+        if (snap) applySnapshot(snap);
+        return;
+      }
+
       if (slashOpen && slashFiltered.length > 0) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
@@ -402,11 +529,13 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
         }
       }
     },
-    [handleSend, slashOpen, slashFiltered, slashHighlight, handleSlashSelect],
+    [handleSend, slashOpen, slashFiltered, slashHighlight, handleSlashSelect, applySnapshot],
   );
 
   const handleInput = useCallback(() => {
     updateHasText();
+    // 键入也进撤销栈（按时间合并成步，见 composerUndo）
+    snapshotNow("typing");
     const el = divRef.current;
     if (!el) return;
     const ctx = findSlashContext(el);
@@ -423,7 +552,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
       }
     }
     setSlashOpen(false);
-  }, [updateHasText]);
+  }, [updateHasText, snapshotNow]);
 
   // Work dir for saving pasted images/files
   const settingsPayload = useEvent<SettingsChangedPayload>(Events.SETTINGS_CHANGED);
@@ -461,6 +590,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
           insertChipAtCursor(el, refText, r.label, cursorOffsetRef.current);
         }
         updateHasText();
+        snapshotNow("edit");
         return;
       }
 
@@ -475,7 +605,10 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
             anySaved = true;
           }
         }
-        if (anySaved) updateHasText();
+        if (anySaved) {
+          updateHasText();
+          snapshotNow("edit");
+        }
         return;
       }
 
@@ -493,8 +626,9 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
         el.appendChild(document.createTextNode(plain));
       }
       updateHasText();
+      snapshotNow("edit");
     },
-    [updateHasText, workDir],
+    [updateHasText, workDir, snapshotNow],
   );
 
   return (
@@ -534,6 +668,7 @@ export function InputArea({ onSend, onInterrupt, streaming, topSlot, rightSlot, 
           contentEditable
           suppressContentEditableWarning
           data-placeholder={t("chat.placeholder")}
+          onClick={handleComposerClick}
           onInput={handleInput}
           onPaste={handlePaste}
           onKeyDown={handleKeyDown}

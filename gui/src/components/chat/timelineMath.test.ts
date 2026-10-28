@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   timeToIndex, segmentizeByDay, layoutSegments, pixelToTime, timeToPixel, buildTicks,
-  promptPreview, findNearestPrompt, clusterPrompts,
+  promptPreview, findNearestPrompt, clusterPrompts, pickEven,
+  hitRange, DOT_HIT_MAX, DOT_HIT_MIN,
 } from "./timelineMath";
 
 const H = 3600_000;
@@ -241,5 +242,103 @@ describe("clusterPrompts — 渲染聚类（防密集糊成一片）", () => {
 
   it("空输入 → []", () => {
     expect(clusterPrompts([], 8)).toEqual([]);
+  });
+});
+
+// ── 点击刻度的**精确性**（2026-10-28 用户反馈）──
+//
+// 用户原话：「独立的一个点有办法精准跳转，而不是鼠标对应的位置只能跳到附近」。
+// 触点在 UI 层变成了真正的可点元素（TimeLineBar 的 role="button"），点中即
+// `onSeek(items[0].index)`。这些用例锁住"index 在聚类/取样的整个链路上不丢、不错位"：
+// 一旦某处退化成"按像素反算时间再二分"，就会跳偏一到几条 —— 那正是要修的 bug。
+
+describe("用户提示刻度的 index 精确性（点哪条跳哪条）", () => {
+  const mk = (index: number, pixel: number) => ({
+    index, time: pixel * 1000, preview: `p${index}`, pixel,
+  });
+
+  it("单条簇里的 index 就是那条消息的下标（不做任何近似）", () => {
+    // 关键场景：两条消息时间几乎相同，像素只差 3px —— 视觉上一个点，
+    // 但它们各自的 index 必须原封不动地带出来
+    const out = clusterPrompts([mk(7, 100), mk(9, 103)], 8);
+    expect(out).toHaveLength(1);
+    expect(out[0].items.map((i) => i.index)).toEqual([7, 9]);
+    // 点这个簇 → 浮层按 index 逐条跳，7 和 9 是两个不同的落点
+  });
+
+  it("聚类不重排、不丢弃、不复制 index（长度守恒）", () => {
+    const input = [mk(0, 10), mk(1, 12), mk(2, 40), mk(3, 41), mk(4, 42), mk(5, 90)];
+    const out = clusterPrompts(input, 8);
+    const flat = out.flatMap((c) => c.items.map((i) => i.index));
+    expect(flat.sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it("簇内按像素升序（浮层列表自上而下 = 时间先后）", () => {
+    const out = clusterPrompts([mk(5, 42), mk(3, 40), mk(4, 41)], 8);
+    expect(out[0].items.map((i) => i.index)).toEqual([3, 4, 5]);
+  });
+
+  it("pickEven 取样保留完整对象（index 随之保留，不会退化成时间代理）", () => {
+    const list = Array.from({ length: 300 }, (_, i) => mk(i, i * 3));
+    const picked = pickEven(list, 120);
+    expect(picked).toHaveLength(120);
+    // 首末必须保留（用户最可能从两头找）
+    expect(picked[0].index).toBe(0);
+    expect(picked[picked.length - 1].index).toBe(299);
+    // 每个取样项都还是原来的对象（index/preview 一一对应）
+    for (const p of picked) {
+      expect(p.preview).toBe(`p${p.index}`);
+    }
+  });
+});
+
+// ── 命中区切分（点击精准的几何保证）──
+//
+// 关键性质：**相邻命中区不重叠**。重叠 = 点击由 DOM 顺序决定 = "点了上一个却跳到
+// 下一个"，那正是用户抱怨的"只能跳到附近"的一种表现。
+
+describe("hitRange — 命中区按中线切分", () => {
+  const cl = (...pixels: number[]) => pixels.map((pixel) => ({ pixel }));
+
+  it("中间点：上下各到与邻居的中线", () => {
+    const c = cl(10, 20, 30);
+    expect(hitRange(c, 1)).toEqual({ top: 15, bottom: 25 });
+  });
+
+  it("首尾点向外延伸半个最大高度", () => {
+    const c = cl(10, 20, 30);
+    expect(hitRange(c, 0).top).toBe(10 - DOT_HIT_MAX / 2);
+    expect(hitRange(c, 2).bottom).toBe(30 + DOT_HIT_MAX / 2);
+  });
+
+  it("相邻命中区**不重叠**（稀疏与密集都成立）", () => {
+    for (const pixels of [[10, 50, 120], [10, 18, 26, 34], [100, 108, 116, 300]]) {
+      const c = cl(...pixels);
+      for (let i = 0; i < c.length - 1; i++) {
+        const a = hitRange(c, i);
+        const b = hitRange(c, i + 1);
+        // 相邻区最多在边界相接，不得交叠
+        expect(a.bottom).toBeLessThanOrEqual(b.top + 1e-9);
+      }
+    }
+  });
+
+  it("极密处（中间点的中线区间 < 最小高度）撑到最小高度，不会缩成 0", () => {
+    // 中间点：top=(100+101)/2=100.5、bottom=(101+102)/2=101.5 → 原始只有 1px，
+    // 必须撑到 DOT_HIT_MIN，否则密集区完全点不中
+    const c = cl(100, 101, 102);
+    const mid = hitRange(c, 1);
+    expect(mid.bottom - mid.top).toBeCloseTo(DOT_HIT_MIN, 5);
+    // 首尾点向外延伸，本来就够高（不需要钳制）
+    expect(hitRange(c, 0).bottom - hitRange(c, 0).top).toBeGreaterThan(DOT_HIT_MIN);
+  });
+
+  it("每个点的命中区都**包含自己的像素位置**（点得中自己）", () => {
+    const c = cl(10, 12, 100, 101, 102, 200);
+    c.forEach((item, i) => {
+      const r = hitRange(c, i);
+      expect(item.pixel).toBeGreaterThanOrEqual(r.top);
+      expect(item.pixel).toBeLessThanOrEqual(r.bottom);
+    });
   });
 });

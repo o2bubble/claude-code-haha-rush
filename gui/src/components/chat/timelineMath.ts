@@ -272,3 +272,40 @@ export function buildTicks(layout: SegmentLayout[], opts?: { maxCount?: number }
 
   return [...dayTicks, ...timeTicks].sort((a, b) => a.time - b.time);
 }
+
+// ── 刻度点的命中区切分（点击精准定位）──
+//
+// 用户要的是「点中这个点就跳到它那条」，而不是「鼠标 Y 落在附近、由时间反算猜一个」。
+// 但刻度点之间最小间距只有 CLUSTER_MIN_GAP（8px），若给每个点固定 16px 的命中框，
+// 相邻框必然重叠 —— 重叠处由 DOM 顺序（靠后的点）抢走点击，会出现
+// 「点了上一个却跳到下一个」。所以命中区**按相邻点的中线切分**，永不重叠。
+
+/** 命中区最大高度（px）：稀疏处每个点最多占这么高。 */
+export const DOT_HIT_MAX = 17;
+/** 命中区最小高度（px）：极密处强制撑开一点，允许轻度重叠 —— 总比点不中好。 */
+export const DOT_HIT_MIN = 6;
+/** 命中区宽度（px）：只覆盖点周围一圈，栏的其余部分留给「拖动扫时间」。 */
+export const TICK_HIT_WIDTH = DOT_HIT_MAX + 7;
+
+/**
+ * 第 i 个点的命中区 `[top, bottom]`（容器内像素）。
+ *
+ * 上界 = 与上一个点的中线，下界 = 与下一个点的中线；首/末点向外延伸半个
+ * DOT_HIT_MAX。相邻点间距小于 DOT_HIT_MIN 时以中线为中心撑到 DOT_HIT_MIN。
+ */
+export function hitRange(
+  clusters: { pixel: number }[],
+  i: number,
+): { top: number; bottom: number } {
+  const half = DOT_HIT_MAX / 2;
+  const cur = clusters[i].pixel;
+  const prev = i > 0 ? clusters[i - 1].pixel : null;
+  const next = i < clusters.length - 1 ? clusters[i + 1].pixel : null;
+  const top = prev === null ? cur - half : (prev + cur) / 2;
+  const bottom = next === null ? cur + half : (cur + next) / 2;
+  if (bottom - top < DOT_HIT_MIN) {
+    const mid = (top + bottom) / 2;
+    return { top: mid - DOT_HIT_MIN / 2, bottom: mid + DOT_HIT_MIN / 2 };
+  }
+  return { top, bottom };
+}

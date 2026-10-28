@@ -31,6 +31,7 @@ import { useEventHandler } from "../../services/useService";
 import { Events } from "../../services/events";
 import { crossWindowBus } from "../../services/crossWindowBus";
 import { usePluginSettings, updatePluginSetting } from "../../services/pluginSettingsStore";
+import { applyTaskbarVisibility } from "../../services/taskbarVisibility";
 import type { PluginManifest } from "../../services/pluginRegistry";
 
 // ── 压缩配置：handoff 预设（完整复刻技能总结要求）+ 默认脚本路径（随程序打包在 extensions/） ──
@@ -688,9 +689,9 @@ function CategoryContent({ cat, settings, update, applyServer, applyWorkspaceOnl
                 applyGlobalOnly({ hideTaskbarIcon: v });
                 // 立刻生效，不必重启 —— 万一点错了，窗口还在屏幕上，
                 // 再点一次这个开关就能把它放回任务栏。
-                void import("@tauri-apps/api/core")
-                  .then(({ invoke }) => invoke("set_main_window_taskbar", { hidden: v }))
-                  .catch(() => {});
+                // 走共享服务（含去重）：其他实例收到广播后也走同一条路，
+                // 见 services/taskbarVisibility.ts。
+                applyTaskbarVisibility(v);
               }}
             />
             <FieldHint text={t("settings.hideTaskbarIconDesc")} />

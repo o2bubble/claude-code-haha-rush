@@ -7,8 +7,9 @@ import { t } from "../../i18n";
 import {
   buildTicks, timeToIndex, pixelToTime, timeToPixel,
   segmentizeByDay, layoutSegments, MIN_SEGMENT_PX,
-  findNearestPrompt, clusterPrompts, pickEven,
-  type UserPrompt, type UserPromptHit,
+  findNearestPrompt, clusterPrompts, pickEven, hitRange,
+  DOT_HIT_MAX, DOT_HIT_MIN, TICK_HIT_WIDTH,
+  type UserPrompt, type UserPromptHit, type PromptCluster,
 } from "./timelineMath";
 
 interface TimeLineBarProps {
@@ -28,6 +29,8 @@ const PROMPT_HIT_RADIUS = 7;
 /** 渲染聚类阈值（px）：中心距小于它就并作一个标记。
  *  点的视觉直径约 6-7px（5px + 1px 描边），取 8 保证相邻点不接触。 */
 const CLUSTER_MIN_GAP = 8;
+const CLUSTER_OPEN_DELAY = 400;
+const CLUSTER_CLOSE_DELAY = 240;
 
 // 精简态（未 hover）窄条，只显示刻度小点；hover/拖动时展开为详细宽条。
 // 展开态需容纳「MM-DD HH:MM」日期+时间，故较宽。
@@ -91,6 +94,57 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
   }, []);
   useEffect(() => () => clearHoverTimer(), [clearHoverTimer]);
 
+  // ── 精准定位交互（2026-10-28 用户反馈）──
+  //
+  // 之前刻度点是 `pointerEvents:none` 的装饰：点它靠的是"鼠标 Y → 最近刻度(7px)
+  // → 否则时间反算"，只能跳到附近。现在点**自己就是命中目标**（见下方渲染），
+  // 点中即 `onSeek(该条的 index)`，不经过任何反算。
+  //
+  // 聚合点（多条挤在几像素内）再展开成一个逐条可点的浮层 —— 像素上根本分不开，
+  // 只能靠列表把每一条的时间和预览摆出来让人挑。
+  /** 鼠标**直接**停在刻度点上时的精确命中（优先于按 Y 反查的 hoveredPrompt）。 */
+  const [exactHover, setExactHover] = useState<UserPromptHit | null>(null);
+  /** 已展开的聚合浮层。用"簇内第一条的 index"作身份标识 ——
+   *  簇对象每次重算都是新引用，直接存对象会在流式输出时莫名关掉浮层。 */
+  const [openClusterKey, setOpenClusterKey] = useState<number | null>(null);
+  const [popoverShown, setPopoverShown] = useState(false);
+  const clusterTimerRef = useRef<number | null>(null);
+
+  const clearClusterTimer = useCallback(() => {
+    if (clusterTimerRef.current) {
+      clearTimeout(clusterTimerRef.current);
+      clusterTimerRef.current = null;
+    }
+  }, []);
+  useEffect(() => () => clearClusterTimer(), [clearClusterTimer]);
+
+  const closeCluster = useCallback(() => {
+    clearClusterTimer();
+    setOpenClusterKey(null);
+  }, [clearClusterTimer]);
+
+  /** 悬停聚合点时延时展开（立刻展开会让快速划过一路弹窗）。 */
+  const scheduleOpenCluster = useCallback(
+    (cluster: PromptCluster) => {
+      clearClusterTimer();
+      clusterTimerRef.current = window.setTimeout(() => {
+        clusterTimerRef.current = null;
+        setOpenClusterKey(cluster.items[0]?.index ?? null);
+        setHovered(true); // 同步展开宽条，浮层才有稳定锚点
+      }, CLUSTER_OPEN_DELAY);
+    },
+    [clearClusterTimer],
+  );
+
+  /** 离开时延时关闭 —— 给"从刻度点移到浮层"留出移动时间。 */
+  const scheduleCloseCluster = useCallback(() => {
+    clearClusterTimer();
+    clusterTimerRef.current = window.setTimeout(() => {
+      clusterTimerRef.current = null;
+      setOpenClusterKey(null);
+    }, CLUSTER_CLOSE_DELAY);
+  }, [clearClusterTimer]);
+
   // hover 或拖动时展开为详细宽条
   const expanded = hovered || dragging;
   const width = expanded ? EXPANDED_WIDTH : COLLAPSED_WIDTH;
@@ -151,9 +205,11 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
       setDragging(true);
       setDragY(e.clientY);
       setHoverY(null);
+      // 开始拖动 = 扫时间轴，聚合浮层挡路，先收起
+      closeCluster();
       seekFromClientY(e.clientY);
     },
-    [seekFromClientY]
+    [seekFromClientY, closeCluster]
   );
 
   const handlePointerMove = useCallback(
@@ -205,15 +261,47 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
     [userTicks],
   );
 
+  // 已展开的浮层对应的簇（按身份标识找回；簇散开/消失则自动关闭）
+  const openCluster = useMemo(
+    () =>
+      openClusterKey == null
+        ? null
+        : promptClusters.find((c) => c.items[0]?.index === openClusterKey) ?? null,
+    [openClusterKey, promptClusters],
+  );
+
+  // 浮层入场动画：挂载后再翻到"显示"，让 transition 有起点（渐变淡入 + 轻微下移）。
+  useEffect(() => {
+    if (!openCluster) {
+      setPopoverShown(false);
+      return;
+    }
+    const id = requestAnimationFrame(() => setPopoverShown(true));
+    return () => cancelAnimationFrame(id);
+  }, [openCluster]);
+
+  // Esc 关浮层
+  useEffect(() => {
+    if (!openCluster) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeCluster();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [openCluster, closeCluster]);
+
+  /** 鼠标直接在刻度点上（而不是按 Y 反查）时的精确命中，优先级更高。 */
+  const activePrompt = exactHover ?? hoveredPrompt;
+
   // 吸附目标在其簇内的序号（密集时告诉用户"这里挤了几条、当前是第几条"）
   const clusterPos = useMemo(() => {
-    if (!hoveredPrompt) return null;
+    if (!activePrompt) return null;
     for (const c of promptClusters) {
-      const i = c.items.findIndex((it) => it.index === hoveredPrompt.index);
+      const i = c.items.findIndex((it) => it.index === activePrompt.index);
       if (i >= 0) return { pos: i + 1, total: c.items.length };
     }
     return null;
-  }, [hoveredPrompt, promptClusters]);
+  }, [activePrompt, promptClusters]);
 
   return (
     <div
@@ -332,30 +420,123 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
 
       {/* 用户提示刻度：实心点，折叠态也显示（回溯定位的主要抓手）。
           颜色用 warning 琥珀，与天刻度(accent 蓝)/时间刻度(border 灰)区分。
-          按像素聚类渲染 —— 密集区一个标记（尺寸编码密度），避免糊成一片。 */}
+          按像素聚类渲染 —— 密集区一个标记（尺寸编码密度），避免糊成一片。
+
+          ⚠️ **这些点是可点的**（不再是 pointerEvents:none 的装饰）：
+          点中即 `onSeek(该条 index)`，跳转不经过「鼠标 Y → 时间 → 二分」的反算，
+          所以是**精确的那一条**而不是附近。命中区比视觉点大得多（DOT_HIT_SIZE）。
+          聚合点（多条挤在一起）点击/悬停展开逐条列表浮层 —— 见下方。 */}
       {height > 0 &&
         promptClusters.map((c, i) => {
-          const active = !!hoveredPrompt && c.items.some((it) => it.index === hoveredPrompt.index);
           const dense = c.items.length > 1;
-          const size = active ? 9 : dense ? 7 : 5;
+          const isOpen = openCluster === c;
+          const active =
+            isOpen || (!!activePrompt && c.items.some((it) => it.index === activePrompt.index));
+          const hoveredThis = !!exactHover && c.items.some((it) => it.index === exactHover.index);
+          const size = active || hoveredThis ? 9 : dense ? 7 : 5;
+          // 命中区按相邻点中线切分（永不重叠）—— 见 hitRange 的注释
+          const { top: hitTop, bottom: hitBottom } = hitRange(promptClusters, i);
           return (
             <div
               key={`up-${i}`}
+              role="button"
+              tabIndex={0}
+              aria-label={
+                dense
+                  ? t("timeline.clusterAria", { n: c.items.length })
+                  : c.items[0].preview || t("timeline.emptyPrompt")
+              }
+              // 阻止冒泡：否则按下会被容器当成"开始拖动"，先 seek 到附近再拖走
+              onPointerDown={(e) => e.stopPropagation()}
+              onPointerEnter={() => {
+                if (dense) {
+                  setExactHover(null);
+                  scheduleOpenCluster(c);
+                } else {
+                  setExactHover(c.items[0]);
+                }
+              }}
+              onPointerLeave={() => {
+                if (dense) {
+                  scheduleCloseCluster();
+                } else if (exactHover && c.items.some((it) => it.index === exactHover.index)) {
+                  setExactHover(null);
+                }
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (dense) {
+                  // 点击聚合点：立刻展开（悬停延时是给"划过"用的，点击要即时）
+                  clearClusterTimer();
+                  setOpenClusterKey(c.items[0]?.index ?? null);
+                  setHovered(true);
+                } else {
+                  onSeekRef.current(c.items[0].index);
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" && e.key !== " ") return;
+                e.preventDefault();
+                e.stopPropagation();
+                if (dense) {
+                  setOpenClusterKey(c.items[0]?.index ?? null);
+                  setHovered(true);
+                } else {
+                  onSeekRef.current(c.items[0].index);
+                }
+              }}
               style={{
                 position: "absolute",
+                // 横向只覆盖点周围一小圈：栏的其余部分仍是"拖动扫时间"区域，
+                // 不能被点的命中区整片吃掉（否则密集区完全没法拖）
                 left: "50%",
-                top: Math.min(height - size, Math.max(0, c.pixel - size / 2)),
-                width: size,
-                height: size,
-                marginLeft: -size / 2,
-                borderRadius: "50%",
-                background: active ? "var(--accent)" : "var(--semantic-warning)",
-                // 细描边把点从中心竖线上"抬"起来，密集处也能分辨
-                boxShadow: "0 0 0 1px var(--bg-surface)",
-                pointerEvents: "none",
-                zIndex: active ? 2 : 1,
+                width: TICK_HIT_WIDTH,
+                marginLeft: -TICK_HIT_WIDTH / 2,
+                // 纵向按中线切分（不重叠）
+                top: Math.max(0, hitTop),
+                height: Math.max(1, Math.min(height, hitBottom) - Math.max(0, hitTop)),
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                pointerEvents: "auto",
+                cursor: "pointer",
+                zIndex: active ? 3 : 2,
+                // 命中区本身不可见；视觉的是里面那个点
+                background: "transparent",
+                border: "none",
+                padding: 0,
               }}
-            />
+            >
+              {/* 聚合标记的外圈：一眼看出"这是一组"，不是单条 */}
+              {dense && (
+                <span
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    width: size + 5,
+                    height: size + 5,
+                    borderRadius: "50%",
+                    border: "1px solid var(--semantic-warning)",
+                    opacity: active || isOpen ? 0.9 : 0.55,
+                    transition: "opacity 0.12s ease",
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
+              <span
+                aria-hidden
+                style={{
+                  width: size,
+                  height: size,
+                  borderRadius: "50%",
+                  background: active || hoveredThis ? "var(--accent)" : "var(--semantic-warning)",
+                  // 细描边把点从中心竖线上"抬"起来，密集处也能分辨
+                  boxShadow: "0 0 0 1px var(--bg-surface)",
+                  transition: "width 0.1s ease, height 0.1s ease, background 0.1s ease",
+                  pointerEvents: "none",
+                }}
+              />
+            </div>
           );
         })}
 
@@ -369,7 +550,7 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
           扫过消息定位，浮层压在右侧正好挡住正要找的内容，且随指针移动一路遮。
           左侧为空的会话栏区域稳定不挡消息；左边缘减去浮层最大宽度即可，
           无需测量自身尺寸。 */}
-      {expanded && hoveredPrompt && barRect && (
+      {expanded && activePrompt && !openCluster && barRect && (
         <div
           style={{
             position: "fixed",
@@ -377,7 +558,7 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
               ? { left: Math.max(4, barRect.left - PREVIEW_MAX_WIDTH - 6) }
               : { left: barRect.left + EXPANDED_WIDTH + 6 }),
             top: Math.min(
-              Math.max(4, barRect.top + hoveredPrompt.pixel - 14),
+              Math.max(4, barRect.top + activePrompt.pixel - 14),
               (typeof window !== "undefined" ? window.innerHeight : 800) - 64
             ),
             maxWidth: PREVIEW_MAX_WIDTH,
@@ -395,7 +576,7 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
           }}
         >
           <div style={{ fontSize: 10, color: "var(--fg-muted)", marginBottom: 2 }}>
-            {t("timeline.userPrompt")} · {formatAxisTime(hoveredPrompt.time, false, Date.now())}
+            {t("timeline.userPrompt")} · {formatAxisTime(activePrompt.time, false, Date.now())}
             {/* 密集区标记：告诉用户"这里挤了几条、当前第几条"——像素不足以逐条区分时，
                 这是唯一能让人判断自己选到哪条的信息 */}
             {clusterPos && clusterPos.total > 1 && (
@@ -405,10 +586,129 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
             )}
           </div>
           <div style={{ wordBreak: "break-word" }}>
-            {hoveredPrompt.preview || t("timeline.emptyPrompt")}
+            {activePrompt.preview || t("timeline.emptyPrompt")}
           </div>
         </div>
       )}
+
+      {/* ── 聚合点浮层：逐条列出这一簇里的提问，点哪条就跳到哪条 ──
+          为什么是列表而不是把点"散开"：多条挤在几像素内，散开也读不出谁是谁，
+          还得逐个悬停看预览。列表一次把时间+预览全摆出来，选哪条一目了然。
+          入场是渐变（淡入 + 轻微下移），对应"渐进展开"的手感。 */}
+      {openCluster && barRect && (() => {
+        const viewportH = typeof window !== "undefined" ? window.innerHeight : 800;
+        const rowH = 26;
+        const maxH = Math.min(360, viewportH - 80);
+        const estH = Math.min(maxH, 30 + openCluster.items.length * rowH + 10);
+        const top = Math.min(
+          Math.max(8, barRect.top + openCluster.pixel - 16),
+          Math.max(8, viewportH - estH - 10),
+        );
+        return (
+          <div
+            // 阻止冒泡：浮层内的按下/滚动不该被当成"拖动时间轴"
+            onPointerDown={(e) => e.stopPropagation()}
+            onWheel={(e) => e.stopPropagation()}
+            onPointerEnter={() => clearClusterTimer()}
+            onPointerLeave={() => scheduleCloseCluster()}
+            style={{
+              position: "fixed",
+              left: Math.max(4, barRect.left + EXPANDED_WIDTH + 6),
+              top,
+              width: PREVIEW_MAX_WIDTH,
+              maxHeight: maxH,
+              display: "flex",
+              flexDirection: "column",
+              borderRadius: 6,
+              background: "var(--bg-root)",
+              border: "1px solid var(--border-medium)",
+              boxShadow: "var(--shadow-md)",
+              overflow: "hidden",
+              zIndex: 1001,
+              // 渐变入场：先透明且微上移，下一帧翻到可见（见 popoverShown 的 rAF）
+              opacity: popoverShown ? 1 : 0,
+              transform: popoverShown ? "translateY(0)" : "translateY(-4px)",
+              transition: "opacity 0.13s ease, transform 0.13s ease",
+            }}
+          >
+            <div
+              style={{
+                padding: "5px 9px",
+                fontSize: 10,
+                color: "var(--semantic-warning)",
+                background: "var(--bg-surface)",
+                borderBottom: "1px solid var(--border-light)",
+                fontFamily: "var(--font-sans)",
+                flexShrink: 0,
+              }}
+            >
+              {t("timeline.clusterTitle", { n: openCluster.items.length })}
+              <span style={{ color: "var(--fg-muted)", marginLeft: 6 }}>
+                {t("timeline.clusterHint")}
+              </span>
+            </div>
+            <div style={{ overflowY: "auto", minHeight: 0 }}>
+              {openCluster.items.map((it) => (
+                <div
+                  key={it.index}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    onSeekRef.current(it.index);
+                    closeCluster();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    onSeekRef.current(it.index);
+                    closeCluster();
+                  }}
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "baseline",
+                    padding: "5px 9px",
+                    height: rowH,
+                    boxSizing: "border-box",
+                    cursor: "pointer",
+                    borderBottom: "1px solid var(--border-light)",
+                    fontFamily: "var(--font-sans)",
+                    fontSize: 11,
+                    lineHeight: "16px",
+                  }}
+                  onPointerEnter={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = "var(--bg-hover)";
+                  }}
+                  onPointerLeave={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = "transparent";
+                  }}
+                >
+                  <span
+                    style={{
+                      flexShrink: 0,
+                      color: "var(--fg-muted)",
+                      fontSize: 10,
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {formatAxisTime(it.time, true, Date.now())}
+                  </span>
+                  <span
+                    style={{
+                      color: "var(--fg-primary)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {it.preview || t("timeline.emptyPrompt")}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 拖动/悬停指针 + 时间提示（仅展开态） */}
       {expanded && pointerPixel !== null && (
@@ -426,7 +726,7 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
             }}
           />
           {/* 时间标签：吸附到用户提示时让位 —— 右侧预览浮层已含时间，避免重复 */}
-          {!hoveredPrompt && (
+          {!activePrompt && (
           <div
             style={{
               position: "absolute",
