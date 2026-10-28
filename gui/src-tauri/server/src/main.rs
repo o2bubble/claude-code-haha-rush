@@ -863,15 +863,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     match action {
                         tray::TrayAction::Kill(pid) => {
                             eprintln!("[tray] 结束实例 pid={pid}");
-                            claude_gui_shared::proc::kill_process_tree(pid);
+                            // 用 kill_instances 而不是 kill_process_tree：有用户把 GUI
+                            // 套了一层拉起器，只杀子进程会留下一个无法交互的空白窗口
+                            // （2026-10-28 反馈）。判定规则见 shared/proc.rs。
+                            // 传自己的 pid 兜底 —— 绝不能把自己杀掉。
+                            let killed =
+                                claude_gui_shared::proc::kill_instances(&[pid], &[std::process::id()]);
+                            if !killed.is_empty() {
+                                eprintln!("[tray] 同时结束了外层拉起器: {killed:?}");
+                            }
                         }
                         tray::TrayAction::KillAll => {
                             // 只关 GUI，**不动 server 自己** —— 托盘的退出走「退出」那一项。
                             // 关完 live 归零，宽限期开始倒数（菜单里能看到剩余时间）。
                             let list = collect_gui_instances();
-                            eprintln!("[tray] 关闭所有实例，共 {} 个", list.len());
-                            for rec in list {
-                                claude_gui_shared::proc::kill_process_tree(rec.pid);
+                            let pids: Vec<u32> = list.iter().map(|r| r.pid).collect();
+                            eprintln!("[tray] 关闭所有实例，共 {} 个", pids.len());
+                            // 一次性传全部 pid：拉起器的"所有孩子都要被杀"判定
+                            // 需要看到完整集合（逐个杀的话永远差最后一个）。
+                            let killed =
+                                claude_gui_shared::proc::kill_instances(&pids, &[std::process::id()]);
+                            if !killed.is_empty() {
+                                eprintln!("[tray] 同时结束了外层拉起器: {killed:?}");
                             }
                         }
                         tray::TrayAction::Focus(pid) => {
