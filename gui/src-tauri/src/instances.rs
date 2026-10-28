@@ -21,33 +21,16 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// 一个实例的自述（写在 `<app_data>/instances/<pid>.json`）。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct InstanceRecord {
-    pub pid: u32,
-    /// 绑定的工作区绝对路径。空 = 尚未绑定（启动早期）。
-    #[serde(default)]
-    pub workspace: String,
-    /// 当前加载的会话 id。空 = 还没加载会话（只有工作区）。
-    #[serde(rename = "sessionId", default)]
-    pub session_id: String,
-    /// **进程启动时刻**（Unix ms，由 `GetProcessTimes` 得来）。
-    ///
-    /// 判存活的唯一正确姿势是 **pid + 启动时间**，因为 pid 会被系统复用：
-    /// 升级强杀实例后自述文件必然残留（强杀不走清理），若某个新进程恰好分到
-    /// 死实例的 pid，只看 pid 就会把残留误判成"还活着"。实测事故（2026-09-21/22）：
-    /// 恢复快照里绑同一工作区的残留被误判存活 → 「跳过（已有实例绑定该工作区）」
-    /// → **该工作区的窗口少恢复一个**（用户感知："有时没拉起新实例"）。
-    ///
-    /// 0 = 旧版本写的记录（无此字段）→ 一律视为**不可信**（当死处理）：
-    /// 本版本起记录必带启动时间；不带 = 本版本之前写的 = 其进程要么已被升级
-    /// 杀光、要么不是本版本能管理的实例。升级流程另有一道"清空自述目录"兜底。
-    #[serde(default)]
-    pub started_at: u64,
-    /// 最后更新时刻（ms）。用于排序/诊断；判存活不用它（见 `started_at`）。
-    #[serde(default)]
-    pub updated_at: u64,
-}
+// ── 与 server 共用的部分（2026-10-27 下沉到 claude-gui-shared）──
+//
+// 托盘菜单在 `claude-gui-server` 里，也要读实例注册表 / 判活 / 结束进程。
+// 记录格式、目录定位、判活、进程终止这些**两边都要用**的逻辑统一下沉，
+// 避免两份实现漂移（尤其是判活逻辑，踩过僵尸进程的坑）。
+pub use claude_gui_shared::instances::{
+    app_data_dir_early, collect_live_instances, instances_dir, is_instance_alive,
+    normalize_workspace, pick_wake_target, process_start_time_ms, read_instance_record,
+    remove_instance_record, write_instance_record, InstanceRecord, APP_BUNDLE_ID,
+};
 
 /// 恢复快照：升级前存下来，升级后由新 GUI 消费一次。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -71,103 +54,9 @@ pub struct RestoreSnapshot {
     pub instances: Vec<InstanceRecord>,
 }
 
-/// 实例自述目录：`<app_data>/instances/`。
-fn instances_dir(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join("instances")
-}
-
-/// 与 `tauri.conf.json` 的 `identifier` **必须一致**。
-///
-/// 存在的唯一理由：**在 Tauri App 建立之前**也要能定位 app_data_dir ——
-/// 认领自己的状态必须赶在 `settings::load_settings()` 之前（见 lib.rs 的调用点），
-/// 而那时还没有 AppHandle，拿不到 `app.path().app_data_dir()`。
-///
-/// 不一致的后果是**功能降级**（早期认领失败 → 退到 setup() 里的兜底认领），
-/// 不会崩。改 identifier 时记得同步这里。
-const APP_BUNDLE_ID: &str = "com.claudecode.gui";
-
-/// `<数据目录>/<bundle id>`，等价于 Tauri 的 `app.path().app_data_dir()`。
-/// 只在启动早期（无 AppHandle）使用 —— 见 APP_BUNDLE_ID 的注释。
-pub fn app_data_dir_early() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("APPDATA")
-            .ok()
-            .map(|p| PathBuf::from(p).join(APP_BUNDLE_ID))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var("HOME")
-            .ok()
-            .map(|p| PathBuf::from(p).join(".config").join(APP_BUNDLE_ID))
-    }
-}
-
 /// 升级恢复快照的路径：`<app_data>/pending-restore.json`。
 pub fn restore_snapshot_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("pending-restore.json")
-}
-
-/// 写本实例的自述（覆盖写，原子替换）。
-pub fn write_instance_record(app_data_dir: &Path, rec: &InstanceRecord) -> Result<(), String> {
-    let dir = instances_dir(app_data_dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建实例目录失败: {e}"))?;
-    let path = dir.join(format!("{}.json", rec.pid));
-    let json = serde_json::to_string_pretty(rec).map_err(|e| e.to_string())?;
-    // 原子写：先 tmp 再 rename —— 升级时可能被强杀在读一半的时刻
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("写实例自述失败: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("提交实例自述失败: {e}"))?;
-    Ok(())
-}
-
-/// 读本实例的自述（不存在/损坏 → None）。
-///
-/// 用途：`update_instance_record` 在"会话为空但要求保留"时读回旧值，
-/// 避免把已经报过的会话冲成空（见该命令的注释）。
-pub fn read_instance_record(app_data_dir: &Path, pid: u32) -> Option<InstanceRecord> {
-    let path = instances_dir(app_data_dir).join(format!("{pid}.json"));
-    let text = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str::<InstanceRecord>(&text).ok()
-}
-
-/// 删本实例的自述（正常退出时）。
-pub fn remove_instance_record(app_data_dir: &Path, pid: u32) {
-    let _ = std::fs::remove_file(instances_dir(app_data_dir).join(format!("{pid}.json")));
-}
-
-/// 收集**所有还活着**的实例自述，并顺带清理死实例留下的文件。
-///
-/// `alive` 由调用方注入（判断"这个 pid 是不是还活着"）——便于单测，
-/// 也避免本模块依赖 prockill 的平台细节。
-pub fn collect_live_instances<F>(app_data_dir: &Path, alive: F) -> Vec<InstanceRecord>
-where
-    F: Fn(&InstanceRecord) -> bool,
-{
-    let dir = instances_dir(app_data_dir);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue; // 跳过 .tmp / 其它杂项
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let Ok(rec) = serde_json::from_str::<InstanceRecord>(&text) else {
-            // 坏文件（写了一半就被杀）→ 清掉，免得每次升级都读到
-            let _ = std::fs::remove_file(&path);
-            continue;
-        };
-        if rec.pid == 0 || !alive(&rec) {
-            // 死实例 → 删文件（顺手清理，避免目录无限增长）
-            let _ = std::fs::remove_file(&path);
-            continue;
-        }
-        out.push(rec);
-    }
-    out
 }
 
 /// **清空全部实例自述** —— 升级流程专用（杀掉所有实例之后调用）。
@@ -352,58 +241,6 @@ where
 
 /// 查询某 pid 的**进程启动时刻**（Unix ms）。进程不存在/无权限 → None。
 ///
-/// Windows：`OpenProcess` + `GetProcessTimes`。FILETIME 是 1601-01-01 起的
-/// 100ns 数，换算成 Unix ms：`(ft - 116444736000000000) / 10000`。
-/// 其它平台：读 `/proc/<pid>/stat` 的第 22 字段（starttime，时钟滴答）——
-/// 目前只在 Windows 用到，其它平台返回 None（功能降级为"当死"，保守少恢复）。
-pub fn process_start_time_ms(pid: u32) -> Option<u64> {
-    if pid == 0 {
-        return None;
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-        use windows_sys::Win32::System::Threading::{
-            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-        unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if h.is_null() {
-                return None;
-            }
-            let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-            let mut exit = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-            let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-            let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-            let ok = GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user);
-            CloseHandle(h);
-            if ok == 0 {
-                return None;
-            }
-            let raw = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
-            // Windows FILETIME 纪元（1601）→ Unix 纪元的偏移，单位 100ns
-            const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
-            raw.checked_sub(EPOCH_DIFF_100NS).map(|v| v / 10_000)
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
-/// 判断一条实例自述对应的进程是否**还活着** —— **pid + 启动时间双因子**。
-///
-/// 只看 pid 会踩 pid 复用（见 `InstanceRecord::started_at` 的事故记录）；
-/// 启动时间不同 = 这是另一个进程（复用了同一个 pid），原实例已死。
-/// 记录缺启动时间（0，旧版本写的）→ 不可信，当死。
-pub fn is_instance_alive(rec: &InstanceRecord) -> bool {
-    if rec.started_at == 0 {
-        return false;
-    }
-    process_start_time_ms(rec.pid) == Some(rec.started_at)
-}
-
 /// 拉起一个新实例，带可选的工作区 / 会话。
 ///
 /// 用 `--workspace` 跳过工作区选择器、`--session` 让它在绑定后自动加载该会话
@@ -441,6 +278,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    // ── 僵尸进程判定（2026-10-27 事故）──
+    //
+    // 用户反馈：「重启 GUI 并没有自动加载最近的会话」。
+    // 根因：锁文件记着早已退出的 pid，但 `OpenProcess` 对**句柄未回收**的
+    // 僵尸进程仍成功、`GetProcessTimes` 仍返回原创建时间 → 判"活着"
+    // → 本实例被当成第二个 → 前端跳过自动加载。
+
+    #[test]
+    fn live_process_has_start_time() {
+        // 自己一定是活的 —— 必须能取到启动时间，否则所有"存活判定"都会失效
+        let me = std::process::id();
+        assert!(
+            process_start_time_ms(me).is_some(),
+            "存活的自进程必须能取到启动时间"
+        );
+    }
+
+    #[test]
+    fn never_started_pid_reports_none() {
+        // 一个几乎不可能存在的 pid：应判死
+        assert!(
+            process_start_time_ms(999_999).is_none(),
+            "不存在的 pid 必须返回 None（否则僵尸锁永远不会被接管）"
+        );
+    }
+
+    #[test]
+    fn pid_zero_reports_none() {
+        assert!(process_start_time_ms(0).is_none());
+    }
+
+    /// 🔴 **复现事故场景**：进程已退出，但句柄还没被回收。
+    ///
+    /// `Child` 持有进程句柄，`wait()` 之后句柄仍在 —— 此时 PID 对应的是
+    /// 一个"已退出但内核对象还活着"的进程。`OpenProcess` 对它会成功，
+    /// `GetProcessTimes` 也会返回原创建时间。
+    ///
+    /// 修复前：本函数返回 `Some(原值)` → 判定"持有者活着" → 跳过自动加载。
+    /// 修复后：退出码 != STILL_ACTIVE → 返回 None。
+    #[cfg(windows)]
+    #[test]
+    fn exited_process_with_live_handle_reports_none() {
+        use std::process::Command;
+
+        // cmd /c exit 退出很快；Child 不 drop → 进程句柄不释放
+        let mut child = Command::new("cmd")
+            .args(["/c", "exit", "0"])
+            .spawn()
+            .expect("spawn 失败");
+        let pid = child.id();
+        let _ = child.wait(); // 进程已退出，但 Child（含句柄）仍在作用域内
+
+        assert!(
+            process_start_time_ms(pid).is_none(),
+            "已退出但句柄未回收的进程必须判死 —— 否则僵尸锁永不接管，             前端会一直跳过自动加载最近会话"
+        );
+
+        drop(child);
     }
 
     #[test]

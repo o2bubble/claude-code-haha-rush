@@ -9,6 +9,15 @@ crate-type = ["lib"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 jieba-rs = "0.10"
 log = "0.4"
+
+# 实例判活 / 进程终止需要 Win32（与 GUI crate 用同一版本，避免重复编译）
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

@@ -93,6 +93,13 @@ fn main() {
                 .args(["/F", "/IM", "claude-code-gui.exe"])
                 .creation_flags(CREATE_NO_WINDOW)
                 .status();
+            // 🔴 server 是独立常驻进程，GUI 被杀它也不会退 —— 不杀的话
+            // 文件替换会失败（exe 被占用），或者换成功了旧进程还带着旧代码在跑
+            // （用户升级后看到的仍是旧托盘菜单）。2026-10-27 实测事故。
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/IM", "claude-gui-server.exe"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
             // Force-killing the GUIs orphans their IDE backends. Kill only
             // --ide-mode claude.exe (GUI backends) — the user's terminal TUI
             // runs claude.exe without --ide-mode and must survive.

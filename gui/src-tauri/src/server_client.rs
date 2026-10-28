@@ -406,6 +406,44 @@ pub fn app_handle() -> Option<tauri::AppHandle> {
     APP_HANDLE.get().cloned()
 }
 
+/// 收到唤醒请求：把主窗拉回前台，然后写 ack 告诉发起方"成功了"。
+///
+/// 由**目标实例自己**执行（而不是发起方直接操作窗口），因为只有它知道
+/// 挂件模式、隐藏挂件这些内部状态 —— 走 `focus_main_window_impl` 才能
+/// 把界面恢复到一致状态（而不是只把某个窗口 show 出来）。
+fn focus_and_ack(app: &tauri::AppHandle, from_pid: u32) {
+    crate::focus_main_window_impl(app.clone());
+
+    if let Some(dir) = crate::instances::app_data_dir_early() {
+        crate::wake::write_wake_ack(&dir, std::process::id(), from_pid);
+    }
+    log::info!("[wake] 已响应唤醒请求（来自 pid={from_pid}）");
+}
+
+/// 唤醒握手：请 server 把 `focus:<from_pid>` 转发给 `target_pid` 那个 GUI。
+///
+/// 阻塞版本（内部 block_on）—— 调用点在启动早期、还没有 tokio 上下文，
+/// 而且我们最多只等 2s，阻塞可以接受。
+pub fn send_wake_request(target_pid: u32, from_pid: u32) -> Result<(), String> {
+    let addr = DEFAULT_ADDR.to_string();
+    tauri::async_runtime::block_on(async move {
+        let client = ServerClient::connect(&addr).await?;
+        client
+            .client
+            .request::<bool, _>(
+                "send_gui_message",
+                (
+                    process_client_id().to_string(),
+                    target_pid.to_string(),
+                    format!("focus:{from_pid}"),
+                ),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+}
+
 /// Start a background task that subscribes to the server's event stream and
 /// re-emits `db_changed` from *other* clients to the frontend ("server:data-changed")
 /// so it refetches. `origin == self` is skipped (we already have the latest).
@@ -414,6 +452,7 @@ pub fn spawn_event_forwarder(client: ServerClient, workspace: String) {
         return;
     };
     let client_id = client.client_id().to_string();
+    let my_pid_str = std::process::id().to_string();
     tauri::async_runtime::spawn(async move {
         let mut sub = match client.subscribe_events(&workspace).await {
             Ok(s) => s,
@@ -439,6 +478,18 @@ pub fn spawn_event_forwarder(client: ServerClient, workspace: String) {
                 // Another GUI closed → its session-status entries are dropped.
                 Ok(ServerEvent::Presence { event: PresenceEvent::Leave { client_id: leaving } }) => {
                     let _ = app.emit("server:client-left", &leaving);
+                }
+                // 唤醒请求：另一个 GUI 启动时发现我们占着同一工作区，
+                // 请我们把窗口拉回前台。详见 src/wake.rs。
+                Ok(ServerEvent::GuiMessage { message }) => {
+                    if message.target != my_pid_str {
+                        continue;
+                    }
+                    if let Some(from) = message.body.strip_prefix("focus:") {
+                        if let Ok(from_pid) = from.trim().parse::<u32>() {
+                            focus_and_ack(&app, from_pid);
+                        }
+                    }
                 }
                 _ => {}
             }

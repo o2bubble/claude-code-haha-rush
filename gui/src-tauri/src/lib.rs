@@ -37,6 +37,7 @@ mod settings;
 mod plugin_pubkey;
 mod plugin_signature;
 mod skill_hash;
+mod wake;
 
 /// Holds the SQLite connection and the workspace it was opened for.
 struct DbState {
@@ -93,6 +94,60 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(not(windows))]
 fn process_alive(_pid: u32) -> bool {
     false
+}
+
+/// 启动早期：尝试唤醒同一工作区已有的 GUI 实例。
+///
+/// **成功 = 已有实例的窗口已经回到前台** → 本进程直接退出（用户看到的是
+/// 那个实例，不会多出一个）。**失败 = 照常启动**，绝不阻塞用户。
+///
+/// 只应在"裸启动"时调用（见调用点注释）。
+fn try_wake_existing_instance() {
+    let Some(dir) = instances::app_data_dir_early() else {
+        return;
+    };
+    wake::sweep_stale_acks(&dir);
+
+    // 目标工作区 = 本机最后使用的那个（裸启动没有 --workspace）
+    let ws = settings::load_settings().work_dir;
+    if ws.trim().is_empty() {
+        return; // 还没选过工作区 → 没有"同一工作区"可言
+    }
+
+    let live = instances::collect_live_instances(&dir, instances::is_instance_alive);
+    let my_pid = std::process::id();
+    let Some(target) = instances::pick_wake_target(&live, my_pid, &ws) else {
+        return; // 没有同工作区的活实例 → 正常启动
+    };
+
+    log::info!(
+        "[wake] 发现同工作区实例 pid={} ws={}，尝试唤醒",
+        target.pid,
+        target.workspace
+    );
+
+    // 授权目标进程抢前台（Windows 前台锁要求）
+    wake::allow_set_foreground(target.pid);
+
+    // ① 优先走 server 通道：目标实例自己 show+focus 最可靠
+    //    （它能正确处理挂件模式、隐藏挂件等内部状态）
+    let via_server = wake::await_wake_ack(&dir, target.pid, my_pid, |target_pid| {
+        crate::server_client::send_wake_request(target_pid, my_pid).is_ok()
+    });
+
+    if via_server {
+        log::info!("[wake] 目标实例已响应，本进程退出");
+        std::process::exit(0);
+    }
+
+    // ② 兜底：直接 Win32 把它的窗口拉出来
+    if wake::force_show_process_windows(target.pid) {
+        log::info!("[wake] server 未响应，已用 Win32 直接恢复窗口，本进程退出");
+        std::process::exit(0);
+    }
+
+    // ③ 都失败 → 照常启动
+    log::warn!("[wake] 唤醒失败，照常启动新实例");
 }
 
 /// 尝试成为「绑定工作区」的第一个实例：独占创建锁文件。
@@ -313,6 +368,10 @@ pub fn run() {
     let mut cli_workspace: Option<String> = None;
     let mut cli_intent: Option<String> = None;
     let mut cli_session: Option<String> = None;
+    // --new-instance: 强制开新实例，**跳过单实例唤醒**。
+    // 「新建窗口」按钮（spawn_gui_instance）会带上它 —— 那个按钮的语义
+    // 就是要再开一个，不能被唤醒逻辑拦下去换成"聚焦已有窗口"。
+    let mut cli_new_instance = false;
     {
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
@@ -334,6 +393,7 @@ pub fn run() {
                         cli_session = Some(v);
                     }
                 }
+                "--new-instance" => cli_new_instance = true,
                 _ => {}
             }
         }
@@ -378,6 +438,19 @@ pub fn run() {
                 settings::set_bound_work_dir(&ws);
             }
         }
+    }
+
+    // ── 单实例唤醒（2026-10-27）──
+    //
+    // 用户双击图标时，如果**同一工作区**已有实例在跑，把它的窗口拉回前台并退出
+    // 自己，而不是再开一个完整 GUI。解决"窗口被隐藏后反复启动、旧进程变僵尸"。
+    //
+    // 只在**裸启动**时尝试：带 --workspace/--intent/--session 的是被程序拉起的
+    // （升级恢复、新建窗口），它们本来就有明确目标；--new-instance 是用户显式
+    // 要求再开一个。这几种都不该被"聚焦已有窗口"取代。
+    if cli_workspace.is_none() && cli_intent.is_none() && cli_session.is_none() && !cli_new_instance
+    {
+        try_wake_existing_instance();
     }
 
     let settings = settings::load_settings();
@@ -3605,6 +3678,18 @@ fn close_chat_widget(app: tauri::AppHandle) -> Result<(), String> {
 /// 让"回主窗"这个动作本身语义正确（将来任何入口调用都不会留两个窗口）。
 #[tauri::command]
 fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    focus_main_window_impl(app)
+}
+
+/// `focus_main_window` 的实现体 —— 也供**跨进程唤醒**调用。
+///
+/// 为什么单独抽出来：`server_client` 的 forwarder 收到 `focus:<pid>` 时需要
+/// 直接调用（那里拿得到 AppHandle 但不是 tauri::command 上下文）。
+///
+/// 语义（2026-10-27 起）：把主窗 show + unminimize + 置前，并**隐藏挂件** ——
+/// 与 `show_chat_widget` 对称。用户从「另一个实例把我唤醒」的路径进来时，
+/// 期望看到的是完整主界面，而不是还停在挂件形态。
+pub(crate) fn focus_main_window_impl(app: tauri::AppHandle) -> Result<(), String> {
     let Some(main) = app.get_webview_window("main") else {
         return Err("主窗不存在".into());
     };
@@ -4682,7 +4767,11 @@ fn spawn_gui_instance() -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        std::process::Command::new(&exe).spawn()
+        // --new-instance：跳过「单实例唤醒」。这个按钮的语义就是**再开一个**，
+        // 不带这个参数会被启动早期的唤醒逻辑拦下去，变成"聚焦已有窗口"。
+        std::process::Command::new(&exe)
+            .arg("--new-instance")
+            .spawn()
             .map_err(|e| format!("spawn 失败: {}", e))?;
     }
     Ok(())

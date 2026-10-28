@@ -61,7 +61,7 @@ FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 # 明确列出的"开发用、不进包"文件（相对插件目录）。
 # 之所以逐个列而不是用通配：新增源文件时**默认进包**，漏发比多发的代价大得多。
 DEV_ONLY = {
-    "screenshot": set(),
+    "screenshot": {"capture.test.cjs"},
     "pointer": set(),
     "mouse-keyboard": set(),
     "computer-use": set(),
@@ -85,7 +85,8 @@ REQUIRED = {
     "pointer": {"plugin.json", "server.cjs", "render.py"},
     "mouse-keyboard": {"plugin.json", "server.cjs", "vendor/win32-x64/koffi.node",
                        "vendor/win32-x64/robotjs.node"},
-    "screenshot": {"plugin.json", "server.cjs"},
+    "screenshot": {"plugin.json", "server.cjs", "win32.cjs",
+                      "vendor/win32-x64/koffi.node"},
     "computer-use": {"plugin.json", "skill/SKILL.md"},
     "gui-manual": {"plugin.json", "skill/SKILL.md"},
     "git-viewer": {"plugin.json"},

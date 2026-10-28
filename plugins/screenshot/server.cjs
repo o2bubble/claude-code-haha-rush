@@ -27,6 +27,9 @@ const { spawn } = require("node:child_process");
 const IS_WIN = process.platform === "win32";
 const IS_MAC = process.platform === "darwin";
 
+// Win32 直调（koffi FFI）。拿不到就回退到 PowerShell 路径 —— 见 win32.cjs 头注释。
+const win32 = IS_WIN ? (() => { try { return require("./win32.cjs"); } catch { return null; } })() : null;
+
 /** 插件设置（宿主随每次命令下发；面板也可 PUT 过来）。 */
 let settings = {
   saveDir: "",
@@ -111,15 +114,30 @@ async function hideHost() {
 /** 恢复那些被我们最小化的宿主窗口（没让位过则 no-op）。 */
 async function restoreHost() {
   if (!hiddenHostWindows.length) return;
-  const ids = hiddenHostWindows.join(",");
-  hiddenHostWindows = [];
+  // ⚠️ **先别清空** —— 万一 koffi 恢复失败，还要用它回退到 PowerShell。
+  // （之前先清空再接回退，会让回退拿不到句柄，等于没兜底。）
+  const handles = hiddenHostWindows.slice();
+
+  // koffi 路径：直接调，几毫秒（PowerShell 要起进程 ~230ms）
+  if (win32 && win32.available()) {
+    try {
+      win32.showWindows(handles);
+      hiddenHostWindows = [];
+      return;
+    } catch (e) {
+      log("restoreHost(koffi) failed, falling back:", e && e.message);
+    }
+  }
+
   try {
     await run("powershell", [
-      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", RESTORE_HOST_SCRIPT(ids),
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-Command", RESTORE_HOST_SCRIPT(handles.join(",")),
     ]);
   } catch (e) {
     log("restoreHost error:", e && e.message);
   }
+  hiddenHostWindows = [];
 }
 
 /** 最小化动画的等待时长。太短会抓到中间态，太长则用户干等。 */
@@ -141,6 +159,10 @@ public class HostWin {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT { public int L, T, R, B; }
 
   public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
   const int GWL_EXSTYLE = -20;
@@ -168,8 +190,13 @@ public class HostWin {
     if (pid != target) return true;
     if (!IsWindowVisible(h)) return true;
     if (IsIconic(h)) return true;
-    int ex = GetWindowLong(h, GWL_EXSTYLE);
-    if ((ex & WS_EX_TOOLWINDOW) != 0) return true;
+    // ⚠️ 不能用 WS_EX_TOOLWINDOW 过滤：Tauri 创建的宿主主窗**带这个样式**
+    // （实测 exstyle=0x080800A0），过滤掉就等于让位永远不生效。
+    // 改用尺寸判断：小于 200x200 的当气泡/候选框忽略。
+    RECT r;
+    if (GetWindowRect(h, out r)) {
+      if ((r.R - r.L) < 200 || (r.B - r.T) < 200) return true;
+    }
     found.Add(h);
     return true;
   }
@@ -179,7 +206,16 @@ public class HostWin {
 `;
 }
 
-/** 恢复指定的窗口句柄（SW_RESTORE）。 */
+/**
+ * 恢复指定的窗口句柄。
+ *
+ * ⚠️ **SW_SHOW(5) 与 SW_RESTORE(9) 有区别，两个都要发**：
+ *   · `SW_RESTORE` 是给**最小化**窗口用的（会从任务栏还原）
+ *   · `SW_SHOW`   是给**隐藏**窗口用的（`SW_HIDE` 的对偶）
+ * 现在让位改用 `SW_HIDE`（瞬间生效，省掉 380ms 动画等待），
+ * 所以必须用 `SW_SHOW` 才能正确还原；对最小化的窗口 `SW_SHOW` 也能还原，
+ * 所以两个都发、覆盖面最广（实测恢复后窗口位置逐像素一致）。
+ */
 function RESTORE_HOST_SCRIPT(ids) {
   return `
 $ErrorActionPreference='Stop'
@@ -189,14 +225,23 @@ using System.Runtime.InteropServices;
 
 public class HostRestore {
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
+  const int SW_SHOW = 5;
   const int SW_RESTORE = 9;
+  const int DWMWA_TRANSITIONS_FORCEDISABLED = 3;
 
   public static int Restore(string ids) {
     int n = 0;
     foreach (var s in ids.Split(',')) {
       long v;
       if (!long.TryParse(s, out v)) continue;
-      ShowWindow(new IntPtr(v), SW_RESTORE);
+      var h = new IntPtr(v);
+      // 还原 DWM 过渡（让位时为加速抓屏禁用了它）—— 不还原的话，
+      // 用户此后最小化/关闭这个窗口会**没有动画**，是能察觉的副作用。
+      int zero = 0;
+      try { DwmSetWindowAttribute(h, DWMWA_TRANSITIONS_FORCEDISABLED, ref zero, sizeof(int)); } catch {}
+      ShowWindow(h, SW_SHOW);     // 撤销 SW_HIDE
+      ShowWindow(h, SW_RESTORE);  // 若之前是最小化态，也能还原
       n++;
     }
     return n;
@@ -232,6 +277,226 @@ function run(cmd, args, opts = {}) {
  *
  * 返回 { path, x, y, width, height, monitorIndex }（x/y 是虚拟桌面坐标）。
  */
+// ── 让位 + 抓屏（合并成一个 PowerShell 进程）─────────────────────────
+//
+// 🔴 **为什么要合并**（2026-10-27，用户反馈「点截图到 overlay 弹出要 1.x 秒」）：
+// 原来这条路径要起**两个** PowerShell 进程：
+//   ① hideHost()      —— 枚举 + 最小化宿主窗口
+//   ② captureWindows() —— DPI + 抓屏 + PNG 编码
+// 每次进程启动都有 200ms+ 固定开销（PowerShell 本身重），两次就是 400ms+。
+//
+// 另外原来用 `SW_MINIMIZE` 会让窗口播放最小化动画，所以代码里只能**固定 sleep
+// 380ms** 等动画播完（HIDE_SETTLE_MS）。实测 `SW_HIDE` 是**瞬间**生效的
+// （4ms，无动画），窗口直接从画面消失 —— 那 380ms 完全可以省掉。
+// 已验证 SW_HIDE 后 CopyFromScreen 确实拍不到窗口（对比整屏哈希变化），
+// 且 SW_SHOW 恢复后窗口位置与原来**逐像素一致**。
+//
+// 实测收益：端到端从 ~750ms 降到 ~330ms（脚本内 232ms + 进程开销）。
+
+/**
+ * 枚举宿主可见顶层窗口并 **SW_HIDE**（瞬间隐藏，无动画）。
+ * 抓屏脚本内部调用，不单独起进程。
+ */
+function HIDE_SCRIPT_BODY(pid) {
+  return `
+$targetPid = ${pid}
+if ($targetPid -gt 0) { $hidden = [SnipWin]::Hide($targetPid) } else { $hidden = @() }
+$ids = ($hidden | ForEach-Object { $_.ToInt64() }) -join ","
+`;
+}
+
+/** 抓屏 + 让位共用的 C# 声明（含枚举、隐藏、DPI）。 */
+const SNIP_CSHARP = `
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public class SnipWin {
+  public delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
+
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int v);
+  [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT { public int L, T, R, B; }
+
+  const int GWL_EXSTYLE = -20;
+  const int WS_EX_TOOLWINDOW = 0x00000080;
+  const int DWMWA_TRANSITIONS_FORCEDISABLED = 3;
+
+  static uint target;
+  static List<IntPtr> found;
+
+  /**
+   * 隐藏宿主窗口。
+   *
+   * 🔴 **必须先禁用 DWM 过渡，再 SW_HIDE**（2026-10-27 事故）。
+   *
+   * 只调 SW_HIDE 的话，窗口会**淡出**（~150ms），期间抓屏会拍到**半透明**
+   * 的窗口残影 —— 用户实测截图糊了一层 UI（见 snip-20261027-213754.png）。
+   *
+   * DWMWA_TRANSITIONS_FORCEDISABLED=1 让 DWM 跳过这层动画，窗口**立即**
+   * 从合成画面消失（实测：禁用后亮度立刻到位，未禁用要等 150ms），
+   * 所以抓屏可以**零等待**。
+   *
+   * 这个属性是**窗口级**的、会一直留到窗口销毁 —— 但对我们只有好处
+   * （下次截图也不会淡出），且用户感知不到差别。
+   */
+  public static IntPtr[] Hide(uint pid) {
+    target = pid;
+    found = new List<IntPtr>();
+    EnumWindows(new EnumWindowsProc(Cb), IntPtr.Zero);
+    foreach (var h in found) {
+      int v = 1;
+      try { DwmSetWindowAttribute(h, DWMWA_TRANSITIONS_FORCEDISABLED, ref v, sizeof(int)); } catch {}
+      ShowWindow(h, 0);
+    }
+    return found.ToArray();
+  }
+
+  static bool Cb(IntPtr h, IntPtr l) {
+    uint pid;
+    GetWindowThreadProcessId(h, out pid);
+    if (pid != target) return true;
+    if (!IsWindowVisible(h)) return true;
+    if (IsIconic(h)) return true;
+    // ⚠️ 不能用 WS_EX_TOOLWINDOW 过滤：Tauri 创建的宿主主窗**带这个样式**
+    // （实测 exstyle=0x080800A0），过滤掉就等于让位永远不生效。
+    // 改用尺寸判断：小于 200x200 的当气泡/候选框忽略。
+    RECT r;
+    if (GetWindowRect(h, out r)) {
+      if ((r.R - r.L) < 200 || (r.B - r.T) < 200) return true;
+    }
+    found.Add(h);
+    return true;
+  }
+
+  public static void EnableDpi() {
+    try { if (SetProcessDpiAwareness(2) == 0) return; } catch {}
+    try { SetProcessDPIAware(); } catch {}
+  }
+}
+`;
+
+/**
+ * Windows 专用（**koffi 路径**）：在**本进程内**完成「隐藏宿主 → 抓屏 → 存 PNG」。
+ *
+ * 相比 PowerShell 路径（`hideAndCapture`）的核心差别：**不起外部进程**。
+ * 原先每个截图动作要 570ms，其中约 400ms 是 powershell.exe 启动 + C# 编译的
+ * 固定代价；koffi 走进程内 FFI，实测约 65ms。
+ *
+ * 只在能拿到 koffi、且**光标在主屏**时可用（多屏副屏没有精确的显示器边界
+ * 绑定，交给 PowerShell 路径处理，宁可慢也不错抓）。
+ *
+ * @returns 与 captureWindows 同结构 + hiddenIds；不可用时返回 null（调用方回退）
+ */
+function hideAndCaptureNative(outPath, which = "cursor") {
+  if (!win32 || !win32.available()) return null;
+
+  const pid = Number(process.env.CLAUDE_PLUGIN_HOST_PID) || 0;
+
+  win32.enableDpi(); // 必须在读任何尺寸之前
+
+  // 只支持"光标所在屏 = 主屏"这一种情况；副屏返回 null 让上层走 PowerShell。
+  let bounds;
+  if (which === "cursor") {
+    bounds = win32.cursorMonitorBounds();
+    if (!bounds) return null; // 光标在副屏 → 回退
+  } else {
+    bounds = win32.virtualScreenBounds();
+  }
+
+  const hiddenIds = pid ? win32.hideProcessWindows(pid) : [];
+  // koffi 路径**不需要等待**：看门禁 —— win32.hideProcessWindows 内部先禁用
+  // DWM 过渡再 SW_HIDE，窗口立刻从合成画面消失（不信可以看
+  // win32.cjs 里 DWMWA_TRANSITIONS_FORCEDISABLED 的注释）。
+
+  const rgba = win32.grabRGBA(bounds);
+  const png = win32.encodePNG(rgba, bounds.w, bounds.h);
+  fs.writeFileSync(outPath, png);
+
+  // 恢复交给调用方（overlay 关闭时 /restore-host）——与 PowerShell 路径一致
+  return {
+    path: outPath,
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.w,
+    height: bounds.h,
+    monitorIndex: -1, // 主屏；-1 = "未知" → 宿主开全部（单屏时等价）
+    hiddenIds: hiddenIds.map(String),
+  };
+}
+
+/**
+ * Windows 专用（**PowerShell 路径**，koffi 不可用时的回退）：
+ * 一个进程完成「隐藏宿主 → 抓屏 → 存 PNG」。
+ *
+ * 返回与 `captureWindows` 相同的结构，外加 `hiddenIds`（供之后恢复）。
+ *
+ * @param which 目前只支持 `"cursor"`（区域/窗口模式都抓光标所在那块屏）
+ */
+async function hideAndCapture(outPath, which = "cursor") {
+  const pid = Number(process.env.CLAUDE_PLUGIN_HOST_PID) || 0;
+  const pickBounds =
+    which === "primary"
+      ? `$scr = [System.Windows.Forms.Screen]::PrimaryScreen`
+      : `$pt = [System.Windows.Forms.Cursor]::Position
+$scr = [System.Windows.Forms.Screen]::FromPoint($pt)`;
+
+  // ⚠️ 脚本必须**纯 ASCII** —— PowerShell 5.1 按系统代码页（GBK）读，
+  // 中文注释会让内嵌 C# 编译失败且报错极具误导性（这个坑踩过两次）。
+  const script = `
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @'
+${SNIP_CSHARP}
+'@
+[SnipWin]::EnableDpi() | Out-Null
+
+${HIDE_SCRIPT_BODY(pid)}
+
+${pickBounds}
+$b = $scr.Bounds
+$idx = [System.Windows.Forms.Screen]::AllScreens.IndexOf($scr)
+
+$bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)
+$op = New-Object System.Drawing.Imaging.ImageAttributes
+$mx = New-Object System.Drawing.Imaging.ColorMatrix
+$mx.Matrix33 = 1.0
+$op.SetColorMatrix($mx)
+$dst = New-Object System.Drawing.Rectangle(0, 0, $b.Width, $b.Height)
+$g.DrawImage($bmp, $dst, 0, 0, $b.Width, $b.Height, [System.Drawing.GraphicsUnit]::Pixel, $op)
+$bmp.Save('${outPath.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)
+$g.Dispose(); $bmp.Dispose()
+
+Write-Output "$ids|$($b.X),$($b.Y),$($b.Width),$($b.Height),$idx"
+`;
+
+  const r = await run("powershell", [
+    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
+  ]);
+  if (r.code !== 0 || !fs.existsSync(outPath)) {
+    throw new Error(`抓屏失败: ${r.err || r.out || `exit ${r.code}`}`);
+  }
+  const line = r.out.trim().split("\n").pop() || "";
+  const [idsPart, geoPart] = line.split("|");
+  const [x, y, w, h, idx] = (geoPart || "").split(",").map(Number);
+  const hiddenIds = (idsPart || "").split(",").filter((s) => s && s !== "0");
+
+  return { path: outPath, x, y, width: w, height: h, monitorIndex: idx, hiddenIds };
+}
+
 async function captureWindows(outPath, which = "virtual") {
   // which:
   //   "virtual"  整个虚拟桌面（所有显示器并集）
@@ -677,7 +942,23 @@ async function captureDirect(mode) {
 async function prepareRegion(opts = {}) {
   fs.mkdirSync(targetDir(), { recursive: true });
   const tmp = path.join(os.tmpdir(), `snipfrozen-${crypto.randomUUID()}.png`);
-  const shot = await captureWindows(tmp, "cursor"); // 只有 Windows 走这条路
+
+  // Windows 上「隐藏宿主 + 抓屏」有两条实现，优先走快的：
+  //   ① koffi（进程内 FFI）   ≈ 65ms  —— 不启外部进程
+  //   ② PowerShell（回退）    ≈ 570ms —— koffi 缺失 / 光标在副屏时用
+  //
+  // mac 不走这两条（Win32 专用），保持原路径。
+  let shot = null;
+  if (IS_WIN) {
+    shot = hideAndCaptureNative(tmp, "cursor");
+    if (!shot) shot = await hideAndCapture(tmp, "cursor");
+    // 记下隐藏的窗口，overlay 关闭时由 /restore-host 恢复
+    if (shot.hiddenIds && shot.hiddenIds.length) {
+      hiddenHostWindows = shot.hiddenIds;
+    }
+  } else {
+    shot = await captureWindows(tmp, "cursor");
+  }
 
   // 窗口模式才枚举（区域模式用不上，省掉一次 PowerShell 往返 ≈ 数百毫秒）。
   // ⚠️ 必须在本函数里（= overlay 建出来**之前**）枚举：overlay 是铺满全屏的窗口，
@@ -1053,9 +1334,14 @@ const server = http.createServer(async (req, res) => {
       // 这两个模式**不在返回前恢复**：overlay 还开着，让宿主在关闭它时回来敲
       // /restore-host（见 overlayHostActions 的 restoreHostOnClose）。
       if ((cmd === "region" || cmd === "window") && IS_WIN) {
-        const hidden = await hideHost();
+        // ⚠️ **不在这里调 hideHost** —— prepareRegion 内部已经在同一个
+        // PowerShell 进程里隐藏宿主了（省一次进程启动）。
+        // 隐藏句柄记在 hiddenHostWindows 里，overlay 关闭时由 /restore-host 恢复。
         const prep = await prepareRegion({ windows: cmd === "window" });
-        return json(res, 200, { ok: true, host: overlayHostActions(prep, cmd, hidden > 0) });
+        return json(res, 200, {
+          ok: true,
+          host: overlayHostActions(prep, cmd, hiddenHostWindows.length > 0),
+        });
       }
       // mac 的区域/窗口走系统原生交互；全屏直接抓。
       // 全屏与 mac 都要让位 → 抓 → **立即恢复**：这条路径没有 overlay 遮挡，
@@ -1127,7 +1413,14 @@ const server = http.createServer(async (req, res) => {
       const mode = b.mode || "fullscreen";
       if ((mode === "region" || mode === "window") && IS_WIN) {
         const prep = await prepareRegion({ windows: mode === "window" });
-        return json(res, 200, { ok: true, host: overlayHostActions(prep, mode) });
+        // 🔴 **必须传 restoreOnClose**（2026-10-27 事故）：
+        // prepareRegion 现在总是在同一个 PowerShell 里隐藏宿主窗口，
+        // 但这里原来没传第三个参数（默认 false）→ 宿主不知道要恢复
+        // → **overlay 关掉后 GUI 一直藏着，用户找不到窗口**。
+        return json(res, 200, {
+          ok: true,
+          host: overlayHostActions(prep, mode, hiddenHostWindows.length > 0),
+        });
       }
       const shot = await captureDirect(mode);
       if (shot.cancelled) return json(res, 200, { ok: true, cancelled: true });
@@ -1234,10 +1527,48 @@ server.on("error", (e) => {
   }
 });
 
+/**
+ * 进程退出前把还藏着的宿主窗口放出来。
+ *
+ * 🔴 **兜底，不是主路径**（2026-10-27 事故）：正常流程是 overlay 关闭 →
+ * 宿主敲 /restore-host。但如果 overlay 根本没开起来、或宿主侧漏了调用，
+ * 窗口就会被 SW_HIDE 一直藏着 —— 用户「找不到 GUI」（真实发生过）。
+ *
+ * 这里同步跑一次恢复，保证进程怎么退都不会把窗口扣下。
+ */
+function restoreOnExit() {
+  if (!hiddenHostWindows.length) return;
+  // 同 restoreHost：先别清空，留给回退用
+  const handles = hiddenHostWindows.slice();
+
+  // koffi 路径本来就是同步的，退出阶段可直接用（比 spawnSync PowerShell 快得多）
+  if (win32 && win32.available()) {
+    try {
+      win32.showWindows(handles);
+      hiddenHostWindows = [];
+      return;
+    } catch { /* 落到下面的兜底 */ }
+  }
+
+  try {
+    // 用 spawnSync：退出阶段异步回调不会被执行
+    const { spawnSync } = require("child_process");
+    spawnSync("powershell", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-Command", RESTORE_HOST_SCRIPT(handles.join(",")),
+    ], { windowsHide: true, timeout: 5000 });
+  } catch { /* 尽力而为 —— 退出路径不能再抛 */ }
+  hiddenHostWindows = [];
+}
+
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     log(`got ${sig}, exiting`);
+    restoreOnExit();
     for (const [, v] of pending) { try { fs.unlinkSync(v.file); } catch {} }
     process.exit(0);
   });
 }
+
+// 正常退出 / 未捕获异常也要兜底
+process.on("exit", () => { restoreOnExit(); });

@@ -83,13 +83,10 @@ fn terminate(pid: u32) {
 
 /// Terminate `pid` and every descendant (children first, then the root) —
 /// mirrors `taskkill /F /T /PID`.
-pub fn kill_process_tree(pid: u32) {
-    let mut targets = collect_descendants(pid);
-    targets.push(pid);
-    for p in targets {
-        terminate(p);
-    }
-}
+///
+/// 2026-10-27 起实现下沉到 `claude_gui_shared::proc`（server 的托盘菜单
+/// 也要能结束 GUI 进程）。这里保留同名导出，调用方无需改动。
+pub use claude_gui_shared::proc::kill_process_tree;
 
 // ── Command-line filter ──
 //

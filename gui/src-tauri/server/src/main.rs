@@ -13,6 +13,8 @@ use jsonrpsee::ws_client::WsClientBuilder;
 use tokio::sync::{broadcast, watch};
 
 mod session_status;
+#[cfg(windows)]
+mod tray;
 
 use session_status::{session_status_reduce, sessions_for_workspace, SessionStatusEvent};
 
@@ -62,7 +64,26 @@ struct ServerCtx {
     events_tx: broadcast::Sender<ServerEvent>,
     live: Arc<AtomicUsize>,
     shutdown_tx: watch::Sender<bool>,
+    /// 「所有 GUI 都断开后，什么时候真正退出」。
+    ///
+    /// 2026-10-27 起托盘常驻在 server 里：如果最后一个 GUI 断开就立刻退出，
+    /// 托盘会跟着消失 —— 而托盘恰恰是用户"找不到窗口"时的救命入口。
+    /// 所以改成**延迟退出**：留一段宽限期，期间随时可以重开 GUI；
+    /// 宽限期过后仍没人连 → 才真的退出。
+    ///
+    /// `None` = 还有 GUI 连着（不退出）；`Some(t)` = 从 t 起算宽限期。
+    idle_deadline: Arc<Mutex<Option<std::time::Instant>>>,
+    /// 是否启用"宽限期后退出"。`false` = 保持原有语义（最后一个 GUI 断开就退出），
+    /// 测试走这条；`true` = 正式运行时给托盘留出常驻时间。
+    idle_grace: bool,
 }
+
+/// 最后一个 GUI 断开后，server（含托盘）还活多久。
+///
+/// 2026-10-27 从 5 分钟改成 3 分钟（用户要求「5 分钟太长了」）。
+/// 托盘菜单里会显示这个倒计时的剩余时间 —— 让用户知道它会自己退出、
+/// 不是常驻占着后台，不用手动去清理。
+pub const IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(180);
 
 impl ServerCtx {
     fn new() -> Self {
@@ -77,6 +98,8 @@ impl ServerCtx {
             events_tx,
             live: Arc::new(AtomicUsize::new(0)),
             shutdown_tx,
+            idle_deadline: Arc::new(Mutex::new(None)),
+            idle_grace: false,
         }
     }
 }
@@ -667,6 +690,10 @@ fn build_module(ctx: ServerCtx) -> RpcModule<ServerCtx> {
                     Err(_) => return,
                 };
                 ctx.live.fetch_add(1, Ordering::SeqCst);
+                // 有新 GUI 连上 → 取消待定的空闲退出
+                if let Ok(mut d) = ctx.idle_deadline.lock() {
+                    *d = None;
+                }
                 loop {
                     tokio::select! {
                         evt = rx.recv() => match evt {
@@ -694,7 +721,15 @@ fn build_module(ctx: ServerCtx) -> RpcModule<ServerCtx> {
                 }
                 ctx.live.fetch_sub(1, Ordering::SeqCst);
                 if ctx.live.load(Ordering::SeqCst) == 0 {
-                    ctx.shutdown_tx.send_replace(true);
+                    if ctx.idle_grace {
+                        // 正式运行：留宽限期，托盘在这期间仍可管理实例。
+                        if let Ok(mut d) = ctx.idle_deadline.lock() {
+                            *d = Some(std::time::Instant::now() + IDLE_GRACE);
+                        }
+                    } else {
+                        // 测试 / 无托盘：保持原有语义 —— 立刻退出。
+                        ctx.shutdown_tx.send_replace(true);
+                    }
                 }
             },
         )
@@ -713,13 +748,43 @@ fn default_client() -> ClientInfo {
     }
 }
 
-/// Start an in-process jsonrpsee WS server; the daemon stops itself when the
-/// last event subscription (live GUI) closes. `addr` "0" = ephemeral (tests).
+/// Start an in-process jsonrpsee WS server with a fresh context.
+///
+/// 测试用这一版：**空闲即退出**（不跑宽限期），行为与历史一致。
 pub async fn spawn_server(
     addr: &str,
 ) -> Result<(ServerHandle, std::net::SocketAddr), Box<dyn std::error::Error + Send + Sync>> {
     let ctx = ServerCtx::new();
+    spawn_server_with_ctx(addr, ctx, false).await
+}
+
+/// 带自有 ctx 的启动 —— `main` 用它把托盘挂到同一个 ctx 上。
+///
+/// `idle_grace` 决定"最后一个 GUI 断开后"的行为：
+/// - `false`（测试）：立即 stop，保持原有语义
+/// - `true`（正式）：等 `IDLE_GRACE` 再 stop，期间托盘仍可用
+pub async fn spawn_server_with_ctx(
+    addr: &str,
+    mut ctx: ServerCtx,
+    idle_grace: bool,
+) -> Result<(ServerHandle, std::net::SocketAddr), Box<dyn std::error::Error + Send + Sync>> {
+    ctx.idle_grace = idle_grace;
     let mut shutdown_rx = ctx.shutdown_tx.subscribe();
+    let idle_deadline = ctx.idle_deadline.clone();
+    let live = ctx.live.clone();
+
+    // 启动即起算宽限期。
+    //
+    // 原来只在"最后一个 GUI 断开"时才设置 deadline —— 于是**从未有 GUI 连过**的
+    // server（典型：GUI 拉起 server 后立刻崩溃/被杀）deadline 恒为 None，托盘会
+    // 永久常驻。用户明确不希望后台长期挂着。真有 GUI 连上时，订阅事件会把它清掉
+    // （见 unsubscribe_events 里的 fetch_add + `*d = None`）。
+    if idle_grace {
+        if let Ok(mut d) = idle_deadline.lock() {
+            *d = Some(std::time::Instant::now() + IDLE_GRACE);
+        }
+    }
+
     let module = build_module(ctx);
 
     let server = ServerBuilder::default().ws_only().build(addr).await?;
@@ -740,6 +805,28 @@ pub async fn spawn_server(
         let _ = stop_handle.stop();
     });
 
+    // 空闲守卫：没有 GUI 时按宽限期退出（托盘常驻的代价与收益，见 idle_deadline）。
+    if idle_grace {
+        let grace_stop = handle.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if live.load(Ordering::SeqCst) != 0 {
+                    continue;
+                }
+                let expired = match idle_deadline.lock() {
+                    Ok(d) => d.map(|t| std::time::Instant::now() >= t).unwrap_or(false),
+                    Err(_) => false,
+                };
+                if expired {
+                    eprintln!("[server] 空闲超时（无 GUI 连接），退出");
+                    let _ = grace_stop.stop();
+                    break;
+                }
+            }
+        });
+    }
+
     Ok((handle, bound))
 }
 
@@ -754,7 +841,98 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .and_then(|a| a.parse().ok())
         .unwrap_or(8766);
     let addr = format!("127.0.0.1:{port}");
-    let (handle, bound) = match spawn_server(&addr).await {
+
+    // 先建 ctx：托盘要挂到同一个 ctx 上（读实例列表、发消息、触发退出）
+    let ctx = ServerCtx::new();
+
+    // ── 托盘（仅 Windows）──
+    //
+    // 放 server 而不是 GUI：GUI 多开会有多个托盘图标，server 是单实例。
+    // 详见 src/tray.rs 顶部注释。
+    #[cfg(windows)]
+    let tray_handle = {
+        let (actions_tx, mut actions_rx) = tokio::sync::mpsc::unbounded_channel::<tray::TrayAction>();
+
+        let h = tray::spawn(actions_tx);
+
+        if h.is_some() {
+            // 动作处理器：结束进程 / 切前台 / 退出
+            let ctx_for_actions = ctx.clone();
+            tokio::spawn(async move {
+                while let Some(action) = actions_rx.recv().await {
+                    match action {
+                        tray::TrayAction::Kill(pid) => {
+                            eprintln!("[tray] 结束实例 pid={pid}");
+                            claude_gui_shared::proc::kill_process_tree(pid);
+                        }
+                        tray::TrayAction::KillAll => {
+                            // 只关 GUI，**不动 server 自己** —— 托盘的退出走「退出」那一项。
+                            // 关完 live 归零，宽限期开始倒数（菜单里能看到剩余时间）。
+                            let list = collect_gui_instances();
+                            eprintln!("[tray] 关闭所有实例，共 {} 个", list.len());
+                            for rec in list {
+                                claude_gui_shared::proc::kill_process_tree(rec.pid);
+                            }
+                        }
+                        tray::TrayAction::Focus(pid) => {
+                            eprintln!("[tray] 切前台 pid={pid}");
+                            // 授权 + 请目标实例自己 focus（同 wake 链路）
+                            request_focus(&ctx_for_actions, pid);
+                        }
+                        tray::TrayAction::NewInstance => {
+                            eprintln!("[tray] 新开一个 GUI 实例");
+                            spawn_new_gui();
+                        }
+                        tray::TrayAction::Quit => {
+                            eprintln!("[tray] 用户要求退出");
+                            // 立即进入空闲退出：把 deadline 设成"现在"
+                            if let Ok(mut d) = ctx_for_actions.idle_deadline.lock() {
+                                *d = Some(std::time::Instant::now());
+                            }
+                            ctx_for_actions.shutdown_tx.send_replace(true);
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // 定期刷新菜单（2s 一次，够快且开销可忽略）
+            if let Some(ref th) = h {
+                let th_tx = th.tx.clone();
+                let th_tid = th.thread_id_for_hint();
+                // 倒计时要读空闲截止时间 —— 与 server 的退出守卫同一个源，
+                // 菜单里显示的剩余时间与真正的退出时刻必然一致。
+                let idle_deadline = ctx.idle_deadline.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        // 没有 GUI 连着且截止时间已设 → 按整秒向上取整显示剩余。
+                        // 向上取整是为了不出现「还剩 0 秒」却还没退出的那一帧。
+                        let idle_remaining_secs = idle_deadline
+                            .lock()
+                            .ok()
+                            .and_then(|d| *d)
+                            .map(|t| {
+                                let left = t.saturating_duration_since(std::time::Instant::now());
+                                let ms = left.as_millis() as u64;
+                                ms.div_ceil(1000)
+                            });
+                        let state = tray::TrayMenuState {
+                            instances: collect_gui_instances(),
+                            idle_remaining_secs,
+                        };
+                        if th_tx.send(tray::TrayCmd::Update(state)).is_err() {
+                            break;
+                        }
+                        tray::wake_by_thread_id(th_tid);
+                    }
+                });
+            }
+        }
+        h
+    };
+
+    let (handle, bound) = match spawn_server_with_ctx(&addr, ctx, true).await {
         Ok(v) => v,
         Err(_) => {
             eprintln!("claude-gui-server: {addr} already in use — another server is running. Exiting.");
@@ -763,7 +941,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     println!("claude-gui-server listening on {bound}");
     handle.stopped().await;
+
+    #[cfg(windows)]
+    if let Some(th) = tray_handle {
+        th.shutdown();
+    }
     Ok(())
+}
+
+/// 从托盘「新建窗口」：拉起一个新的 GUI 实例。
+///
+/// 与 GUI 自己的 `spawn_gui_instance`（新建窗口按钮）走同一条路径 ——
+/// 带 `--new-instance`，跳过单实例唤醒逻辑（否则会被"聚焦已有窗口"接管，
+/// 用户点了"新建"却什么都不发生）。
+#[cfg(windows)]
+fn spawn_new_gui() {
+    // GUI 与 server 装在同一个目录（server 由 GUI 拉起）
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(dir) = exe.parent() else { return };
+    let gui = dir.join("claude-code-gui.exe");
+    if !gui.is_file() {
+        eprintln!("[tray] 找不到 GUI 可执行文件: {}", gui.display());
+        return;
+    }
+    match std::process::Command::new(&gui).arg("--new-instance").spawn() {
+        Ok(_) => eprintln!("[tray] 已拉起新实例"),
+        Err(e) => eprintln!("[tray] 拉起新实例失败: {e}"),
+    }
+}
+
+/// 读出所有存活的 GUI 实例（托盘菜单用）。
+fn collect_gui_instances() -> Vec<claude_gui_shared::instances::InstanceRecord> {
+    let Some(dir) = claude_gui_shared::instances::app_data_dir_early() else {
+        return Vec::new();
+    };
+    claude_gui_shared::instances::collect_live_instances(
+        &dir,
+        claude_gui_shared::instances::is_instance_alive,
+    )
+}
+
+/// 请求某个 GUI 把窗口拉到前台。
+///
+/// 走 server 自己的 `GuiMessage` 通道：目标 GUI 收到 `focus:<pid>` 后会 show+focus。
+#[cfg(windows)]
+fn request_focus(ctx: &ServerCtx, target_pid: u32) {
+    use claude_gui_shared::presence::GuiMessage;
+
+    // 托盘进程是"当前前台"的可能性不高，但仍显式授权一次
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+        let _ = AllowSetForegroundWindow(target_pid);
+    }
+
+    let _ = ctx.events_tx.send(ServerEvent::GuiMessage {
+        message: GuiMessage {
+            from: "tray".into(),
+            target: target_pid.to_string(),
+            body: "focus:0".into(), // from_pid=0：托盘发起，不需要 ack
+            at: now_iso(),
+        },
+    });
 }
 
 #[cfg(test)]
@@ -867,6 +1105,114 @@ mod tests {
 
         let stopped = tokio::time::timeout(std::time::Duration::from_secs(3), handle.stopped()).await;
         assert!(stopped.is_ok(), "server did not stop after last subscription closed");
+    }
+
+    /// 宽限期模式：最后一个 GUI 断开后**不立即**退出（托盘要留着）。
+    ///
+    /// 这是 2026-10-27 的改动：托盘常驻在 server 里，如果照旧立刻退，
+    /// 用户"找不到窗口"时连托盘也没了。
+    #[tokio::test]
+    async fn idle_grace_keeps_server_alive_after_last_subscription() {
+        let ctx = ServerCtx::new();
+        let (handle, addr) = spawn_server_with_ctx("127.0.0.1:0", ctx, true).await.unwrap();
+        let c = client_for(addr).await;
+        let sub = c
+            .subscribe::<ServerEvent, _>("subscribe_events", ("w1",), "unsubscribe_events")
+            .await
+            .unwrap();
+        drop(sub);
+        drop(c);
+
+        // 宽限期内不应停止
+        let stopped =
+            tokio::time::timeout(std::time::Duration::from_millis(800), handle.clone().stopped()).await;
+        assert!(stopped.is_err(), "宽限期内不该退出 —— 托盘还要用");
+
+        handle.stop().unwrap();
+    }
+
+    /// 启动即起算：**从未有 GUI 连过**的 server 也必须在宽限期后退出。
+    ///
+    /// 没有这条的话，GUI 拉起 server 后立刻崩溃 → 托盘图标永久挂在系统托盘上，
+    /// 而用户看到的正是他最不想要的东西：「一个不知道哪来的、一直在的后台」。
+    /// （这里只断言 deadline 已装好，因为真等 180 秒不现实。）
+    #[tokio::test]
+    async fn fresh_server_arms_idle_deadline_without_any_client() {
+        let ctx = ServerCtx::new();
+        let deadline = ctx.idle_deadline.clone();
+        let (handle, _addr) = spawn_server_with_ctx("127.0.0.1:0", ctx, true).await.unwrap();
+
+        let armed = *deadline.lock().unwrap();
+        assert!(armed.is_some(), "启动时就必须起算，否则没人连过的 server 会永久常驻");
+
+        handle.stop().unwrap();
+    }
+
+    /// 截止时间一过**真的会退出**（不真的等 180 秒 —— 把 deadline 设成过去）。
+    ///
+    /// 这条覆盖的是"用户能不能相信它会自己关"：单测只能证明 deadline 装上了，
+    /// 证明不了守卫真的在读它。
+    #[tokio::test]
+    async fn expired_deadline_shuts_the_server_down() {
+        let ctx = ServerCtx::new();
+        // 先埋一个"已经过期"的截止时间，再起 server。
+        // 注意 spawn 内部在 idle_grace 时会把 deadline 重置成 now+IDLE_GRACE，
+        // 所以这里改用"起完之后再改"的方式（守卫每秒读一次）。
+        let deadline = ctx.idle_deadline.clone();
+        let (handle, _addr) = spawn_server_with_ctx("127.0.0.1:0", ctx, true).await.unwrap();
+
+        {
+            let mut d = deadline.lock().unwrap();
+            *d = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        }
+
+        let stopped = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle.clone().stopped(),
+        )
+        .await;
+        assert!(stopped.is_ok(), "deadline 过期后守卫应当退出，但 5 秒内没停");
+    }
+
+    /// 不启用宽限（测试/无托盘）时**不**装 deadline —— 保持原有"断开即退"语义。
+    #[tokio::test]
+    async fn no_grace_mode_leaves_deadline_unarmed() {
+        let ctx = ServerCtx::new();
+        let deadline = ctx.idle_deadline.clone();
+        let (handle, _addr) = spawn_server_with_ctx("127.0.0.1:0", ctx, false).await.unwrap();
+
+        assert!(deadline.lock().unwrap().is_none());
+        handle.stop().unwrap();
+    }
+
+    /// 宽限期内重新连上 → 取消待定退出。
+    #[tokio::test]
+    async fn reconnect_cancels_idle_shutdown() {
+        let ctx = ServerCtx::new();
+        let (handle, addr) = spawn_server_with_ctx("127.0.0.1:0", ctx, true).await.unwrap();
+
+        let c1 = client_for(addr).await;
+        let sub1 = c1
+            .subscribe::<ServerEvent, _>("subscribe_events", ("w1",), "unsubscribe_events")
+            .await
+            .unwrap();
+        drop(sub1);
+        drop(c1);
+
+        // 立刻重连（相当于用户重新打开 GUI）
+        let c2 = client_for(addr).await;
+        let sub2 = c2
+            .subscribe::<ServerEvent, _>("subscribe_events", ("w1",), "unsubscribe_events")
+            .await
+            .unwrap();
+
+        let stopped =
+            tokio::time::timeout(std::time::Duration::from_millis(800), handle.clone().stopped()).await;
+        assert!(stopped.is_err(), "有 GUI 连着时不该退出");
+
+        drop(sub2);
+        drop(c2);
+        handle.stop().unwrap();
     }
 
     // ── ticket 03: per-workspace SQLite, mutate (LWW) + list ──
@@ -1138,6 +1484,7 @@ mod tests {
             .request("note_create", (
                 note::NoteInput {
                     title: "t".into(), content: "c".into(), scope: "global".into(), tags: vec![],
+                    action: None, merged_content: None, target_ids: None,
                 },
                 "gui-A".to_string(),
             ))

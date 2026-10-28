@@ -963,6 +963,21 @@ pub fn launch_updater_and_exit(app: tauri::AppHandle, updater_path: String) -> R
             .args(["-NoProfile", "-Command",
                 "Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object { $_.CommandLine -match '--ide-mode' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"])
             .status();
+        // 🔴 **必须杀掉 server**（2026-10-27 实测事故）：
+        //
+        // server（`claude-gui-server.exe`）是**独立常驻进程**，不受 GUI 退出影响。
+        // 升级只替换 GUI 的文件时，它会继续带着**旧代码**在内存里跑 ——
+        // 用户升级后看到的是旧版托盘菜单，以为升级没生效。
+        //
+        // 实测：v.5 加了托盘、v.6 加了「新建窗口」，但升级后托盘还是旧菜单，
+        // 因为 server 进程从 22:59 起就没重启过。
+        //
+        // 杀掉即可：GUI 重启后第一次 `ensure_server` 会拉起新版 server。
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", "claude-gui-server.exe"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .status();
+
         // 插件后台进程: 本进程 exit(0) 绕过 RunEvent::Exit → 若不清理则遗留孤儿
         // (node 以插件目录为 cwd = 目录句柄 → 卸载报 os error 32)。
         // ① 自己 registry 里的; ② 历史上被强杀/更新留下的孤儿(父进程已死 + cwd 在插件根内)。
@@ -1025,6 +1040,30 @@ pub fn get_install_dir_path() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// 🔴 升级时必须杀掉 **server** 进程（2026-10-27 实测事故）。
+    ///
+    /// `claude-gui-server.exe` 是独立常驻进程：只杀 GUI 的话，server 会带着
+    /// **旧代码**继续跑。实测 v.5 加托盘、v.6 加「新建窗口」，升级后用户看到的
+    /// 仍是旧菜单 —— 因为 server 从 22:59 起就没重启过。
+    ///
+    /// 这条测试锁住"launch_updater_and_exit 里必须有 kill server 的命令"
+    /// （源码级断言：直接调用会真的杀进程，不能进单测）。
+    #[test]
+    fn updater_must_kill_server_process() {
+        let src = include_str!("update.rs");
+        let fn_start = src.find("pub fn launch_updater_and_exit").expect("找不到该函数");
+        let fn_body = &src[fn_start..];
+        let end = fn_body.find("
+}
+").map(|i| i + fn_body.len() - i).unwrap_or(fn_body.len());
+        let body = &fn_body[..end.min(fn_body.len())];
+
+        assert!(
+            body.contains("claude-gui-server.exe"),
+            "launch_updater_and_exit 必须杀 claude-gui-server.exe，             否则升级后 server 还跑着旧代码（托盘菜单不会更新）"
+        );
+    }
     use super::*;
 
     fn artifact(platform: &str, name: &str) -> Option<PathBuf> {

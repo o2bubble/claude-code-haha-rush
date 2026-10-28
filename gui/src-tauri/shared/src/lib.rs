@@ -5,10 +5,13 @@
 //! reference the same definitions — no drift between two copies of the schema.
 
 pub mod db;
+pub mod instances;
 pub mod note;
 pub mod presence;
+pub mod proc;
 pub mod tokenizer;
 
 pub use db::*;
+pub use instances::*;
 pub use note::*;
 pub use presence::*;
