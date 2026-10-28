@@ -19,25 +19,38 @@ import { invoke } from "@tauri-apps/api/core";
 /** 上一次上报过的值 —— 相同则跳过（见文件头注释）。 */
 let lastWorkspace: string | undefined;
 let lastSession: string | undefined;
+let lastTitle: string | undefined;
 let lastSentAt = 0;
 
 /** 被最小间隔拦下、等待补发的值（见 scheduleFlush 的注释）。 */
-let pending: { workspace: string; session: string } | null = null;
+let pending: { workspace: string; session: string; title: string } | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 最短上报间隔：即使值一直变，也不高频写盘。
  *  1 秒足够 —— 升级时用到的只是"最后一个稳定值"，晚 1 秒无所谓。 */
 const MIN_INTERVAL_MS = 1000;
 
-function doSend(workspace: string, session: string, keepSession: boolean): void {
+function doSend(
+  workspace: string,
+  session: string,
+  title: string,
+  keepSession: boolean,
+): void {
   lastWorkspace = workspace;
   lastSession = session;
+  lastTitle = title;
   lastSentAt = Date.now();
-  invoke("update_instance_record", { workspace, sessionId: session, keepSession }).catch(() => {
+  invoke("update_instance_record", {
+    workspace,
+    sessionId: session,
+    sessionTitle: title,
+    keepSession,
+  }).catch(() => {
     // 写失败不影响使用（最坏是升级后少恢复一个窗口）——
     // 回滚去重状态，让下次有机会重试
     lastWorkspace = undefined;
     lastSession = undefined;
+    lastTitle = undefined;
   });
 }
 
@@ -49,8 +62,13 @@ function doSend(workspace: string, session: string, keepSession: boolean): void 
  * 实测场景：会话加载完成的那次上报正好落在流式密集期内 → 被拦 → 之后再无事件
  * → 自述里始终没有会话。
  */
-function scheduleFlush(workspace: string, session: string, keepSession: boolean): void {
-  pending = { workspace, session };
+function scheduleFlush(
+  workspace: string,
+  session: string,
+  title: string,
+  keepSession: boolean,
+): void {
+  pending = { workspace, session, title };
   if (flushTimer) return; // 已有定时器，它的回调会读到最新的 pending
   const wait = Math.max(0, MIN_INTERVAL_MS - (Date.now() - lastSentAt));
   flushTimer = setTimeout(() => {
@@ -58,8 +76,14 @@ function scheduleFlush(workspace: string, session: string, keepSession: boolean)
     const p = pending;
     pending = null;
     if (!p) return;
-    if (p.workspace === (lastWorkspace ?? "") && p.session === (lastSession ?? "")) return;
-    doSend(p.workspace, p.session, keepSession);
+    if (
+      p.workspace === (lastWorkspace ?? "") &&
+      p.session === (lastSession ?? "") &&
+      p.title === (lastTitle ?? "")
+    ) {
+      return;
+    }
+    doSend(p.workspace, p.session, p.title, keepSession);
   }, wait + 10);
 }
 
@@ -77,6 +101,7 @@ export interface ReportOptions {
  *
  * - `workspace`：传则更新工作区（切工作区时用）
  * - `sessionId`：当前会话；空值 + `keepSession` 时由 Rust 侧保留旧值
+ * - `sessionTitle`：当前会话的**标题**（托盘菜单显示用，见 InstanceRecord::session_title）
  *
  * 值完全没变时**跳过**（见文件头注释：这个函数调用得极其频繁）。
  */
@@ -84,6 +109,7 @@ export function reportInstanceState(
   workspace?: string,
   sessionId?: string,
   opts?: ReportOptions,
+  sessionTitle?: string,
 ): void {
   const keepSession = opts?.keepSession ?? true;
   const nextWs = workspace !== undefined ? workspace : (lastWorkspace ?? "");
@@ -96,21 +122,30 @@ export function reportInstanceState(
   const nextSess = wsChanged
     ? (sessionId ?? "")
     : (sessionId !== undefined ? sessionId : (lastSession ?? ""));
+  // 会话名与会话 id 同进退：切了工作区就不该再带旧会话的名字。
+  const nextTitle = wsChanged
+    ? (sessionTitle ?? "")
+    : (sessionTitle !== undefined ? sessionTitle : (lastTitle ?? ""));
 
-  if (nextWs === (lastWorkspace ?? "") && nextSess === (lastSession ?? "")) {
+  if (
+    nextWs === (lastWorkspace ?? "") &&
+    nextSess === (lastSession ?? "") &&
+    nextTitle === (lastTitle ?? "")
+  ) {
     return; // 值没变 —— 最常见的路径（每次消息变化都会走到这）
   }
   if (Date.now() - lastSentAt < MIN_INTERVAL_MS) {
-    scheduleFlush(nextWs, nextSess, keepSession); // 太频繁 → 排一次补发
+    scheduleFlush(nextWs, nextSess, nextTitle, keepSession); // 太频繁 → 排一次补发
     return;
   }
-  doSend(nextWs, nextSess, keepSession);
+  doSend(nextWs, nextSess, nextTitle, keepSession);
 }
 
 /** 仅测试用：重置去重状态。 */
 export function __resetInstanceRegistryCache(): void {
   lastWorkspace = undefined;
   lastSession = undefined;
+  lastTitle = undefined;
   lastSentAt = 0;
   pending = null;
   if (flushTimer) {

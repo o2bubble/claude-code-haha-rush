@@ -27,6 +27,15 @@ pub struct InstanceRecord {
     /// 当前加载的会话 id。空 = 还没加载会话（只有工作区）。
     #[serde(rename = "sessionId", default)]
     pub session_id: String,
+    /// 当前会话的**标题**（2026-10-28 新增）。
+    ///
+    /// 为什么单独存：托盘菜单要显示「工作区 · 会话名」帮用户认出是哪个窗口
+    /// （用户要求）。会话名只有 GUI 的业务层知道（在会话列表里），server 拿不到 ——
+    /// 所以由 GUI 随自述一起写下来。
+    ///
+    /// 空 = 没加载会话 / 旧版本写的记录 → 菜单只显示工作区（不显示空括号）。
+    #[serde(rename = "sessionTitle", default)]
+    pub session_title: String,
     /// **进程启动时刻**（Unix ms，由 `GetProcessTimes` 得来）。
     ///
     /// 判存活的唯一正确姿势是 **pid + 启动时间**，因为 pid 会被系统复用：

@@ -2050,23 +2050,31 @@ fn update_instance_record(
     app: tauri::AppHandle,
     workspace: Option<String>,
     session_id: Option<String>,
+    session_title: Option<String>,
     keep_session: Option<bool>,
 ) {
     let Ok(dir) = app.path().app_data_dir() else { return };
     let pid = std::process::id();
     let incoming = session_id.unwrap_or_default();
+    let prev = instances::read_instance_record(&dir, pid);
     let resolved_session = if incoming.is_empty() && keep_session.unwrap_or(false) {
         // 读回已有值沿用（读不到就是空，等价于清空）
-        instances::read_instance_record(&dir, pid)
-            .map(|r| r.session_id)
-            .unwrap_or_default()
+        prev.as_ref().map(|r| r.session_id.clone()).unwrap_or_default()
     } else {
         incoming
+    };
+    // 会话名同样"空则沿用"：流式期间前端可能只报 id 不带标题（与会话 id 同理，
+    // 见上面 keep_session 的说明）。会话非空却拿不到名字时保留旧名，
+    // 免得托盘菜单在会话名加载出来之前闪一下"没有会话名"。
+    let resolved_title = match session_title.unwrap_or_default() {
+        t if !t.is_empty() => t,
+        _ => prev.map(|r| r.session_title).unwrap_or_default(),
     };
     let rec = instances::InstanceRecord {
         pid,
         workspace: workspace.unwrap_or_default(),
         session_id: resolved_session,
+        session_title: resolved_title,
         // 双因子存活的另一半（见 InstanceRecord::started_at）：写自己的启动时刻。
         // 查自己必然成功；万一失败记 0 = 不可信（保守当死），只是少恢复一个窗口。
         started_at: instances::process_start_time_ms(pid).unwrap_or(0),

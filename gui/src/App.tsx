@@ -638,9 +638,14 @@ export default function App() {
     // 工作区、不开会话"。会话为空几乎总是"还没就绪"而非"用户不要会话"，所以保留旧值。
     // 真正要清空（用户新建会话）由 chatSession.resetSession 显式上报。
     void import("./services/instanceRegistry").then(({ reportInstanceState }) => {
-      reportInstanceState(titleRef.current.workDir ?? "", st.sessionId ?? undefined, {
-        keepSession: true,
-      });
+      // 会话名一起上报 —— 托盘菜单用「工作区 · 会话名」区分窗口（用户要求）。
+      // 与窗口标题同一个数据源（上面刚算过 titleRef.current.sessionTitle）
+      reportInstanceState(
+        titleRef.current.workDir ?? "",
+        st.sessionId ?? undefined,
+        { keepSession: true },
+        titleRef.current.sessionTitle,
+      );
     });
   });
 

@@ -156,12 +156,21 @@ pub fn idle_countdown_label(secs: u64) -> String {
     format!("（无窗口）后台将在 {} 后自动退出", format_countdown(secs))
 }
 
+/// 菜单一条文案里，会话名最多留多少字（菜单项太窄，长了会被系统截断得很丑）。
+const MAX_SESSION_LABEL_CHARS: usize = 20;
+
 /// 菜单里显示的一条文案。纯函数（便于单测）。
 ///
-/// 形如 `工作区名 (pid 1234)`；工作区为空时退化为 `(未绑定工作区)`。
+/// 三种形态：
+/// - `工作区 · 会话名`  —— 常见情形
+/// - `工作区`           —— 会话名未知（还没加载 / 旧版本写的自述）
+/// - `(未绑定工作区) · 会话名` / `(未绑定工作区)` —— 启动早期
+///
+/// **不带 pid**：它有实际用途（区分同工作区的两个实例），但放在菜单里
+/// 太长且对用户没意义；同工作区多开的情形很少，真需要时看任务管理器。
 pub fn instance_label(rec: &InstanceRecord) -> String {
     let ws = rec.workspace.trim();
-    let name = if ws.is_empty() {
+    let ws_name = if ws.is_empty() {
         "(未绑定工作区)".to_string()
     } else {
         // 只取最后一段，菜单太窄放不下完整路径
@@ -171,7 +180,19 @@ pub fn instance_label(rec: &InstanceRecord) -> String {
             .unwrap_or(ws)
             .to_string()
     };
-    format!("{}  (pid {})", name, rec.pid)
+
+    let title = rec.session_title.trim();
+    if title.is_empty() {
+        return ws_name;
+    }
+    let shown: String = if title.chars().count() > MAX_SESSION_LABEL_CHARS {
+        let mut s: String = title.chars().take(MAX_SESSION_LABEL_CHARS).collect();
+        s.push('…');
+        s
+    } else {
+        title.to_string()
+    };
+    format!("{ws_name} · {shown}")
 }
 
 // ── Windows 实现 ───────────────────────────────────────────────────
@@ -454,7 +475,57 @@ mod tests {
         r.workspace = "D:\\Development\\claude-code-haha-dev".into();
         let l = instance_label(&r);
         assert!(l.contains("claude-code-haha-dev"), "应取最后一段: {l}");
-        assert!(l.contains("42"));
+        assert!(!l.contains("Development"), "不该带中间路径: {l}");
+    }
+
+    #[test]
+    fn label_shows_session_title_when_known() {
+        let mut r = InstanceRecord::default();
+        r.workspace = "C:\\Storage\\work\\docs".into();
+        r.session_title = "修一下登录".into();
+        assert_eq!(instance_label(&r), "docs · 修一下登录");
+    }
+
+    #[test]
+    fn label_falls_back_to_workspace_without_session_title() {
+        // 旧版本自述没有 sessionTitle 字段 → 只显示工作区，不能出现空的「 · 」
+        let mut r = InstanceRecord::default();
+        r.workspace = "C:\\Storage\\work\\docs".into();
+        assert_eq!(instance_label(&r), "docs");
+
+        // 只有空白也算没有
+        r.session_title = "   ".into();
+        assert_eq!(instance_label(&r), "docs");
+    }
+
+    #[test]
+    fn label_handles_unbound_workspace_with_session() {
+        let mut r = InstanceRecord::default();
+        r.session_title = "新会话".into();
+        assert_eq!(instance_label(&r), "(未绑定工作区) · 新会话");
+    }
+
+    #[test]
+    fn label_truncates_long_session_titles() {
+        let mut r = InstanceRecord::default();
+        r.workspace = "C:\\w\\docs".into();
+        r.session_title = "这是一个非常非常长的会话标题应该在菜单里被截断掉".into();
+        let l = instance_label(&r);
+        assert!(l.starts_with("docs · "), "工作区名必须完整保留: {l}");
+        assert!(l.ends_with('…'), "超长要省略: {l}");
+        let shown = l.strip_prefix("docs · ").unwrap();
+        assert_eq!(shown.chars().count(), MAX_SESSION_LABEL_CHARS + 1, "+1 是省略号: {l}");
+    }
+
+    #[test]
+    fn label_truncates_by_chars_not_bytes() {
+        // 中文按字符截断，不能把一个汉字的字节切一半（会出乱码）
+        let mut r = InstanceRecord::default();
+        r.workspace = "C:/w/d".into();
+        r.session_title = "中".repeat(MAX_SESSION_LABEL_CHARS + 5);
+        let l = instance_label(&r);
+        assert!(l.chars().all(|c| c != '\u{FFFD}'), "不该出现替换字符: {l}");
+        assert_eq!(l.strip_prefix("d · ").unwrap().chars().count(), MAX_SESSION_LABEL_CHARS + 1);
     }
 
     #[test]
@@ -628,7 +699,7 @@ mod tests {
     fn label_handles_empty_workspace() {
         let mut r = InstanceRecord::default();
         r.pid = 7;
-        assert!(instance_label(&r).contains("未绑定工作区"));
+        assert_eq!(instance_label(&r), "(未绑定工作区)");
     }
 
     #[test]

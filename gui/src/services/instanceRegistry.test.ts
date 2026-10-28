@@ -53,6 +53,7 @@ describe("reportInstanceState — 去重与整体覆盖语义", () => {
     expect(invokeMock).toHaveBeenCalledWith("update_instance_record", {
       workspace: "C:/ws/a",
       sessionId: "s2",
+      sessionTitle: "",
       keepSession: true, // 默认保留（会话为空时才起作用）
     });
   });
@@ -71,6 +72,7 @@ describe("reportInstanceState — 去重与整体覆盖语义", () => {
     expect(invokeMock).toHaveBeenCalledWith("update_instance_record", {
       workspace: "C:/ws/b",
       sessionId: "",
+      sessionTitle: "",
       keepSession: true, // ← Rust 侧读回旧会话，不清空
     });
   });
@@ -87,6 +89,7 @@ describe("reportInstanceState — 去重与整体覆盖语义", () => {
     expect(invokeMock).toHaveBeenCalledWith("update_instance_record", {
       workspace: "C:/ws/b",
       sessionId: "s-new",
+      sessionTitle: "",
       keepSession: true,
     });
   });
@@ -134,6 +137,7 @@ describe("reportInstanceState — 会话为空时保留旧值", () => {
     expect(invokeMock).toHaveBeenCalledWith("update_instance_record", {
       workspace: "C:/ws/a",
       sessionId: "",
+      sessionTitle: "",
       keepSession: true, // ← 关键：让 Rust 侧读回旧会话，而不是清空
     });
   });
@@ -148,6 +152,7 @@ describe("reportInstanceState — 会话为空时保留旧值", () => {
     expect(invokeMock).toHaveBeenCalledWith("update_instance_record", {
       workspace: "C:/ws/a",
       sessionId: "",
+      sessionTitle: "",
       keepSession: false,
     });
   });
@@ -168,6 +173,7 @@ describe("reportInstanceState — 会话为空时保留旧值", () => {
     expect(invokeMock).toHaveBeenCalledWith("update_instance_record", {
       workspace: "C:/ws/a",
       sessionId: "s-target",
+      sessionTitle: "",
       keepSession: true,
     });
   });
@@ -184,5 +190,63 @@ describe("reportInstanceState — 会话为空时保留旧值", () => {
     vi.advanceTimersByTime(1500);
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(invokeMock.mock.calls[0][1]).toMatchObject({ sessionId: "s3" });
+  });
+});
+
+// ── 会话名（托盘菜单显示「工作区 · 会话名」用，2026-10-28 新增）──
+describe("reportInstanceState — 会话名上报", () => {
+  beforeEach(() => {
+    invokeMock.mockClear();
+    invokeMock.mockResolvedValue(undefined);
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("会话名随会话一起上报", async () => {
+    const { reportInstanceState } = await freshModule();
+    reportInstanceState("C:/ws/a", "s1", { keepSession: true }, "修一下登录");
+    expect(invokeMock).toHaveBeenCalledWith("update_instance_record", {
+      workspace: "C:/ws/a",
+      sessionId: "s1",
+      sessionTitle: "修一下登录",
+      keepSession: true,
+    });
+  });
+
+  it("会话名变了也要上报（不能因为会话 id 没变就跳过）", async () => {
+    const { reportInstanceState } = await freshModule();
+    reportInstanceState("C:/ws/a", "s1", { keepSession: true }, "旧标题");
+    vi.advanceTimersByTime(2000);
+    invokeMock.mockClear();
+
+    reportInstanceState("C:/ws/a", "s1", { keepSession: true }, "会话被改名了");
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock.mock.calls[0][1]).toMatchObject({ sessionTitle: "会话被改名了" });
+  });
+
+  it("切工作区 → 会话名跟着清空（不能残留上一个工作区的会话名）", async () => {
+    const { reportInstanceState } = await freshModule();
+    reportInstanceState("C:/ws/a", "s1", { keepSession: true }, "A 的会话");
+    vi.advanceTimersByTime(2000);
+    invokeMock.mockClear();
+
+    reportInstanceState("C:/ws/b");
+    const arg = invokeMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(arg.workspace).toBe("C:/ws/b");
+    expect(arg.sessionId).toBe("");
+    expect(arg.sessionTitle).toBe(""); // 与 sessionId 同进退
+  });
+
+  it("没传会话名时沿用上次的值（流式期间不闪成空）", async () => {
+    const { reportInstanceState } = await freshModule();
+    reportInstanceState("C:/ws/a", "s1", { keepSession: true }, "稳定的标题");
+    vi.advanceTimersByTime(2000);
+    invokeMock.mockClear();
+
+    reportInstanceState("C:/ws/a", "s1"); // 这次没带标题
+    // 标题没变 → 整体值没变 → 直接跳过（不上报），自述里仍是旧标题
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
