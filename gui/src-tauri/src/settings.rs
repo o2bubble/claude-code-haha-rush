@@ -176,6 +176,20 @@ pub struct AppSettings {
     /// → 重启静默回退（与 skillRegistryUrl 同一类坑）。
     #[serde(rename = "windowTitleOrder", default)]
     pub window_title_order: Option<String>,
+    /// **隐藏主窗的任务栏图标**（缺省关，即 None 视为 false）。
+    ///
+    /// 2026-10-28 用户反馈：多开几个窗口，任务栏堆一排图标；既然托盘已经能管理
+    /// 全部实例，任务栏那排就是冗余的。
+    ///
+    /// ⚠️ **高阶用法，默认关闭**。开启的后果必须让用户清楚（见设置页提示）：
+    /// `skip_taskbar` 在 Windows 上给窗口加 `WS_EX_TOOLWINDOW`，**任务栏和
+    /// Alt+Tab 都会消失** —— 之后只能从托盘找回窗口。托盘由 server 进程持有，
+    /// server 不在时就没有任何入口（窗口本身还在屏幕上，不点最小化就找得到）。
+    ///
+    /// ⚠️ **纯全局 UI 偏好，刻意不进 `merge_workspace_overrides` 白名单**（同
+    /// windowTitleOrder）：跟"绑了哪个工作区"无关，前端也用 applyGlobalOnly。
+    #[serde(rename = "hideTaskbarIcon", default)]
+    pub hide_taskbar_icon: Option<bool>,
     /// 升级重启后**自动把其他实例恢复回来**（缺省开，即 None 视为 true）。
     ///
     /// 关掉后：升级只重启本实例，不再拉起其他窗口 —— 适合"宁可自己重开、也不想在
@@ -286,6 +300,7 @@ impl Default for AppSettings {
             session_folder_tree: None,
             message_timeline: None,
             window_title_order: None,
+            hide_taskbar_icon: None,
             auto_restore_instances: None,
             deepseek_flash_notice_shown: None,
             custom_compact_prompt: None,
@@ -1159,6 +1174,55 @@ mod tests {
             base.window_title_order.as_deref(),
             Some("session-first"),
             "工作区覆盖不该影响 windowTitleOrder —— 它是全局 UI 偏好"
+        );
+    }
+
+    /// `hideTaskbarIcon` 的 JSON 字段名是**跨端契约**：前端 settingsStore /
+    /// SettingsPanel 按这个名字读写。改名会让开关**静默失效**
+    /// （写得进、读不回，界面还显示成缺省值）。
+    #[test]
+    fn hide_taskbar_icon_json_key_is_contract() {
+        let mut s = AppSettings::default();
+        s.hide_taskbar_icon = Some(true);
+        let gui = app_settings_to_gui(&s);
+        assert_eq!(
+            gui.get("hideTaskbarIcon").and_then(|v| v.as_bool()),
+            Some(true),
+            "前端按 hideTaskbarIcon 读写 —— 改了这里必须同步改前端"
+        );
+        let back: AppSettings = gui_to_app_settings(&gui);
+        assert_eq!(back.hide_taskbar_icon, Some(true));
+    }
+
+    /// 缺省必须是「显示任务栏图标」。
+    ///
+    /// 这条不只是测默认值 —— 它锁住一个**产品决策**：隐藏任务栏是高阶用法，
+    /// 新用户绝不能一上来就掉进"窗口在任务栏和 Alt+Tab 里都找不到"的状态。
+    #[test]
+    fn hide_taskbar_icon_defaults_to_off() {
+        let s = AppSettings::default();
+        assert_eq!(s.hide_taskbar_icon, None);
+        assert!(
+            !s.hide_taskbar_icon.unwrap_or(false),
+            "缺省必须显示任务栏图标（None 在 build 时按 false 处理）"
+        );
+    }
+
+    /// ⚠️ **刻意不进 `merge_workspace_overrides` 白名单**（同 windowTitleOrder）。
+    ///
+    /// "要不要出现在任务栏"跟绑了哪个工作区无关，按工作区各设一套只会让同一台
+    /// 机器上的窗口行为不一致。前端也用 applyGlobalOnly 固定写 global。
+    #[test]
+    fn hide_taskbar_icon_is_global_only() {
+        let mut base = AppSettings::default();
+        base.hide_taskbar_icon = Some(true);
+        let mut ws = AppSettings::default();
+        ws.hide_taskbar_icon = Some(false);
+        merge_workspace_overrides(&mut base, &ws);
+        assert_eq!(
+            base.hide_taskbar_icon,
+            Some(true),
+            "工作区覆盖不该影响 hideTaskbarIcon —— 它是全局 UI 偏好"
         );
     }
 

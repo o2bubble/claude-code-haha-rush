@@ -86,6 +86,13 @@ export interface AppSettings {
    *  ⚠️ **全局字段**：不进 Rust 的 merge_workspace_overrides 白名单，前端也固定写
    *  global（SettingsPanel 的 applyGlobalOnly）—— 理由见 Rust 侧同名字段注释。 */
   windowTitleOrder?: "workspace-first" | "session-first";
+  /** 隐藏主窗的任务栏图标（缺省**关** —— undefined 视为 false）。
+   *
+   *  多开时任务栏会堆一排图标；既然托盘已经能管理全部实例，可以只留托盘。
+   *  ⚠️ 高阶用法：隐藏后**任务栏与 Alt+Tab 都看不到窗口**，只能从托盘找回。
+   *  ⚠️ **全局字段**（同 windowTitleOrder）：不进 Rust 的 merge_workspace_overrides
+   *  白名单，前端固定写 global（applyGlobalOnly）。 */
+  hideTaskbarIcon?: boolean;
   /** 升级重启后自动把其他实例恢复回来（缺省**开** —— undefined 视为开）。
    *  关掉后升级只重启本实例，不再拉起其他窗口。
    *  ⚠️ **全局字段**（同 windowTitleOrder）：不进 Rust 的 merge_workspace_overrides 白名单。 */

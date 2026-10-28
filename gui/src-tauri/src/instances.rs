@@ -347,6 +347,7 @@ mod tests {
             pid: 111,
             workspace: "C:/ws/a".into(),
             session_id: "sess-1".into(),
+            session_title: "我的会话".into(),
             started_at: 12345,
             updated_at: now_ms(),
         };
@@ -649,6 +650,7 @@ mod keep_session_tests {
 
         write_instance_record(&d, &InstanceRecord {
             pid: 42, workspace: "C:/ws".into(), session_id: "sess-keep".into(),
+            session_title: "保留的会话".into(),
             started_at: 12345, updated_at: now_ms(),
         }).unwrap();
 

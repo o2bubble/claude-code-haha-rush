@@ -133,7 +133,12 @@ const en: Locale = {
     workspaceScope: "Workspace",
     shortcutsGlobalOnly: "Shortcuts are global-only and cannot be saved per workspace",
     catSkills: "Skills",
+    catAdvanced: "Advanced",
     catAbout: "About",
+    hideTaskbarIcon: "Hide taskbar icon",
+    hideTaskbarIconDesc:
+      "Removes the window from the taskbar and Alt+Tab; manage all windows from the system tray instead (right-click the tray icon → switch / close).\n" +
+      "Useful when you keep many windows open. Note: once hidden, a minimized window can only be restored from the tray — and the tray is provided by the background service, so there is no entry point when that service isn't running.",
     catShortcuts: "Shortcuts",
     // Editor
     editorFontSize: "Font Size",

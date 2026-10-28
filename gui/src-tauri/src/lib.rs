@@ -461,6 +461,10 @@ pub fn run() {
     let saved_window_x = settings.window_x;
     let saved_window_y = settings.window_y;
     let saved_window_maximized = settings.window_maximized;
+    // 「隐藏任务栏图标」是**高级选项，默认关**（见 AppSettings::hide_taskbar_icon）。
+    // 建窗时就带上，避免先出现在任务栏、几毫秒后才消失（那会有明显的闪烁）。
+    // 运行中改这一项走 set_main_window_taskbar 命令。
+    let hide_taskbar_icon = settings.hide_taskbar_icon.unwrap_or(false);
 
     let db_dir = std::path::PathBuf::from(&work_dir).join(".claude");
     std::fs::create_dir_all(&db_dir).expect("Failed to create .claude directory");
@@ -609,6 +613,7 @@ pub fn run() {
             let main_builder = main_builder.decorations(false);
             let main_window = main_builder.build()?;
 
+
             // 🔴 主窗口关闭前，先关掉本实例开的所有插件窗口（挂件 / 覆盖层）。
             //
             // 为什么必须做：Tauri 的退出策略是「**所有**窗口都关闭后才退出进程」。
@@ -648,6 +653,20 @@ pub fn run() {
             // assigning a slot (or the saved position points at a removed monitor)
             // — bring it back on-screen so the GUI is never invisible.
             ensure_window_on_screen(app.handle(), &main_window);
+
+            // 高级选项：隐藏任务栏图标（默认 false = 正常显示）。
+            //
+            // ⚠️ 位置很关键 —— **必须放在上面这些 set_position / set_size /
+            // maximize 之后**。tao 的 apply_diff 会按它内部缓存的 WindowFlags
+            // **整份重算** GWL_EXSTYLE（其中 ON_TASKBAR → WS_EX_APPWINDOW），
+            // 把我们的改动覆盖掉。实测（2026-10-28）：紧跟 build() 之后改样式，
+            // 随后的窗口定位/最大化会把它擦回 0x40110。
+            //
+            // ⚠️ **不能用 Tauri 的 `.skip_taskbar(true)`**：Windows 上它只调
+            // `ITaskbarList::DeleteTab`，既不设 WS_EX_TOOLWINDOW（Alt+Tab 里还在），
+            // 也不清 WS_EX_APPWINDOW；窗口随后 show() 时按钮还会被系统重建。
+            #[cfg(windows)]
+            let _ = apply_taskbar_visibility(&main_window, hide_taskbar_icon);
 
             // ── 升级后恢复其他实例 ──
             // 升级时所有实例被强杀（释放 exe 文件锁），只有本进程被 updater 重启。
@@ -897,6 +916,7 @@ pub fn run() {
             show_chat_widget,
             close_chat_widget,
             focus_main_window,
+            set_main_window_taskbar,
             open_url_window,
             open_in_explorer,
             guard::guard_event,
@@ -3709,6 +3729,70 @@ pub(crate) fn focus_main_window_impl(app: tauri::AppHandle) -> Result<(), String
     }
     // 主窗回到前台 → 控制请求 UI 交还主窗（挂件侧不再渲染）。见 WIDGET_MODE_EVENT。
     let _ = app.emit(WIDGET_MODE_EVENT, false);
+    Ok(())
+}
+
+/// 运行时切换主窗的任务栏图标（设置 → 高级 → 隐藏任务栏图标）。
+///
+/// 为什么要有命令而不只靠"重启生效"：这是个开关，用户点完立刻想看到效果；
+/// 且**万一点错了**（窗口从任务栏消失）他得能立刻点回来 —— 窗口还在屏幕上，
+/// 再点一次这个开关就行。只靠重启生效的话，误点后要关窗重开才能恢复。
+#[tauri::command]
+fn set_main_window_taskbar(app: tauri::AppHandle, hidden: bool) -> Result<(), String> {
+    let win = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗不存在".to_string())?;
+    apply_taskbar_visibility(&win, hidden)
+}
+
+/// 让窗口从任务栏 + Alt+Tab 里出现/消失（Windows）。
+///
+/// 靠 `WS_EX_TOOLWINDOW` / `WS_EX_APPWINDOW` 两个扩展样式位：
+///
+/// | 样式 | 效果 |
+/// |---|---|
+/// | `WS_EX_TOOLWINDOW` | 不在任务栏、**不在 Alt+Tab** |
+/// | `WS_EX_APPWINDOW`  | 强制出现在任务栏（优先级高于 TOOLWINDOW） |
+///
+/// 所以隐藏 = 置 TOOLWINDOW 且**清掉** APPWINDOW；恢复 = 反过来。
+/// 只置 TOOLWINDOW 而不清 APPWINDOW 是无效的（实测建窗后 APPWINDOW 是开着的）。
+///
+/// ⚠️ 改完样式要**隐藏再显示**一次，任务栏才会立刻刷新 —— 只改样式位的话，
+/// 已经画出来的任务栏按钮不会消失（要等下次 show）。这里有 1 帧的隐藏，
+/// 肉眼几乎不可见，比"点了没反应、必须重启"好得多。
+///
+/// 非 Windows 平台是空实现（mac/Linux 没有这套样式位）。
+#[cfg(windows)]
+fn apply_taskbar_visibility(win: &tauri::WebviewWindow, hidden: bool) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, SW_HIDE, SW_SHOW,
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    };
+
+    let hwnd = win.hwnd().map_err(|e| e.to_string())?.0 as *mut core::ffi::c_void;
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let new_ex = if hidden {
+            (ex | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize)
+        } else {
+            (ex & !(WS_EX_TOOLWINDOW as isize)) | WS_EX_APPWINDOW as isize
+        };
+        if new_ex != ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
+            // 强制任务栏重算这个窗口的按钮（见上面的说明）
+            ShowWindow(hwnd, SW_HIDE);
+            ShowWindow(hwnd, SW_SHOW);
+            log::info!(
+                "[taskbar] ex {ex:#x} -> {:#x} (hidden={hidden})",
+                GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn apply_taskbar_visibility(_win: &tauri::WebviewWindow, _hidden: bool) -> Result<(), String> {
     Ok(())
 }
 

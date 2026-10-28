@@ -99,6 +99,9 @@ export const CATEGORIES: SettingCategory[] = [
   { id: "shortcuts", i18nKey: "settings.catShortcuts" },
   { id: "plugins", i18nKey: "settings.catPlugins" },
   { id: "skills", i18nKey: "settings.catSkills" },
+  // 「高级」放在最后（关于之前）：这类选项影响面大、误点代价高，
+  // 不该和日常设置混在一起（用户建议单独分组）。
+  { id: "advanced", i18nKey: "settings.catAdvanced" },
   { id: "about", i18nKey: "settings.catAbout" },
 ];
 
@@ -669,6 +672,28 @@ function CategoryContent({ cat, settings, update, applyServer, applyWorkspaceOnl
               onChange={(v) => applyGlobalOnly({ recentSessionMax: clampRecentMax(v) })}
             />
             <FieldHint text={t("settings.recentSessionMaxDesc")} />
+          </div>
+        </div>
+      );
+
+    case "advanced":
+      return (
+        <div style={S.form}>
+          <div>
+            <Label text={t("settings.hideTaskbarIcon")} />
+            <Toggle
+              value={settings.hideTaskbarIcon ?? false}
+              onChange={(v) => {
+                // 固定写 global（纯 UI 偏好，见 applyGlobalOnly 注释）
+                applyGlobalOnly({ hideTaskbarIcon: v });
+                // 立刻生效，不必重启 —— 万一点错了，窗口还在屏幕上，
+                // 再点一次这个开关就能把它放回任务栏。
+                void import("@tauri-apps/api/core")
+                  .then(({ invoke }) => invoke("set_main_window_taskbar", { hidden: v }))
+                  .catch(() => {});
+              }}
+            />
+            <FieldHint text={t("settings.hideTaskbarIconDesc")} />
           </div>
         </div>
       );

@@ -131,7 +131,13 @@ const zh = {
     workspaceScope: "工作区",
     shortcutsGlobalOnly: "快捷键为全局设置，不支持按工作区保存",
     catSkills: "技能",
+    catAdvanced: "高级",
     catAbout: "关于",
+    hideTaskbarIcon: "隐藏任务栏图标",
+    hideTaskbarIconDesc:
+      "开启后窗口不再出现在任务栏和 Alt+Tab 里，改用系统托盘管理所有窗口（托盘右键 → 切换/关闭）。\n" +
+      "适合多开很多窗口的情形。注意：隐藏后如果最小化了窗口，只能从托盘找回；" +
+      "托盘由后台服务提供，服务未运行时没有这个入口。",
     catShortcuts: "快捷键",
     // 快捷键面板（嵌套结构 —— t() 用 . 作路径分隔）
     // Editor
