@@ -385,3 +385,18 @@ body {
   background: var(--bg-code);
 }
 .md-notes pre code { background: none; padding: 0; }
+
+/* ── 被「叫到前台」时的窗口内闪烁（见 components/FocusFlash.tsx）──
+   闪 2 次：前一次让人注意到，后一次确认"就是这一窗"。
+   opacity 从 0 起 —— 首次绘制不闪白。 */
+@keyframes focus-flash-blink {
+  0%   { opacity: 0; }
+  12%  { opacity: 1; }
+  30%  { opacity: 1; }
+  48%  { opacity: 0; }
+  62%  { opacity: 0; }
+  74%  { opacity: 1; }
+  88%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+.focus-flash { animation: focus-flash-blink 1.4s ease-in-out forwards; }

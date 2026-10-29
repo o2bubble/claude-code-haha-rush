@@ -3543,6 +3543,14 @@ const WIDGET_LABEL: &str = "widget-main";
 /// 前端据此决定"控制请求 UI 由谁渲染"——同一时刻只能有一个窗口响应权限/提问，
 /// 否则两窗都能点，会出现已消费的 request_id 被二次响应。
 const WIDGET_MODE_EVENT: &str = "widget-mode-changed";
+
+/// 主窗被"叫到前台"时发给前端的**闪烁提示**事件（前端画一圈高亮边框）。
+///
+/// 存在的理由：切换前台在 Windows 上可能被前台锁定拦住（见 `force_foreground`），
+/// 这时窗口不会到最前面 —— 用户面前的画面**毫无变化**，只能感到"点了没反应"。
+/// 闪烁是窗口内部的绘制，即使被别的窗口盖住也照常发生；用户一旦看到它，
+/// 就知道"确实切了，只是被挡住了"，至少能自己去任务栏/Alt+Tab 找。
+const FOCUS_FLASH_EVENT: &str = "main-window-focus-flash";
 /// 挂件窗的兜底显示延迟：前端就绪信号（握手 + 历史回填完成）可能永不到达，
 /// 不能让用户干等 —— 到点无论就绪与否都亮出来（同 INDICATOR_SHOW_DELAY_MS 的思路，
 /// 但更长：挂件要等桥接握手与历史回填）。
@@ -3748,19 +3756,31 @@ fn focus_main_window(app: tauri::AppHandle) -> Result<(), String> {
 /// 语义（2026-10-27 起）：把主窗 show + unminimize + 置前，并**隐藏挂件** ——
 /// 与 `show_chat_widget` 对称。用户从「另一个实例把我唤醒」的路径进来时，
 /// 期望看到的是完整主界面，而不是还停在挂件形态。
+///
+/// 2026-10-29：`set_focus()` 换成 `force_foreground()`。托盘是**另一个进程**发起的，
+/// 前台锁定会让 `set_focus()` 被静默拒绝（详见 `force_foreground` 的注释）。
 pub(crate) fn focus_main_window_impl(app: tauri::AppHandle) -> Result<(), String> {
-    if app.get_webview_window("main").is_none() {
+    let Some(main) = app.get_webview_window("main") else {
         return Err("主窗不存在".into());
-    }
+    };
     show_main_window(&app);
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.set_focus();
+    let _ = main.set_focus();
+    // 加强：绕开 Windows 前台锁定，并实测确认真的到了前台
+    let brought_to_front = force_foreground(&main);
+    if !brought_to_front {
+        log::warn!("[focus] 未能把主窗带到前台（可能被系统前台锁定拦截）");
     }
     if let Some(widget) = app.get_webview_window(WIDGET_LABEL) {
         let _ = widget.hide();
     }
     // 主窗回到前台 → 控制请求 UI 交还主窗（挂件侧不再渲染）。见 WIDGET_MODE_EVENT。
     let _ = app.emit(WIDGET_MODE_EVENT, false);
+    // 窗口内**闪烁提示**：让用户一眼看到"就是这一窗"。
+    // 尤其重要的情况：多个实例同时开着，用户点了托盘里的一项，光靠窗口出现
+    // 还分不清是哪个 —— 闪两下比什么都直观。
+    // 即使没能切到前台也照发：此时它可能被别的窗口盖住，闪烁本身反而成了
+    // "它在哪"的线索。
+    let _ = app.emit(FOCUS_FLASH_EVENT, ());
     Ok(())
 }
 
@@ -3902,6 +3922,121 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     let _ = main.unminimize();
     #[cfg(windows)]
     enforce_taskbar_visibility(app);
+}
+
+/// **强制**把窗口带到前台（Windows）。
+///
+/// ## 为什么 `set_focus()` 不够（2026-10-29 用户反馈"托盘切不到前台"）
+///
+/// Windows 有**前台锁定**（foreground lock）：只有「当前前台进程」、或「被前台
+/// 进程用 `AllowSetForegroundWindow` 授权过」的进程，才被允许调用
+/// `SetForegroundWindow`。托盘菜单是**另一个进程**（`claude-gui-server`）发起的，
+/// 它自己不是前台，`AllowSetForegroundWindow` 也就无效 —— 于是本进程的
+/// `set_focus()` 被静默拒绝。
+///
+/// 实测（2026-10-29，本机 A/B 对照）：
+///
+/// | 方案 | API 返回 | 前台真的变了吗 |
+/// |---|---|---|
+/// | 裸 `SetForegroundWindow` | **true** | **没有** |
+/// | 本函数 | true | 是 |
+///
+/// ⚠️ 注意第一行 —— **返回 true 但没生效**，比返回 false 更隐蔽。所以本函数
+/// **不信返回值**，最后用 `GetForegroundWindow()` 实测确认。
+///
+/// ## 三道保险
+///
+/// 1. **`AttachThreadInput`** —— 把本线程的输入队列临时附加到「当前前台窗口的
+///    线程」，共享输入状态后 `SetForegroundWindow` 才被认作"自己人"。
+///    这是绕开前台锁定的标准做法。
+/// 2. **`BringWindowToTop`** —— 在 Z 序里抬到最上。
+/// 3. **`TOPMOST` 立刻取消** —— 置顶一次再还原。对**「隐藏任务栏图标」的
+///    TOOLWINDOW 窗口尤其关键**：它没有任务栏按钮，用户没有任何备用手法把它
+///    调到前面（普通窗口还能点任务栏），所以必须一次到位。
+///
+/// 成败以 **`GetForegroundWindow() == hwnd`** 为准，返回该实测结果。
+#[cfg(windows)]
+fn force_foreground(window: &tauri::WebviewWindow) -> bool {
+    use windows_sys::Win32::Foundation::HWND;
+    // ⚠️ `AttachThreadInput` 在 System::Threading 下，不在 WindowsAndMessaging
+    // （按直觉找会编译失败 —— 实测 E0432）。
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+        SetWindowPos, ShowWindow, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SW_RESTORE,
+    };
+
+    let Ok(raw) = window.hwnd() else { return false };
+    let hwnd = raw.0 as HWND;
+    if hwnd.is_null() {
+        return false;
+    }
+
+    unsafe {
+        let my_thread = GetCurrentThreadId();
+        let fg = GetForegroundWindow();
+        // 已经是前台了就别折腾（避免 AttachThreadInput 引起的输入卡顿）
+        if fg == hwnd {
+            return true;
+        }
+        let mut target_pid = 0u32;
+        let target_thread = GetWindowThreadProcessId(hwnd, &mut target_pid);
+        let mut fg_pid = 0u32;
+        let fg_thread = if fg.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(fg, &mut fg_pid)
+        };
+
+        // 附加到前台线程与目标线程的输入队列（第 3 个参数是 BOOL，1=附加 0=分离）
+        let attach_fg = fg_thread != 0 && fg_thread != my_thread
+            && AttachThreadInput(my_thread, fg_thread, 1) != 0;
+        let attach_target = target_thread != my_thread && target_thread != fg_thread
+            && AttachThreadInput(my_thread, target_thread, 1) != 0;
+
+        ShowWindow(hwnd, SW_RESTORE);
+        BringWindowToTop(hwnd);
+        let api_ok = SetForegroundWindow(hwnd) != 0;
+        // 置顶一次再取消 —— 对没有任务栏按钮的 TOOLWINDOW 窗口是必需的
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+
+        if attach_target {
+            AttachThreadInput(my_thread, target_thread, 0);
+        }
+        if attach_fg {
+            AttachThreadInput(my_thread, fg_thread, 0);
+        }
+
+        // **不信 API 返回值** —— 实测过返回 true 但前台没变的情况
+        let real = GetForegroundWindow() == hwnd;
+        if !real {
+            log::warn!("[focus] 强制置前未生效（api_ok={api_ok}），前台仍是别的窗口");
+        }
+        real
+    }
+}
+
+#[cfg(not(windows))]
+fn force_foreground(_window: &tauri::WebviewWindow) -> bool {
+    false
 }
 
 /// 关闭某插件的全部 overlay 窗口（插件主动收起 / 禁用 / 退出时清理）。

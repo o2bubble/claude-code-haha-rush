@@ -38,6 +38,7 @@ import CommandPalette from "./components/CommandPalette";
 import { useCommandPalette } from "./components/useCommandPalette";
 import ToastContainer from "./components/ToastContainer";
 import { WindowControlsOverlay } from "./components/TitleBar";
+import { FocusFlash } from "./components/FocusFlash";
 import { reloadDesktops } from "./stores/desktopStore";
 import { loadSessionList, loadMorePlans, resetPagination } from "./stores/planHistoryStore";
 import { chatSession } from "./chat/chatSession";
@@ -1004,6 +1005,9 @@ export default function App() {
           窗口（无装饰窗口下失去它们 = 用户无法控制窗口）。
           它也盖在启动器/向导等全屏覆盖层之上，所以那两处不再各自复制一份。 */}
       <WindowControlsOverlay />
+      {/* 被「叫到前台」时的窗口内闪烁 —— 切前台可能被系统前台锁定拦下，
+          那时画面毫无变化、用户以为没反应。闪烁让他至少知道是这一窗。 */}
+      <FocusFlash />
     </>
   );
 }
