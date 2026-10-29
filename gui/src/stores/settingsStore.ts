@@ -97,6 +97,15 @@ export interface AppSettings {
    *  关掉后升级只重启本实例，不再拉起其他窗口。
    *  ⚠️ **全局字段**（同 windowTitleOrder）：不进 Rust 的 merge_workspace_overrides 白名单。 */
   autoRestoreInstances?: boolean;
+  /** 启动时自动更新已安装的**官方**插件（缺省**开** —— undefined 视为开）。
+   *
+   *  只更新同时满足三条的：① 市场有新版本；② 官方签名验证通过；
+   *  ③ 不是 `ai-guided`（AI 指导类没有运行时，更新无意义，还可能覆盖用户
+   *  按指导手工配置的安装状态）。
+   *  判定与执行见 services/pluginAutoUpdate.ts。
+   *  ⚠️ **全局字段**（同 autoRestoreInstances）：插件是用户级共享的，
+   *  不该按工作区各存一份。 */
+  autoUpdatePlugins?: boolean;
   /** 「建议从 DeepSeek Pro 换到 Flash」一次性提示是否已展示（任意选择后 true）。
    *  ⚠️ **全局字段**（同 autoRestoreInstances）：不进 Rust 的 merge_workspace_overrides
    *  白名单 —— 换模型建议只弹一次，不按工作区重复。 */

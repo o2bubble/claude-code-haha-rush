@@ -229,6 +229,8 @@ const en: Locale = {
     aboutRepoGitee: "Gitee (primary)",
     aboutRepoGithub: "GitHub (mirror)",
     aboutOpenFailed: "Could not open link — copied to clipboard",
+    autoUpdatePlugins: "Auto-update official plugins",
+    autoUpdatePluginsDesc: "On startup, bring installed official plugins up to date automatically. Only signed standard plugins are updated — AI-guided plugins and third-party packages are left alone. Plugins go stale because nobody remembers to update them; this remembers for you",
   },
 
   shortcuts: {
@@ -576,6 +578,10 @@ const en: Locale = {
     skillsCount: "{count} skills",
     downloads: "{count} downloads",
   },
+  pluginAutoUpdate: {
+    done: "Plugins auto-updated: {list}",
+  },
+
   pluginMarket: {
     searchPlaceholder: "Search plugins...",
     marketplaceLoading: "Loading...",

@@ -756,6 +756,11 @@ export default function App() {
       await startPluginProcessListener();
       // 插件面板注册晚于布局恢复时, 标题可能仍是持久化值 → 再刷新一次收敛
       refreshAllTitles();
+      // 自动更新已安装的官方插件（默认开，见 services/pluginAutoUpdate.ts）。
+      // **不 await** —— 它要连市场、下载、重扫，慢且可能失败，绝不能让启动卡在它上面。
+      void import("./services/pluginAutoUpdate")
+        .then(({ runAutoUpdatePlugins }) => runAutoUpdatePlugins())
+        .catch(() => { /* 自动更新失败不影响启动 */ });
     })();
   }, []);
 

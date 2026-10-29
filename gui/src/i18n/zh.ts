@@ -229,6 +229,8 @@ const zh = {
     aboutRepoGitee: "Gitee（主仓库）",
     aboutRepoGithub: "GitHub（镜像）",
     aboutOpenFailed: "无法打开链接，已复制到剪贴板",
+    autoUpdatePlugins: "自动更新官方插件",
+    autoUpdatePluginsDesc: "启动时自动把已安装的官方插件升到最新版（只更新带官方签名的标准插件；AI 指导类插件与第三方包不在此列）。插件一直是老版本往往是忘了升，这个开关就是替你记着",
   },
 
   shortcuts: {
@@ -576,6 +578,10 @@ const zh = {
     skillsCount: "{count} 个技能",
     downloads: "{count} 次下载",
   },
+  pluginAutoUpdate: {
+    done: "已自动更新插件：{list}",
+  },
+
   pluginMarket: {
     searchPlaceholder: "搜索插件...",
     marketplaceLoading: "加载中...",

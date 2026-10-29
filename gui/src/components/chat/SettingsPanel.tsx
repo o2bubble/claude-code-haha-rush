@@ -722,6 +722,19 @@ function CategoryContent({ cat, settings, update, applyServer, applyWorkspaceOnl
             <RepoLink label={t("settings.aboutRepoGithub")} url="https://github.com/o2bubble/claude-code-haha-rush" />
           </div>
 
+          {/* 设置项放在品牌信息之后 —— 关于页主体仍是"什么版本 / repo 在哪"，
+              但「自动更新插件」属于**装上就不用再管**的偏好，和版本信息放一起
+              最自然（用户原话就是"关于里加一个新的设置项"）。
+              左对齐：上面几段是居中排版，开关行居中会很难看。 */}
+          <div style={{ marginTop: 24, width: "100%", maxWidth: 320, textAlign: "left" }}>
+            <Label text={t("settings.autoUpdatePlugins")} />
+            <Toggle
+              value={settings.autoUpdatePlugins ?? true}
+              onChange={(v) => applyGlobalOnly({ autoUpdatePlugins: v })}
+            />
+            <FieldHint text={t("settings.autoUpdatePluginsDesc")} />
+          </div>
+
           <div style={{ fontSize: "calc(var(--font-scale, 1) * 11px)", color: "var(--fg-muted)", marginTop: 20 }}>
             {t("settings.aboutTechStack")}
           </div>

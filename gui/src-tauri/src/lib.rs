@@ -894,6 +894,8 @@ pub fn run() {
             search_in_files,
             read_bytes,
             list_plugin_manifests,
+            plugin_autoupdate_lock,
+            plugin_autoupdate_unlock,
             get_plugins_base_dir,
             get_platform,
             get_plugin_settings,
@@ -1278,6 +1280,70 @@ fn read_bytes(path: String) -> Result<String, String> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).map_err(|e| format!("Cannot read: {}", e))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
+}
+
+/// 抢一个跨进程锁文件（用于插件自动更新，防多实例同时写插件目录）。
+///
+/// 语义 = `OpenOptions::create_new`：**原子**地"有则失败、无则创建并写入 pid"。
+/// 返回 `true` 表示抢到了（调用方之后负责 `plugin_autoupdate_unlock`）。
+///
+/// 陈旧锁：超过 `stale_ms` 视为持有者已崩溃，删掉重抢 —— 否则一次崩溃会让
+/// 自动更新**永久**不再运行，而且没有任何提示。
+///
+/// 为什么需要：多开是本项目的核心用法，两个实例同时跑自动更新会写同一个
+/// `.tmp_plugin_<name>` 临时目录（`install_plugin_package` 按包名建临时目录，
+/// 没有进程间互斥），可能把插件装坏。
+///
+/// `file` 只接受**纯文件名**（不含路径分隔符/`..`）—— 前端只能锁 application
+/// data 目录下的同名文件，不会被当成任意路径写入。
+#[tauri::command]
+fn plugin_autoupdate_lock(app: tauri::AppHandle, file: String, stale_ms: u64) -> Result<bool, String> {
+    if file.contains(['/', '\\']) || file.contains("..") {
+        return Err("invalid lock file name".into());
+    }
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"));
+    std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let path = base.join(&file);
+
+    if let Ok(meta) = std::fs::metadata(&path) {
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_millis() as u64 > stale_ms)
+            .unwrap_or(false);
+        if stale {
+            log::info!("[pluginAutoUpdate] 清理陈旧锁 {file}");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut f) => {
+            use std::io::Write;
+            let _ = write!(f, "{}", std::process::id());
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 释放 `plugin_autoupdate_lock` 抢到的锁。
+#[tauri::command]
+fn plugin_autoupdate_unlock(app: tauri::AppHandle, file: String) -> Result<(), String> {
+    if file.contains(['/', '\\']) || file.contains("..") {
+        return Err("invalid lock file name".into());
+    }
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("claude-code-gui"));
+    let _ = std::fs::remove_file(base.join(&file));
+    Ok(())
 }
 
 /// 读取插件目录中各 plugin.json → 前端 scanPlugins(纯逻辑) 处理。

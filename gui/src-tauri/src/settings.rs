@@ -204,6 +204,17 @@ pub struct AppSettings {
     /// 换模型建议只该弹一次，不该按工作区各弹一遍。
     #[serde(rename = "deepseekFlashNoticeShown", default)]
     pub deepseek_flash_notice_shown: Option<bool>,
+    /// 启动时**自动更新已安装的官方插件**（缺省开，即 None 视为 true）。
+    ///
+    /// 只更新同时满足三条的插件：① 市场上有更新的版本；② 能验证官方签名；
+    /// ③ `installType != "ai-guided"`（AI 指导类插件没有运行时，更新它没有意义，
+    /// 还可能覆盖用户按指导手工配置的安装状态）。
+    /// 判定与执行都在前端（`services/pluginAutoUpdate.ts`），Rust 只负责持久化开关。
+    ///
+    /// 纯全局偏好（与 autoRestoreInstances 同），不进 `merge_workspace_overrides` ——
+    /// 插件是整个用户共用的，不该"这个工作区自动更新、那个不更新"。
+    #[serde(rename = "autoUpdatePlugins", default)]
+    pub auto_update_plugins: Option<bool>,
     #[serde(rename = "customCompactPrompt", default)]
     pub custom_compact_prompt: Option<CompactPrompt>,
     #[serde(rename = "compactExtractScript", default)]
@@ -303,6 +314,7 @@ impl Default for AppSettings {
             hide_taskbar_icon: None,
             auto_restore_instances: None,
             deepseek_flash_notice_shown: None,
+            auto_update_plugins: None,
             custom_compact_prompt: None,
             compact_extract_script: None,
             stream_stall_wake_prompt: None,
@@ -1175,6 +1187,30 @@ mod tests {
             Some("session-first"),
             "工作区覆盖不该影响 windowTitleOrder —— 它是全局 UI 偏好"
         );
+    }
+
+    /// `autoUpdatePlugins` 的 JSON 字段名是**跨端契约**（同 hideTaskbarIcon）。
+    #[test]
+    fn auto_update_plugins_json_key_is_contract() {
+        let mut s = AppSettings::default();
+        s.auto_update_plugins = Some(false);
+        let gui = app_settings_to_gui(&s);
+        assert_eq!(
+            gui.get("autoUpdatePlugins").and_then(|v| v.as_bool()),
+            Some(false),
+            "前端按 autoUpdatePlugins 读写 —— 改了这里必须同步改前端"
+        );
+        let back: AppSettings = gui_to_app_settings(&gui);
+        assert_eq!(back.auto_update_plugins, Some(false));
+    }
+
+    /// 缺省必须是 None（= 前端按 true 处理 = 自动更新**开**）。
+    ///
+    /// 锁住产品决策：绝大多数人不会主动去升级插件，默认关掉等于这个功能不存在。
+    #[test]
+    fn auto_update_plugins_defaults_to_none_meaning_on() {
+        let s = AppSettings::default();
+        assert_eq!(s.auto_update_plugins, None);
     }
 
     /// `hideTaskbarIcon` 的 JSON 字段名是**跨端契约**：前端 settingsStore /
