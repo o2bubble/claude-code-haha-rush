@@ -4830,7 +4830,9 @@ fn resolve_explorer_path(raw: &str, work_dir: &str) -> String {
 #[cfg(target_os = "windows")]
 #[tauri::command]
 fn open_in_explorer(path: String) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+
     // explorer 要求 /select, 与路径合成单个参数：分离传参时 explorer 会忽略
     // 选择指令，退化为打开默认「文档」库（实测分离参数打开了文档而非目标目录）。
     let abs = resolve_explorer_path(&path, &crate::settings::load_settings().work_dir);
@@ -4838,11 +4840,64 @@ fn open_in_explorer(path: String) -> Result<(), String> {
     if !std::path::Path::new(&abs).exists() {
         return Err(format!("Path not found: {}", abs));
     }
+
+    // ⚠️ **必须用 `raw_arg` 自己控制引号位置**（2026-10-29 用户反馈定位）。
+    //
+    // 用 `.arg()` 时，路径含空格会让 Rust 把**整个参数**包成
+    // `"/select,C:\a b\f.txt"`；explorer 解析不了这种形态，悄悄退化到默认位置
+    // （此电脑 / 用户目录）—— 用户看到的是"右键打开，弹出个无关窗口"。
+    //
+    // 实测三种形态（同一台机器，`C:\Storage\test space dir\sample file.txt`）：
+    //   `"/select,<path>"`  整包引号（.arg 的产物） → 打开「此电脑」  ❌
+    //   `/select,<path>`    无引号（仅无空格路径会这样） → 正确          ✓
+    //   `/select,"<path>"`  引号只包路径（本实现）      → 正确          ✓
+    //
+    // 这解释了为什么"有些用户没事"：工作目录不含空格的人碰不到。
+    // 移动硬盘上的 `K:\Claude Code` 这类含空格路径必然命中。
+    //
+    // 末尾的 `\` 必须去掉：`"C:\foo\"` 里的 `\"` 被当作转义引号，引号就不闭合了。
+    // 但盘符根（`C:\`）保留原样 —— 去掉就变成 `C:` 了。
+    let sel = explorer_select_arg(&abs);
+    log::info!("[explorer] {sel}");
     Command::new("explorer")
-        .arg(format!("/select,{}", abs))
+        .raw_arg(sel)
         .spawn()
         .map_err(|e| format!("Failed to open explorer: {}", e))?;
     Ok(())
+}
+
+/// 构造 `explorer.exe` 的 `/select,` 参数（纯函数，可单测）。
+///
+/// 三件事都不能省，每一件都对应一个**实测过的失败**：
+///
+/// 1. **正斜杠 → 反斜杠**：explorer 的 `/select,` 不认正斜杠路径 ——
+///    `/select,C:/Storage/a/f.txt` 打开的是「此电脑」。而 agent 给的路径
+///    常常是正斜杠（`K:/Claude Code/a.txt`），`resolve_explorer_path` 对
+///    绝对路径原样返回、不转换分隔符。（Windows 文件名不允许 `/`，整串替换安全。）
+///
+/// 2. **引号只包路径**：`/select,"<path>"`。若交给 `Command::arg`，
+///    路径含空格时 Rust 会把**整个参数**包成 `"/select,<path>"`，
+///    explorer 解析不了 → 退化到「此电脑 / 用户目录」。
+///
+/// 3. **去掉尾部 `\`**：`"C:\foo\"` 里的 `\"` 会被当作转义引号，引号不闭合。
+///    盘符根（`C:\`）例外 —— 去掉就变成 `C:` 了。
+///
+/// 用户场景（2026-10-29）：工作目录在移动硬盘 `K:\Claude Code`，
+/// 同时命中 1 与 2，点「在资源管理器打开」只弹出一个无关窗口。
+/// 路径不含空格的人只命中 1（若路径是正斜杠），全反斜杠且无空格的人一切正常 ——
+/// 这正是"有些用户机器是坏的"的来源。
+#[cfg(target_os = "windows")]
+fn explorer_select_arg(abs: &str) -> String {
+    let native = abs.replace('/', "\\");
+    match native.strip_suffix('\\') {
+        // 普通文件/目录：去掉尾部 `\` 再加引号
+        Some(s) if !s.ends_with(':') => format!("/select,\"{s}\""),
+        // 盘符根（`C:\`）：去掉尾部只剩 `C:`；保留反斜杠又会被 `"` 拼成 `\"`。
+        // 这种路径不含空格，**不加引号**即可 —— `/select,C:\` 是合法形态。
+        Some(_) => format!("/select,{native}"),
+        // 绝大多数：不以分隔符结尾
+        None => format!("/select,\"{native}\""),
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -6789,6 +6844,53 @@ mod tests {
             resolve_explorer_path(r"C:\Users\SZH\a.txt", r"C:\ws"),
             r"C:\Users\SZH\a.txt"
         );
+    }
+
+    #[test]
+    /// `/select,` 参数构造 —— 三个坑各一条，全部实测过。
+    ///
+    /// 用户机器上路径同时命中前两条（`K:\Claude Code` 含空格 + 正斜杠），
+    /// 表现为"右键在资源管理器打开，弹出一个无关窗口"。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explorer_select_arg_quotes_only_the_path() {
+        // ② 含空格：引号必须只包路径，不能整包（整包是 .arg 的产物，explorer 不认）
+        assert_eq!(
+            explorer_select_arg(r"C:\Storage\test space\f.txt"),
+            r#"/select,"C:\Storage\test space\f.txt""#
+        );
+        // 不含空格时也统一加引号：微软文档就是这个写法，避免"有无空格走不同分支"
+        assert_eq!(
+            explorer_select_arg(r"C:\Storage\a\f.txt"),
+            r#"/select,"C:\Storage\a\f.txt""#
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explorer_select_arg_normalizes_forward_slashes() {
+        // ① explorer 的 /select, 不认正斜杠 —— agent 给的路径常常是这种
+        assert_eq!(
+            explorer_select_arg("C:/Storage/a/f.txt"),
+            r#"/select,"C:\Storage\a\f.txt""#
+        );
+        assert_eq!(
+            explorer_select_arg("K:/Claude Code/a.txt"),
+            r#"/select,"K:\Claude Code\a.txt""#
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explorer_select_arg_strips_trailing_backslash_but_keeps_drive_root() {
+        // ③ 尾部反斜杠会让 `\"` 变成转义引号
+        assert_eq!(
+            explorer_select_arg(r"C:\Storage\dir\"),
+            r#"/select,"C:\Storage\dir""#
+        );
+        // 盘符根例外：去掉尾部只剩 `C:`，保留反斜杠又会拼出 `\"`；
+        // 这种路径无空格，不加引号即可。
+        assert_eq!(explorer_select_arg(r"C:\"), r"/select,C:\");
     }
 
     #[test]
