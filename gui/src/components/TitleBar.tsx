@@ -22,6 +22,13 @@ export function isWindowsChrome(): boolean {
   return isWindowsPlatform();
 }
 
+/** 单个窗口按钮宽度（px）。46 与 Windows 11 原生标题栏一致。 */
+const BTN_W = 46;
+/** 三个按钮的总宽。工具栏右侧按此预留 padding（见 Toolbar 的 TOOLBAR_CONTAINER）。 */
+export const WINDOW_CONTROLS_WIDTH = BTN_W * 3;
+/** 按钮条高度 = 工具栏高度（36）。两处**必须一致**，否则按钮与工具栏错位。 */
+export const WINDOW_CONTROLS_HEIGHT = 36;
+
 /**
  * 应用标记 —— 内联 SVG（不引外部图片：`public/` 里没有图标资源，
  * 引 src-tauri/icons 会依赖打包期拷贝路径，内联最省事且随主题着色）。
@@ -78,7 +85,7 @@ export function WindowControls() {
   }, []);
 
   const btnStyle = (kind: string, danger = false): React.CSSProperties => ({
-    width: 46,
+    width: BTN_W,
     height: "100%",
     border: "none",
     background: hovered === kind
@@ -94,13 +101,13 @@ export function WindowControls() {
     borderRadius: 0,
   });
 
-  // flexShrink: 0 —— **窗口按钮绝不能被压缩/挤出**。
-  // 无装饰窗口下用户只能靠这三个按钮控制窗口（最小化/最大化/关闭），
-  // 一旦被挤到窗口外就彻底失去控制手段（实测：工作区名变长时溢出 81px，三个全看不见）。
-  // 空间不够是**折叠机制**要解决的问题（把低频项收进应用菜单），不是让核心控件消失。
-  // 与 btnStyle 里的 flexShrink: 0 是两层保险：内层保按钮不变形，外层保容器不缩。
+  // ⚠️ `flexShrink: 0` 只保证**不被压缩**，不保证**不被挤出**：容器宽度不够时，
+  // 不收缩的 flex 项会整块溢出到容器外、被祖先的 `overflow: hidden` 裁掉 ——
+  // 表现就是"三个按钮不见了"。所以真正的位置保障靠
+  // `WindowControlsOverlay`（固定在窗口右上角，与工具栏的 flex 流完全无关），
+  // 这里的 flexShrink 只是那层保障之上的第二道保险。
   return (
-    <div style={{ display: "flex", alignItems: "stretch", height: "100%", marginLeft: 4, flexShrink: 0 }}>
+    <div style={{ display: "flex", alignItems: "stretch", height: "100%", flexShrink: 0 }}>
       <button
         type="button"
         aria-label={t("toolbar.windowMinimize")}
@@ -133,6 +140,48 @@ export function WindowControls() {
       >
         <X size={15} style={{ pointerEvents: "none" }} />
       </button>
+    </div>
+  );
+}
+
+/**
+ * **固定在窗口右上角**的窗口按钮层。
+ *
+ * 为什么不是把 `WindowControls` 直接放进工具栏的 flex 行里：
+ * 那样它的位置就取决于「同一行里其它元素占了多少」—— 文字缩放调大、Windows
+ * 显示缩放、工作区名变长、以后新增一个按钮……任何一样都可能把总宽推过窗口宽度，
+ * 于是最右侧的三个按钮被挤到窗口外（外层 `overflow: hidden` 一裁就整个消失）。
+ * 无装饰窗口下失去这三个按钮 = **用户无法控制窗口**，代价远大于省一层 DOM。
+ *
+ * 现在它们的位置只由「窗口右上角」决定，与任何布局压力无关 —— 永远不会被
+ * 挤出、也永远不会被压缩。
+ *
+ * 三个关键点：
+ *  · `pointerEvents: none`（容器）—— 只让按钮本身接收点击，容器覆盖的那一小块
+ *    不挡住下面的拖拽区/内容。
+ *  · `zIndex: 99990` —— 高于所有全屏覆盖层（启动器 1000 / 向导 2000 / 面板 9999），
+ *    这样它们盖住工具栏时按钮依然在；但低于右键菜单(99999)、命令面板与 Toast
+ *    (100000)，避免弹层被按钮压住边缘。
+ *  · 高度与工具栏一致（`WINDOW_CONTROLS_HEIGHT`），视觉上仍是标题栏的一部分。
+ */
+export function WindowControlsOverlay() {
+  if (!isWindowsChrome()) return null;
+  return (
+    <div
+      style={{
+        position: "fixed",
+        top: 0,
+        right: 0,
+        height: WINDOW_CONTROLS_HEIGHT,
+        display: "flex",
+        alignItems: "stretch",
+        zIndex: 99990,
+        pointerEvents: "none",
+      }}
+    >
+      <div style={{ pointerEvents: "auto" }}>
+        <WindowControls />
+      </div>
     </div>
   );
 }

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { t, setLanguage, getLanguage, type Language } from "../../i18n";
 import { getSettings } from "../../stores/settingsStore";
 import { withTimeout, DEFAULT_LOAD_TIMEOUT_MS } from "../../services/asyncUtils";
-import { WindowControls, isWindowsChrome } from "../TitleBar";
+import { isWindowsChrome } from "../TitleBar";
 import { windowBus } from "../../services/windowBus";
 import { Events } from "../../services/events";
 import { CLOUD_SERVER_URL, INTRANET_SERVER_URL, type PresetServerProfile } from "../../utils/serverProfile";
@@ -958,19 +958,18 @@ export function WelcomeWizard({ onComplete }: WelcomeWizardProps) {
 
   return (
     <div style={C.overlay}>
-      {/* 自绘窗口按钮（仅 Windows）——覆盖层盖住工具栏，没有它无法关窗/最小化。
+      {/* 顶部拖动条（仅 Windows）—— 覆盖层盖住工具栏，但仍要能拖窗口。
+          窗口按钮由 App 的 `WindowControlsOverlay` 固定在右上角（层级更高），
+          这里不再复制一份。
           拖动区只取顶部一条：向导内多为 div onClick，deep 会吞掉点击。 */}
       {isWindowsChrome() && (
         <div
           data-tauri-drag-region
           style={{
             position: "absolute", top: 0, left: 0, right: 0, height: 36,
-            display: "flex", alignItems: "center", justifyContent: "flex-end",
             zIndex: 1,
           }}
-        >
-          <WindowControls />
-        </div>
+        />
       )}
       <div style={C.card}>
         {/* Step Indicator */}

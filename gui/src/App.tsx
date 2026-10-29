@@ -37,6 +37,7 @@ import { addStatusMessage } from "./stores/statusMsgStore";
 import CommandPalette from "./components/CommandPalette";
 import { useCommandPalette } from "./components/useCommandPalette";
 import ToastContainer from "./components/ToastContainer";
+import { WindowControlsOverlay } from "./components/TitleBar";
 import { reloadDesktops } from "./stores/desktopStore";
 import { loadSessionList, loadMorePlans, resetPagination } from "./stores/planHistoryStore";
 import { chatSession } from "./chat/chatSession";
@@ -998,6 +999,11 @@ export default function App() {
         />
       </ErrorBoundary>
       <ErrorBoundary panelName="ToastContainer"><ToastContainer /></ErrorBoundary>
+      {/* 自绘窗口按钮（仅 Windows）—— **放在最外层的固定定位层**，不属于工具栏
+          的 flex 流。这样文字缩放、长工作区名、未来新增按钮都不会把它们挤出
+          窗口（无装饰窗口下失去它们 = 用户无法控制窗口）。
+          它也盖在启动器/向导等全屏覆盖层之上，所以那两处不再各自复制一份。 */}
+      <WindowControlsOverlay />
     </>
   );
 }

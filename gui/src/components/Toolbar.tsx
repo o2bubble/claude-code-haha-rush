@@ -5,7 +5,7 @@ import { iconFor } from "../utils/icons";
 import { getRecent, sortByRecent } from "../utils/recentUsage";
 import { getChatState } from "../stores/chatStore";
 import { GuardButton, GuardConfirmDialog } from "./chat/GuardButton";
-import { WindowControls, isWindowsChrome } from "./TitleBar";
+import { isWindowsChrome, WINDOW_CONTROLS_WIDTH } from "./TitleBar";
 import { AppMenu } from "./AppMenu";
 import { useToolbarCollapse, DRAG_GUTTER_PX } from "./useToolbarCollapse";
 import { partitionItems, type ToolbarItem } from "./toolbarItems";
@@ -298,7 +298,8 @@ const TOOLBAR_CONTAINER = {
   display: "flex",
   alignItems: "center",
   gap: 4,
-  padding: "4px 0 4px 8px", // 右侧留给窗口按钮（自带 padding 语义）
+  // 左侧内边距；右侧的动态预留见渲染处的 paddingRight（窗口按钮固定层占位）
+  padding: "4px 0 4px 8px",
   borderBottom: "1px solid var(--border-light)",
   backgroundColor: "var(--bg-surface)",
   height: 36,
@@ -1217,7 +1218,12 @@ export default function Toolbar() {
   return (
     <div
       ref={containerRef}
-      style={TOOLBAR_CONTAINER}
+      style={{
+        ...TOOLBAR_CONTAINER,
+        // 右侧给**固定定位**的窗口按钮层留出同样的宽度 —— 它们不在 flex 流里，
+        // 不预留的话工具栏最后几个按钮会排到它们底下（被盖住、点不到）。
+        ...(chrome ? { paddingRight: WINDOW_CONTROLS_WIDTH } : {}),
+      }}
       {...(chrome ? { "data-tauri-drag-region": "deep" } : {})}
     >
       {/* 应用菜单入口（跨平台）：图标可点 → 弹出低频功能区。
@@ -1381,15 +1387,11 @@ export default function Toolbar() {
       <PresetPickerModal open={openModal === "preset"} onClose={() => setOpenModal(null)} />
       <GuardConfirmDialog open={openModal === "guard"} onClose={() => setOpenModal(null)} />
 
-      {/* 自绘窗口按钮（仅 Windows）。放最右且与工具栏按钮留有间距 ——
-          Win11 的关闭按钮贴角，视觉上不该和功能按钮挤在一起。
-          这三个永不折叠：无装饰窗口下失去它们 = 窗口无法控制。 */}
-      {chrome && (
-        <>
-          <div style={{ width: 6, flexShrink: 0 }} />
-          <WindowControls />
-        </>
-      )}
+      {/* 自绘窗口按钮**已经不在这行里**了 —— 见 App 的 WindowControlsOverlay。
+          它们固定在窗口右上角、与这里的 flex 流完全无关，所以任何布局压力
+          （文字缩放、长工作区名、以后新增按钮）都不可能把它们挤出窗口。
+          这里只负责在右侧**预留同样的宽度**（TOOLBAR_CONTAINER 的 paddingRight），
+          让工具栏内容不排到按钮底下。 */}
     </div>
   );
 }
