@@ -313,13 +313,68 @@ pub fn kill_instances(roots: &[u32], extra_protected: &[u32]) -> Vec<u32> {
     );
 
     for &r in &roots {
-        kill_process_tree(r);
+        kill_tree_excluding(r, extra_protected);
     }
     for &l in &launchers {
         // 拉起器用整树杀：它下面此刻只剩我们（条件④已保证）
-        kill_process_tree(l);
+        kill_tree_excluding(l, extra_protected);
     }
     launchers
+}
+
+/// 算出 `exclude` 里的进程**以及它们的全部后代** —— 这些进程在杀树时必须放过。
+///
+/// 抽成纯函数是为了能测：真正去杀进程的路径没法进单测。
+pub fn protected_subtree_of(
+    exclude: &[u32],
+    procs: &[ProcEntry],
+) -> std::collections::HashSet<u32> {
+    let mut set: std::collections::HashSet<u32> = exclude.iter().copied().collect();
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for pr in procs {
+        children.entry(pr.parent).or_default().push(pr.pid);
+    }
+    let mut stack: Vec<u32> = exclude.to_vec();
+    while let Some(cur) = stack.pop() {
+        if let Some(kids) = children.get(&cur) {
+            for &k in kids {
+                if set.insert(k) {
+                    stack.push(k);
+                }
+            }
+        }
+    }
+    set
+}
+
+/// 杀掉 `pid` 及其后代，但**跳过 `exclude` 里的进程**（连同它们的子树）。
+///
+/// 🔴 为什么需要这个（2026-10-28 实测事故）：
+///
+/// `claude-gui-server.exe`（托盘宿主）是**由 GUI 拉起**的 —— 它的父进程就是 GUI。
+/// 托盘里「结束进程」调 `kill_process_tree(gui_pid)` 时，会把 server 也一并杀掉：
+/// 托盘当场消失（用户看到的是"点了结束，托盘没了，还留了块黑屏窗口"）。
+///
+/// `extra_protected` 原本只挡住"向上追溯父进程"，没挡"向下杀子进程"。
+/// 这里补上向下保护 —— 命中 `exclude` 的整个子树都不动。
+fn kill_tree_excluding(pid: u32, exclude: &[u32]) {
+    if pid == 0 {
+        return;
+    }
+    if exclude.contains(&pid) {
+        return; // 根本身就被保护
+    }
+    let procs = snapshot_processes();
+    let protected_subtree = protected_subtree_of(exclude, &procs);
+
+    let mut targets = collect_descendants(pid);
+    targets.push(pid);
+    for t in targets {
+        if protected_subtree.contains(&t) {
+            continue; // server 自己 / 它的子孙 —— 放过
+        }
+        terminate(t);
+    }
 }
 
 #[cfg(test)]
@@ -334,6 +389,97 @@ mod tests {
     /// 用一张"pid → 启动时刻"表当 `start_ms`。
     fn starts(pairs: &[(u32, u64)]) -> impl Fn(u32) -> Option<u64> + '_ {
         move |pid| pairs.iter().find(|(p, _)| *p == pid).map(|(_, t)| *t)
+    }
+
+    // ── 结束实例时不能杀掉 server 自己（2026-10-28 实测事故）──
+    //
+    // 用户从托盘「结束进程」后：托盘消失 + 桌面留一块黑屏窗口。
+    // 根因：server 是 GUI 的子进程，kill_process_tree(GUI) 把它一起杀了。
+
+    #[test]
+    fn protected_subtree_covers_excluded_and_its_descendants() {
+        // 形状（本机实测）：
+        //   GUI(100) ─┬─ server(200) ── plugin(300)
+        //             ├─ webview2(400)
+        //             └─ node(500)
+        let procs = vec![
+            p(100, 1, "claude-code-gui"),
+            p(200, 100, "claude-gui-server"),
+            p(300, 200, "node"),
+            p(400, 100, "msedgewebview2"),
+            p(500, 100, "node"),
+        ];
+        let prot = protected_subtree_of(&[200], &procs);
+
+        assert!(prot.contains(&200), "server 自己必须被保护");
+        assert!(prot.contains(&300), "server 的子孙也必须保护");
+        assert!(!prot.contains(&100), "root 不在保护集里（它就是要被杀的那个）");
+        assert!(!prot.contains(&400), "无关的兄弟进程不该被误保护");
+        assert!(!prot.contains(&500));
+    }
+
+    #[test]
+    fn killing_gui_leaves_server_alive() {
+        // 复刻事故：杀 GUI(100) 时，保护集含 server(200)
+        // → 待杀集合里必须**不含** 200 和它的子孙
+        let procs = vec![
+            p(100, 1, "claude-code-gui"),
+            p(200, 100, "claude-gui-server"),
+            p(300, 200, "node"),
+            p(400, 100, "msedgewebview2"),
+        ];
+        let prot = protected_subtree_of(&[200], &procs);
+
+        // 模拟 collect_descendants(100) 的结果
+        let targets = vec![100u32, 200, 300, 400];
+        let survivors: Vec<u32> = targets.iter().copied().filter(|t| prot.contains(t)).collect();
+
+        assert_eq!(survivors, vec![200, 300], "server 和它的子进程必须活下来");
+        assert!(!prot.contains(&100), "GUI 自己必须被杀");
+        assert!(!prot.contains(&400), "webview2 应随 GUI 一起杀（否则留黑屏窗口）");
+    }
+
+    /// 锁住"kill_instances 真的用了保护集"。
+    ///
+    /// 上面几条测的是 `protected_subtree_of` 本身算得对不对；
+    /// 但如果 `kill_instances` 忘了调用它，那些测试**照样全绿** —— 这正是
+    /// 第一条修复写完后 red-capable 验证没过（改回去测试也不红）暴露的问题。
+    /// 所以补一条源码级断言。
+    #[test]
+    fn kill_instances_must_use_protected_subtree() {
+        let src = include_str!("proc.rs");
+        let start = src.find("pub fn kill_instances").expect("找不到 kill_instances");
+        let body = &src[start..];
+        let end = body.find("
+}
+").map(|i| i + 2).unwrap_or(body.len());
+        let body = &body[..end];
+
+        // ⚠️ 必须检查**杀 root 的那个循环**，不能只搜 "kill_tree_excluding" ——
+        // launchers 循环里也有这个名字，改坏 roots 循环后断言照样通过
+        // （第一版断言就是这么假绿的）。
+        let roots_loop = body
+            .find("for &r in &roots")
+            .map(|i| &body[i..])
+            .unwrap_or("");
+        let roots_end = roots_loop.find('}').unwrap_or(0);
+        let roots_body = &roots_loop[..roots_end];
+
+        assert!(
+            roots_body.contains("kill_tree_excluding"),
+            "杀 root 的循环必须用 kill_tree_excluding（保护 server 自己），             实际是: {roots_body}"
+        );
+        assert!(
+            !roots_body.contains("kill_process_tree(r)"),
+            "杀 root 不能直接 kill_process_tree —— 会连带杀掉 GUI 的子进程（含 server），             表现是「结束实例后托盘消失」"
+        );
+    }
+
+    #[test]
+    fn empty_exclude_protects_nothing() {
+        let procs = vec![p(100, 1, "gui"), p(200, 100, "server")];
+        let prot = protected_subtree_of(&[], &procs);
+        assert!(prot.is_empty(), "没传保护 pid 时不该保护任何东西");
     }
 
     #[test]

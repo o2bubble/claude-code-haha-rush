@@ -268,6 +268,7 @@ mod tests {
             pid,
             workspace: ws.into(),
             session_id: String::new(),
+            session_title: String::new(),
             started_at: 12345,
             updated_at: updated,
         }

@@ -639,11 +639,27 @@ pub fn run() {
                     // 只在样式**真的不符**时动手（见 enforce_taskbar_visibility），
                     // 所以这里多调几次不会闪、也不会形成焦点循环。
                     #[cfg(windows)]
-                    if matches!(
-                        event,
-                        tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Resized(_)
-                    ) {
-                        enforce_taskbar_visibility(&app_h);
+                    match event {
+                        // ⚠️ **不能靠 size==0 判断最小化**：实测 Windows 把窗口缩成
+                        // 底部残余矩形时，上报的是**那个残余矩形的尺寸**（160x28），
+                        // 不是 0x0 —— 曾因此漏判，残余照旧出现。直接问 IsIconic。
+                        tauri::WindowEvent::Resized(size) => {
+                            if is_main_minimized(&app_h) {
+                                log::info!(
+                                    "[taskbar] 窗口被最小化（上报 {}x{}）→ 走折叠处理",
+                                    size.width,
+                                    size.height
+                                );
+                                collapse_minimized_if_taskbar_hidden(&app_h);
+                            } else {
+                                enforce_taskbar_visibility(&app_h);
+                            }
+                        }
+                        // **只在获得焦点时**纠正，不在失去焦点时：点最小化会先发出
+                        // `Focused(false)`，那一刻动画刚开始、`IsIconic` 还没置位 ——
+                        // 就在这时改样式正是残余小块的成因（见 enforce 的说明）。
+                        tauri::WindowEvent::Focused(true) => enforce_taskbar_visibility(&app_h),
+                        _ => {}
                     }
                 });
             }
@@ -3652,7 +3668,6 @@ fn open_chat_widget(
                         // 「隐藏任务栏图标」（tao 的 show 会擦掉这些样式位）
                         show_main_window(&app_ev);
                         if let Some(main) = app_ev.get_webview_window("main") {
-                            let _ = main.unminimize();
                             let _ = main.set_focus();
                         }
                         let _ = app_ev.emit("chat-widget-closed", ());
@@ -3739,7 +3754,6 @@ pub(crate) fn focus_main_window_impl(app: tauri::AppHandle) -> Result<(), String
     }
     show_main_window(&app);
     if let Some(main) = app.get_webview_window("main") {
-        let _ = main.unminimize();
         let _ = main.set_focus();
     }
     if let Some(widget) = app.get_webview_window(WIDGET_LABEL) {
@@ -3823,11 +3837,55 @@ fn apply_taskbar_visibility(_win: &tauri::WebviewWindow, _hidden: bool) -> Resul
 /// 挂件模式（主窗 hide → 再 show）就是一条必经路径。
 fn enforce_taskbar_visibility(app: &tauri::AppHandle) {
     let Some(win) = app.get_webview_window("main") else { return };
+    // ⚠️ **最小化时绝不改样式**（2026-10-29 用户反馈"任务栏上方冒出一小块"的成因）：
+    // 最小化动画进行中改 GWL_EXSTYLE，Windows 会丢掉"最小化目标"，
+    // 把窗口留在动画终点 —— 实测一个 160x28 的矩形贴在屏幕左下角、且
+    // `IsWindowVisible` 仍为 true，右键能弹出系统菜单（还原即可恢复）。
+    // 动画时序随机器快慢而异，所以现象是"有概率"出现。
+    if win.is_minimized().unwrap_or(false) {
+        return;
+    }
     let hidden = crate::settings::load_settings().hide_taskbar_icon.unwrap_or(false);
     if let Err(e) = apply_taskbar_visibility(&win, hidden) {
         log::warn!("[taskbar] 纠正失败: {e}");
     }
 }
+
+/// 窗口被最小化时的处理（仅在开着「隐藏任务栏图标」时）。
+///
+/// 这个设置下窗口**本来就没有任务栏按钮**，最小化后既点不到、也飞不进任务栏，
+/// Windows 只能把它停在屏幕左下角 —— 就是用户看到的那个"小块"。
+/// 而设置项说明写明的语义本来也是「最小化后只能从托盘恢复」，所以这里直接把
+/// 窗口 hide 掉：状态干净（不是"最小化但可见"），也不会留下残余。
+///
+/// 恢复走 `show_main_window`（show + unminimize + 重新应用样式）。
+#[cfg(windows)]
+fn is_main_minimized(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.is_minimized().ok())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn collapse_minimized_if_taskbar_hidden(app: &tauri::AppHandle) {
+    if !crate::settings::load_settings().hide_taskbar_icon.unwrap_or(false) {
+        return;
+    }
+    let Some(win) = app.get_webview_window("main") else { return };
+    if !win.is_visible().unwrap_or(false) {
+        return; // 已经藏着了，不必重复
+    }
+    log::info!("[taskbar] 已最小化且隐藏任务栏图标 → 还原后隐藏（不留残余）");
+    // ⚠️ **必须先还原再隐藏**：窗口处于最小化态时，它对外报告的矩形就是那个
+    // 160x28 的残余尺寸；直接在最小化态 hide，之后再 show 出来的也是 160x28
+    // （实测）。先 unminimize 让系统把"正常尺寸/位置"恢复回来，再 hide，
+    // 从托盘恢复时才是原来的大小。
+    let _ = win.unminimize();
+    let _ = win.hide();
+}
+
+#[cfg(not(windows))]
+fn collapse_minimized_if_taskbar_hidden(_app: &tauri::AppHandle) {}
 
 /// 把主窗亮出来 —— 并**保证「隐藏任务栏图标」在此之后仍然成立**。
 ///
@@ -3838,6 +3896,10 @@ fn enforce_taskbar_visibility(app: &tauri::AppHandle) {
 pub(crate) fn show_main_window(app: &tauri::AppHandle) {
     let Some(main) = app.get_webview_window("main") else { return };
     let _ = main.show();
+    // 开着「隐藏任务栏图标」时，最小化会被折叠成 hide（见
+    // collapse_minimized_if_taskbar_hidden）—— 那种窗口在 IsIconic 意义上仍是
+    // 最小化的，必须还原，否则 show 出来还是最小化态。
+    let _ = main.unminimize();
     #[cfg(windows)]
     enforce_taskbar_visibility(app);
 }
