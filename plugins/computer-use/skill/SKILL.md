@@ -109,6 +109,65 @@ description: "READ THIS BEFORE DRIVING THE DESKTOP — practical, hard-won habit
 → 用 `region` 截那一小块（比如以目标为中心的 200×200），坐标立刻就清楚了。
 注意 `region` 的 `x,y` 是**相对该显示器左上角**的（工具内部会换算成绝对坐标）。
 
+### 🔴 会变形的目标：截完图坐标就失效了
+
+有些控件**一被悬停就改变尺寸/位置** —— 侧边栏自动展开、悬浮卡片、下拉箭头。
+
+```
+截图（折叠态，宽 12px）→ 量出中心 x=1188 → 鼠标移到 1188
+                                          ↑ 此刻它展开成 72px，中心变成 1218
+                                          → 点在了错误的刻度上
+```
+
+实测教训（2026-10-29，时间线刻度）：这类目标连点 3 次全落错位置，每次都"看起来只差一点点"，
+实际是整个坐标系在靠近时变了 —— 再微调 x 也永远调不中。
+
+**判据**：目标是「悬停/聚焦时展开、加宽、位移」的控件 → 坐标不能从**操作前**的截图取。
+
+**做法（任选，先试 ①）**：
+
+1. **先让它展开，再截图，然后原地点击** —— 把 pointer 移到目标附近（不点），
+   等动画结束，重新截图量坐标，此时点击不会再次改变布局。
+2. **有键盘入口就用键盘** —— 展开/聚焦类控件通常可用 `Tab` 到它、或直接快捷键，
+   完全绕开坐标问题（棋盘格、列表项、菜单项）。
+3. **让被测对象自己报告坐标** —— 自家 Web 应用见下节；原生应用若有可查询接口优先用。
+4. **用相对定位而非绝对像素** —— 以某个稳定锚点（窗口左边缘、某个固定按钮）为基准，
+   每次操作前重新量一次偏移。
+
+> 通用信号：**"点了没反应"或"点到了隔壁那个"连续 2 次** → 立刻怀疑目标在动，
+> 而不是怀疑自己像素差了几个。停下来重新截图，对比两张图里目标是否换了位置。
+
+### 🔴 自家 Web 应用（Tauri / Electron / 任何 webview）：别用像素，用 DOM
+
+如果目标是**自己开发的应用**，浏览器能测的坐标比截图准得多，而且能测到小数点后。
+
+截图量像素的误差来源太多（缩放、抗锯齿、半透明边、图片降采样）；
+`getBoundingClientRect()` 返回的是**权威值**，还能直接断言"是否溢出视口"。
+
+```js
+// Playwright / CDP 连上页面后，一次拿到所有要的信息
+() => {
+  const btns = [...document.querySelectorAll('button[aria-label]')]
+    .filter(b => /关闭|Close/i.test(b.getAttribute('aria-label') || ''));
+  return {
+    viewport: { w: innerWidth, h: innerHeight },
+    rects: btns.map(b => { const r = b.getBoundingClientRect();
+      return { l: b.getAttribute('aria-label'), x: Math.round(r.x),
+               right: Math.round(r.right), w: Math.round(r.width) }; }),
+    // 关键断言：有没有跑出可视区
+    overflow: btns.filter(b => { const r = b.getBoundingClientRect();
+      return r.x < 0 || r.right > innerWidth + 0.5; }).length,
+  };
+}
+```
+
+**这种方式验证"修好了没有"是决定性的** —— 比截图上目测"看起来还在"可信得多。
+实测（2026-10-29 窗口按钮修复）：靠它量出「工具栏内容右边界 662 = 按钮左边界 662，
+恰好相接、无重叠」，这是看图根本给不出的结论。
+
+**代价**：需要应用跑在可连调试的环境（dev server / CDP 端口）。
+拿不到时再退回截图，但**优先争取 DOM 测量**。
+
 ---
 
 ## 三、先让目标出现：启动程序与找窗口
@@ -148,6 +207,109 @@ Win11 的记事本、计算器等 **Store（打包）应用是多窗口共享进
 窗口没出现时，按顺序查：① 路径对不对（坑 1）→ ② 是不是 Store 应用（坑 2）
 → ③ 程序是否需要特定工作目录/参数。
 
+### 坑 3：同一个应用开了多个实例 —— 标题全都一样
+
+多实例场景（浏览器多窗口、开发工具多开、Tauri 应用多开）里：
+
+- `Get-Process` 的 `MainWindowTitle` 可能就是**空**的 —— 窗口不一定挂在那个 PID 上
+- 即使有标题，**多个实例标题可能完全相同**，你分不清是哪一个
+- 截图只会拿到**最上面那个**，很容易验证到"我以为的那个"其实是别的实例
+
+**规则**：认窗口用 **(PID, class, rect)** 三元组，不要只看标题。
+`scripts/find-window.ps1` 就是干这个的：
+
+```powershell
+# 列出某个进程的所有顶层窗口（含 hwnd / class / 精确 rect / zoomed / dpi）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/find-window.ps1 -Match claude-code-gui -Class "Tauri Window" -VisibleOnly
+```
+
+输出示例（注意 **hwnd 与 rect 才是唯一定位依据**）：
+
+```
+hwnd=0x50816  pid=30616  class=Tauri Window
+  title=claude-code-haha-dev · 标题: 主页构建 *
+  rect=40,40 960x660   visible=True iconic=False zoomed=False  dpi=96 (scale 1)
+hwnd=0x230CCA  pid=29320  class=Tauri Window
+  title=cloud-ui · 1b2ea971
+  rect=-8,-8 1936x1048  visible=True iconic=False zoomed=True  dpi=96 (scale 1)
+```
+
+拿到 hwnd 之后，用 `scripts/window-bounds.ps1` 调整尺寸/激活（**它对最大化窗口做了
+正确的还原处理**，见下节）。两个脚本都已设置 DPI 感知，坐标与截屏插件同一空间。
+
+### 坑 4：对**最大化**的窗口 resize 会得到垃圾尺寸
+
+```powershell
+SetWindowPos($h, 0, 40, 40, 900, 700, SWP_NOZORDER)
+# → 实际结果 rect=40,40 900x65535   ← 高度 65535 = 16 位无符号溢出的 -1
+```
+
+**最大化状态下 `SetWindowPos` 不生效**，返回 `true` 但尺寸是垃圾。
+必须先 `ShowWindow($h, 9)`（`SW_RESTORE`）还原，等窗口退出最大化，再 resize。
+
+```powershell
+# 正确顺序：还原 → 等 → SetWindowPos → 读回验证
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/window-bounds.ps1 `
+    -Hwnd 0x50816 -Left 40 -Top 40 -Width 900 -Height 640
+# 输出会打印 BEFORE / AFTER 两段，直接对比是否真的生效
+```
+
+**别相信"我设了 900x700"，一定要读回实际矩形。**
+
+### 🔴 PowerShell 单字母变量会静默互相覆盖（大小写不敏感）
+
+这是写自动化脚本时最阴的一类 bug：**PowerShell 变量名不区分大小写**。
+
+```powershell
+param([int]$H)          # 高度
+$h = [WinCtl]::FindWindow(...)   # $h 和 $H 是同一个变量！句柄把高度覆盖了
+SetWindowPos(..., $W, $H, ...)   # → 传进去的是句柄，尺寸变成垃圾
+```
+
+实测（2026-10-29）：我写 `-H 660`，结果窗口高度变成 **960x65535**，
+排查了两轮才发现是 `$h`（句柄）与 `$H`（高度）互相覆盖 —— **不是 API 问题**。
+
+同理，`$Hwnd` 参数与内部 `$hwnd` 是同一个变量；如果参数声明成 `[string]`，
+内部赋 IntPtr 会被强制转成字符串，再传给需要 IntPtr 的方法就报类型转换错误。
+
+**规则**：
+- 别用单字母变量，尤其 `$h` / `$H` / `$p` / `$P` / `$w` / `$W`
+- 已知的保留变量还有 `$pid`（= 当前进程 ID）、`$host`、`$args`、`$input`、`$error`、`$matches`
+- 参数与内部变量**取不同词**（参数 `-Hwnd`，内部就叫 `$target`）
+
+### 🔴 .ps1 文件必须是 UTF-8 **带 BOM**（写中文注释时）
+
+PowerShell 5.1 **没有 BOM 时按 ANSI（GBK）解码 .ps1**。文件是 UTF-8 中文注释 →
+被当成 GBK → 某些字节组合会**破坏语法解析**，报出完全无关的错误：
+
+```
++ using System;
++      ~
+缺少 using 指令          ← 实际是 C# 的 using，PowerShell 却在按 PS 语法骂它
+'using' 语句必须出现在脚本中的任何其他语句之前。
+```
+
+**这个报错极具误导性** —— 看起来像 C# 编译错误，实际是文件编码问题。
+而且报的**行号是错的**（比真实位置靠前），会把你引向不存在的问题。
+
+**规则**：用 `Write` / 编辑器写 `.ps1` 时，**确保 UTF-8 BOM**；或者干脆让
+脚本的**输出全是 ASCII**（中文留给注释之外的地方，如 SKILL 文档）。
+
+**同类坑（输出方向）**：脚本要打印中文（如窗口标题）时，控制台默认按 GBK 输出 →
+agent 读到的是 `claude-code-haha-dev �� ����`，**窗口标题正是分辨实例的依据**，
+糊了等于没用。在脚本开头显式设一次：
+
+```powershell
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+$OutputEncoding = [System.Text.Encoding]::UTF8
+```
+
+```powershell
+# 补 BOM（对已有文件）
+$raw = [IO.File]::ReadAllBytes($path)
+if ($raw[0] -ne 0xEF) { [IO.File]::WriteAllBytes($path, [byte[]](0xEF,0xBB,0xBF) + $raw) }
+```
+
 ### 需要窗口在前台时（别第一时间找用户）
 
 第七章说「前台是本 GUI」会被拒绝 —— 那是保护，但**解法不用麻烦用户**：
@@ -158,6 +320,17 @@ $targetPid = (Get-Process notepad | Select-Object -First 1).Id
 (New-Object -ComObject WScript.Shell).AppActivate($targetPid)   # 返回 True 为成功
 explorer.exe "C:\path\to\app.exe"                                # 或经 explorer 中转启动（新窗口通常直接在前台）
 ```
+
+**`AppActivate` 失败时**（返回 False，或应用是多实例/多窗口、`MainWindowTitle` 为空）：
+改用 **hwnd 三连**，成功率明显更高：
+
+```powershell
+# ShowWindow(9) → BringWindowToTop → SetForegroundWindow，三步缺一不可
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/window-bounds.ps1 -Hwnd 0x50816
+```
+
+原因：Windows 会拒绝非前台进程的 `SetForegroundWindow`，而 `ShowWindow` /
+`BringWindowToTop` 能把进程"推"进允许设置前台的状态。
 
 ### 🔴 焦点：点击和输入之前必须先确认的事
 
@@ -324,6 +497,12 @@ explorer.exe "C:\path\to\app.exe"                                # 或经 explor
 | "输入被系统拦截" | 目标窗口以管理员权限运行 | Windows 的 UIPI 限制，**无解** —— 如实告诉用户，请他自己操作或以普通权限重开目标 |
 | 输入的中文丢了几个字 | `delayMs` 太小（默认仅 4ms） | 改成 **`delayMs: 100`**（见第六章；60 也会丢） |
 | 滚动方向反了 | —— | 工具语义是 **正 `dy` = 向下滚**，符合直觉，不用管 Windows 原生符号 |
+| 明明瞄准了却总点偏，且「每次都差一点点」 | **目标在动**（悬停展开/加宽/位移），坐标来自操作前的截图 | 让它先展开 → 重新截图 → 原地点击；或改走键盘（见第二章「会变形的目标」） |
+| 修改窗口尺寸后得到 `900x65535` 这类怪尺寸，`SetWindowPos` 却返回成功 | 窗口处于**最大化**状态，resize 不生效 | 先 `ShowWindow(h, 9)` 还原再 resize；用 `scripts/window-bounds.ps1` 自动处理 |
+| 脚本里传了 `-H 660`，结果高度变成 65535 / 报类型转换错误 | **PowerShell 变量名大小写不敏感**：`$H` 与 `$h`（句柄）是同一个变量 | 别用单字母变量；参数与内部变量取不同词（见第三章） |
+| `.ps1` 报 `'using' 语句必须出现在...` 之类看不懂的语法错，行号还对不上 | 文件是 **UTF-8 无 BOM**，PowerShell 5.1 按 GBK 解 → 中文注释破坏解析 | 存成 **UTF-8 with BOM**（见第三章） |
+| 脚本打印的中文标题变乱码 | 控制台按 GBK 输出 | 脚本开头设 `[Console]::OutputEncoding = [UTF8]`（见第三章） |
+| `AppActivate($pid)` 返回 False / 激活了错的窗口 | 多实例、`MainWindowTitle` 为空 | 用 hwnd 三连：`ShowWindow(9)` → `BringWindowToTop` → `SetForegroundWindow`（`scripts/window-bounds.ps1`） |
 
 **失败时的第一反应应该是截图，而不是调大参数重试。**
 
@@ -371,9 +550,66 @@ explorer.exe "C:\path\to\app.exe"                                # 或经 explor
 - **收尾要清场** —— 关掉自己启动的程序、确认最终状态；
   跑清理脚本时**别用 `$pid` 这类保留变量命名**（PowerShell 里会静默失效，进程根本没关掉）
 
+### 🔴 别绕过插件用裸 Win32 发鼠标/键盘事件
+
+```powershell
+✗ [WinCtl]::SetCursorPos($x, $y); mouse_event(LEFTDOWN...)   # 绕过了全部保护
+✓ plugin_mouse-keyboard_control { action: "click", x, y }     # 走插件
+```
+
+**为什么不能图省事**：插件那层不是包装，是**保护** ——
+
+| 保护 | 裸 API 有没有 |
+|---|---|
+| 屏幕上「AI 正在操作」指示窗 | ❌ |
+| 点击落在指示窗上时**拒绝执行**（而不是点错地方） | ❌ |
+| 用户按 **Ctrl+Q 立刻中断** | ❌ |
+| `lock` 声明独占，防用户误触 | ❌ |
+| 每一步重新校验前台/急停状态 | ❌ |
+
+裸 `SetCursorPos` + `mouse_event` 动的是**用户真实的系统光标**：没有输入锁，
+用户正在打字时你的点击可能落到别的窗口；用户正在用鼠标时会直接打架。
+
+**实测事故（2026-10-29）**：验证时间线时用裸 PowerShell 点了 5 次真实鼠标，
+用户事后问"你是不是操作过我的窗口" —— **他确实可能察觉到光标自己动了**，
+而当时没有任何指示窗告诉他"这是 AI 在操作"。
+
+**规则**：凡是**点击/输入**一律走插件。窗口管理类操作（`ShowWindow` /
+`SetWindowPos` / 激活）不产生用户可见的鼠标动作，可以用脚本
+（`scripts/window-bounds.ps1`），但**也不要在里面混入鼠标点击**。
+
+---
+
+## 十、辅助脚本
+
+两个脚本都**已设置 DPI 感知**（坐标与截屏插件同一空间），输出为 ASCII。
+
+| 脚本 | 用途 |
+|---|---|
+| `scripts/find-window.ps1` | 按进程名/PID 枚举顶层窗口：hwnd、class、标题、**精确 rect**、visible/iconic/zoomed、dpi。多实例分不清时用它 |
+| `scripts/window-bounds.ps1` | 还原（退出最大化/最小化）→ 调整位置尺寸 → 激活到前台 → **打印前后矩形对比** |
+
+```powershell
+# 1) 先找到目标窗口（多实例时看 rect 区分）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/find-window.ps1 `
+    -Match claude-code-gui -Class "Tauri Window" -VisibleOnly
+
+# 2) 再用 hwnd 操作它（自动处理最大化、自动读回验证）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/window-bounds.ps1 `
+    -Hwnd 0x50816 -Left 40 -Top 40 -Width 900 -Height 640
+```
+
+> ⚠️ 这两个脚本会**移动/调整真实窗口**。用户的窗口布局可能是他有意的
+> （多屏摆位、分屏对照），改之前想一下是否必要；纯验证尽量用 Playwright/DOM 测量，
+> 根本不用动窗口。
+
+**写新的 .ps1 时记住三条**（都已写进第三章）：UTF-8 **带 BOM**、
+**别用单字母变量**、路径/名字**别裸写**。
+
 ---
 
 ## 参考
 
 - 更细的坐标换算与多显示器处理：`references/coordinates.md`
 - 工具参数速查：`references/tool-reference.md`
+- 辅助脚本：`scripts/find-window.ps1`、`scripts/window-bounds.ps1`

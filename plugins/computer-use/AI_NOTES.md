@@ -19,6 +19,9 @@
     references/
       coordinates.md     ← 坐标换算细节
       tool-reference.md  ← 工具参数速查
+    scripts/
+      find-window.ps1    ← 枚举窗口（hwnd/class/rect/dpi），多实例定位
+      window-bounds.ps1  ← 还原→改尺寸→激活（自动处理最大化陷阱）
 ```
 
 ## 故障模式
@@ -91,6 +94,19 @@ rmdir %USERPROFILE%\.claude\skills\computer-use    ← rmdir 只摘链接，不�
 **真 symlink 需要管理员权限或开发者模式**，而 junction 不需要 —— 用户装个插件
 不该要求他开开发者模式。（junction 也是 reparse point，Node 的
 `Dirent.isSymbolicLink()` 返回 true，技能加载器显式接受它，所以能被识别。）
+
+### 脚本（0.1.7 起）的三个固定坑
+
+写或改 `skill/scripts/*.ps1` 时，这三条每次都会咬人：
+
+1. **必须 UTF-8 带 BOM** —— PowerShell 5.1 无 BOM 时按 GBK 解码，
+   中文注释会破坏解析并报出无关的 C# 错误（`'using' 语句必须出现在...`），行号还是错的。
+2. **别用单字母变量** —— 变量名**大小写不敏感**，`$H`（高度）与 `$h`（句柄）
+   是同一个变量。实测踩过：传 `-H 660` 得到 `960x65535`。
+3. **输出显式设 UTF-8** —— 否则 GBK 控制台下中文窗口标题变乱码，
+   而标题正是分辨实例的依据。
+
+脚本输出尽量保持 ASCII 结构（`hwnd=0x... rect=x,y WxH`），便于解析。
 
 ### 技能内容的边界
 

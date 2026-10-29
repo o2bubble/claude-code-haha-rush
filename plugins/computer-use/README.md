@@ -37,7 +37,35 @@ skill/
   SKILL.md                      ← 核心心法（看→做→看 / 坐标换算 / 批量 / 独占 / 恢复）
   references/coordinates.md     ← 坐标换算细节（多显示器、高 DPI）
   references/tool-reference.md  ← 两个工具的完整参数速查
+  scripts/
+    find-window.ps1             ← 按进程/PID 枚举窗口：hwnd / class / 精确 rect / dpi
+    window-bounds.ps1           ← 还原→改尺寸→激活，打印前后矩形对比
 ```
+
+### 两个辅助脚本（0.1.7 起）
+
+都是**实测踩坑后写的**，解决「知道该怎么做、但真做起来总会错」的那部分：
+
+| 脚本 | 解决什么 |
+|---|---|
+| `find-window.ps1` | 多实例分不清是哪个窗口（标题可能相同、甚至为空）；DPI 感知读取，坐标与截屏插件同一空间 |
+| `window-bounds.ps1` | 对**最大化**窗口 resize 会得到 `900x65535` 垃圾尺寸；`AppActivate` 在多实例下静默失败 |
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/find-window.ps1 `
+    -Match claude-code-gui -Class "Tauri Window" -VisibleOnly
+
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/window-bounds.ps1 `
+    -Hwnd 0x50816 -Left 40 -Top 40 -Width 900 -Height 640
+```
+
+### 0.1.7 技能新增的坑（都是实测）
+
+- **会变形的目标**：悬停展开的控件（侧边栏、悬浮卡片）坐标会在鼠标靠近时失效
+- **PowerShell 变量名大小写不敏感**：`$H` 与 `$h` 是同一个变量，静默互相覆盖
+- **`.ps1` 必须 UTF-8 带 BOM**，否则中文注释会让 PowerShell 报出无关的 C# 语法错
+- **自家 Web 应用优先 DOM 测量**（`getBoundingClientRect`），比截图量像素准得多
+- **别绕过插件用裸 Win32 发鼠标事件**（没有指示窗、没有 Ctrl+Q、没有输入锁）
 
 ## 实现说明（给好奇的人）
 
