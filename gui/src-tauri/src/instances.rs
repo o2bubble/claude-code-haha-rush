@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 // 避免两份实现漂移（尤其是判活逻辑，踩过僵尸进程的坑）。
 pub use claude_gui_shared::instances::{
     app_data_dir_early, collect_live_instances, instances_dir, is_instance_alive,
-    normalize_workspace, pick_wake_target, process_start_time_ms, read_instance_record,
-    remove_instance_record, write_instance_record, InstanceRecord, APP_BUNDLE_ID,
+    process_start_time_ms, read_instance_record, remove_instance_record, write_instance_record,
+    InstanceRecord,
 };
 
 /// 恢复快照：升级前存下来，升级后由新 GUI 消费一次。

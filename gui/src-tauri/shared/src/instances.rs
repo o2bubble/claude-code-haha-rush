@@ -224,89 +224,9 @@ pub fn is_instance_alive(rec: &InstanceRecord) -> bool {
     }
 }
 
-/// 工作区路径归一化 —— 判"同一个工作区"时用。
-///
-/// Windows 路径大小写不敏感、`\` 与 `/` 等价、尾斜杠无意义，
-/// 不归一化会导致同一工作区被当成两个（唤醒/去重都失效）。
-pub fn normalize_workspace(p: &str) -> String {
-    let mut s = p.trim().replace('\\', "/");
-    while s.len() > 1 && s.ends_with('/') {
-        s.pop();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        s = s.to_lowercase();
-    }
-    s
-}
-
-/// 从实例列表里挑一个"应该被唤醒"的目标。
-///
-/// 规则：排除自己、只要活着的、工作区必须一致、取 `updated_at` 最新的。
-/// 纯函数，便于测试。
-pub fn pick_wake_target(
-    records: &[InstanceRecord],
-    my_pid: u32,
-    workspace: &str,
-) -> Option<InstanceRecord> {
-    let want = normalize_workspace(workspace);
-    records
-        .iter()
-        .filter(|r| r.pid != my_pid && !want.is_empty())
-        .filter(|r| normalize_workspace(&r.workspace) == want)
-        // 最后更新时刻最新 = 用户最有可能正在用的那个
-        .max_by_key(|r| r.updated_at)
-        .cloned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn rec(pid: u32, ws: &str, updated: u64) -> InstanceRecord {
-        InstanceRecord {
-            pid,
-            workspace: ws.into(),
-            session_id: String::new(),
-            session_title: String::new(),
-            started_at: 12345,
-            updated_at: updated,
-        }
-    }
-
-    #[test]
-    fn normalize_handles_slashes_and_case() {
-        assert_eq!(
-            normalize_workspace("C:\\Work\\Proj\\"),
-            normalize_workspace("c:/work/proj"),
-        );
-        assert_eq!(normalize_workspace("/a/b//"), "/a/b");
-    }
-
-    #[test]
-    fn picks_latest_matching_workspace() {
-        let recs = vec![
-            rec(1, "C:/ws/a", 100),
-            rec(2, "C:/ws/a", 300), // 最新 → 选它
-            rec(3, "C:/ws/b", 999), // 工作区不同
-        ];
-        let t = pick_wake_target(&recs, 9, "c:\\ws\\a").unwrap();
-        assert_eq!(t.pid, 2);
-    }
-
-    #[test]
-    fn never_picks_self() {
-        let recs = vec![rec(7, "C:/ws/a", 100)];
-        assert!(pick_wake_target(&recs, 7, "C:/ws/a").is_none());
-    }
-
-    #[test]
-    fn empty_workspace_never_matches() {
-        // 没绑定工作区的实例不该被当成唤醒目标（否则会醒错窗口）
-        let recs = vec![rec(1, "", 100)];
-        assert!(pick_wake_target(&recs, 9, "").is_none());
-        assert!(pick_wake_target(&recs, 9, "C:/ws/a").is_none());
-    }
 
     #[test]
     fn live_process_detected_and_dead_rejected() {
@@ -317,8 +237,14 @@ mod tests {
 
     #[test]
     fn record_without_started_at_is_never_alive() {
-        let mut r = rec(1, "C:/ws/a", 0);
-        r.started_at = 0;
+        let r = InstanceRecord {
+            pid: 1,
+            workspace: "C:/ws/a".into(),
+            session_id: String::new(),
+            session_title: String::new(),
+            started_at: 0,
+            updated_at: 0,
+        };
         assert!(!is_instance_alive(&r), "旧格式（无启动时间）必须当死");
     }
 }

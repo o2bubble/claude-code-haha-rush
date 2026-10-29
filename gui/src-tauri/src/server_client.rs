@@ -406,42 +406,20 @@ pub fn app_handle() -> Option<tauri::AppHandle> {
     APP_HANDLE.get().cloned()
 }
 
-/// 收到唤醒请求：把主窗拉回前台，然后写 ack 告诉发起方"成功了"。
+/// 收到「切到前台」请求：把主窗拉回前台。
 ///
 /// 由**目标实例自己**执行（而不是发起方直接操作窗口），因为只有它知道
 /// 挂件模式、隐藏挂件这些内部状态 —— 走 `focus_main_window_impl` 才能
 /// 把界面恢复到一致状态（而不是只把某个窗口 show 出来）。
-fn focus_and_ack(app: &tauri::AppHandle, from_pid: u32) {
-    crate::focus_main_window_impl(app.clone());
-
-    if let Some(dir) = crate::instances::app_data_dir_early() {
-        crate::wake::write_wake_ack(&dir, std::process::id(), from_pid);
-    }
-    log::info!("[wake] 已响应唤醒请求（来自 pid={from_pid}）");
-}
-
-/// 唤醒握手：请 server 把 `focus:<from_pid>` 转发给 `target_pid` 那个 GUI。
 ///
-/// 阻塞版本（内部 block_on）—— 调用点在启动早期、还没有 tokio 上下文，
-/// 而且我们最多只等 2s，阻塞可以接受。
-pub fn send_wake_request(target_pid: u32, from_pid: u32) -> Result<(), String> {
-    let addr = DEFAULT_ADDR.to_string();
-    tauri::async_runtime::block_on(async move {
-        let client = ServerClient::connect(&addr).await?;
-        client
-            .client
-            .request::<bool, _>(
-                "send_gui_message",
-                (
-                    process_client_id().to_string(),
-                    target_pid.to_string(),
-                    format!("focus:{from_pid}"),
-                ),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    })
+/// 发起方恒为托盘（server 进程）。启动路径里的"单实例唤醒"已于 2026-10-29
+/// 移除（双击图标一律新建实例），所以这里不再写 ack 文件。
+fn handle_focus_request(app: &tauri::AppHandle) {
+    if let Err(e) = crate::focus_main_window_impl(app.clone()) {
+        log::warn!("[focus] 响应前台请求失败: {e}");
+        return;
+    }
+    log::info!("[focus] 已响应前台请求（托盘）");
 }
 
 /// Start a background task that subscribes to the server's event stream and
@@ -479,16 +457,15 @@ pub fn spawn_event_forwarder(client: ServerClient, workspace: String) {
                 Ok(ServerEvent::Presence { event: PresenceEvent::Leave { client_id: leaving } }) => {
                     let _ = app.emit("server:client-left", &leaving);
                 }
-                // 唤醒请求：另一个 GUI 启动时发现我们占着同一工作区，
-                // 请我们把窗口拉回前台。详见 src/wake.rs。
+                // 「切到前台」请求（托盘菜单）。启动路径里的单实例唤醒已于
+                // 2026-10-29 移除 —— 现在只有托盘会发这条消息。
                 Ok(ServerEvent::GuiMessage { message }) => {
                     if message.target != my_pid_str {
                         continue;
                     }
-                    if let Some(from) = message.body.strip_prefix("focus:") {
-                        if let Ok(from_pid) = from.trim().parse::<u32>() {
-                            focus_and_ack(&app, from_pid);
-                        }
+                    // 托盘发的 `focus:<pid>`（pid 恒为 0，历史格式保留）
+                    if message.body.starts_with("focus:") {
+                        handle_focus_request(&app);
                     }
                 }
                 _ => {}

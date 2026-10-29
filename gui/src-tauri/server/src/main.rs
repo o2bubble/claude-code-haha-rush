@@ -889,7 +889,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                         tray::TrayAction::Focus(pid) => {
                             eprintln!("[tray] 切前台 pid={pid}");
-                            // 授权 + 请目标实例自己 focus（同 wake 链路）
+                            // 授权 + 请目标实例自己 focus（它能正确处理挂件模式）
                             request_focus(&ctx_for_actions, pid);
                         }
                         tray::TrayAction::NewInstance => {
@@ -964,9 +964,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 /// 从托盘「新建窗口」：拉起一个新的 GUI 实例。
 ///
-/// 与 GUI 自己的 `spawn_gui_instance`（新建窗口按钮）走同一条路径 ——
-/// 带 `--new-instance`，跳过单实例唤醒逻辑（否则会被"聚焦已有窗口"接管，
-/// 用户点了"新建"却什么都不发生）。
+/// 与 GUI 自己的 `spawn_gui_instance`（新建窗口按钮）走同一条路径。
+/// GUI 启动即新建实例（启动路径里的"单实例唤醒"已于 2026-10-29 移除），
+/// 所以不需要再传 `--new-instance`。
 #[cfg(windows)]
 fn spawn_new_gui() {
     // GUI 与 server 装在同一个目录（server 由 GUI 拉起）
@@ -977,7 +977,7 @@ fn spawn_new_gui() {
         eprintln!("[tray] 找不到 GUI 可执行文件: {}", gui.display());
         return;
     }
-    match std::process::Command::new(&gui).arg("--new-instance").spawn() {
+    match std::process::Command::new(&gui).spawn() {
         Ok(_) => eprintln!("[tray] 已拉起新实例"),
         Err(e) => eprintln!("[tray] 拉起新实例失败: {e}"),
     }

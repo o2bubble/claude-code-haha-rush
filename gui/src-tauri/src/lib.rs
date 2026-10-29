@@ -37,7 +37,6 @@ mod settings;
 mod plugin_pubkey;
 mod plugin_signature;
 mod skill_hash;
-mod wake;
 
 /// Holds the SQLite connection and the workspace it was opened for.
 struct DbState {
@@ -94,60 +93,6 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(not(windows))]
 fn process_alive(_pid: u32) -> bool {
     false
-}
-
-/// 启动早期：尝试唤醒同一工作区已有的 GUI 实例。
-///
-/// **成功 = 已有实例的窗口已经回到前台** → 本进程直接退出（用户看到的是
-/// 那个实例，不会多出一个）。**失败 = 照常启动**，绝不阻塞用户。
-///
-/// 只应在"裸启动"时调用（见调用点注释）。
-fn try_wake_existing_instance() {
-    let Some(dir) = instances::app_data_dir_early() else {
-        return;
-    };
-    wake::sweep_stale_acks(&dir);
-
-    // 目标工作区 = 本机最后使用的那个（裸启动没有 --workspace）
-    let ws = settings::load_settings().work_dir;
-    if ws.trim().is_empty() {
-        return; // 还没选过工作区 → 没有"同一工作区"可言
-    }
-
-    let live = instances::collect_live_instances(&dir, instances::is_instance_alive);
-    let my_pid = std::process::id();
-    let Some(target) = instances::pick_wake_target(&live, my_pid, &ws) else {
-        return; // 没有同工作区的活实例 → 正常启动
-    };
-
-    log::info!(
-        "[wake] 发现同工作区实例 pid={} ws={}，尝试唤醒",
-        target.pid,
-        target.workspace
-    );
-
-    // 授权目标进程抢前台（Windows 前台锁要求）
-    wake::allow_set_foreground(target.pid);
-
-    // ① 优先走 server 通道：目标实例自己 show+focus 最可靠
-    //    （它能正确处理挂件模式、隐藏挂件等内部状态）
-    let via_server = wake::await_wake_ack(&dir, target.pid, my_pid, |target_pid| {
-        crate::server_client::send_wake_request(target_pid, my_pid).is_ok()
-    });
-
-    if via_server {
-        log::info!("[wake] 目标实例已响应，本进程退出");
-        std::process::exit(0);
-    }
-
-    // ② 兜底：直接 Win32 把它的窗口拉出来
-    if wake::force_show_process_windows(target.pid) {
-        log::info!("[wake] server 未响应，已用 Win32 直接恢复窗口，本进程退出");
-        std::process::exit(0);
-    }
-
-    // ③ 都失败 → 照常启动
-    log::warn!("[wake] 唤醒失败，照常启动新实例");
 }
 
 /// 尝试成为「绑定工作区」的第一个实例：独占创建锁文件。
@@ -368,10 +313,6 @@ pub fn run() {
     let mut cli_workspace: Option<String> = None;
     let mut cli_intent: Option<String> = None;
     let mut cli_session: Option<String> = None;
-    // --new-instance: 强制开新实例，**跳过单实例唤醒**。
-    // 「新建窗口」按钮（spawn_gui_instance）会带上它 —— 那个按钮的语义
-    // 就是要再开一个，不能被唤醒逻辑拦下去换成"聚焦已有窗口"。
-    let mut cli_new_instance = false;
     {
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
@@ -393,7 +334,6 @@ pub fn run() {
                         cli_session = Some(v);
                     }
                 }
-                "--new-instance" => cli_new_instance = true,
                 _ => {}
             }
         }
@@ -440,18 +380,21 @@ pub fn run() {
         }
     }
 
-    // ── 单实例唤醒（2026-10-27）──
+    // ── 启动一律新开实例（2026-10-29 起）──
     //
-    // 用户双击图标时，如果**同一工作区**已有实例在跑，把它的窗口拉回前台并退出
-    // 自己，而不是再开一个完整 GUI。解决"窗口被隐藏后反复启动、旧进程变僵尸"。
+    // 这里曾经有个「单实例唤醒」：裸启动时若有同工作区的实例在跑，就把它的窗口
+    // 拉到前台并让本进程退出。删掉的原因（用户两次反馈）：
+    //   · 从开始菜单点图标 = 开一个窗口，这是所有人的直觉（也是唤醒机制加入
+    //     之前的行为）。唤醒把它变成了"已有窗口闪一下"，想开新窗口反而只能
+    //     进 GUI 内部点「新实例」。
+    //   · 想用"窗口是否可见"来区分意图也不行 —— 开着「隐藏任务栏图标」再
+    //     最小化时窗口本就不可见，那恰恰是用户最想再开一个的时候。
     //
-    // 只在**裸启动**时尝试：带 --workspace/--intent/--session 的是被程序拉起的
-    // （升级恢复、新建窗口），它们本来就有明确目标；--new-instance 是用户显式
-    // 要求再开一个。这几种都不该被"聚焦已有窗口"取代。
-    if cli_workspace.is_none() && cli_intent.is_none() && cli_session.is_none() && !cli_new_instance
-    {
-        try_wake_existing_instance();
-    }
+    // 唤醒原本要解决的「窗口被隐藏、用户不知道它在跑」由**托盘**覆盖：托盘菜单
+    // 列出全部实例（含隐藏的），可「切到前台」/「结束」—— 而且那条路径现在
+    // 能真正抢到前台（见 force_foreground）。
+    //
+    // 因此：裸启动 = 新建实例，不再有任何启发式拦截。
 
     let settings = settings::load_settings();
     log::info!("Settings loaded: workDir={}", settings.work_dir);
@@ -5168,10 +5111,8 @@ fn spawn_gui_instance() -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        // --new-instance：跳过「单实例唤醒」。这个按钮的语义就是**再开一个**，
-        // 不带这个参数会被启动早期的唤醒逻辑拦下去，变成"聚焦已有窗口"。
+        // 启动即新建实例（启动路径里已没有唤醒逻辑，不需要额外参数）
         std::process::Command::new(&exe)
-            .arg("--new-instance")
             .spawn()
             .map_err(|e| format!("spawn 失败: {}", e))?;
     }
