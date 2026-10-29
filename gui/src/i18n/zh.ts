@@ -958,6 +958,8 @@ const zh = {
     submit: "提交",
   },
   message: {
+    metaLabel: "程序自动消息",
+    metaHint: "由程序自动插入、不是你实际输入的消息。例如恢复会话时发现上一轮被中断，会自动补一条「继续上次未完成的内容」。点击展开/收起全文",
     copy: "复制",
     search: "搜索消息",
     searchPlaceholder: "搜索会话内容...",

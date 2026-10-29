@@ -1068,6 +1068,9 @@ async function handleCompact(ws: WebSocket): Promise<void> {
           message:
             ((m as Record<string, unknown>).message as Record<string, unknown>) ??
             (m as unknown as Record<string, unknown>),
+          isMeta:
+            ((m as Record<string, unknown>).isMeta as boolean | undefined) ??
+            undefined,
           parent_tool_use_id:
             ((m as Record<string, unknown>).parent_tool_use_id as
               | string
@@ -2234,6 +2237,9 @@ async function handleLoadSession(
             uuid: entry.uuid as string | undefined,
             type: entryType,
             message: (entry.message as Record<string, unknown>) ?? entry,
+            // isMeta: 程序合成、非用户实际输入的消息（如恢复中断回合时补的
+            // "Continue from where you left off."）。GUI 据此弱化渲染。
+            isMeta: (entry.isMeta as boolean | undefined) ?? undefined,
             parent_tool_use_id:
               (entry.parent_tool_use_id as string | null) ?? null,
             timestamp: entry.timestamp as string | undefined,
@@ -2382,6 +2388,9 @@ async function handleResumeSession(
         message:
           ((m as Record<string, unknown>).message as Record<string, unknown>) ??
           (m as unknown as Record<string, unknown>),
+        isMeta:
+          ((m as Record<string, unknown>).isMeta as boolean | undefined) ??
+          undefined,
         parent_tool_use_id:
           ((m as Record<string, unknown>).parent_tool_use_id as
             | string

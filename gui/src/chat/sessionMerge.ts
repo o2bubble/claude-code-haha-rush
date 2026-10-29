@@ -44,6 +44,9 @@ export function mergeSessionMessages(raw: any[], uuid: () => string = () => cryp
       thinking: curParts.thinking || undefined,
       toolUses: curParts.toolUses.length > 0 ? curParts.toolUses : undefined,
       timestamp: toTimestamp(cur.timestamp),
+      // 程序合成的消息（恢复中断回合时补的 "Continue from where you left off."）。
+      // 透传给 UI 做弱化渲染 —— 见 ChatMessage.isMeta。
+      isMeta: cur.isMeta === true ? true : undefined,
     };
     if (!curMsg.content && !curMsg.thinking && !curMsg.toolUses?.length) continue;
 

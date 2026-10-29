@@ -12,6 +12,15 @@ export interface ChatMessage {
   streaming?: boolean;
   thinking?: string;
   toolUses?: ToolUse[];
+  /** 程序合成、**不是用户实际输入**的消息（后端 `isMeta: true`）。
+   *
+   *  典型来源：恢复会话时发现上一轮被中断（停在 tool_result / attachment 上），
+   *  Claude Code 会补一条 `"Continue from where you left off."` 让 API 对话合法
+   *  —— 见 `src/utils/conversationRecovery.ts`。
+   *
+   *  UI 上**弱化但保留**：完全隐藏会让排查问题时看不出"AI 为什么接着往下说"。
+   *  渲染见 components/chat/MessageItem.tsx。 */
+  isMeta?: boolean;
 }
 
 export interface ToolUse {

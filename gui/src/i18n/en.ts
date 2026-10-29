@@ -958,6 +958,8 @@ const en: Locale = {
     submit: "Submit",
   },
   message: {
+    metaLabel: "Auto message",
+    metaHint: "Inserted by the program, not typed by you. For example, when resuming a session whose previous turn was interrupted, it adds a \"continue where you left off\" prompt. Click to expand/collapse",
     copy: "Copy",
     search: "Search messages",
     searchPlaceholder: "Search conversation...",

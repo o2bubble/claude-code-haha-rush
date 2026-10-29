@@ -268,6 +268,97 @@ function renderMarkdown(content: string): Promise<string> {
   });
 }
 
+// ── 程序自动消息（isMeta）的专用渲染 ──
+//
+// 「弱化但不隐藏」的具体形态：
+//  · **居中**而不是靠右 —— 靠右是"用户发言"的视觉语言
+//  · 不用气泡（无 accent 底色、无 18px 圆角），改用虚线细边框的小条
+//  · 加一枚「程序自动消息」标签，一眼看出不是人打的字
+//  · 内容超过一行就折成省略号，**点一下展开全文** —— 排查问题时能看全
+//  · hover 显示来源说明（哪来的、为什么会有）
+//
+// 为什么不直接套用现有的 Thinking 折叠块：那个是 collapsed 的 details，
+// 内容是"模型的思考"；这条是"程序替你发的用户消息"，语义完全不同，
+// 混在一起反而更难理解。
+function MetaMessage({
+  text,
+  timestamp,
+  showTime,
+  animateIn,
+}: {
+  text: string;
+  timestamp?: number;
+  showTime: boolean;
+  animateIn: boolean;
+}) {
+  const [expanded, setExpanded] = React.useState(false);
+  // 折起时只留一行；用 CSS 做省略而不是截字符串 —— 中英文混排、emoji 下更稳
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        marginBottom: 12,
+        animation: animateIn ? "msg-fade-in var(--transition-normal)" : "none",
+      }}
+    >
+      {showTime && timestamp != null && (
+        <div
+          style={{
+            fontSize: 10,
+            color: "var(--fg-muted)",
+            fontFamily: "var(--font-sans)",
+            lineHeight: "14px",
+            marginBottom: 2,
+          }}
+        >
+          {formatMessageTime(timestamp, undefined, t("timeline.yesterday"))}
+        </div>
+      )}
+      <div
+        onClick={() => setExpanded((v) => !v)}
+        title={t("message.metaHint")}
+        style={{
+          maxWidth: "85%",
+          padding: "4px 10px",
+          borderRadius: 8,
+          border: "1px dashed var(--border-light)",
+          backgroundColor: "transparent",
+          color: "var(--fg-muted)",
+          fontSize: "calc(var(--font-scale, 1) * 12px)",
+          fontFamily: "var(--font-sans)",
+          lineHeight: 1.5,
+          cursor: "pointer",
+          userSelect: "text",
+          whiteSpace: expanded ? "pre-wrap" : "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          wordBreak: "break-word",
+          overflowWrap: "anywhere",
+        }}
+      >
+        <span
+          style={{
+            display: "inline-block",
+            marginRight: 6,
+            padding: "0 5px",
+            borderRadius: 4,
+            border: "1px solid var(--border-light)",
+            fontSize: "calc(var(--font-scale, 1) * 10px)",
+            letterSpacing: 0.3,
+            opacity: 0.9,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {t("message.metaLabel")}
+        </span>
+        {text}
+      </div>
+    </div>
+  );
+}
+
 export function MessageItem({ message, animateIn = true }: MessageItemProps) {
   const isDark = typeof document !== "undefined" && isDarkTheme(document.documentElement.dataset.theme);
   const isUser = message.role === "user";
@@ -353,6 +444,26 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
       pre.appendChild(btn);
     }
   }, [html, isDark]);
+
+  // ── 程序合成的消息（isMeta）—— 弱化渲染，但**不隐藏** ──
+  //
+  // Claude Code 在「恢复会话时发现上一轮被中断」会补一条
+  // `"Continue from where you left off."`（src/utils/conversationRecovery.ts）。
+  // 那不是用户说的话，用用户气泡渲染会让人以为"程序自己在发消息"。
+  //
+  // 但完全隐藏也不行：排查"AI 为什么接着往下说"时，看不到这条就断链了。
+  // 所以用一条居中的、明显不是气泡的小行，带「程序自动消息」标签，
+  // 内容默认折起、点一下展开全文。
+  if (message.isMeta) {
+    return (
+      <MetaMessage
+        text={text || message.content || ""}
+        timestamp={message.timestamp}
+        showTime={showMsgTime}
+        animateIn={animateIn}
+      />
+    );
+  }
 
   return (
     <div

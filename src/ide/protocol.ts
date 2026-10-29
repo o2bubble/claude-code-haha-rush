@@ -264,6 +264,9 @@ export interface IDESessionLoadedResponse {
     uuid?: string
     type: string
     message: Record<string, unknown>
+    /** 程序合成、非用户实际输入的消息（如恢复中断回合时补的
+     *  "Continue from where you left off."）。GUI 据此弱化渲染。 */
+    isMeta?: boolean
     parent_tool_use_id?: string | null
     timestamp?: string
   }>
