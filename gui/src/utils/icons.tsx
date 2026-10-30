@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { FolderOpen, Search, ListTree, Code2, Layers, FolderKanban, Package, Grid3X3, LayoutGrid, Combine, File, Box, Settings, Terminal, ClipboardList, Wrench, Bot, MessageSquare, Pencil, History, Zap, Sparkles, LayoutDashboard, HelpCircle, Monitor, UserCog, User, Folder, Bug, StickyNote, Download, Stethoscope, GitBranch } from "lucide-react";
+import { FolderOpen, Search, ListTree, Code2, Layers, FolderKanban, Package, Grid3X3, LayoutGrid, Combine, File, Box, Settings, Terminal, ClipboardList, Wrench, Bot, MessageSquare, Pencil, History, Zap, Sparkles, LayoutDashboard, HelpCircle, Monitor, UserCog, User, Folder, Bug, StickyNote, Download, Stethoscope, GitBranch, Trash2 } from "lucide-react";
 import type { IconKey } from "../types/layout";
 
 const SIZE = 18;
@@ -42,6 +42,7 @@ export const Icons: Record<IconKey, ReactNode> = {
   combine: <Combine size={SIZE} />,
   gitBranch: <GitBranch size={SIZE} />,
   user: <User size={SIZE} />,
+  broom: <Trash2 size={SIZE} />,
   default: <Box size={SIZE} />,
 };
 

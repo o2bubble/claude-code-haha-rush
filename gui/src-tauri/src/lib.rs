@@ -19,6 +19,7 @@ use serde::Serialize;
 use tauri::Manager;
 use base64::Engine;
 
+mod cleanup;
 mod notes;
 mod server_client;
 mod update;
@@ -856,6 +857,9 @@ pub fn run() {
             path_exists,
             delete_path,
             rename_path,
+            cleanup_scan,
+            cleanup_run,
+            cleanup_history,
             get_app_settings,
             save_app_settings,
             diagnostics::run_env_diagnostics,
@@ -2058,6 +2062,135 @@ fn db_save_desktop_history(state: tauri::State<Mutex<DbState>>, settings: tauri:
 fn db_load_desktop_history(state: tauri::State<Mutex<DbState>>, settings: tauri::State<Mutex<settings::AppSettings>>, desktop_id: String) -> Result<Option<db::DesktopHistoryRecord>, String> {
     let db = ensure_db(&state, &settings)?;
     db::load_desktop_history(&db.conn, &desktop_id)
+}
+
+// ── 存储清理命令（规格：.scratch/cleanup-tool/PRD.md）──
+//
+// 规则与文件系统操作全在 `cleanup` 模块里（可用临时目录单测）；
+// 这里只负责把「本机当前状态」组装成扫描输入，并把结果/进度转给前端。
+
+/// 单次统计的超时（秒）。规格 Q12：初版 8 秒偏短，改 20 秒。
+const CLEANUP_ITEM_TIMEOUT_SECS: u64 = 20;
+
+/// 清理日志保留条数（规格 Q28）。
+const CLEANUP_LOG_KEEP: usize = 50;
+
+fn cleanup_claude_dir() -> Option<std::path::PathBuf> {
+    let home = user_home();
+    let p = home.join(".claude");
+    p.is_dir().then_some(p)
+}
+
+fn cleanup_log_path() -> Option<std::path::PathBuf> {
+    instances::app_data_dir_early().map(|d| d.join("cleanup-log.jsonl"))
+}
+
+/// 当前有活动实例绑定的工作区 —— 这些工作区里的东西默认不给清（规格 Q14）。
+fn active_instance_workspaces() -> Vec<String> {
+    let Some(dir) = instances::app_data_dir_early() else {
+        return Vec::new();
+    };
+    instances::collect_live_instances(&dir, instances::is_instance_alive)
+        .into_iter()
+        .map(|r| r.workspace)
+        .filter(|w| !w.trim().is_empty())
+        .collect()
+}
+
+/// 扫描全部清理候选。
+///
+/// `workspaces` 由前端传入（启动页那份工作区列表），可含手动添加的路径；
+/// 传空则退回实例注册表里已知的工作区 —— 至少不会因为前端没准备好就扫不到东西。
+#[tauri::command]
+async fn cleanup_scan(
+    workspaces: Option<Vec<String>>,
+) -> Result<cleanup::ScanResult, String> {
+    let roots = cleanup::ScanRoots {
+        claude_dir: cleanup_claude_dir(),
+        app_data_dir: instances::app_data_dir_early(),
+        workspaces: workspaces.unwrap_or_else(active_instance_workspaces),
+        active_workspaces: active_instance_workspaces(),
+        // 本进程正在使用的东西：当前绑定的工作区整体视为在用
+        // （正在这里跑会话，它的临时文件随时可能被读写）。
+        in_use_paths: {
+            let w = settings::bound_work_dir();
+            if w.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![w]
+            }
+        },
+    };
+
+    // 扫描是同步的重活（递归目录），放到阻塞线程池里跑，别卡住 async 运行时。
+    tokio::task::spawn_blocking(move || {
+        cleanup::scan(&roots, std::time::Duration::from_secs(CLEANUP_ITEM_TIMEOUT_SECS))
+    })
+    .await
+    .map_err(|e| format!("扫描失败: {e}"))
+}
+
+/// 执行清理。逐项删除，某项失败不影响其余（规格 Q13）。
+#[tauri::command]
+async fn cleanup_run(
+    app: tauri::AppHandle,
+    items: Vec<cleanup::CleanupItem>,
+) -> Result<cleanup::RunReport, String> {
+    let mut roots_buf: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(p) = cleanup_claude_dir() {
+        roots_buf.push(p);
+    }
+    if let Some(p) = instances::app_data_dir_early() {
+        roots_buf.push(p);
+    }
+    // 每个待删项所在工作区的 `.claude` 也是合法根 —— 否则工作区级清理全被拒。
+    for it in &items {
+        let p = std::path::Path::new(&it.path);
+        if let Some(idx) = p
+            .components()
+            .enumerate()
+            .find(|(_, c)| c.as_os_str().eq_ignore_ascii_case(".claude"))
+            .map(|(i, _)| i)
+        {
+            let prefix: std::path::PathBuf = p.components().take(idx + 1).collect();
+            roots_buf.push(prefix);
+        }
+    }
+    let app_for_events = app.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        // 借用必须在闭包内建立 —— `roots` 借的是 `roots_buf`，跨 await 会悬垂。
+        let roots: Vec<&std::path::Path> = roots_buf.iter().map(|p| p.as_path()).collect();
+        cleanup::run_deletes(&items, &roots, |outcome| {
+            // 进度事件：前端据此逐行更新状态，不必等全部结束。
+            let _ = app_for_events.emit("cleanup-progress", outcome);
+        })
+    })
+    .await
+    .map_err(|e| format!("清理失败: {e}"))?;
+
+    // 落一条清理记录（失败不影响清理结果本身 —— 日志是辅助信息）。
+    if let Some(log_path) = cleanup_log_path() {
+        let entry = cleanup::CleanupLogEntry {
+            at_ms: cleanup::now_ms(),
+            freed_bytes: report.freed_bytes,
+            ok_count: report.outcomes.iter().filter(|o| o.ok).count(),
+            fail_count: report.outcomes.iter().filter(|o| !o.ok).count(),
+            categories: Vec::new(),
+        };
+        if let Err(e) = cleanup::append_log(&log_path, &entry, CLEANUP_LOG_KEEP) {
+            log::warn!("[cleanup] 写清理日志失败: {e}");
+        }
+    }
+    Ok(report)
+}
+
+/// 最近几次清理记录（新的在前）。
+#[tauri::command]
+fn cleanup_history(limit: Option<usize>) -> Vec<cleanup::CleanupLogEntry> {
+    match cleanup_log_path() {
+        Some(p) => cleanup::read_log(&p, limit.unwrap_or(10)),
+        None => Vec::new(),
+    }
 }
 
 // ── Settings commands ──

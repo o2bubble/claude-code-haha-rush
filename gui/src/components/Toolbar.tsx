@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope, Copy, Brain, Gauge, GripHorizontal, PictureInPicture2 } from "lucide-react";
+import { PanelLeft, PanelRight, PanelBottom, Settings, Grid3x3, Shield, Layers, Terminal, FolderOpen, LayoutTemplate, RefreshCw, User, Sun, Moon, Bug, Download, HelpCircle, Search, Stethoscope, Copy, Brain, Gauge, GripHorizontal, PictureInPicture2, Trash2 } from "lucide-react";
 import { getTree, findParentSplit, toggleGroupHidden, toggleLeftColumn, toggleRightPanel, addFloatingPanel, getFloatingPanels, bringFloatingToFront, findTabByPanelId, applyLayoutPreset, LAYOUT_PRESETS, togglePanelInTree, isPanelOpenInTree } from "../stores/layoutStore";
 import { iconFor } from "../utils/icons";
 import { getRecent, sortByRecent } from "../utils/recentUsage";
@@ -28,6 +28,7 @@ let floatFeedbackId: string | null = null;
 let floatUpdateId: string | null = null;
 let floatHelpId: string | null = null;
 let floatDiagnosticsId: string | null = null;
+let floatCleanupId: string | null = null;
 
 function isVisible(groupId: string): boolean {
   const parent = findParentSplit(getTree(), groupId);
@@ -152,6 +153,32 @@ export function openHelpFloat() {
         { id: "tab-help-float", panelId: "help", title: t("help.title"), icon: "help" },
       ],
       activeTabId: "tab-help-float",
+    },
+    Math.round((window.innerWidth - w) / 2),
+    Math.round((window.innerHeight - h) / 2),
+    w, h,
+  );
+}
+
+/** 存储清理 —— 低频功能，只从应用菜单进入（不进工具栏）。 */
+export function openCleanupFloat() {
+  if (floatCleanupId) {
+    const existing = getFloatingPanels().find((fp) => fp.id === floatCleanupId);
+    if (existing) {
+      bringFloatingToFront(floatCleanupId);
+      return;
+    }
+    floatCleanupId = null;
+  }
+  const w = 620, h = 560;
+  floatCleanupId = addFloatingPanel(
+    {
+      type: "group",
+      id: "cleanup-float-group",
+      tabs: [
+        { id: "tab-cleanup-float", panelId: "cleanup", title: t("cleanup.title"), icon: "broom" },
+      ],
+      activeTabId: "tab-cleanup-float",
     },
     Math.round((window.innerWidth - w) / 2),
     Math.round((window.innerHeight - h) / 2),
@@ -1173,6 +1200,9 @@ export default function Toolbar() {
       onClick: openHelpFloat, inMenuByDefault: true },
     { id: "diagnostics", label: t("toolbar.diagnostics"), icon: <Stethoscope size={14} />,
       onClick: openDiagnosticsFloat, inMenuByDefault: true },
+    // 存储清理 —— 低频且"有破坏性"，固定待在菜单里（规格：不做角标/提醒）。
+    { id: "cleanup", label: t("cleanup.title"), icon: <Trash2 size={14} />,
+      onClick: openCleanupFloat, inMenuByDefault: true },
     { id: "feedback", label: t("feedback.title"), icon: <Bug size={14} />,
       onClick: openFeedbackFloat, inMenuByDefault: true },
     // ② 常驻（高频：很多人靠它快速开新窗口）——不进菜单、不参与折叠。

@@ -65,6 +65,7 @@ const ICON_KEYS = new Set<string>([
   "explorer", "search", "outline", "compoundGroup", "file", "notes",
   "quickPrompts", "help", "diagnostics", "default", "user",
   "folderKanban", "package", "grid3x3", "layoutGrid", "combine", "gitBranch",
+  "broom",
 ]);
 export function isIconKey(v: string | undefined): v is IconKey {
   return !!v && ICON_KEYS.has(v);

@@ -14,7 +14,8 @@ export type IconKey =
   | "askQuestion" | "desktopItemView" | "profileManager" | "feedback" | "update"
   | "explorer" | "search" | "outline" | "compoundGroup" | "file" | "notes"
   | "quickPrompts" | "help" | "diagnostics" | "default" | "user"
-  | "folderKanban" | "package" | "grid3x3" | "layoutGrid" | "combine" | "gitBranch";
+  | "folderKanban" | "package" | "grid3x3" | "layoutGrid" | "combine" | "gitBranch"
+  | "broom";
 
 /** 分割容器 — 水平或垂直排列子节点，带可拖拽分隔线 */
 export interface SplitNode {

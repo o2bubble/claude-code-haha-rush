@@ -25,6 +25,7 @@ import NotesPanel from "../components/chat/NotesPanel";
 import HelpPanel from "../components/chat/HelpPanel";
 import { UpdatePanel } from "../components/chat/UpdatePanel";
 import { DiagnosticPanel } from "../components/chat/DiagnosticPanel";
+import { CleanupPanel } from "../components/chat/CleanupPanel";
 import PluginMarketPanel from "../components/chat/PluginMarketPanel";
 import PluginMarketDetailPanel from "../components/chat/PluginMarketDetailPanel";
 
@@ -131,6 +132,11 @@ export const ALL_PANEL_DEFS: PanelDefinition[] = [
   {
     id: "diagnostics", title: t("panel.diagnostics"), icon: "diagnostics", userManaged: false, defaultView: "main",
     views: [{ id: "main", title: t("panel.diagnostics"), render: () => withError("Diagnostics", <DiagnosticPanel />) }],
+  },
+  {
+    // 存储清理：低频功能，只从应用菜单进（不在工具栏）。
+    id: "cleanup", title: t("cleanup.title"), icon: "broom", userManaged: false, defaultView: "main",
+    views: [{ id: "main", title: t("cleanup.title"), render: () => withError("Cleanup", <CleanupPanel />) }],
   },
   {
     // 插件市场(T5): 用户打开的市场面板, userManaged 默认 true(可在面板下拉开关)
