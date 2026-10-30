@@ -15,6 +15,14 @@ import { getMainLoopModel, getSmallFastModel } from '../../utils/model/model.js'
 import { jsonParse, jsonStringify } from '../../utils/slowOperations.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
 import { localSearch } from './localSearch.js'
+import {
+  baseUrlHost,
+  isKnownUnsupported,
+  isToolRejectionError,
+  noteNoSearchPerformed,
+  noteSearchSucceeded,
+  noteToolRejected,
+} from './serverSearchSupport.js'
 import { getWebSearchPrompt, WEB_SEARCH_TOOL_NAME } from './prompt.js'
 import {
   getToolUseSummary,
@@ -150,28 +158,18 @@ function makeOutputFromSearchResponse(
   }
 }
 
-// 中转 (a non-Anthropic ANTHROPIC_BASE_URL) doesn't implement Anthropic's
-// server-side `web_search_20250305` tool, so asking the model to run the search
-// would just burn a round-trip and come back with placeholder shells. Detect it
-// upfront and search locally instead. getAPIProvider() reports third-party
-// relays as 'firstParty', so the hostname of the base URL is the only signal.
-function isRelayProvider(): boolean {
+// Bedrock / Vertex / Foundry 走各自的 SDK 后端，服务端工具不在同一条协议上 ——
+// 这些 provider 永远不该走 Anthropic 的 `web_search_20250305`。
+//
+// ⚠️ 注意这里**不再**用"host 不是 anthropic.com 就判定为中转"的粗暴条件
+// （原 `isRelayProvider`）。2026-10-30 实测：DeepSeek 的 Anthropic 兼容端点
+// **完整实现了**服务端搜索并返回真实结果，旧判据让它一次都没被尝试过。
+// 现在改为"先试、失败才记"，见 serverSearchSupport.ts。
+function isNonAnthropicNativeProvider(): boolean {
   const provider = getAPIProvider()
-  if (
-    provider === 'bedrock' ||
-    provider === 'vertex' ||
-    provider === 'foundry'
-  ) {
-    return false
-  }
-  const baseUrl = process.env.ANTHROPIC_BASE_URL
-  if (!baseUrl) return false
-  try {
-    const host = new URL(baseUrl).hostname
-    return host !== 'api.anthropic.com' && !host.endsWith('.anthropic.com')
-  } catch {
-    return false
-  }
+  return (
+    provider === 'bedrock' || provider === 'vertex' || provider === 'foundry'
+  )
 }
 
 // Run a local keyless search (DuckDuckGo/Bing) and shape the result into the
@@ -326,22 +324,97 @@ export const WebSearchTool = buildTool({
   async call(input, context, _canUseTool, _parentMessage, onProgress) {
     const startTime = performance.now()
     const { query } = input
+    const host = baseUrlHost()
 
-    // Relays don't implement the server-side web_search tool — skip the wasted
-    // model round-trip and search locally right away.
-    if (isRelayProvider()) {
+    /** 本地兜底：把 DuckDuckGo/Bing 的命中拼成与服务端同构的输出。 */
+    const runLocal = async () => {
       const data = await makeLocalFallbackOutput(
         input,
         query,
-        0,
+        (performance.now() - startTime) / 1000,
         context.abortController.signal,
         onProgress,
       )
-      data.durationSeconds = (performance.now() - startTime) / 1000
       return { data }
     }
 
-    const userMessage = createUserMessage({
+    // ① 原生非 Anthropic provider（bedrock/vertex/foundry）服务端工具不适用。
+    if (isNonAnthropicNativeProvider()) return await runLocal()
+
+    // ② 这个 host 已被证明做不到（见 serverSearchSupport.ts）—— 别再白跑一轮。
+    if (isKnownUnsupported(host)) return await runLocal()
+
+    // ③ 先试服务端。失败/无结果才回退本地 —— 不能像旧实现那样按 host 一刀切，
+    //    那会把 DeepSeek 这类**确实实现了**服务端搜索的端点一并牺牲掉。
+    try {
+      const data = await runServerSideSearch(input, context, query, onProgress)
+      if (data) {
+        noteSearchSucceeded(host)
+        return { data: { ...data, durationSeconds: (performance.now() - startTime) / 1000 } }
+      }
+      // 200 但一次搜索都没发生（模型直接答了，或 provider 编了段假文本）
+      noteNoSearchPerformed(host)
+      logError(
+        new Error(
+          'Server-side web search returned no search results; falling back to local search.',
+        ),
+      )
+    } catch (e) {
+      // 用户/上层主动中断 —— 必须原样抛出，不能悄悄换成一次本地搜索
+      if (context.abortController.signal.aborted) throw e
+      if (isToolRejectionError(e)) noteToolRejected(host)
+      logError(e)
+    }
+
+    return await runLocal()
+  },
+  mapToolResultToToolResultBlockParam(output, toolUseID) {
+    const { query, results } = output
+
+    let formattedOutput = `Web search results for query: "${query}"\n\n`
+
+    // Process the results array - it can contain both string summaries and search result objects.
+    // Guard against null/undefined entries that can appear after JSON round-tripping
+    // (e.g., from compaction or transcript deserialization).
+    ;(results ?? []).forEach(result => {
+      if (result == null) {
+        return
+      }
+      if (typeof result === 'string') {
+        // Text summary
+        formattedOutput += result + '\n\n'
+      } else {
+        // Search result with links
+        if (result.content?.length > 0) {
+          formattedOutput += `Links: ${jsonStringify(result.content)}\n\n`
+        } else {
+          formattedOutput += 'No links found.\n\n'
+        }
+      }
+    })
+
+    formattedOutput +=
+      '\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.'
+
+    return {
+      tool_use_id: toolUseID,
+      type: 'tool_result',
+      content: formattedOutput.trim(),
+    }
+  },
+} satisfies ToolDef<InputSchema, Output, WebSearchProgress>)
+
+/** 走服务端的 `web_search_20250305` 工具，返回结果；**没有发生任何搜索时返回 null**。
+ *
+ *  抛出的错误交给调用方判定（明确的 4xx 工具拒绝会被记进 host 能力表）。 */
+async function runServerSideSearch(
+  input: Input,
+  context: Parameters<typeof WebSearchTool.call>[1],
+  query: string,
+  onProgress?: (progress: WebSearchProgress) => void,
+): Promise<Output | null> {
+  const startTime = performance.now()
+  const userMessage = createUserMessage({
       content: 'Perform a web search for the query: ' + query,
     })
     const toolSchema = makeToolSchema(input)
@@ -478,56 +551,13 @@ export const WebSearchTool = buildTool({
     const endTime = performance.now()
     const durationSeconds = (endTime - startTime) / 1000
 
-    // If the provider executed a real search it returns at least one
-    // web_search_tool_result block. Its absence means the server-side tool isn't
-    // implemented (a relay fabricated placeholder text instead) — fall back to a
-    // local search so the model still receives real hits.
+    // 真跑过一次搜索的 provider 至少会返回一个 web_search_tool_result 块。
+    // 没有 = 服务端工具没被执行（provider 编了段假文本，或模型选择直接回答）——
+    // 交给调用方决定是否回退本地，并据此更新 host 能力表。
     const sawServerSearch = allContentBlocks.some(
       block => block.type === 'web_search_tool_result',
     )
-    const data = sawServerSearch
+    return sawServerSearch
       ? makeOutputFromSearchResponse(allContentBlocks, query, durationSeconds)
-      : await makeLocalFallbackOutput(
-          input,
-          query,
-          durationSeconds,
-          context.abortController.signal,
-          onProgress,
-        )
-    return { data }
-  },
-  mapToolResultToToolResultBlockParam(output, toolUseID) {
-    const { query, results } = output
-
-    let formattedOutput = `Web search results for query: "${query}"\n\n`
-
-    // Process the results array - it can contain both string summaries and search result objects.
-    // Guard against null/undefined entries that can appear after JSON round-tripping
-    // (e.g., from compaction or transcript deserialization).
-    ;(results ?? []).forEach(result => {
-      if (result == null) {
-        return
-      }
-      if (typeof result === 'string') {
-        // Text summary
-        formattedOutput += result + '\n\n'
-      } else {
-        // Search result with links
-        if (result.content?.length > 0) {
-          formattedOutput += `Links: ${jsonStringify(result.content)}\n\n`
-        } else {
-          formattedOutput += 'No links found.\n\n'
-        }
-      }
-    })
-
-    formattedOutput +=
-      '\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.'
-
-    return {
-      tool_use_id: toolUseID,
-      type: 'tool_result',
-      content: formattedOutput.trim(),
-    }
-  },
-} satisfies ToolDef<InputSchema, Output, WebSearchProgress>)
+      : null
+  }
