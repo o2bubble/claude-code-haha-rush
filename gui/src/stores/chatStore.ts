@@ -18,7 +18,10 @@ export type MetaKind =
   | "interrupt"
   /** GUI 自己发的「流卡死唤醒」醒词（chatSession.wakeStream）。
    *  走的是正常发送通道，所以后端看起来就是一条用户消息。 */
-  | "stall-wake";
+  | "stall-wake"
+  /** GUI 自己发的「自动续跑」续写（chatSession.maybeResumeInterruptedTurn）。
+   *  同样是正常发送通道，落盘后没有 isMeta，只能按固定文案识别。 */
+  | "resume";
 
 export interface ChatMessage {
   id: string;

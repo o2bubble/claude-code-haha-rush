@@ -106,6 +106,15 @@ export interface AppSettings {
    *  ⚠️ **全局字段**（同 autoRestoreInstances）：插件是用户级共享的，
    *  不该按工作区各存一份。 */
   autoUpdatePlugins?: boolean;
+  /** 打开会话时自动续跑被中断的回合（缺省**关** —— undefined 视为关）。
+   *
+   *  后台会话被中断（工具刚跑完、模型还没回话就关窗/被杀）后，恢复时对话里
+   *  会有一条程序补的 `"Continue from where you left off."`。打开本项后，
+   *  GUI 会真的把它发出去，模型接着干活 —— 否则那条消息只是一句空话。
+   *
+   *  ⚠️ **默认必须关**：会自动消耗 token，且可能在用户没盯着的时候改文件。
+   *  ⚠️ **全局字段**（同 autoRestoreInstances）：不进 merge_workspace_overrides 白名单。 */
+  autoResumeInterruptedTurn?: boolean;
   /** 「建议从 DeepSeek Pro 换到 Flash」一次性提示是否已展示（任意选择后 true）。
    *  ⚠️ **全局字段**（同 autoRestoreInstances）：不进 Rust 的 merge_workspace_overrides
    *  白名单 —— 换模型建议只弹一次，不按工作区重复。 */

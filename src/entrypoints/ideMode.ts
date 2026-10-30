@@ -2345,12 +2345,29 @@ async function handleResumeSession(
     }
 
     // Clean messages (filter unresolved tool uses, orphaned thinking, etc.)
+    //
+    // 用带中断检测的版本：若上一轮被中断（停在 tool_result / attachment 上），
+    // 它会补一条 `"Continue from where you left off."`（isMeta 合成消息）+
+    // `"No response requested."` 哨兵，保证下一轮 API 调用合法。
+    //
+    // ⚠️ **合成的那条不能出现在上下文里**（2026-10-30 用户反馈）：
+    //  - 它在 GUI 里只是一句空话（`--ide-mode` 没有 print.ts 的自动续跑逻辑），
+    //    却会被 recordTranscript 落盘，永久污染历史；
+    //  - GUI 侧开启「自动续跑」时会**自己发**一条同样的续写 —— 两条会重复。
+    // 所以：从上下文里剔除它，但**保留在发给 GUI 的展示列表**里（用户要能看到
+    // "程序在这里插过一句话"）。哨兵保留，它是下一轮 API 合法的保证。
     let cleanedMessages: Message[]
+    let syntheticContinuationId: string | undefined
     try {
-      const { deserializeMessages } = await import(
+      const { deserializeMessagesWithInterruptDetection } = await import(
         '../utils/conversationRecovery.js'
       )
-      cleanedMessages = deserializeMessages(rawMessages)
+      const result = deserializeMessagesWithInterruptDetection(rawMessages)
+      cleanedMessages = result.messages
+      const state = result.turnInterruptionState
+      if (state.kind !== 'none' && state.message.isMeta === true) {
+        syntheticContinuationId = state.message.uuid as string
+      }
     } catch {
       cleanedMessages = rawMessages
     }
@@ -2375,6 +2392,16 @@ async function handleResumeSession(
       console.error('[ide-mode] SessionStart(resume) hooks failed:', err)
     }
 
+    // 展示列表（含合成的续写消息）—— 与上下文分开，见上面的说明
+    const messagesForDisplay = cleanedMessages
+
+    // 上下文里剔除合成续写，避免它被 recordTranscript 落盘污染历史
+    if (syntheticContinuationId) {
+      cleanedMessages = cleanedMessages.filter(
+        m => (m as Record<string, unknown>).uuid !== syntheticContinuationId,
+      )
+    }
+
     // Set the message context so the next turn continues this session
     mutableMessages = cleanedMessages
 
@@ -2382,7 +2409,7 @@ async function handleResumeSession(
     const response: IDESessionLoadedResponse = {
       type: 'session_loaded',
       session_id: sessionId,
-      messages: cleanedMessages.map(m => ({
+      messages: messagesForDisplay.map(m => ({
         uuid: (m as Record<string, unknown>).uuid as string | undefined,
         type: m.type,
         message:

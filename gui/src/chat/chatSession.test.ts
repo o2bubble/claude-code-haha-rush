@@ -3,11 +3,12 @@
 // landing, message queue flush, leaf-mode fallback, and the resume_session
 // one-shot guard. Each test uses a fresh createChatSession() instance.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createChatSession } from "./chatSession";
 import { emptyChatState, isBackendBusy } from "./chatReduce";
 import { getChatState, replaceState } from "../stores/chatStore";
 import { _reset as resetTerminal, getEntries } from "../stores/terminalStore";
+import { updateSettings } from "../stores/settingsStore";
 import { crossWindowBus } from "../services/crossWindowBus";
 
 const mocks = vi.hoisted(() => ({
@@ -504,5 +505,75 @@ describe("ChatSession — 旁问（askSideQuestion）", () => {
     // 真正的响应仍然能配上
     ws._msg({ type: "side_question_result", context_id: sent.context_id, response: "mine" });
     await expect(p).resolves.toEqual({ response: "mine", error: undefined });
+  });
+});
+
+// ── 自动续跑被中断的回合（设置项 autoResumeInterruptedTurn，默认关）──
+//
+// 背景（2026-10-30 用户反馈）：后端恢复会话时会补一条
+// `"Continue from where you left off."`（isMeta 合成）让 API 上下文合法，
+// 但 GUI 的 --ide-mode 路径**不会真的发出去**，于是那条消息只是一句空话。
+// 打开本开关后 GUI 要把它当作真实输入发出去，否则用户看到"会话没有继续"。
+describe("ChatSession — 自动续跑被中断的回合", () => {
+  const CONTINUE = "Continue from where you left off.";
+  const loadMsg = {
+    type: "session_loaded",
+    session_id: "sess-resume",
+    messages: [
+      {
+        uuid: "u-tool",
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      },
+      {
+        uuid: "c-phantom",
+        type: "user",
+        isMeta: true,
+        message: { role: "user", content: [{ type: "text", text: CONTINUE }] },
+      },
+    ],
+  };
+
+  // 设置是模块级单例 —— 开后必须复位，否则影响本文件后续用例
+  afterEach(() => updateSettings({ autoResumeInterruptedTurn: false }));
+
+  function freshSessionWithLoad() {
+    const s = createChatSession();
+    s.connect(8200);
+    const ws = FakeWebSocket.instances[0];
+    ws._open();
+    ws._msg(loadMsg);
+    return ws;
+  }
+
+  it("默认关：不续跑，合成消息保持原样（程序自动消息）", () => {
+    updateSettings({ autoResumeInterruptedTurn: false });
+    const ws = freshSessionWithLoad();
+    expect(ws.sent.some((d) => d.includes('"type":"user"'))).toBe(false);
+    const msgs = getChatState().messages;
+    expect(msgs.filter((m) => m.metaKind === "resume")).toHaveLength(0);
+    expect(msgs.filter((m) => m.isMeta)).toHaveLength(1);
+  });
+
+  it("打开后：真的发出去，且展示里只留一条（幻影行被替换）", () => {
+    updateSettings({ autoResumeInterruptedTurn: true });
+    const ws = freshSessionWithLoad();
+    const userSends = ws.sent.filter((d) => d.includes('"type":"user"') && d.includes("Continue from where you left off"));
+    expect(userSends).toHaveLength(1);
+    const msgs = getChatState().messages;
+    // 幻影那条（auto）被移除，只剩真实发送的 resume 那条
+    expect(msgs.filter((m) => m.metaKind === "auto")).toHaveLength(0);
+    expect(msgs.filter((m) => m.metaKind === "resume")).toHaveLength(1);
+  });
+
+  it("同一回合重复下发 session_loaded 只续跑一次（防反复烧 token）", () => {
+    updateSettings({ autoResumeInterruptedTurn: true });
+    const ws = freshSessionWithLoad();
+    const count = () =>
+      ws.sent.filter((d) => d.includes('"type":"user"') && d.includes("Continue from where you left off")).length;
+    expect(count()).toBe(1);
+    // 重连/重复下发：幻影又回来了，但不该再发一次
+    ws._msg(loadMsg);
+    expect(count()).toBe(1);
   });
 });

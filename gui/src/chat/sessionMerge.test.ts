@@ -165,3 +165,27 @@ describe("mergeSessionMessages — 自动唤醒醒词（无 isMeta）", () => {
     expect(out[0].isMeta).toBeUndefined();
   });
 });
+
+// ── ④ 自动续跑的续写：GUI 真发的那条，落盘后没有 isMeta ──
+//
+// 开启「自动续跑被中断的回合」后，GUI 会真发一条同文案（chatSession），
+// 后端按普通 user 消息落盘。重载时若不识别，就会变成一个用户气泡。
+describe("mergeSessionMessages — 自动续跑续写（无 isMeta）", () => {
+  const PROMPT = "Continue from where you left off.";
+
+  it("同文案识别为 resume", () => {
+    const out = mergeSessionMessages([user(PROMPT)]);
+    expect(out[0].isMeta).toBe(true);
+    expect(out[0].metaKind).toBe("resume");
+  });
+
+  it("带 isMeta 的仍是 auto（后端合成的幻影消息，没真的跑过）", () => {
+    const out = mergeSessionMessages([user(PROMPT, { isMeta: true })]);
+    expect(out[0].metaKind).toBe("auto");
+  });
+
+  it("首尾空白不影响判定", () => {
+    const out = mergeSessionMessages([user("  " + PROMPT + "\n")]);
+    expect(out[0].metaKind).toBe("resume");
+  });
+});

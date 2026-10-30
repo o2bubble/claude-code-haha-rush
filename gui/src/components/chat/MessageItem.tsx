@@ -294,14 +294,16 @@ function MetaMessage({
   animateIn: boolean;
 }) {
   const [expanded, setExpanded] = React.useState(false);
-  // 三种成因各自一枚徽标 + 一句 hover 说明 —— 排查时要能分清"程序替谁说话"
+  // 各种成因各一枚徽标 + 一句 hover 说明 —— 排查时要能分清"程序替谁说话"
   const badge =
     kind === "interrupt" ? t("message.metaInterrupt") :
     kind === "stall-wake" ? t("message.metaStallWake") :
+    kind === "resume" ? t("message.metaResume") :
     t("message.metaLabel");
   const hint =
     kind === "interrupt" ? t("message.metaInterruptHint") :
     kind === "stall-wake" ? t("message.metaStallWakeHint") :
+    kind === "resume" ? t("message.metaResumeHint") :
     t("message.metaHint");
   // 折起时只留一行；用 CSS 做省略而不是截字符串 —— 中英文混排、emoji 下更稳
   return (

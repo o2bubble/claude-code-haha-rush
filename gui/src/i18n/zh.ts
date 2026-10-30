@@ -208,6 +208,8 @@ const zh = {
     sessionFoldersDesc: "在会话面板按文件夹组织会话（嵌套树，默认关闭）",
     recentSessionMax: "「最近」记录条数",
     recentSessionMaxDesc: "会话面板「最近」Tab 最多保留多少条打开记录（默认 25，范围 1–200）",
+    autoResumeInterruptedTurn: "自动续跑被中断的回合",
+    autoResumeInterruptedTurnDesc: "上次做到一半被中断的会话，重新打开时自动接着做。打开后程序会替你发出一条「继续」并消耗 token，且可能在你没看着的时候修改文件 —— 确认需要再开启",
     // Files
     fileSortOrder: "排序方式",
     fileSortOrderDesc: "文件浏览器中目录和文件的排列顺序，目录始终优先",
@@ -962,6 +964,8 @@ const zh = {
     metaInterruptHint: "这里是你按 Esc 中断的位置。Claude Code 会写入一条这样的标记让对话保持完整，它并不是你打的字",
     metaStallWake: "自动唤醒",
     metaStallWakeHint: "输出长时间没有响应时，程序自动中断并发出的「继续」提示（不是你手动输入的）。用的是设置里的醒词",
+    metaResume: "自动续跑",
+    metaResumeHint: "打开这个会话时，程序自动替你发出这条「继续」提示，让上一轮接着做（设置里的「自动续跑被中断的回合」开启时才会发生）",
     metaLabel: "程序自动消息",
     metaHint: "由程序自动插入、不是你实际输入的消息。例如恢复会话时发现上一轮被中断，会自动补一条「继续上次未完成的内容」。点击展开/收起全文",
     copy: "复制",

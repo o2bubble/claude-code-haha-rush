@@ -21,13 +21,22 @@ export function isInterruptMessage(text: string): boolean {
   return text === INTERRUPT_TEXT || text === INTERRUPT_TEXT_TOOL;
 }
 
+/** 恢复被中断的回合时，程序补/发的那句续写提示。
+ *
+ *  · 后端 `conversationRecovery.ts` 会补一条 `isMeta: true` 的同文案消息（合成，
+ *    只用于让 API 上下文合法）；
+ *  · GUI 开启「自动续跑」时会**真发**一条同文案（chatSession.maybeResumeInterruptedTurn）。
+ *
+ *  后者落盘后**没有 isMeta**，重载时只能按文案认出它也是程序发的。逐字一致。 */
+export const CONTINUE_PROMPT = "Continue from where you left off.";
+
 /** 判定一条 session_loaded 消息在 UI 上算不算「程序消息」，返回其成因。
  *
- *  三种来源按可靠性排序判定：
- *   ① 协议字段 `isMeta` —— 最可靠
+ *  四种来源按可靠性排序判定：
+ *   ① 协议字段 `isMeta` —— 最可靠（合成消息）
  *   ② 中断标记文本 —— 后端不写字段，只能比文本
- *   ③ 自动唤醒醒词 —— GUI 代发的，后端同样当普通 user 消息落盘，
- *      重载历史时只能拿设置里的醒词比文本
+ *   ③ 自动续跑续写 —— GUI 真发的，落盘后没有 isMeta，只能比文本
+ *   ④ 自动唤醒醒词 —— 同上，且醒词可由用户自定义（从设置传入）
  */
 function detectMetaKind(
   cur: any,
@@ -40,6 +49,7 @@ function detectMetaKind(
   if (cur?.type !== "user") return undefined;
   if (isInterruptMessage(text)) return "interrupt";
   const t = text.trim();
+  if (t === CONTINUE_PROMPT) return "resume";
   if (t && stallWakePrompts.some((p) => p.trim() === t)) return "stall-wake";
   return undefined;
 }

@@ -674,6 +674,16 @@ function CategoryContent({ cat, settings, update, applyServer, applyWorkspaceOnl
             />
             <FieldHint text={t("settings.recentSessionMaxDesc")} />
           </div>
+          <div>
+            <Label text={t("settings.autoResumeInterruptedTurn")} />
+            {/* 纯全局偏好（同 recentSessionMax）：自动续跑跟"打开哪个工作区"无关。
+                默认**关** —— 会自己花 token、可能在你没盯着时改文件。 */}
+            <Toggle
+              value={settings.autoResumeInterruptedTurn ?? false}
+              onChange={(v) => applyGlobalOnly({ autoResumeInterruptedTurn: v })}
+            />
+            <FieldHint text={t("settings.autoResumeInterruptedTurnDesc")} />
+          </div>
         </div>
       );
 

@@ -10,6 +10,7 @@ import {
   addMessage,
   updateLastAssistant,
   replaceState,
+  setMessages,
   isChatReady,
   type EffortLevelUI,
   type MetaKind,
@@ -37,7 +38,8 @@ import { wsDiagAdd } from "../services/wsDiag";
 import { crossWindowBus } from "../services/crossWindowBus";
 import { chatReduce, isBackendBusy } from "./chatReduce";
 import { applyStoreEffects } from "./effects";
-import type { WireMessage } from "./types";
+import { CONTINUE_PROMPT } from "./sessionMerge";
+import type { ChatState, WireMessage } from "./types";
 
 // ── 旁问（/btw）的请求-响应登记表 ──
 //
@@ -474,6 +476,10 @@ export function createChatSession(): ChatSession {
     // 必须在 replaceState 之后——reducer 已把 backendBusy 清 false，flush 读到
     // 权威空闲信号才直发（早于 replaceState 会读到旧的乐观 streaming）。
     if (turnEndedMsg) { flushPendingWake(); flushPendingGuard(); }
+    // 「自动续跑被中断的回合」：会话刚加载完就在此判定（见 maybeResumeInterruptedTurn）
+    if (innerMsg.type === "session_loaded") {
+      maybeResumeInterruptedTurn(nextState);
+    }
     // 跨 GUI 同步：后端确认列表变化(session_created/session_renamed) 或 session_list
     // 内容真的变了(create/rename/delete 都会触发) → 中继给 server 广播，其他 GUI
     // 重新拉取自己的列表。session_list 只在签名变化时中继，避免 refetch 回显死循环。
@@ -749,6 +755,11 @@ export function createChatSession(): ChatSession {
   // 放出去(用户看到"中断后队列直接泄出")；正常时序也会让队首挤进醒词回合尾。
   let wakeTurnInFlight = false;
 
+  // 自动续跑去重键：`<sessionId>:<合成续写消息 uuid>`。
+  // 同一回合只续跑一次 —— 断线重连/重复 session_loaded 会再走一遍加载路径，
+  // 不记住就会反复续跑、反复烧 token。
+  let _lastResumeKey: string | null = null;
+
   function flushPendingWake(): void {
     if (pendingWakeTimer) { clearTimeout(pendingWakeTimer); pendingWakeTimer = null; }
     if (!pendingWakePrompt) return;
@@ -763,6 +774,57 @@ export function createChatSession(): ChatSession {
     // 用户手动点「继续」快捷提示走的是另一条路（正常 sendMessage），仍是真用户消息。
     sendMessage(prompt, { force: true, metaKind: "stall-wake" });
     // 队列恢复不在此时执行——等醒词回合 turnEnded 后由 watchQueueGate 统一 resume
+  }
+
+  /**
+   * 自动续跑被中断的回合（设置项 autoResumeInterruptedTurn，**默认关**）。
+   *
+   * ## 为什么需要
+   *
+   * 上一轮做到一半（工具刚跑完、模型还没回话）就关窗/进程被杀后，后端恢复会话
+   * 时会补一条 `"Continue from where you left off."` 让 API 上下文合法 ——
+   * 但 `--ide-mode` 只做"补"，不做"跑"（那一步只有 headless 的 print.ts 有，
+   * 受 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` 控制）。结果那条消息是一句空话，
+   * 用户看到的是"会话并没有真的继续"（2026-10-30 用户反馈）。
+   *
+   * ## 做什么
+   *
+   * 开关打开时：把那条合成续写当作真实输入发出去 → 模型接着干活。
+   *
+   * ## 为什么默认关
+   *
+   * 这会**自动消耗 token**，而且可能在用户没盯着的时候跑工具改文件。
+   * 有风险的功能不能默认替用户打开。
+   *
+   * ## 去重
+   *
+   * 同一个 `会话 id + 那条消息的 uuid` 只触发一次 —— 防止断线重连、
+   * 重复 session_loaded 把同一个回合反复续跑（每次都烧钱）。
+   */
+  function maybeResumeInterruptedTurn(st: ChatState) {
+    if (!(getSettings().autoResumeInterruptedTurn ?? false)) return;
+    const msgs = st.messages;
+    // 合成续写：isMeta + 固定文案（后端 conversationRecovery.ts 的产物）
+    let idx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.role === "user" && m.isMeta && (m.content || "").trim() === CONTINUE_PROMPT) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) return;
+
+    const key = `${st.sessionId ?? ""}:${msgs[idx].id}`;
+    if (_lastResumeKey === key) return;
+    _lastResumeKey = key;
+
+    // 去掉展示里的合成行 —— 立刻会用真实发送的那条替代，否则并排两条一样的
+    setMessages(msgs.filter((_, i) => i !== idx));
+
+    // force：会话刚加载完，后端不在回合里；走后端就绪判定反而可能被误判 busy。
+    // metaKind=resume：UI 弱化成「自动续跑」，落盘后重载也靠文案识别。
+    sendMessage(CONTINUE_PROMPT, { force: true, metaKind: "resume" });
   }
 
   /**

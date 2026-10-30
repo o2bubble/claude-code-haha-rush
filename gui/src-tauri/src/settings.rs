@@ -215,6 +215,24 @@ pub struct AppSettings {
     /// 插件是整个用户共用的，不该"这个工作区自动更新、那个不更新"。
     #[serde(rename = "autoUpdatePlugins", default)]
     pub auto_update_plugins: Option<bool>,
+    /// 打开会话时**自动续跑被中断的回合**（缺省**关**，即 None 视为 false）。
+    ///
+    /// 场景：上一轮做到一半（工具刚跑完 / 模型还没回话）就关了窗口或进程被杀。
+    /// Claude Code 恢复时会在对话里补一条 `"Continue from where you left off."`
+    /// 让 API 上下文合法，但**它本身不会触发续跑** —— 那一步只有 headless 的
+    /// `print.ts` 会做（受 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN` 控制），
+    /// GUI 的 `--ide-mode` 路径一直缺这一半，于是那条消息只是一句空话。
+    ///
+    /// 打开后：GUI 加载到这类会话时，会把那条续写当作真实输入发出去，模型接着干活。
+    /// 判定与执行都在前端（`chatSession.ts` / `sessionMerge.ts`）。
+    ///
+    /// ⚠️ **默认必须关**：这会**自动消耗 token**，且可能在用户没盯着的时候改文件。
+    /// 有风险的功能不能默认替用户开。
+    ///
+    /// 纯全局偏好（同 autoRestoreInstances），不进 `merge_workspace_overrides` ——
+    /// 是否自动续跑跟"打开哪个工作区"无关。
+    #[serde(rename = "autoResumeInterruptedTurn", default)]
+    pub auto_resume_interrupted_turn: Option<bool>,
     #[serde(rename = "customCompactPrompt", default)]
     pub custom_compact_prompt: Option<CompactPrompt>,
     #[serde(rename = "compactExtractScript", default)]
@@ -315,6 +333,7 @@ impl Default for AppSettings {
             auto_restore_instances: None,
             deepseek_flash_notice_shown: None,
             auto_update_plugins: None,
+            auto_resume_interrupted_turn: None,
             custom_compact_prompt: None,
             compact_extract_script: None,
             stream_stall_wake_prompt: None,
@@ -1187,6 +1206,32 @@ mod tests {
             Some("session-first"),
             "工作区覆盖不该影响 windowTitleOrder —— 它是全局 UI 偏好"
         );
+    }
+
+    /// `autoResumeInterruptedTurn` 的 JSON 字段名是**跨端契约**（同 autoUpdatePlugins）。
+    #[test]
+    fn auto_resume_interrupted_turn_json_key_is_contract() {
+        let mut s = AppSettings::default();
+        s.auto_resume_interrupted_turn = Some(true);
+        let gui = app_settings_to_gui(&s);
+        assert_eq!(
+            gui.get("autoResumeInterruptedTurn").and_then(|v| v.as_bool()),
+            Some(true),
+            "前端按 autoResumeInterruptedTurn 读写 —— 改了这里必须同步改前端"
+        );
+        let back: AppSettings = gui_to_app_settings(&gui);
+        assert_eq!(back.auto_resume_interrupted_turn, Some(true));
+    }
+
+    /// 缺省必须是 None（= 前端按 false 处理 = 自动续跑**关**）。
+    ///
+    /// 这条锁住一个**产品决策**：自动续跑会自己花 token、可能在用户没盯着时
+    /// 改文件。有风险的功能绝不默认开 —— 与 autoUpdatePlugins 的默认开相反，
+    /// 别看错。
+    #[test]
+    fn auto_resume_interrupted_turn_defaults_to_none_meaning_off() {
+        let s = AppSettings::default();
+        assert_eq!(s.auto_resume_interrupted_turn, None);
     }
 
     /// `autoUpdatePlugins` 的 JSON 字段名是**跨端契约**（同 hideTaskbarIcon）。

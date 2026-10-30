@@ -208,6 +208,8 @@ const en: Locale = {
     sessionFoldersDesc: "Organize sessions into nested folders in the session panel (off by default)",
     recentSessionMax: "Recent history size",
     recentSessionMaxDesc: "How many recently-opened sessions the Recent tab keeps (default 25, range 1–200)",
+    autoResumeInterruptedTurn: "Resume interrupted turns automatically",
+    autoResumeInterruptedTurnDesc: "When you reopen a session whose last turn was cut off midway, continue it automatically. This sends a \"continue\" prompt on your behalf (consuming tokens) and may modify files while you're not watching — enable only if you want that",
     // Files
     fileSortOrder: "Sort Order",
     fileSortOrderDesc: "Sort order for files and folders in the file browser, folders always first",
@@ -962,6 +964,8 @@ const en: Locale = {
     metaInterruptHint: "Where you pressed Esc to interrupt. Claude Code writes this marker to keep the conversation well-formed; it isn't text you typed",
     metaStallWake: "Auto wake",
     metaStallWakeHint: "Sent automatically when output stalls for too long — an interrupt plus a \"continue\" prompt (not typed by you). Uses the wake prompt from settings",
+    metaResume: "Auto resume",
+    metaResumeHint: "Sent automatically when this session was opened, so the interrupted turn could continue (only happens when \"Resume interrupted turns automatically\" is enabled in settings)",
     metaLabel: "Auto message",
     metaHint: "Inserted by the program, not typed by you. For example, when resuming a session whose previous turn was interrupted, it adds a \"continue where you left off\" prompt. Click to expand/collapse",
     copy: "Copy",
