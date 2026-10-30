@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import type { ChatMessage } from "../../stores/chatStore";
+import type { ChatMessage, MetaKind } from "../../stores/chatStore";
 import { dedupTools } from "../../utils/dedupTools";
 import { parseReferences } from "../../utils/referenceParser";
 import { ReferenceLink } from "./ReferenceLink";
@@ -273,7 +273,7 @@ function renderMarkdown(content: string): Promise<string> {
 // 「弱化但不隐藏」的具体形态：
 //  · **居中**而不是靠右 —— 靠右是"用户发言"的视觉语言
 //  · 不用气泡（无 accent 底色、无 18px 圆角），改用虚线细边框的小条
-//  · 加一枚「程序自动消息」标签，一眼看出不是人打的字
+//  · 加一枚成因徽标（程序自动消息 / 中断标记 / 自动唤醒），一眼看出不是人打的字
 //  · 内容超过一行就折成省略号，**点一下展开全文** —— 排查问题时能看全
 //  · hover 显示来源说明（哪来的、为什么会有）
 //
@@ -282,16 +282,27 @@ function renderMarkdown(content: string): Promise<string> {
 // 混在一起反而更难理解。
 function MetaMessage({
   text,
+  kind,
   timestamp,
   showTime,
   animateIn,
 }: {
   text: string;
+  kind: MetaKind;
   timestamp?: number;
   showTime: boolean;
   animateIn: boolean;
 }) {
   const [expanded, setExpanded] = React.useState(false);
+  // 三种成因各自一枚徽标 + 一句 hover 说明 —— 排查时要能分清"程序替谁说话"
+  const badge =
+    kind === "interrupt" ? t("message.metaInterrupt") :
+    kind === "stall-wake" ? t("message.metaStallWake") :
+    t("message.metaLabel");
+  const hint =
+    kind === "interrupt" ? t("message.metaInterruptHint") :
+    kind === "stall-wake" ? t("message.metaStallWakeHint") :
+    t("message.metaHint");
   // 折起时只留一行；用 CSS 做省略而不是截字符串 —— 中英文混排、emoji 下更稳
   return (
     <div
@@ -318,7 +329,7 @@ function MetaMessage({
       )}
       <div
         onClick={() => setExpanded((v) => !v)}
-        title={t("message.metaHint")}
+        title={hint}
         style={{
           maxWidth: "85%",
           padding: "4px 10px",
@@ -351,7 +362,7 @@ function MetaMessage({
             whiteSpace: "nowrap",
           }}
         >
-          {t("message.metaLabel")}
+          {badge}
         </span>
         {text}
       </div>
@@ -458,6 +469,7 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
     return (
       <MetaMessage
         text={text || message.content || ""}
+        kind={message.metaKind ?? "auto"}
         timestamp={message.timestamp}
         showTime={showMsgTime}
         animateIn={animateIn}

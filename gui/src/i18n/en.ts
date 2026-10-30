@@ -958,6 +958,10 @@ const en: Locale = {
     submit: "Submit",
   },
   message: {
+    metaInterrupt: "Interrupted",
+    metaInterruptHint: "Where you pressed Esc to interrupt. Claude Code writes this marker to keep the conversation well-formed; it isn't text you typed",
+    metaStallWake: "Auto wake",
+    metaStallWakeHint: "Sent automatically when output stalls for too long — an interrupt plus a \"continue\" prompt (not typed by you). Uses the wake prompt from settings",
     metaLabel: "Auto message",
     metaHint: "Inserted by the program, not typed by you. For example, when resuming a session whose previous turn was interrupted, it adds a \"continue where you left off\" prompt. Click to expand/collapse",
     copy: "Copy",

@@ -3,7 +3,46 @@
 // wire messages from session_loaded into display messages, merging adjacent
 // thinking + content assistant messages and deduping tool_use blocks by id.
 
-import type { ChatMessage, ToolUse } from "./types";
+import type { ChatMessage, MetaKind, ToolUse } from "./types";
+
+/** 用户按 Esc 中断时，后端写入的标记文本。
+ *
+ *  ⚠️ **这两条消息没有 `isMeta` 字段** —— 见 `src/utils/messages.ts` 的
+ *  `createUserInterruptionMessage()`（它只调 `createUserMessage({content})`）。
+ *  原生 TUI 靠内容比对把它们渲染成 "Interrupted · What should Claude do instead?"
+ *  而不是用户气泡（`components/messages/UserTextMessage.tsx`），GUI 这里同理。
+ *
+ *  与 `isMeta` 那条的区别：`isMeta` 是**协议字段**，这是**内容约定** ——
+ *  因为后端没给字段，只能比文本。常量必须与后端逐字一致。 */
+const INTERRUPT_TEXT = "[Request interrupted by user]";
+const INTERRUPT_TEXT_TOOL = "[Request interrupted by user for tool use]";
+
+export function isInterruptMessage(text: string): boolean {
+  return text === INTERRUPT_TEXT || text === INTERRUPT_TEXT_TOOL;
+}
+
+/** 判定一条 session_loaded 消息在 UI 上算不算「程序消息」，返回其成因。
+ *
+ *  三种来源按可靠性排序判定：
+ *   ① 协议字段 `isMeta` —— 最可靠
+ *   ② 中断标记文本 —— 后端不写字段，只能比文本
+ *   ③ 自动唤醒醒词 —— GUI 代发的，后端同样当普通 user 消息落盘，
+ *      重载历史时只能拿设置里的醒词比文本
+ */
+function detectMetaKind(
+  cur: any,
+  text: string,
+  stallWakePrompts: readonly string[] = [],
+): MetaKind | undefined {
+  if (cur?.isMeta === true) return "auto";
+  // 只有 user 文本消息才可能是标记（tool_result 里的同名文本属于工具输出，
+  // 由工具块自己渲染，不该冒出一条独立消息）
+  if (cur?.type !== "user") return undefined;
+  if (isInterruptMessage(text)) return "interrupt";
+  const t = text.trim();
+  if (t && stallWakePrompts.some((p) => p.trim() === t)) return "stall-wake";
+  return undefined;
+}
 
 export function extractContent(content: any, uuid: () => string = () => crypto.randomUUID()): {
   text: string;
@@ -32,11 +71,18 @@ function toTimestamp(t: unknown): number {
   return t ? new Date(t as string | number).getTime() : Date.now();
 }
 
-export function mergeSessionMessages(raw: any[], uuid: () => string = () => crypto.randomUUID()): ChatMessage[] {
+export function mergeSessionMessages(
+  raw: any[],
+  uuid: () => string = () => crypto.randomUUID(),
+  opts: { stallWakePrompts?: readonly string[] } = {},
+): ChatMessage[] {
   const merged: ChatMessage[] = [];
   for (let i = 0; i < raw.length; i++) {
     const cur = raw[i];
     const curParts = extractContent(cur?.message?.content, uuid);
+    // 程序消息：透传给 UI 做弱化渲染 —— 见 ChatMessage.isMeta / metaKind。
+    // 三种来源都要识别：协议字段 isMeta、**没有该字段**的中断标记文本、自动唤醒醒词。
+    const metaKind = detectMetaKind(cur, curParts.text, opts.stallWakePrompts);
     const curMsg: ChatMessage = {
       id: cur.uuid || uuid(),
       role: cur.type === "user" ? "user" : "assistant",
@@ -44,9 +90,7 @@ export function mergeSessionMessages(raw: any[], uuid: () => string = () => cryp
       thinking: curParts.thinking || undefined,
       toolUses: curParts.toolUses.length > 0 ? curParts.toolUses : undefined,
       timestamp: toTimestamp(cur.timestamp),
-      // 程序合成的消息（恢复中断回合时补的 "Continue from where you left off."）。
-      // 透传给 UI 做弱化渲染 —— 见 ChatMessage.isMeta。
-      isMeta: cur.isMeta === true ? true : undefined,
+      ...(metaKind ? { isMeta: true, metaKind } : {}),
     };
     if (!curMsg.content && !curMsg.thinking && !curMsg.toolUses?.length) continue;
 

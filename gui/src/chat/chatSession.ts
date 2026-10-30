@@ -12,6 +12,7 @@ import {
   replaceState,
   isChatReady,
   type EffortLevelUI,
+  type MetaKind,
 } from "../stores/chatStore";
 import { getSettings, updateSettings, saveSettings } from "../stores/settingsStore";
 import { clear as clearTerminal } from "../stores/terminalStore";
@@ -441,6 +442,9 @@ export function createChatSession(): ChatSession {
       (msg.type === "status" && (msg as { status?: string }).status === "ready");
     const { nextState, effects } = chatReduce(getChatState(), msg, {
       savedPermissionMode: getSettings().permissionMode,
+      // 自动唤醒醒词：后端把它们当普通 user 消息落盘（无 isMeta），
+      // 重载历史时只能靠文本认出是「程序代发」而不是用户打的字。
+      stallWakePrompts: [DEFAULT_STALL_WAKE_PROMPT, getSettings().streamStallWakePrompt ?? ""],
     });
     replaceState(nextState);
     // 会话列表**刚就绪** → 立即兑现待加载目标（同一 tick，没有轮询间隔）。
@@ -683,11 +687,15 @@ export function createChatSession(): ChatSession {
    * force 直发 WS——它是 agent 后续回合的指令, 塞进用户队列会被当成普通
    * 任务排队, 且守卫回合是串行验收的, 绝不能排队等待。
    */
-  function sendMessage(content: string, opts?: { force?: boolean }) {
+  function sendMessage(content: string, opts?: { force?: boolean; metaKind?: MetaKind }) {
+    // 程序代为发送的消息（如流卡死唤醒）在 UI 上要弱化成「程序自动消息」。
+    // 它走的是正常发送通道，后端看到的仍是一条普通 user 消息 —— 这点无法避免，
+    // 但至少本地气泡不该长得像用户打的字。
+    const meta = opts?.metaKind ? { isMeta: true, metaKind: opts.metaKind } : {};
     if (opts?.force) {
       // 守卫控制消息(验收/继续): 直发, 属于自动回合 — 不标记用户插话
       clearUserInterruptedTurn();
-      addMessage({ id: crypto.randomUUID(), role: "user", content, timestamp: Date.now() });
+      addMessage({ id: crypto.randomUUID(), role: "user", content, timestamp: Date.now(), ...meta });
       // 新回合开始：无响应计时从本消息发出时刻归零（避免沿用上一回合的旧 lastStreamEventAt）
       updateChatState({ lastStreamEventAt: Date.now() });
       send("user", { content });
@@ -709,7 +717,7 @@ export function createChatSession(): ChatSession {
     // 用户手动发消息: 标记为插话回合 — Asking 期间的新回合守卫将忽略,
     // 避免把正常对话误当验收回复解析成「格式异常」
     markUserInterruptedTurn();
-    addMessage({ id: crypto.randomUUID(), role: "user", content, timestamp: Date.now() });
+    addMessage({ id: crypto.randomUUID(), role: "user", content, timestamp: Date.now(), ...meta });
     // 无响应计时从本消息发出时刻归零（见上）
     updateChatState({ lastStreamEventAt: Date.now() });
     send("user", { content });
@@ -751,7 +759,9 @@ export function createChatSession(): ChatSession {
     const prompt = pendingWakePrompt;
     pendingWakePrompt = null;
     wakeTurnInFlight = true;              // 醒词回合期间队列保持 paused
-    sendMessage(prompt, { force: true }); // 后端已就绪才发，正常不再撞 busy
+    // metaKind：这条醒词是**程序自动发的**，不是用户打的字 —— UI 要弱化渲染。
+    // 用户手动点「继续」快捷提示走的是另一条路（正常 sendMessage），仍是真用户消息。
+    sendMessage(prompt, { force: true, metaKind: "stall-wake" });
     // 队列恢复不在此时执行——等醒词回合 turnEnded 后由 watchQueueGate 统一 resume
   }
 

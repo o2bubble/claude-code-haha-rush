@@ -3,11 +3,11 @@
 // returned as a typed ChatEffect that the runner applies. Input is the raw
 // wire message (the protocol IS the interface — no second vocabulary).
 
-import type { ChatState, ChatMessage, ToolUse } from "../stores/chatStore";
+import type { ChatState, ChatMessage, MetaKind, ToolUse } from "../stores/chatStore";
 import type { PlanTask } from "../stores/planStore";
 import type { SubAgentInfo, SubAgentMessage } from "../stores/subAgentStore";
 
-export type { ChatState, ChatMessage, ToolUse, PlanTask, SubAgentInfo, SubAgentMessage };
+export type { ChatState, ChatMessage, MetaKind, ToolUse, PlanTask, SubAgentInfo, SubAgentMessage };
 
 /** A raw message as received on the WebSocket (post stream_event unwrap). */
 export type WireMessage = Record<string, any>;
@@ -37,6 +37,12 @@ export type ChatEffect =
  *  the settings store at dispatch time; tests pass explicit values. */
 export interface ReduceCtx {
   savedPermissionMode?: string;
+  /** 「流卡死自动唤醒」用过的提示词（默认值 + 用户自定义）。
+   *
+   *  用途：这些醒词是 GUI **程序代发**的，但后端把它们当普通 user 消息落盘
+   *  （没有 isMeta），重载历史时只能按文本识别成「程序消息」而不是用户发言。
+   *  由 runner 从设置里读出传入 —— reducer 保持纯函数。 */
+  stallWakePrompts?: readonly string[];
   now?: () => number;
   uuid?: () => string;
 }

@@ -958,6 +958,10 @@ const zh = {
     submit: "提交",
   },
   message: {
+    metaInterrupt: "中断标记",
+    metaInterruptHint: "这里是你按 Esc 中断的位置。Claude Code 会写入一条这样的标记让对话保持完整，它并不是你打的字",
+    metaStallWake: "自动唤醒",
+    metaStallWakeHint: "输出长时间没有响应时，程序自动中断并发出的「继续」提示（不是你手动输入的）。用的是设置里的醒词",
     metaLabel: "程序自动消息",
     metaHint: "由程序自动插入、不是你实际输入的消息。例如恢复会话时发现上一轮被中断，会自动补一条「继续上次未完成的内容」。点击展开/收起全文",
     copy: "复制",

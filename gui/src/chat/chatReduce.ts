@@ -491,7 +491,9 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
       };
       if (inner.session_id) ns.sessionId = inner.session_id;
       if (Array.isArray(inner.messages)) {
-        const merged = mergeSessionMessages(inner.messages, uuid);
+        const merged = mergeSessionMessages(inner.messages, uuid, {
+          stallWakePrompts: ctx.stallWakePrompts,
+        });
         ns.messages = merged;
         ns.streaming = false;
         outer: for (let i = merged.length - 1; i >= 0; i--) {

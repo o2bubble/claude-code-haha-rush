@@ -4,6 +4,22 @@ import { windowBus } from "../services/windowBus";
 import { Events } from "../services/events";
 import { emptyChatState } from "../chat/chatReduce";
 
+/** 程序消息的成因 —— 决定消息列表里显示的徽标文案。
+ *
+ *  三种都**不是用户打的字**，但来源不同，排查时要能分开看。 */
+export type MetaKind =
+  /** 后端 `isMeta: true` 的合成消息。典型：恢复会话时发现上一轮被中断，
+   *  补一条 "Continue from where you left off."（src/utils/conversationRecovery.ts）。 */
+  | "auto"
+  /** 用户按 Esc 中断时后端写入的 `[Request interrupted by user]` 标记。
+   *  ⚠️ 它**没有** isMeta 字段（见 src/utils/messages.ts 的 createUserInterruptionMessage），
+   *  只能靠内容识别 —— 原生 TUI 也把它渲染成 "Interrupted · What should Claude do instead?"，
+   *  而不是用户消息。 */
+  | "interrupt"
+  /** GUI 自己发的「流卡死唤醒」醒词（chatSession.wakeStream）。
+   *  走的是正常发送通道，所以后端看起来就是一条用户消息。 */
+  | "stall-wake";
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -12,15 +28,15 @@ export interface ChatMessage {
   streaming?: boolean;
   thinking?: string;
   toolUses?: ToolUse[];
-  /** 程序合成、**不是用户实际输入**的消息（后端 `isMeta: true`）。
+  /** 程序合成、**不是用户实际输入**的消息。
    *
-   *  典型来源：恢复会话时发现上一轮被中断（停在 tool_result / attachment 上），
-   *  Claude Code 会补一条 `"Continue from where you left off."` 让 API 对话合法
-   *  —— 见 `src/utils/conversationRecovery.ts`。
+   *  只看这个布尔值即可决定"是否弱化渲染"；具体成因看 `metaKind`。
    *
    *  UI 上**弱化但保留**：完全隐藏会让排查问题时看不出"AI 为什么接着往下说"。
    *  渲染见 components/chat/MessageItem.tsx。 */
   isMeta?: boolean;
+  /** 程序消息的成因（缺省按 `"auto"` 处理）。仅当 `isMeta` 为真时有意义。 */
+  metaKind?: MetaKind;
 }
 
 export interface ToolUse {
