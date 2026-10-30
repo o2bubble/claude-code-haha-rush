@@ -1,5 +1,7 @@
 import axios, { type AxiosResponse } from 'axios'
 import { LRUCache } from 'lru-cache'
+import { getIsNonInteractiveSession } from '../../bootstrap/state.js'
+import { fetchViaServer } from './serverFetch.js'
 import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
@@ -16,6 +18,13 @@ import { getSettings_DEPRECATED } from '../../utils/settings/settings.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
 import { isPreapprovedHost } from './preapproved.js'
 import { makeSecondaryModelPrompt } from './prompt.js'
+
+/** 这些原因属于"本来就没打算走服务端"，不算异常，不打日志。 */
+const SERVER_FETCH_QUIET_REASONS = new Set([
+  'no-endpoint',
+  'no-token',
+  'host-marked-unsupported',
+])
 
 // Custom error classes for domain blocking
 class DomainBlockedError extends Error {
@@ -408,6 +417,39 @@ export async function getURLMarkdownContent(
       throw e
     }
     logError(e)
+  }
+
+  // ── 先试 provider 侧的抓取（DeepSeek `/v1/tools/fetch`）──
+  //
+  // 上面的 URL 校验与域名黑名单**已经执行过**，所以这条路并没有绕过安全检查。
+  //
+  // ⚠️ 一处有意的行为差异：provider 自己跟随重定向，我们拿不到中间跳转，
+  // 因此**不会**走本地那条「跨域重定向 → 让模型带新 URL 再请求一次」的流程。
+  // 代价是省掉一次人工确认；收益是内容拿得到（本地常因反爬/JS 渲染失败）。
+  // 拿到的只是纯文本 markdown，不执行任何脚本。
+  const viaServer = await fetchViaServer(
+    upgradedUrl,
+    abortController.signal,
+    getIsNonInteractiveSession(),
+  )
+  if (viaServer.status === 'ok') {
+    const contentBytes = Buffer.byteLength(viaServer.content)
+    const entry: CacheEntry = {
+      bytes: contentBytes,
+      code: 200,
+      codeText: 'OK',
+      content: viaServer.content,
+      contentType: 'text/markdown',
+    }
+    URL_CACHE.set(url, entry, { size: Math.max(1, contentBytes) })
+    return entry
+  }
+  // 只有"真的试过但没成功"才值得记一笔日志 —— no-endpoint / no-token 是
+  // 正常配置（官方端点、没配 key 走别处），每次都打日志只会刷屏。
+  if (!SERVER_FETCH_QUIET_REASONS.has(viaServer.reason)) {
+    logError(
+      new Error(`[webfetch] server-side fetch skipped/failed (${viaServer.reason}) for ${upgradedUrl}`),
+    )
   }
 
   const response = await getWithPermittedRedirects(
