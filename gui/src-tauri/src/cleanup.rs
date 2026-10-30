@@ -64,10 +64,11 @@ pub struct ScanRoots {
     pub app_data_dir: Option<PathBuf>,
     /// 启动页工作区列表（未归一化，本模块统一归一化并去重）
     pub workspaces: Vec<String>,
-    /// 当前有活动实例绑定的工作区（已经归一化过的）
+    /// **其他**活动实例绑定的工作区（本进程自己不算）。
+    ///
+    /// 命名保留 `active_workspaces`，语义收窄为"别人正在用" —— 由调用方保证
+    /// 已排除自身 pid。这一层不做 pid 判断：本模块不读进程表，只做文件系统。
     pub active_workspaces: Vec<String>,
-    /// 本进程正在使用的路径（归一化）；这些项标 `in-use`
-    pub in_use_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -168,11 +169,16 @@ fn mtime_ms(md: &std::fs::Metadata) -> Option<u64> {
 /// 目录上本身就是可观的开销。
 fn stat_tree(root: &Path, deadline: Instant) -> Stats {
     let mut st = Stats::default();
-    if !root.exists() {
+    let Ok(md) = std::fs::metadata(root) else {
         return st;
-    }
-    if let Ok(md) = std::fs::metadata(root) {
-        st.newest_ms = mtime_ms(&md);
+    };
+    st.newest_ms = mtime_ms(&md);
+    // 单文件目标（如 `edit-history.jsonl`）直接返回 —— 否则会落到下面的
+    // `read_dir`，对文件失败后返回全 0，清单里显示「0 B / 0 个文件」。
+    if md.is_file() {
+        st.files = 1;
+        st.bytes = md.len();
+        return st;
     }
     let mut stack = vec![root.to_path_buf()];
     let mut ticks: u32 = 0;
@@ -267,11 +273,6 @@ pub fn scan(roots: &ScanRoots, item_timeout: Duration) -> ScanResult {
         .iter()
         .map(|w| normalize_path(w))
         .collect();
-    let in_use: HashSet<String> = roots
-        .in_use_paths
-        .iter()
-        .map(|w| normalize_path(w))
-        .collect();
     let workspaces = dedupe_workspaces(&roots.workspaces);
 
     // ── 用户级：~/.claude ──
@@ -285,24 +286,64 @@ pub fn scan(roots: &ScanRoots, item_timeout: Duration) -> ScanResult {
             push_if_exists(&mut items, claude, kind, rel, cat, item_timeout);
         }
 
-        // 所有项目下的 tool-results（每个会话一个子目录）
-        if let Some(projects) = Some(claude.join("projects")) {
-            if let Ok(dirs) = std::fs::read_dir(&projects) {
-                let mut subdirs: Vec<PathBuf> = dirs
+        // ── projects/<项目>/ 下的三类东西 ──
+        //
+        // 目录结构是 **三层**：
+        //   projects/<项目 slug>/
+        //     <会话 id>.jsonl          会话记录（不清理）
+        //     edit-history.jsonl       编辑历史日志（清理，归「编辑快照」）
+        //     <会话 id>/               会话子目录
+        //       tool-results/          工具输出（清理）
+        //       subagents/             子代理执行记录（清理）
+        //
+        // ⚠️ 首版把 tool-results 当成 `projects/<项目>/tool-results` —— 少了
+        // `<会话 id>` 这一层，**从来没扫到过任何东西**（2026-10-30 用户实测发现）。
+        if let Ok(projs) = std::fs::read_dir(claude.join("projects")) {
+            let mut project_dirs: Vec<PathBuf> = projs
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            project_dirs.sort();
+            for proj in project_dirs {
+                // ① 编辑历史日志：单个文件，属于「编辑快照」（删了同样丢失历史）
+                let edit_history = proj.join("edit-history.jsonl");
+                if edit_history.is_file() {
+                    let st = stat_tree(&edit_history, Instant::now() + item_timeout);
+                    items.push(make_item(
+                        &format!("edit-history:{}", edit_history.display()),
+                        CAT_FILE_HISTORY,
+                        "edit-history",
+                        &edit_history,
+                        st,
+                    ));
+                }
+
+                // ② 每个会话子目录下的 tool-results / subagents
+                let Ok(sessions) = std::fs::read_dir(&proj) else {
+                    continue;
+                };
+                let mut session_dirs: Vec<PathBuf> = sessions
                     .flatten()
                     .map(|e| e.path())
                     .filter(|p| p.is_dir())
                     .collect();
-                subdirs.sort();
-                for proj in subdirs {
-                    let tr = proj.join("tool-results");
-                    if tr.is_dir() {
-                        let st = stat_tree(&tr, Instant::now() + item_timeout);
+                session_dirs.sort();
+                for session in session_dirs {
+                    for (kind, dirname) in [
+                        ("tool-results", "tool-results"),
+                        ("subagents", "subagents"),
+                    ] {
+                        let target = session.join(dirname);
+                        if !target.is_dir() {
+                            continue;
+                        }
+                        let st = stat_tree(&target, Instant::now() + item_timeout);
                         items.push(make_item(
-                            &format!("tool-results:{}", tr.display()),
+                            &format!("{kind}:{}", target.display()),
                             CAT_TEMP,
-                            "tool-results",
-                            &tr,
+                            kind,
+                            &target,
                             st,
                         ));
                     }
@@ -391,17 +432,6 @@ pub fn scan(roots: &ScanRoots, item_timeout: Duration) -> ScanResult {
                 it.blocked_reason = Some("active-workspace".into());
             }
             items.push(it);
-        }
-    }
-
-    // 本进程正在使用的项：优先于其他判定
-    for it in items.iter_mut() {
-        if !it.deletable {
-            continue;
-        }
-        if in_use.contains(&normalize_path(&it.path)) {
-            it.deletable = false;
-            it.blocked_reason = Some("in-use".into());
         }
     }
 
@@ -710,6 +740,75 @@ mod tests {
         std::fs::remove_dir_all(&claude).ok();
     }
 
+    /// 三层结构：`projects/<项目>/<会话 id>/{tool-results,subagents}`。
+    ///
+    /// 首版把它当成 `projects/<项目>/tool-results`（少一层），导致这部分
+    /// **从来没扫到过任何东西** —— 而且旧的测试只覆盖了 shell-snapshots，
+    /// 所以这个 bug 一路溜到了用户手里。这条测试就是为了钉死层级。
+    #[test]
+    fn scan_finds_tool_results_and_subagents_under_session_dir() {
+        let claude = tmp("nested");
+        let proj = claude.join("projects/C--Storage-work-demo");
+        let session = proj.join("1a2b3c4d-0000-0000-0000-000000000000");
+        write(&session.join("tool-results/out.txt"), 100);
+        write(&session.join("subagents/agent.jsonl"), 250);
+
+        let roots = ScanRoots {
+            claude_dir: Some(claude.clone()),
+            ..Default::default()
+        };
+        let r = scan(&roots, Duration::from_secs(5));
+
+        let tr = r
+            .items
+            .iter()
+            .find(|i| i.kind == "tool-results")
+            .expect("tool-results 必须被扫到（三层路径）");
+        assert_eq!(tr.size_bytes, 100);
+        assert_eq!(tr.category, CAT_TEMP);
+
+        let sa = r
+            .items
+            .iter()
+            .find(|i| i.kind == "subagents")
+            .expect("subagents 必须被扫到");
+        assert_eq!(sa.size_bytes, 250);
+        assert_eq!(sa.category, CAT_TEMP);
+
+        std::fs::remove_dir_all(&claude).ok();
+    }
+
+    /// `edit-history.jsonl` 是单文件目标，必须能统计出真实大小
+    /// （`stat_tree` 早年只处理目录，对文件会返回 0 B）。
+    #[test]
+    fn scan_finds_edit_history_file_with_real_size() {
+        let claude = tmp("edithist");
+        let proj = claude.join("projects/C--Storage-work-demo");
+        write(&proj.join("edit-history.jsonl"), 4096);
+        write(&proj.join("some-session.jsonl"), 999);
+
+        let roots = ScanRoots {
+            claude_dir: Some(claude.clone()),
+            ..Default::default()
+        };
+        let r = scan(&roots, Duration::from_secs(5));
+
+        let eh = r
+            .items
+            .iter()
+            .find(|i| i.kind == "edit-history")
+            .expect("edit-history.jsonl 必须被扫到");
+        assert_eq!(eh.size_bytes, 4096, "单文件也要算出真实大小");
+        assert_eq!(eh.file_count, 1);
+        assert_eq!(eh.category, CAT_FILE_HISTORY, "归入「编辑快照」，默认不勾");
+        assert!(eh.deletable);
+
+        // 会话 jsonl 本身不该出现在任何清理项里（那是唯一不可再生的数据）
+        assert!(!r.items.iter().any(|i| i.path.ends_with("some-session.jsonl")));
+
+        std::fs::remove_dir_all(&claude).ok();
+    }
+
     #[test]
     fn orphan_needs_both_decodable_and_missing() {
         let claude = tmp("orphan");
@@ -894,3 +993,4 @@ mod tests {
         std::fs::remove_dir_all(&claude).ok();
     }
 }
+

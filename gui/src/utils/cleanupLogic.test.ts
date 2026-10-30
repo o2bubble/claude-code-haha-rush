@@ -11,6 +11,8 @@ import {
   DEFAULT_CHECKED,
   NEEDS_CONFIRM,
   buildDeleteRequest,
+  hasForceableItems,
+  summarizeBlocked,
   dedupeWorkspaces,
   formatBytes,
   initialSelection,
@@ -164,5 +166,63 @@ describe("格式化与结果摘要", () => {
     expect(s.failCount).toBe(1);
     expect(s.freedBytes).toBe(30);
     expect(s.failures.map((f) => f.path)).toEqual(["C:/b"]);
+  });
+});
+
+// ── 强制包含被跳过的项 ──
+//
+// 规格里「有强制清理开关，默认关闭」这一条首版没实现。它的必要性来自实际场景：
+// 其他窗口正在用的工作区默认跳过，但若那是**残留的实例记录**（PID 复用过、
+// 进程早没了），没有开关就等于永远清不掉。
+//
+// 但 `protected`（`.git` 配置版本仓库）**永远**不能包含 —— 它不是垃圾。
+describe("强制包含", () => {
+  const items = [
+    item({ id: "ok", category: "temp" }),
+    item({ id: "used", category: "temp", deletable: false, blockedReason: "active-workspace" }),
+    item({ id: "git", category: "archive", deletable: false, blockedReason: "protected" }),
+  ];
+
+  it("默认不带被跳过的项", () => {
+    const req = buildDeleteRequest(new Set<CleanupCategory>(["temp", "archive"]), items);
+    expect(req.map((i) => i.id)).toEqual(["ok"]);
+  });
+
+  it("force 后带上可强制项", () => {
+    const req = buildDeleteRequest(new Set<CleanupCategory>(["temp", "archive"]), items, true);
+    expect(req.map((i) => i.id)).toEqual(["ok", "used"]);
+  });
+
+  it("force **也带不上** protected —— .git 永远不删", () => {
+    const req = buildDeleteRequest(new Set<CleanupCategory>(["temp", "archive"]), items, true);
+    expect(req.some((i) => i.id === "git")).toBe(false);
+  });
+
+  it("汇总把可强制与受保护分开计数", () => {
+    const s = summarizeBlocked(items);
+    expect(s).toEqual({ forced: 1, protected: 1, total: 2 });
+  });
+
+  it("只有受保护项时，强制开关不该出现", () => {
+    const onlyProtected = [item({ id: "git", category: "archive", deletable: false, blockedReason: "protected" })];
+    expect(hasForceableItems(onlyProtected)).toBe(false);
+    expect(hasForceableItems(items)).toBe(true);
+  });
+
+  it("类别全是可强制项时，force 打开后可勾选", () => {
+    const allBlocked = [
+      item({ id: "a", category: "temp", deletable: false, blockedReason: "active-workspace" }),
+    ];
+    expect(isCategorySelectable("temp", allBlocked)).toBe(false);
+    expect(isCategorySelectable("temp", allBlocked, true)).toBe(true);
+  });
+
+  it("force 打开后汇总把可强制项也算进去", () => {
+    const all = [
+      item({ id: "a", category: "temp", sizeBytes: 10, fileCount: 1 }),
+      item({ id: "b", category: "temp", sizeBytes: 20, fileCount: 2, deletable: false, blockedReason: "active-workspace" }),
+    ];
+    expect(summarizeCategory("temp", all).bytes).toBe(10);
+    expect(summarizeCategory("temp", all, true).bytes).toBe(30);
   });
 });

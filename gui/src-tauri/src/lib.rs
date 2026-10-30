@@ -2085,13 +2085,22 @@ fn cleanup_log_path() -> Option<std::path::PathBuf> {
     instances::app_data_dir_early().map(|d| d.join("cleanup-log.jsonl"))
 }
 
-/// 当前有活动实例绑定的工作区 —— 这些工作区里的东西默认不给清（规格 Q14）。
-fn active_instance_workspaces() -> Vec<String> {
+/// **其他**活动实例绑定的工作区 —— 只有这些才默认不给清。
+///
+/// ⚠️ 必须排除**自己**（2026-10-30 用户反馈）：用户打开清理工具时，
+/// 当前工作区就是他自己正在用的那个。若把"有活动实例"当成"不许清"，
+/// 他自己的工作区永远清不到 —— 而这恰恰是最该清的地方。
+///
+/// 用 pid 比较：`collect_live_instances` 给的记录里带 pid，与本进程
+/// `std::process::id()` 相同的就是自己。
+fn other_instance_workspaces() -> Vec<String> {
     let Some(dir) = instances::app_data_dir_early() else {
         return Vec::new();
     };
+    let me = std::process::id();
     instances::collect_live_instances(&dir, instances::is_instance_alive)
         .into_iter()
+        .filter(|r| r.pid != me)
         .map(|r| r.workspace)
         .filter(|w| !w.trim().is_empty())
         .collect()
@@ -2108,18 +2117,10 @@ async fn cleanup_scan(
     let roots = cleanup::ScanRoots {
         claude_dir: cleanup_claude_dir(),
         app_data_dir: instances::app_data_dir_early(),
-        workspaces: workspaces.unwrap_or_else(active_instance_workspaces),
-        active_workspaces: active_instance_workspaces(),
-        // 本进程正在使用的东西：当前绑定的工作区整体视为在用
-        // （正在这里跑会话，它的临时文件随时可能被读写）。
-        in_use_paths: {
-            let w = settings::bound_work_dir();
-            if w.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![w]
-            }
-        },
+        workspaces: workspaces.unwrap_or_else(other_instance_workspaces),
+        // 只保护**其他**实例的工作区。自己这个不保护 —— 用户打开清理工具
+        // 就是在这个工作区里，把他也跳过等于永远清不到（2026-10-30 反馈）。
+        active_workspaces: other_instance_workspaces(),
     };
 
     // 扫描是同步的重活（递归目录），放到阻塞线程池里跑，别卡住 async 运行时。

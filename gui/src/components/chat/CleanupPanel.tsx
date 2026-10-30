@@ -22,7 +22,9 @@ import {
   initialSelection,
   isCategorySelectable,
   needsConfirm,
+  summarizeBlocked,
   summarizeCategory,
+  hasForceableItems,
   summarizeRun,
   type CleanupCategory,
   type CleanupItem,
@@ -129,8 +131,16 @@ export const CleanupPanel = memo(function CleanupPanel() {
   const [report, setReport] = useState<RunReport | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 强制包含被跳过的项（规格：默认关闭）。
+   *
+   * 存在的理由：其他窗口正在用的工作区会被默认跳过，但如果那个窗口是**残留**
+   * 的实例记录（PID 复用过、进程其实早没了），没有开关就等于永远清不掉。
+   * 只影响 `active-workspace` 这类可绕过的保护；`.git` 是 protected，永不包含。 */
+  const [force, setForce] = useState(false);
 
   const items = scan?.items ?? [];
+  const blockedStats = useMemo(() => summarizeBlocked(items), [items]);
+  const canForce = useMemo(() => hasForceableItems(items), [items]);
 
   /** 启动页那份工作区列表 + 最近记录（去重）。 */
   const workspaces = useMemo(() => {
@@ -169,7 +179,7 @@ export const CleanupPanel = memo(function CleanupPanel() {
 
   const toggleCategory = useCallback(
     (c: CleanupCategory) => {
-      if (!isCategorySelectable(c, items)) return;
+      if (!isCategorySelectable(c, items, force)) return;
       setSelection((prev) => {
         const next = new Set(prev);
         if (next.has(c)) next.delete(c);
@@ -177,7 +187,7 @@ export const CleanupPanel = memo(function CleanupPanel() {
         return next;
       });
     },
-    [items],
+    [items, force],
   );
 
   const toggleExpand = useCallback((c: CleanupCategory) => {
@@ -190,8 +200,8 @@ export const CleanupPanel = memo(function CleanupPanel() {
   }, []);
 
   const payload = useMemo(
-    () => buildDeleteRequest(selection, items),
-    [selection, items],
+    () => buildDeleteRequest(selection, items, force),
+    [selection, items, force],
   );
   const payloadBytes = useMemo(
     () => payload.reduce((acc, i) => acc + i.sizeBytes, 0),
@@ -261,10 +271,43 @@ export const CleanupPanel = memo(function CleanupPanel() {
           <div style={S.meta}>{t("cleanup.nothingFound")}</div>
         )}
 
+        {/* 跳过项说明 + 强制开关。
+            其他窗口正在用的工作区默认跳过；但如果那是残留的实例记录
+            （PID 复用过、进程早没了），没有开关就永远清不掉。 */}
+        {blockedStats.total > 0 && (
+          <div style={{ ...S.warn, display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              {t("cleanup.blockedSummary", { count: blockedStats.total })}
+              {blockedStats.protected > 0 && (
+                <div style={{ marginTop: 2 }}>
+                  {t("cleanup.blockedProtected", { count: blockedStats.protected })}
+                </div>
+              )}
+            </div>
+            {canForce && (
+              <label
+                style={{
+                  display: "flex", alignItems: "center", gap: 4,
+                  cursor: "pointer", whiteSpace: "nowrap", color: "var(--fg-secondary)",
+                }}
+                title={t("cleanup.forceHint")}
+              >
+                <input
+                  type="checkbox"
+                  checked={force}
+                  onChange={(e) => setForce(e.target.checked)}
+                  style={{ cursor: "pointer" }}
+                />
+                {t("cleanup.forceLabel")}
+              </label>
+            )}
+          </div>
+        )}
+
         {CATEGORY_ORDER.map((cat) => {
-          const { bytes, files, entries } = summarizeCategory(cat, items);
+          const { bytes, files, entries } = summarizeCategory(cat, items, force);
           if (entries.length === 0) return null;
-          const selectable = isCategorySelectable(cat, items);
+          const selectable = isCategorySelectable(cat, items, force);
           const checked = selection.has(cat) && selectable;
           const isOpen = expanded.has(cat);
           return (

@@ -82,36 +82,83 @@ export function initialSelection(): Set<CleanupCategory> {
   );
 }
 
-/** 某个类别能否被勾选：至少有一条可删项，且不是被整体保护的类型。 */
+/** 某个类别能否被勾选：至少有一条能删的项。
+ *
+ * `force` 打开后被跳过的项也算「能删」（`protected` 除外）。
+ * 否则一个类别若全是「其他窗口正在用」的项，打开开关后仍然勾不动。 */
 export function isCategorySelectable(
   category: CleanupCategory,
   items: readonly CleanupItem[],
+  force = false,
 ): boolean {
-  return items.some((i) => i.category === category && i.deletable);
+  return items.some(
+    (i) =>
+      i.category === category &&
+      (i.deletable || (force && i.blockedReason !== "protected")),
+  );
 }
 
-/** 汇总某类别：可删项总大小 / 文件数 / 明细。 */
+/** 汇总某类别：可删项总大小 / 文件数 / 明细（`force` 时把可强制项也算上）。 */
 export function summarizeCategory(
   category: CleanupCategory,
   items: readonly CleanupItem[],
+  force = false,
 ): { bytes: number; files: number; entries: CleanupItem[] } {
   const entries = items.filter((i) => i.category === category);
   let bytes = 0;
   let files = 0;
   for (const e of entries) {
-    if (!e.deletable) continue;
+    const counts = e.deletable || (force && e.blockedReason !== "protected");
+    if (!counts) continue;
     bytes += e.sizeBytes;
     files += e.fileCount;
   }
   return { bytes, files, entries };
 }
 
-/** 只保留可删项 —— 灰掉的东西永远不该进入请求载荷。 */
+/** 被跳过的项统计。
+ *
+ * `forced` 与 `protected` 必须分开：前者是「别人正在用」这类**可绕过**的保护，
+ * 后者（`.git` 配置版本仓库）**永远不能**包含 —— 删掉就丢配置历史。 */
+export interface BlockedSummary {
+  /** 可强制包含的项（其他窗口正在使用的工作区） */
+  forced: number;
+  /** 永远不可包含的项（受保护） */
+  protected: number;
+  total: number;
+}
+
+export function summarizeBlocked(items: readonly CleanupItem[]): BlockedSummary {
+  let forced = 0;
+  let prot = 0;
+  for (const i of items) {
+    if (i.deletable) continue;
+    if (i.blockedReason === "protected") prot++;
+    else forced++;
+  }
+  return { forced, protected: prot, total: forced + prot };
+}
+
+/** 是否还有可被强制的项（供界面决定要不要显示开关）。 */
+export function hasForceableItems(items: readonly CleanupItem[]): boolean {
+  return items.some((i) => !i.deletable && i.blockedReason !== "protected");
+}
+
+/** 构造删除请求载荷。
+ *
+ * `force` 用于**用户明确要求**包含那些被跳过的项（规格：强制开关默认关闭）。
+ * 但 `protected` 永远排除 —— `.git` 是配置版本仓库，不是垃圾。
+ * Rust 侧 `validate_deletable` 也会再拒一次；这里只是不发注定失败的请求。 */
 export function buildDeleteRequest(
   selection: ReadonlySet<CleanupCategory>,
   items: readonly CleanupItem[],
+  force = false,
 ): CleanupItem[] {
-  return items.filter((i) => i.deletable && selection.has(i.category));
+  return items.filter((i) => {
+    if (!selection.has(i.category)) return false;
+    if (i.deletable) return true;
+    return force && i.blockedReason !== "protected";
+  });
 }
 
 /** 这一次操作是否需要弹二次确认。 */
