@@ -1,7 +1,10 @@
 """Proxy capture + forward for reverse-engineering official claude.exe.
 
 Usage:
-    python temp/proxy_stream.py [--port 8899] [--target https://api.deepseek.com/anthropic]
+    python scripts/reverse-engineering/proxy_stream.py \
+        [--port 8899] [--target https://api.deepseek.com/anthropic] [--out DIR]
+
+Captures default to <repo>/temp/capture/ (gitignored).
 """
 
 import argparse
@@ -14,7 +17,11 @@ import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CAPTURE_DIR = os.path.join(SCRIPT_DIR)
+# ⚠️ 不能写 SCRIPT_DIR —— 本脚本在 git 里，抓包产物会变成一堆未跟踪文件。
+# 默认落到仓库根下的 temp/capture/（temp/ 已 gitignore）。
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+DEFAULT_CAPTURE_DIR = os.path.join(REPO_ROOT, "temp", "capture")
+CAPTURE_DIR = DEFAULT_CAPTURE_DIR
 os.makedirs(CAPTURE_DIR, exist_ok=True)
 
 seq = 0
@@ -117,15 +124,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    global target_base, auth_token
+    global target_base, auth_token, CAPTURE_DIR
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8899)
     parser.add_argument("--target", default="https://api.deepseek.com/anthropic")
     parser.add_argument("--auth-token", default="")
+    parser.add_argument("--out", default=DEFAULT_CAPTURE_DIR,
+                        help="capture output dir (default: <repo>/temp/capture)")
     args = parser.parse_args()
 
     target_base = args.target.rstrip("/")
     auth_token = args.auth_token
+    CAPTURE_DIR = os.path.abspath(args.out)
+    os.makedirs(CAPTURE_DIR, exist_ok=True)
 
     print(f"Proxy: 127.0.0.1:{args.port} -> {args.target}", file=sys.stderr)
     print(f"Captures: {CAPTURE_DIR}/", file=sys.stderr)

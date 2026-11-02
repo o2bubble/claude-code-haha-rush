@@ -76,7 +76,7 @@ tengu_output_style, tengu_advisor, tengu_schedule, session_guidance, brief_mode,
 2. 运行 `proxy_stream.py` 拦截 HTTP 请求并转发到 DeepSeek API
 3. `claude.exe -p` 模式发出 API 请求 → 代理保存完整请求体（含 system prompt + tools）
 4. 主 agent 请求成功后 spawn 子 agent → 第二个请求携带子 agent 的 system prompt
-5. 提取 `subagent_type=claude` 的请求体，获得完整 system prompt（`temp/claude_agent_prompt.txt`）
+5. 提取 `subagent_type=claude` 的请求体，获得完整 system prompt（见 `prompts/capture_claude_subagent_prompt.txt`）
 
 ## 我们的优势（官方没有的）
 
@@ -143,7 +143,7 @@ tengu_output_style, tengu_advisor, tengu_schedule, session_guidance, brief_mode,
 1. ~~**Packet capture**: 设系统代理抓 HTTPS 请求~~ ✅ 已完成，`scripts/reverse-engineering/proxy_stream.py`
 2. ~~**Prompt + tools 提取**: 主 agent + 7 种子 agent system prompt~~ ✅ 已完成
 3. ~~**Agent 对齐**: 7 built-in agent prompt + 工具限制~~ ✅ 已完成
-4. ~~**PE 字符串提取**: 基础方法已验证~~ ✅ 文档保留在 `docs/reverse-engineering-guide.md`
+4. ~~**PE 字符串提取**: 基础方法已验证~~ ✅ 文档保留在 `reverse-engineering-guide.md`（同目录）
 
 ## 2026-07-16: 2.1.211 更新分析
 
@@ -167,4 +167,5 @@ tengu_output_style, tengu_advisor, tengu_schedule, session_guidance, brief_mode,
 
 ### 代理脚本
 
-`temp/proxy_stream.py` 已重建，支持 HTTPS 代理抓包 + DeepSeek 转发。
+`scripts/reverse-engineering/proxy_stream.py`（已入库），支持代理抓包 + 转发到目标 API。
+抓包产物写到 `temp/capture/`。
