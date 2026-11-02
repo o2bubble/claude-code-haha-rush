@@ -421,4 +421,31 @@ describe("hitRange — 命中区按中线切分", () => {
       expect(item.pixel).toBeLessThanOrEqual(r.bottom);
     });
   });
+
+  // 2026-11-02 用户反馈：「时间轴上只能点到点，其他用来随意时间的定位用不了了」。
+  // 根因就在这里：命中区只按邻居中线切分、没有封顶 —— 两个点隔 400px 时
+  // 每个点的隐形可点区域高达 200px，整条轴都被"点"吃掉。
+  it("命中区高度被 DOT_HIT_MAX **封顶**（稀疏处也只是一小圈）", () => {
+    const c = cl(100, 500);   // 相距 400px
+    for (let i = 0; i < c.length; i++) {
+      const r = hitRange(c, i);
+      expect(r.bottom - r.top).toBeLessThanOrEqual(DOT_HIT_MAX + 1e-9);
+    }
+  });
+
+  it("封顶后两点中间是**自由区**（不命中任何点）", () => {
+    const c = cl(100, 500);
+    const near = (y: number) =>
+      c.some((_, i) => {
+        const r = hitRange(c, i);
+        return y >= r.top && y <= r.bottom;
+      });
+    // 各占 DOT_HIT_MAX → 中间 111..489 都应该是自由区
+    expect(near(300)).toBe(false);
+    expect(near(200)).toBe(false);
+    expect(near(400)).toBe(false);
+    // 点自己附近仍然命中
+    expect(near(100)).toBe(true);
+    expect(near(500)).toBe(true);
+  });
 });
