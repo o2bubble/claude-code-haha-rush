@@ -1,10 +1,10 @@
 // TimeLineBar — 消息面板左侧的时间线导航栏（右侧有滚动条，放左边避免误触）。
-// 静止态：粗刻度标尺（日期分组 + 整点）。
+// 静止态：粗刻度标尺（日期分组 + 整点）。拖动/点击：指针 → 时间 → 定位到该时刻
+// 之前最近一条消息（按时间自由浏览）。
 //
-// 交互核心：**有用户提问刻度时，整条轴都是"选提问"** —— 指针落点永远解析为
-// 最近的那条提问（`seekIndexAt`），点击/拖动都直达那条消息的下标，不经过
-// 「像素→时间→该时刻之前最近一条」的反算（那条路会系统性落到上一轮的助手
-// 消息上）。只有完全没有提问刻度的会话才退化为时间轴。
+// 另有「用户提问」圆点：**瞄准圆点时**（±PROMPT_SNAP_RADIUS，或直接命中圆点的
+// DOM 命中区）直接取那条提问的 index，不经过时间反算 —— 反算会落到上一轮的
+// 助手消息上。轴的其他部分保持原来的自由扫时间，两者互不影响。
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { t } from "../../i18n";
@@ -12,7 +12,7 @@ import {
   buildTicks, seekIndexAt, pixelToTime, timeToPixel,
   segmentizeByDay, layoutSegments, MIN_SEGMENT_PX,
   findNearestPrompt, clusterPrompts, pickEven, hitRange,
-  DOT_HIT_MAX, DOT_HIT_MIN, TICK_HIT_WIDTH,
+  DOT_HIT_MAX, DOT_HIT_MIN, TICK_HIT_WIDTH, PROMPT_SNAP_RADIUS,
   type UserPrompt, type UserPromptHit, type PromptCluster,
 } from "./timelineMath";
 
@@ -215,9 +215,8 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
       const rect = el.getBoundingClientRect();
       const y = Math.min(el.clientHeight, Math.max(0, clientY - rect.top));
 
-      // 选中规则见 seekIndexAt：有提问刻度时永远是"最近的那条提问"（不限距离），
-      // 不再经过「像素→时间→该时刻之前最近一条」的反算 —— 那条路会系统性地
-      // 落到上一轮的助手消息上（实测真实会话偏离 1 秒即 10/10 全错）。
+      // 规则见 seekIndexAt：圆点附近才吸附到该提问；**其余位置照旧按时间定位**，
+      // 不能因为加了提问圆点就把自由扫时间挤掉（用户 2026-11-02 明确要求保留）。
       const idx = seekIndexAt(y, userTicksRef.current, layout, timestamps);
       if (idx >= 0) onSeekRef.current(idx);
     },
@@ -272,11 +271,12 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
     }
   }
 
-  // 当前选中的用户提示（悬停与**拖动**共用）——拖动时 pointerPixel 取自 dragY，
+  // 当前瞄准的用户提示（悬停与**拖动**共用）——拖动时 pointerPixel 取自 dragY，
   // 所以拖动过程中它就是"会跳到哪条"，浮层实时跟随，松开前就能确认。
-  // **不限距离**：与 seekFromClientY 用同一条规则，保证「预览哪条 = 点下去跳哪条」。
+  // 半径与 seekIndexAt 的吸附半径一致：保证「预览哪条 = 点下去跳哪条」，
+  // 同时离得远时不出预览（那时是自由扫时间，右侧显示的是时间标签）。
   const hoveredPrompt = useMemo(
-    () => (pointerPixel === null ? null : findNearestPrompt(pointerPixel, userTicks, Number.POSITIVE_INFINITY)),
+    () => (pointerPixel === null ? null : findNearestPrompt(pointerPixel, userTicks, PROMPT_SNAP_RADIUS)),
     [pointerPixel, userTicks],
   );
 

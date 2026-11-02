@@ -3,6 +3,7 @@ import {
   timeToIndex, segmentizeByDay, layoutSegments, pixelToTime, timeToPixel, buildTicks,
   promptPreview, findNearestPrompt, clusterPrompts, pickEven,
   hitRange, DOT_HIT_MAX, DOT_HIT_MIN, buildUserPrompts, seekIndexAt,
+  PROMPT_SNAP_RADIUS,
 } from "./timelineMath";
 
 const H = 3600_000;
@@ -203,33 +204,30 @@ describe("findNearestPrompt — 悬停命中查找", () => {
     expect(findNearestPrompt(50, [], 7)).toBeNull();
   });
 
-  // 时间线的交互规则（2026-10-31 用户反馈「总是定位不准」）：
-  // 整条轴都用来选提问 —— 指针离得再远也吸附到最近的那一条，不做时间反算。
-  // 反算的语义是「该时刻之前最近一条消息」，提问后面紧跟助手回复，
-  // 所以稍微偏上就会落到**上一轮**的助手消息（实测真实会话 10/10 全跳错）。
-  it("阈值给 Infinity = 不限距离，永远取最近的一条（时间线的选中规则）", () => {
-    const list = [mk(0, 10), mk(1, 300)];
-    expect(findNearestPrompt(260, list, Number.POSITIVE_INFINITY)?.index).toBe(1);
-    expect(findNearestPrompt(0, list, Number.POSITIVE_INFINITY)?.index).toBe(0);
-    expect(findNearestPrompt(9999, list, Number.POSITIVE_INFINITY)?.index).toBe(1);
+  // 时间线的吸附半径（2026-11-02 用户反馈「其他用来随意时间的定位用不了了」）：
+  // 吸附只在圆点附近生效，绝不能覆盖整条轴 —— 那会把自由扫时间挤掉。
+  it("PROMPT_SNAP_RADIUS 必须有限且不大（锁死「整条轴归提问」的回归）", () => {
+    expect(Number.isFinite(PROMPT_SNAP_RADIUS)).toBe(true);
+    expect(PROMPT_SNAP_RADIUS).toBeGreaterThan(0);
+    expect(PROMPT_SNAP_RADIUS).toBeLessThanOrEqual(12);
   });
 });
 
-// ── 时间线的选中规则（2026-10-31 用户反馈「总是定位不准」）──
+// ── 时间线的选中规则 ──
 //
-// 旧规则：像素 → 时间 → 「该时刻之前最近一条」。提问后面紧跟助手回复，
-// 所以指针只要落在提问点**正上方一点**，取到的就是上一轮的助手消息。
-// 用真实会话验过：偏离提问时刻 1 秒，10/10 全跳错。
-// 新规则：有提问刻度时整条轴都归提问所有 —— 永远取最近的一条，不限距离。
+// **圆点附近** → 精确跳那条提问（旧的时间反算会落到上一轮的助手消息：
+// 提问后面紧跟助手回复，指针稍偏上就取到回复那条，实测真实会话 10/10 全错）。
+// **其余位置** → 保持原来的时间反算，按时间自由浏览（这是时间线的本职，
+// 2026-11-02 用户明确要求保留）。
 describe("seekIndexAt — 时间线指针 → 消息下标", () => {
   const TS = [D0, D0 + 1000, D0 + 2000];
-  const layout = layoutSegments(segmentizeByDay(TS), 200, 0);
+  const layout = layoutSegments(segmentizeByDay(TS), 200, 0);   // 10ms / px
   const tick = (index: number, pixel: number) => ({
     index, time: D0 + pixel * 10, preview: `p${index}`, pixel,
   });
 
-  it("指针在提问点**上方**一点 → 仍然跳到那条提问（旧规则会落到上一条）", () => {
-    // 时间反算会得到 index 0（上一轮的助手消息）—— 这正是要修的偏差
+  it("指针在提问点**上方**一点 → 仍吸附到那条提问（旧规则会落到上一条）", () => {
+    // 其余位置的时间反算会得到 index 0（上一轮的助手消息）
     expect(seekIndexAt(90, [tick(1, 100)], layout, TS)).toBe(1);
   });
 
@@ -237,13 +235,20 @@ describe("seekIndexAt — 时间线指针 → 消息下标", () => {
     expect(seekIndexAt(110, [tick(1, 100)], layout, TS)).toBe(1);
   });
 
-  it("离得很远也吸附最近的一条提问（整条轴都用来选提问）", () => {
-    const ticks = [tick(0, 20), tick(2, 180)];
-    expect(seekIndexAt(0, ticks, layout, TS)).toBe(0);
-    expect(seekIndexAt(140, ticks, layout, TS)).toBe(2);
+  it("超出吸附半径 → 回到时间轴反算（自由扫时间不被圆点吃掉）", () => {
+    // 21 条消息（每 100ms 一条），像素 20 = D0+200 = index 2
+    const ts = Array.from({ length: 21 }, (_, i) => D0 + i * 100);
+    const ticks = [tick(15, 20)];
+    // 命中（±10px 内）→ 该提问
+    expect(seekIndexAt(20, ticks, layout, ts)).toBe(15);
+    expect(seekIndexAt(30, ticks, layout, ts)).toBe(15);
+    expect(seekIndexAt(10, ticks, layout, ts)).toBe(15);
+    // 离开吸附半径 → 按时间定位（该时刻之前最近一条，不是提问的 index 15）
+    expect(seekIndexAt(55, ticks, layout, ts)).toBe(5);
+    expect(seekIndexAt(100, ticks, layout, ts)).toBe(10);
   });
 
-  it("没有任何提问刻度时才退回时间轴反算（该时刻之前最近一条）", () => {
+  it("没有任何提问刻度 → 时间轴反算（该时刻之前最近一条）", () => {
     expect(seekIndexAt(90, [], layout, TS)).toBe(0);
     expect(seekIndexAt(200, [], layout, TS)).toBe(2);
   });

@@ -217,24 +217,35 @@ export function timeToPixel(t: number, layout: SegmentLayout[]): number {
 }
 
 /**
+ * 时间线上"瞄准了某个提问圆点"的吸附半径（px）。
+ *
+ * 只管**靠近圆点**这一小段；轴的其他部分仍然是自由扫时间。
+ * 圆点自身还有更大的 DOM 命中区（见 `hitRange`，最密处也 ≥ DOT_HIT_MIN），
+ * 这里兜的是"在轴上空处按下、但明显是冲这个点来的"的情况。
+ *
+ * ⚠️ 不要把半径放大到覆盖整条轴 —— 那会让「按时间自由定位」彻底失效
+ * （用户 2026-11-02 明确反馈过）。
+ */
+export const PROMPT_SNAP_RADIUS = 10;
+
+/**
  * 时间线定位：指针 y → 要跳转的消息下标。
  *
- * **有用户提问刻度时，整条轴都用来选提问**：永远取离 y 最近的那条，不看距离。
- * 为什么不再按时间反算：反算的语义是「该时刻之前最近一条消息」，而用户的提问
- * 后面紧跟助手回复 —— 指针只要落在提问点正上方一点，取到的就是**上一轮**的
- * 助手消息（实测真实会话：偏离 1 秒，10/10 全跳错）。用户要的是定位自己的
- * 消息，不是按时间粗略导航，所以刻度优先、且不需要精确点中。
- *
- * 没有提问刻度（如纯助手输出）时才退回时间轴反算。
+ * 两条规则各管一段：
+ * - **圆点附近（±snapRadius）** → 直接取那条提问的 index，不经过时间反算。
+ *   反算的语义是「该时刻之前最近一条消息」，而提问后面紧跟助手回复，
+ *   指针稍偏上就会取到**上一轮**的助手消息（实测偏离 1 秒 10/10 全错）。
+ * - **其余位置** → 时间轴反算（该时刻之前最近一条），保留按时间自由浏览。
  */
 export function seekIndexAt(
   y: number,
   ticks: readonly UserPromptHit[],
   layout: SegmentLayout[],
   timestamps: readonly number[],
+  snapRadius: number = PROMPT_SNAP_RADIUS,
 ): number {
   if (ticks.length > 0) {
-    const hit = findNearestPrompt(y, ticks, Number.POSITIVE_INFINITY);
+    const hit = findNearestPrompt(y, ticks, snapRadius);
     if (hit) return hit.index;
   }
   return timeToIndex(timestamps, pixelToTime(y, layout));
