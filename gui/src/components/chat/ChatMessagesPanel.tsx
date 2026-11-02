@@ -5,7 +5,7 @@ import { useChatBridge } from "./useChatBridge";
 import { MessageList } from "./MessageList";
 import { MessageSearchDialog } from "./MessageSearchDialog";
 import { TimeLineBar } from "./TimeLineBar";
-import { promptPreview, type UserPrompt } from "./timelineMath";
+import { buildUserPrompts } from "./timelineMath";
 import { useBackend } from "../../services/backendService";
 import { useEvent } from "../../services/useService";
 import { Events, type ChatStateChangedPayload, type SettingsChangedPayload } from "../../services/events";
@@ -31,21 +31,24 @@ function ChatMessagesPanelImpl() {
     setScrollTarget((prev) => ({ index, seq: (prev?.seq ?? 0) + 1 }));
   }, []);
 
-  // 时间线栏需要递增的消息时间戳（用于时间→索引二分定位）
-  const messageTimestamps = useMemo(
-    () => state.messages.map((m) => m.timestamp),
-    [state.messages]
+  // 面板实际渲染的消息数组。
+  //
+  // ⚠️ **时间线 / 搜索 / 列表必须吃同一个数组**：它们的 index 是数组下标，
+  // 一旦「只看我的消息」时有人传全量、有人传过滤后，点哪条都会跳到错位的消息，
+  // 末尾几条还会因为越界而完全没反应（旧实现就是这个毛病）。
+  const visibleMessages = useMemo(
+    () => (userOnly ? state.messages.filter((m) => m.role === "user") : state.messages),
+    [state.messages, userOnly],
   );
 
-  // 用户提示刻度：回溯"我在哪儿说过什么"（悬停显示预览）。preview 已折叠空白/截断。
-  const userPrompts = useMemo(() => {
-    const out: UserPrompt[] = [];
-    state.messages.forEach((m, i) => {
-      if (m.role !== "user") return;
-      out.push({ index: i, time: m.timestamp, preview: promptPreview(m.content) });
-    });
-    return out;
-  }, [state.messages]);
+  // 时间线栏需要递增的消息时间戳（用于时间→索引二分定位）
+  const messageTimestamps = useMemo(
+    () => visibleMessages.map((m) => m.timestamp),
+    [visibleMessages]
+  );
+
+  // 用户提示刻度：回溯"我在哪儿说过什么"。index 即 visibleMessages 下标。
+  const userPrompts = useMemo(() => buildUserPrompts(visibleMessages), [visibleMessages]);
 
   useChatBridge(backend.port);
 
@@ -120,9 +123,8 @@ function ChatMessagesPanelImpl() {
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>
           <MessageList
             key={`${state.sessionId ?? "no-session"}-${userOnly ? "user" : "all"}`}
-            messages={state.messages}
+            messages={visibleMessages}
             scrollTarget={scrollTarget}
-            onlyUser={userOnly}
           />
 
           {/* 切换会话进行中 —— 见上面 useEffect 的注释（延迟显示 + 叠加不替换） */}
@@ -167,7 +169,9 @@ function ChatMessagesPanelImpl() {
               静止态 0.7 透明度是为了不抢内容，激活态恒为 1。 */}
           <button
             type="button"
-            onClick={() => setUserOnly((v) => !v)}
+            // 切换过滤 = 换了一个数组，旧的跳转下标在新数组里无意义 —— 清掉，
+            // 否则重挂后会把列表滚到一条不相干的消息上。
+            onClick={() => { setUserOnly((v) => !v); setScrollTarget(null); }}
             title={userOnly ? t("message.showAllMessages") : t("message.onlyUser")}
             aria-label={userOnly ? t("message.showAllMessages") : t("message.onlyUser")}
             onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
@@ -208,7 +212,7 @@ function ChatMessagesPanelImpl() {
 
       {showSearch && (
         <MessageSearchDialog
-          messages={state.messages}
+          messages={visibleMessages}
           onJump={jumpTo}
           onClose={() => setShowSearch(false)}
         />

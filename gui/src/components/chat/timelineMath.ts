@@ -14,6 +14,24 @@ export interface UserPrompt {
   preview: string;
 }
 
+/** 从消息列表提取用户提问刻度。
+ *
+ *  ⚠️ **index 是传入数组的下标** —— 时间线/搜索/列表必须吃**同一个数组**
+ *  （「只看我的消息」模式下是过滤后的那份），否则点哪条跳哪条全会偏移。
+ *
+ *  跳过 `isMeta`：中断标记 / 自动续跑 / 自动唤醒这些是**程序代发的**，
+ *  不是用户问过的话，混进刻度里会让人点了却"找不到自己说过这句"。 */
+export function buildUserPrompts(
+  messages: readonly { role: string; isMeta?: boolean; timestamp: number; content: string }[],
+): UserPrompt[] {
+  const out: UserPrompt[] = [];
+  messages.forEach((m, i) => {
+    if (m.role !== "user" || m.isMeta) return;
+    out.push({ index: i, time: m.timestamp, preview: promptPreview(m.content) });
+  });
+  return out;
+}
+
 /** 落在用户提示上的悬停命中：带像素位置便于渲染高亮。 */
 export interface UserPromptHit extends UserPrompt {
   pixel: number;
@@ -36,10 +54,11 @@ export function promptPreview(text: string, maxLen = 60): string {
 }
 
 /** 找离 y（像素）最近且不超过 threshold 的用户提示；无命中 → null。
- *  两条都在阈值内时取更近的一条（刻度密时不至于乱跳）。 */
+ *  两条都在阈值内时取更近的一条（刻度密时不至于乱跳）。
+ *  threshold 传 `Infinity` = 不限距离、永远取最近的一条（时间线的选中规则，见 `seekIndexAt`）。 */
 export function findNearestPrompt(
   y: number,
-  prompts: UserPromptHit[],
+  prompts: readonly UserPromptHit[],
   threshold: number,
 ): UserPromptHit | null {
   let best: UserPromptHit | null = null;
@@ -107,7 +126,7 @@ export const MIN_SEGMENT_PX = 48;
 
 /** 时间 → 消息索引：二分找到「t 之前最近一条」消息（含重复时间戳的最后一条）。
  *  输入须按时间递增。t 早于首条 → 0；t 晚于末条 → 末条。空数组 → -1。 */
-export function timeToIndex(timestamps: number[], t: number): number {
+export function timeToIndex(timestamps: readonly number[], t: number): number {
   if (timestamps.length === 0) return -1;
   let lo = 0;
   let hi = timestamps.length - 1;
@@ -195,6 +214,30 @@ export function timeToPixel(t: number, layout: SegmentLayout[]): number {
     }
   }
   return last.end;
+}
+
+/**
+ * 时间线定位：指针 y → 要跳转的消息下标。
+ *
+ * **有用户提问刻度时，整条轴都用来选提问**：永远取离 y 最近的那条，不看距离。
+ * 为什么不再按时间反算：反算的语义是「该时刻之前最近一条消息」，而用户的提问
+ * 后面紧跟助手回复 —— 指针只要落在提问点正上方一点，取到的就是**上一轮**的
+ * 助手消息（实测真实会话：偏离 1 秒，10/10 全跳错）。用户要的是定位自己的
+ * 消息，不是按时间粗略导航，所以刻度优先、且不需要精确点中。
+ *
+ * 没有提问刻度（如纯助手输出）时才退回时间轴反算。
+ */
+export function seekIndexAt(
+  y: number,
+  ticks: readonly UserPromptHit[],
+  layout: SegmentLayout[],
+  timestamps: readonly number[],
+): number {
+  if (ticks.length > 0) {
+    const hit = findNearestPrompt(y, ticks, Number.POSITIVE_INFINITY);
+    if (hit) return hit.index;
+  }
+  return timeToIndex(timestamps, pixelToTime(y, layout));
 }
 
 /** 按时间跨度选小时节点步长（毫秒）。跨度越大步长越粗。 */

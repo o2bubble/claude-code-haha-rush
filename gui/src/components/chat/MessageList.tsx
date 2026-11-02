@@ -1,4 +1,4 @@
-import React, { useRef, useCallback, useLayoutEffect, useState, useEffect, useMemo } from "react";
+import React, { useRef, useCallback, useLayoutEffect, useState, useEffect } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 import type { ChatMessage } from "../../stores/chatStore";
@@ -8,10 +8,10 @@ import { ErrorBoundary } from "../ErrorBoundary";
 import { t } from "../../i18n";
 
 interface MessageListProps {
+  /** 面板实际渲染的消息（「只看我的消息」的过滤由调用方做 —— 时间线/搜索的
+   *  index 也基于同一个数组，否则下标空间不一致会导致跳错消息）。 */
   messages: ChatMessage[];
-  /** 只看用户消息（回顾自己发言历史）—— 过滤后虚拟列表只渲染 user 消息 */
-  onlyUser?: boolean;
-  /** 外部跳转目标（消息搜索）：index 是要滚到的消息下标，seq 递增触发 */
+  /** 外部跳转目标（消息搜索/时间线）：index 是 `messages` 的下标，seq 递增触发 */
   scrollTarget?: { index: number; seq: number } | null;
 }
 
@@ -37,24 +37,20 @@ function estimateHeight(m?: ChatMessage): number {
  *   新消息在下方累积不影响当前视口。
  * - 渲染窗口完全由虚拟列表决定,不再有 displayCount/冻结窗口那套机制。
  */
-export function MessageList({ messages, scrollTarget, onlyUser }: MessageListProps) {
+export function MessageList({ messages, scrollTarget }: MessageListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
-  const visibleMessages = useMemo(
-    () => (onlyUser ? messages.filter((m) => m.role === "user") : messages),
-    [messages, onlyUser],
-  );
   // 是否跟随底部:初始 true;任何上滚动作立即置 false,回到真正底部才恢复
   const followRef = useRef(true);
   const prevScrollTopRef = useRef(0);
   const prevScrollHeightRef = useRef(0);
 
   const rowVirtualizer = useVirtualizer({
-    count: visibleMessages.length,
+    count: messages.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => estimateHeight(visibleMessages[index]),
+    estimateSize: (index) => estimateHeight(messages[index]),
     overscan: 8,
-    getItemKey: (index) => visibleMessages[index]?.id ?? index,
+    getItemKey: (index) => messages[index]?.id ?? index,
     // 会话加载后直接锚定底部,避免首帧先画列表顶部再跳到底部(闪烁)
     initialOffset: () => Number.MAX_SAFE_INTEGER,
     // 默认 useFlushSync=true 会在 render/lifecycle 期间同步 flushSync(rerender),
@@ -99,11 +95,11 @@ export function MessageList({ messages, scrollTarget, onlyUser }: MessageListPro
     if (el) el.scrollTop = el.scrollHeight;
   }, []);
 
-  // 外部跳转（消息搜索）：滚动到指定消息并停止跟随，方便浏览匹配上下文
+  // 外部跳转（消息搜索 / 时间线）：滚动到指定消息并停止跟随，方便浏览匹配上下文
   useEffect(() => {
     if (!scrollTarget) return;
     const { index, seq } = scrollTarget;
-    if (index < 0 || index >= visibleMessages.length) return;
+    if (index < 0 || index >= messages.length) return;
     void seq;
     followRef.current = false;
     rowVirtualizer.scrollToIndex(index, { align: "center" });
@@ -121,7 +117,7 @@ export function MessageList({ messages, scrollTarget, onlyUser }: MessageListPro
           padding: "8px 16px",
         }}
       >
-        {visibleMessages.length === 0 ? (
+        {messages.length === 0 ? (
           <div
             style={{
               display: "flex",
@@ -155,8 +151,8 @@ export function MessageList({ messages, scrollTarget, onlyUser }: MessageListPro
               >
                 <ErrorBoundary panelName="Messages">
                   <MessageItem
-                    message={visibleMessages[virtualRow.index]}
-                    animateIn={virtualRow.index === visibleMessages.length - 1}
+                    message={messages[virtualRow.index]}
+                    animateIn={virtualRow.index === messages.length - 1}
                   />
                 </ErrorBoundary>
               </div>

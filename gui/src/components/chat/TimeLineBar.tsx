@@ -1,11 +1,15 @@
 // TimeLineBar — 消息面板左侧的时间线导航栏（右侧有滚动条，放左边避免误触）。
-// 静止态：粗刻度标尺（日期分组 + 整点）。拖动/点击：指针 → 时间（秒级 tooltip）→
-// 定位到该时刻之前最近一条消息（通过 onSeek(index) 通知父级滚动）。
+// 静止态：粗刻度标尺（日期分组 + 整点）。
+//
+// 交互核心：**有用户提问刻度时，整条轴都是"选提问"** —— 指针落点永远解析为
+// 最近的那条提问（`seekIndexAt`），点击/拖动都直达那条消息的下标，不经过
+// 「像素→时间→该时刻之前最近一条」的反算（那条路会系统性落到上一轮的助手
+// 消息上）。只有完全没有提问刻度的会话才退化为时间轴。
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { t } from "../../i18n";
 import {
-  buildTicks, timeToIndex, pixelToTime, timeToPixel,
+  buildTicks, seekIndexAt, pixelToTime, timeToPixel,
   segmentizeByDay, layoutSegments, MIN_SEGMENT_PX,
   findNearestPrompt, clusterPrompts, pickEven, hitRange,
   DOT_HIT_MAX, DOT_HIT_MIN, TICK_HIT_WIDTH,
@@ -24,8 +28,6 @@ interface TimeLineBarProps {
 /** 用户提示刻度的数量上限：超过则均分取样（保首末）。提示本就比助手消息稀疏，
  *  正常会话远达不到；设上限只为防极端场景糊成一条线。 */
 const MAX_USER_TICKS = 120;
-/** 吸附半径（px）：指针离刻度多近就"吸"到它。点击与拖动共用（走 seekFromClientY）。 */
-const PROMPT_HIT_RADIUS = 7;
 /** 渲染聚类阈值（px）：中心距小于它就并作一个标记。
  *  点的视觉直径约 6-7px（5px + 1px 描边），取 8 保证相邻点不接触。 */
 const CLUSTER_MIN_GAP = 8;
@@ -184,16 +186,11 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
       if (!el) return;
       const rect = el.getBoundingClientRect();
       const y = Math.min(el.clientHeight, Math.max(0, clientY - rect.top));
-      // 落在用户提示刻度上 → 直接跳该条。不做「像素→时间→二分」反算：
-      // 反算有时间取整误差，会落到前一条（实测点第 3 个刻度跳到了 index 3
-      // 而目标是 index 4）。刻度自身的 index 才是准确意图。
-      const hit = findNearestPrompt(y, userTicksRef.current, PROMPT_HIT_RADIUS);
-      if (hit) {
-        onSeekRef.current(hit.index);
-        return;
-      }
-      const time = pixelToTime(y, layout);
-      const idx = timeToIndex(timestamps, time);
+
+      // 选中规则见 seekIndexAt：有提问刻度时永远是"最近的那条提问"（不限距离），
+      // 不再经过「像素→时间→该时刻之前最近一条」的反算 —— 那条路会系统性地
+      // 落到上一轮的助手消息上（实测真实会话偏离 1 秒即 10/10 全错）。
+      const idx = seekIndexAt(y, userTicksRef.current, layout, timestamps);
       if (idx >= 0) onSeekRef.current(idx);
     },
     [layout, timestamps]
@@ -247,11 +244,11 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
     }
   }
 
-  // 当前吸附的用户提示刻度（悬停与**拖动**共用）——拖动时 pointerPixel 取自 dragY，
-  // 所以拖动过程中它就是"吸到了哪条"，浮层实时跟随，松开前就能确认。
-  // 早先 dragging 时返回 null，导致拖动全程看不到吸附结果（密集时无从判断）。
+  // 当前选中的用户提示（悬停与**拖动**共用）——拖动时 pointerPixel 取自 dragY，
+  // 所以拖动过程中它就是"会跳到哪条"，浮层实时跟随，松开前就能确认。
+  // **不限距离**：与 seekFromClientY 用同一条规则，保证「预览哪条 = 点下去跳哪条」。
   const hoveredPrompt = useMemo(
-    () => (pointerPixel === null ? null : findNearestPrompt(pointerPixel, userTicks, PROMPT_HIT_RADIUS)),
+    () => (pointerPixel === null ? null : findNearestPrompt(pointerPixel, userTicks, Number.POSITIVE_INFINITY)),
     [pointerPixel, userTicks],
   );
 
@@ -292,6 +289,9 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
 
   /** 鼠标直接在刻度点上（而不是按 Y 反查）时的精确命中，优先级更高。 */
   const activePrompt = exactHover ?? hoveredPrompt;
+  /** 指针线画在**选中项**上，而不是鼠标位置 —— 吸附后两者可能相距很远，
+   *  线停在鼠标处会让人以为"选的是这里"，而实际会跳另一个点。 */
+  const linePixel = activePrompt ? activePrompt.pixel : pointerPixel;
 
   // 吸附目标在其簇内的序号（密集时告诉用户"这里挤了几条、当前是第几条"）
   const clusterPos = useMemo(() => {
@@ -710,28 +710,28 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
         );
       })()}
 
-      {/* 拖动/悬停指针 + 时间提示（仅展开态） */}
-      {expanded && pointerPixel !== null && (
+      {/* 拖动/悬停指针 + 时间提示（仅展开态）。指针线定位到 `linePixel`（选中项）。 */}
+      {expanded && linePixel !== null && (
         <>
           <div
             style={{
               position: "absolute",
               left: 0,
               right: 0,
-              top: pointerPixel - 1,
+              top: linePixel - 1,
               height: 2,
               background: "var(--accent)",
               pointerEvents: "none",
               zIndex: 2,
             }}
           />
-          {/* 时间标签：吸附到用户提示时让位 —— 右侧预览浮层已含时间，避免重复 */}
+          {/* 时间标签：选中了用户提示时让位 —— 右侧预览浮层已含时间，避免重复 */}
           {!activePrompt && (
           <div
             style={{
               position: "absolute",
               left: 6,
-              top: Math.min(height - 18, Math.max(0, pointerPixel - 8)),
+              top: Math.min(height - 18, Math.max(0, linePixel - 8)),
               fontSize: 10,
               lineHeight: "14px",
               color: "var(--fg-inverse)",
@@ -743,8 +743,7 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
               zIndex: 3,
             }}
           >
-            {pointerPixel !== null &&
-              formatAxisTime(pixelToTime(pointerPixel, layout), dragging, Date.now())}
+            {formatAxisTime(pixelToTime(linePixel, layout), dragging, Date.now())}
           </div>
           )}
         </>

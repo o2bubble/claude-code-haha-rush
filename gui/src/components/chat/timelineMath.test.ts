@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   timeToIndex, segmentizeByDay, layoutSegments, pixelToTime, timeToPixel, buildTicks,
   promptPreview, findNearestPrompt, clusterPrompts, pickEven,
-  hitRange, DOT_HIT_MAX, DOT_HIT_MIN,
+  hitRange, DOT_HIT_MAX, DOT_HIT_MIN, buildUserPrompts, seekIndexAt,
 } from "./timelineMath";
 
 const H = 3600_000;
@@ -201,6 +201,81 @@ describe("findNearestPrompt — 悬停命中查找", () => {
 
   it("空列表 → null", () => {
     expect(findNearestPrompt(50, [], 7)).toBeNull();
+  });
+
+  // 时间线的交互规则（2026-10-31 用户反馈「总是定位不准」）：
+  // 整条轴都用来选提问 —— 指针离得再远也吸附到最近的那一条，不做时间反算。
+  // 反算的语义是「该时刻之前最近一条消息」，提问后面紧跟助手回复，
+  // 所以稍微偏上就会落到**上一轮**的助手消息（实测真实会话 10/10 全跳错）。
+  it("阈值给 Infinity = 不限距离，永远取最近的一条（时间线的选中规则）", () => {
+    const list = [mk(0, 10), mk(1, 300)];
+    expect(findNearestPrompt(260, list, Number.POSITIVE_INFINITY)?.index).toBe(1);
+    expect(findNearestPrompt(0, list, Number.POSITIVE_INFINITY)?.index).toBe(0);
+    expect(findNearestPrompt(9999, list, Number.POSITIVE_INFINITY)?.index).toBe(1);
+  });
+});
+
+// ── 时间线的选中规则（2026-10-31 用户反馈「总是定位不准」）──
+//
+// 旧规则：像素 → 时间 → 「该时刻之前最近一条」。提问后面紧跟助手回复，
+// 所以指针只要落在提问点**正上方一点**，取到的就是上一轮的助手消息。
+// 用真实会话验过：偏离提问时刻 1 秒，10/10 全跳错。
+// 新规则：有提问刻度时整条轴都归提问所有 —— 永远取最近的一条，不限距离。
+describe("seekIndexAt — 时间线指针 → 消息下标", () => {
+  const TS = [D0, D0 + 1000, D0 + 2000];
+  const layout = layoutSegments(segmentizeByDay(TS), 200, 0);
+  const tick = (index: number, pixel: number) => ({
+    index, time: D0 + pixel * 10, preview: `p${index}`, pixel,
+  });
+
+  it("指针在提问点**上方**一点 → 仍然跳到那条提问（旧规则会落到上一条）", () => {
+    // 时间反算会得到 index 0（上一轮的助手消息）—— 这正是要修的偏差
+    expect(seekIndexAt(90, [tick(1, 100)], layout, TS)).toBe(1);
+  });
+
+  it("指针在提问点下方一点 → 同一条", () => {
+    expect(seekIndexAt(110, [tick(1, 100)], layout, TS)).toBe(1);
+  });
+
+  it("离得很远也吸附最近的一条提问（整条轴都用来选提问）", () => {
+    const ticks = [tick(0, 20), tick(2, 180)];
+    expect(seekIndexAt(0, ticks, layout, TS)).toBe(0);
+    expect(seekIndexAt(140, ticks, layout, TS)).toBe(2);
+  });
+
+  it("没有任何提问刻度时才退回时间轴反算（该时刻之前最近一条）", () => {
+    expect(seekIndexAt(90, [], layout, TS)).toBe(0);
+    expect(seekIndexAt(200, [], layout, TS)).toBe(2);
+  });
+});
+
+// ── 提问刻度的来源（index 必须指向**传进来的数组**）──
+//
+// 时间线 / 搜索 / 列表吃的是同一个数组（「只看我的消息」下是过滤后的那份）。
+// 一旦有人拿全量数组算刻度、又拿过滤后的数组滚动，点哪条都会偏移。
+describe("buildUserPrompts", () => {
+  const mkMsg = (role: "user" | "assistant", content: string, extra: Record<string, unknown> = {}) => ({
+    role, content, timestamp: 1000, ...extra,
+  });
+
+  it("index 就是传入数组的下标（与数组下标空间一致）", () => {
+    const msgs = [mkMsg("user", "a"), mkMsg("assistant", "b"), mkMsg("user", "c")];
+    const out = buildUserPrompts(msgs);
+    expect(out.map((p) => p.index)).toEqual([0, 2]);
+    expect(out.map((p) => p.preview)).toEqual(["a", "c"]);
+  });
+
+  it("跳过程序代发的用户消息（isMeta：中断标记 / 自动续跑 / 自动唤醒）", () => {
+    const msgs = [
+      mkMsg("user", "我的问题"),
+      mkMsg("user", "[Request interrupted by user]", { isMeta: true }),
+      mkMsg("user", "Continue from where you left off.", { isMeta: true }),
+    ];
+    expect(buildUserPrompts(msgs).map((p) => p.index)).toEqual([0]);
+  });
+
+  it("空列表 → []", () => {
+    expect(buildUserPrompts([])).toEqual([]);
   });
 });
 
