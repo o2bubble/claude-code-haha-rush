@@ -92,6 +92,9 @@ export interface ModelCapabilities {
   thinking: boolean;
   adaptiveThinking: boolean;
   reasoning: boolean;
+  /** 推理强度通过 `output_config.effort` 发送（DeepSeek 官方兼容端点）。
+   *  与 `reasoning` 互斥：后者把开关与强度一起塞进 `reasoning:{effort}`。 */
+  outputConfigEffort?: boolean;
   defaultEffort?: EffortLevelUI | number;
 }
 

@@ -54,13 +54,19 @@ export function formatAgentLine(agent: AgentDefinition): string {
  * connect, /reload-plugins, or permission-mode changes mutate the list →
  * description changes → full tool-schema cache bust.
  *
- * Override with CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=true/false for testing.
+ * ⚠️ 2026-11-02 默认改为开：官方 2.1.316 就是这么做的（其 Agent 描述是静态的，
+ * agent 名单在 `<system-reminder>` 里），实测能省下每次请求 ~6K 字符，并且
+ * agent 增删不再让工具定义变化 —— 对 prompt 缓存是实打实的好处。
+ * 原来靠 GrowthBook 的 `tengu_agent_list_attach` 开关，本地拿不到值，等于永远关。
+ *
+ * 想退回内联：`CLAUDE_CODE_AGENT_LIST_IN_MESSAGES=false`。
  */
 export function shouldInjectAgentListInMessages(): boolean {
   if (isEnvTruthy(process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES)) return true
   if (isEnvDefinedFalsy(process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES))
     return false
-  return getFeatureValue_CACHED_MAY_BE_STALE('tengu_agent_list_attach', false)
+  // GrowthBook 仍可覆盖（远端灰度/紧急关闭），但缺省视为开启。
+  return getFeatureValue_CACHED_MAY_BE_STALE('tengu_agent_list_attach', true)
 }
 
 export async function getPrompt(
@@ -153,40 +159,10 @@ ${AGENT_TOOL_NAME}({
 </example>
 `
 
-  const currentExamples = `Example usage:
-
-<example_agent_descriptions>
-"test-runner": use this agent after you are done writing code to run tests
-"greeting-responder": use this agent to respond to user greetings with a friendly joke
-</example_agent_descriptions>
-
-<example>
-user: "Please write a function that checks if a number is prime"
-assistant: I'm going to use the ${FILE_WRITE_TOOL_NAME} tool to write the following code:
-<code>
-function isPrime(n) {
-  if (n <= 1) return false
-  for (let i = 2; i * i <= n; i++) {
-    if (n % i === 0) return false
-  }
-  return true
-}
-</code>
-<commentary>
-Since a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests
-</commentary>
-assistant: Uses the ${AGENT_TOOL_NAME} tool to launch the test-runner agent
-</example>
-
-<example>
-user: "Hello"
-<commentary>
-Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
-</commentary>
-assistant: "I'm going to use the ${AGENT_TOOL_NAME} tool to launch the greeting-responder agent"
-</example>
-`
-
+  // ⚠️ 2026-11-02：原来这里是两个完整示例（~1.1K 字符）。官方 2.1.316 的
+  // Agent 描述里**一个示例都没有**，改用一段"什么时候该用 / 什么时候自己来"的
+  // 判断规则 —— 同样的篇幅，信息密度高得多。示例对模型挑选 agent 的帮助有限。
+  const currentExamples = ``
   // When the gate is on, the agent list lives in an agent_listing_delta
   // attachment (see attachments.ts) instead of inline here. This keeps the
   // tool description static across MCP/plugin/permission changes so the
@@ -252,26 +228,31 @@ When NOT to use the ${AGENT_TOOL_NAME} tool:
   return `${shared}
 ${whenNotToUseSection}
 
-Usage notes:
+## When to use
+
+Reach for this when you have independent work to run in parallel, when the user asks for a side quest that shouldn't block your main thread, or when answering would mean reading across several files — delegate that and you keep the conclusion, not the file dumps.
+
+Do the work yourself when it is a handful of tool calls or a lookup whose target you already know; don't delegate a check you could run inline. Delegate review only when you want a read that isn't anchored on yours — then give it the code, not your conclusion. Once you've delegated something, don't also run it yourself; wait for the result. When in doubt, don't spawn.
+
+When you do spawn one, brief it like the peer it is: state the goal and what you have already ruled out, point it at the files and docs worth reading instead of retyping them, and keep the scope explicit and narrow. That brief is the only context it will have — if you cannot write a clear one, you do not understand the task well enough to hand it off.
+
 - Always include a short description (3-5 words) summarizing what the agent will do${concurrencyNote}
-- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.${
-    // eslint-disable-next-line custom-rules/no-process-env-top-level
+- The agent's final report is **not shown to the user** — relay what matters in your own message.
+- Use ${SEND_MESSAGE_TOOL_NAME} with the agent's ID or name to continue a previously spawned agent with its context intact; a new ${AGENT_TOOL_NAME} call starts fresh.${
     !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS) &&
     !isInProcessTeammate() &&
     !forkEnabled
       ? `
-- You can optionally run agents in the background using the run_in_background parameter. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
-- **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed — e.g., research agents whose findings inform your next steps. Use background when you have genuinely independent work to do in parallel.`
+- Subagents run in the background by default; you'll be notified when one completes. Pass \`run_in_background: false\` only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — give status, not a guess.`
       : ''
   }
-- To continue a previously spawned agent, use ${SEND_MESSAGE_TOOL_NAME} with the agent's ID or name as the \`to\` field. The agent resumes with its full context preserved. ${forkEnabled ? 'Each fresh Agent invocation with a subagent_type starts without context — provide a complete task description.' : 'Each Agent invocation starts fresh — provide a complete task description.'}
-- The agent's outputs should generally be trusted
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.)${forkEnabled ? '' : ", since it is not aware of the user's intent"}
-- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
-- If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple ${AGENT_TOOL_NAME} tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
-- You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result.${
+- Clearly tell the agent whether you expect it to write code or just to do research, since it is not aware of the user's intent.
+- If the agent description mentions that it should be used proactively, use it without being asked. Use your judgement.
+- To run agents in parallel, send a single message with multiple ${AGENT_TOOL_NAME} tool use blocks.
+- \`isolation: "worktree"\` gives the agent its own git worktree (auto-cleaned if unchanged).${
     process.env.USER_TYPE === 'ant'
-      ? `\n- You can set \`isolation: "remote"\` to run the agent in a remote CCR environment. This is always a background task; you'll be notified when it completes. Use for long-running tasks that need a fresh sandbox.`
+      ? `
+- \`isolation: "remote"\` runs the agent in a remote CCR environment (always background).`
       : ''
   }${
     isInProcessTeammate()
@@ -279,7 +260,7 @@ Usage notes:
 - The run_in_background, name, team_name, and mode parameters are not available in this context. Only synchronous subagents are supported.`
       : isTeammate()
         ? `
-- The name, team_name, and mode parameters are not available in this context — teammates cannot spawn other teammates. Omit them to spawn a subagent.`
+- The name, team_name, and mode parameters are not available in this context — teammates cannot spawn other teammates.`
         : ''
   }${whenToForkSection}${writingThePromptSection}
 

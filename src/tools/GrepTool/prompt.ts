@@ -1,18 +1,18 @@
 import { AGENT_TOOL_NAME } from '../AgentTool/constants.js'
-import { BASH_TOOL_NAME } from '../BashTool/toolName.js'
 
 export const GREP_TOOL_NAME = 'Grep'
 
+// ⚠️ 2026-11-02 精简（官方 2.1.316 同名工具 477 字符）。删掉的是与系统提示
+// 重复的"别用 Bash 的 grep"细节；"多轮搜索改用 Agent"保留一句 —— 它决定工具选择。
+// ⚠️ 反斜杠必须双写（`\\s`）：模板字符串里 `\s` 会退化成 `s`，示例就废了。
 export function getDescription(): string {
-  return `A powerful search tool built on ripgrep
+  return `A powerful search tool built on ripgrep.
 
-  Usage:
-  - ALWAYS use ${GREP_TOOL_NAME} for search tasks. NEVER invoke \`grep\` or \`rg\` as a ${BASH_TOOL_NAME} command. The ${GREP_TOOL_NAME} tool has been optimized for correct permissions and access.
-  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")
-  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
-  - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
-  - Use ${AGENT_TOOL_NAME} tool for open-ended searches requiring multiple rounds
-  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use \`interface\\{\\}\` to find \`interface{}\` in Go code)
-  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like \`struct \\{[\\s\\S]*?field\`, use \`multiline: true\`
+- ALWAYS use ${GREP_TOOL_NAME} for content search — never invoke \`grep\` or \`rg\` via Bash.
+- Full regex syntax (e.g. "log.*Error", "function\\s+\\w+"). Literal braces need escaping (\`interface\\{\\}\` finds \`interface{}\` in Go).
+- Filter with glob ("*.js", "**/*.tsx") or type ("js", "py", "rust").
+- Output modes: "content" (matching lines), "files_with_matches" (paths, default), "count".
+- Multiline: by default patterns match within a single line. For cross-line patterns use \`multiline: true\`.
+- For open-ended searches needing several rounds of globbing and grepping, use ${AGENT_TOOL_NAME} instead.
 `
 }

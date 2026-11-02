@@ -122,6 +122,7 @@ import {
   convertEffortValueToLevel,
   modelSupportsEffort,
   modelSupportsMaxEffort,
+  modelSupportsOutputConfigEffort,
   getDefaultEffortForModel,
   type EffortLevel,
   type EffortValue,
@@ -242,6 +243,10 @@ function getModelCapabilities(model: string) {
     thinking: modelSupportsThinking(model),
     adaptiveThinking: modelSupportsAdaptiveThinking(model),
     reasoning: modelSupportsReasoning(model),
+    // 推理强度走 `output_config.effort`（DeepSeek 官方兼容端点的方式）。
+    // 与 `reasoning` 互斥 —— 声明 reasoning 时后端会把强度并进
+    // `reasoning:{effort}`，而 DeepSeek 不认该字段。
+    outputConfigEffort: modelSupportsOutputConfigEffort(model),
     defaultEffort: getDefaultEffortForModel(model),
   }
 }

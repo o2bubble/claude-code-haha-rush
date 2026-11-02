@@ -167,7 +167,11 @@ import { CHROME_TOOL_SEARCH_INSTRUCTIONS } from 'src/utils/claudeInChrome/prompt
 import { getMaxThinkingTokensForModel } from 'src/utils/context.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { logForDiagnosticsNoPII } from 'src/utils/diagLogs.js'
-import { type EffortValue, modelSupportsEffort } from 'src/utils/effort.js'
+import {
+  type EffortValue,
+  modelSupportsEffort,
+  modelSupportsOutputConfigEffort,
+} from 'src/utils/effort.js'
 import {
   isFastModeAvailable,
   isFastModeCooldown,
@@ -180,6 +184,7 @@ import { isMcpInstructionsDeltaEnabled } from 'src/utils/mcpInstructionsDelta.js
 import { calculateUSDCost } from 'src/utils/modelCost.js'
 import { endQueryProfile, queryCheckpoint } from 'src/utils/queryProfiler.js'
 import {
+  isRelayEndpoint,
   modelSupportsAdaptiveThinking,
   modelSupportsReasoning,
   modelSupportsThinking,
@@ -440,7 +445,7 @@ function should1hCacheTTL(querySource?: QuerySource): boolean {
  * Configure effort parameters for API request.
  *
  */
-function configureEffortParams(
+export function configureEffortParams(
   effortValue: EffortValue | undefined,
   outputConfig: BetaOutputConfig,
   extraBodyParams: Record<string, unknown>,
@@ -449,6 +454,20 @@ function configureEffortParams(
   thinkingOn: boolean,
 ): void {
   if (!modelSupportsEffort(model) || 'effort' in outputConfig) {
+    return
+  }
+
+  // Endpoints that take reasoning strength via `output_config.effort` (DeepSeek's
+  // Anthropic-compatible surface — documented, and the ONLY field it honors;
+  // `budget_tokens` and `reasoning*` are ignored). Declared per-profile so the
+  // GLM-style branch below keeps working for the endpoints that need it.
+  if (modelSupportsOutputConfigEffort(model)) {
+    if (effortValue === undefined) {
+      betas.push(EFFORT_BETA_HEADER)
+    } else if (typeof effortValue === 'string') {
+      outputConfig.effort = effortValue
+      betas.push(EFFORT_BETA_HEADER)
+    }
     return
   }
 
@@ -1683,17 +1702,31 @@ async function* queryModel(
       thinkingConfig.type !== 'disabled' &&
       !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_THINKING)
     let thinking: BetaMessageStreamParams['thinking'] | undefined = undefined
-    // 3P reasoning-capable provider (e.g. DeepSeek): thinking on/off + intensity
-    // ride on `reasoning:{effort}`. Mutually exclusive with the Claude `thinking`
-    // block — never send both to the same provider.
-    const reasoningParams = options.reasoningEffort
+    // 中继端点（自定义 ANTHROPIC_BASE_URL）按**官方文档**发字段。
+    //
+    // 以 DeepSeek 的 Anthropic 兼容文档为准（2026-11-02 实测逐条验证）：
+    //   · `thinking.type`          —— 支持，且**只有它说了算**
+    //   · `thinking.budget_tokens` —— **被忽略**（给 256 也照样思考 5000+ 字）
+    //   · `reasoning:{effort}`     —— 文档未提及，实测无效
+    //   · `reasoning_effort`       —— 实测无效
+    //   · `output_config.effort`   —— **支持，唯一能真正调节思考量的字段**
+    //
+    // 所以中继端点：thinking 开关用 `thinking.type`，强度交给 `output_config.effort`
+    // （由 configureEffortParams 处理），**不夹带** `reasoning` 与 `budget_tokens`。
+    const relay = isRelayEndpoint()
+
+    // 3P reasoning-capable provider: thinking on/off + intensity ride on
+    // `reasoning:{effort}`. Mutually exclusive with the Claude `thinking` block
+    // — never send both to the same provider. 中继端点不参与：它已由上方规则
+    // 限定为「thinking 开关 + output_config.effort」。
+    const reasoningParams = !relay && options.reasoningEffort
       ? { effort: options.reasoningEffort }
       : undefined
 
     // IMPORTANT: Do not change the adaptive-vs-budget thinking selection below
     // without notifying the model launch DRI and research. This is a sensitive
     // setting that can greatly affect model quality and bashing.
-    if (!reasoningParams && modelSupportsThinking(options.model)) {
+    if (!reasoningParams && (modelSupportsThinking(options.model) || relay)) {
       if (!hasThinking) {
         // Thinking OFF (GUI default). Some 3P adaptive models (e.g. qwen3.8-flash)
         // fall back to their own default reasoning when the request omits the
@@ -1716,6 +1749,12 @@ async function* queryModel(
         // enabled ≡ always-think).
         thinking = {
           type: modelSupportsReasoning(options.model) ? 'adaptive' : 'enabled',
+        } satisfies BetaMessageStreamParams['thinking']
+      } else if (relay) {
+        // 中继端点：官方文档明确 `budget_tokens` 被忽略，发它只会造成"有上限"
+        // 的错觉。只发 `type`，强度交给 `output_config.effort`。
+        thinking = {
+          type: 'enabled',
         } satisfies BetaMessageStreamParams['thinking']
       } else {
         // For models that do not support adaptive thinking, use the default

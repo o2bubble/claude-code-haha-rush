@@ -835,11 +835,16 @@ Code review 对比设计原型 `memory-explorer.html` 发现的偏离项。PRD: 
 
 ## Done (2026-07-16): 新增 code-simplifier built-in agent
 
-官方有 code-simplifier agent（15 tools，4.3K prompt）但我们没有。现有 `/simplify` 是 skill，不是 built-in agent。
+~~官方有 code-simplifier agent（15 tools，4.3K prompt）但我们没有。~~ **判断有误，2026-11-02 已撤销。**
 
-- [x] 创建 `src/tools/AgentTool/built-in/codeSimplifierAgent.ts`
-- [x] 注册到 `builtInAgents.ts`
-- [x] 对齐: 共享 suffix
+官方 exe **不内置** code-simplifier —— 当时抓包看到的它是**本地安装的插件**
+（`code-simplifier@claude-plugins-official`）被官方加载的结果。同批产出的
+`docs/reverse-engineering/official-version-analysis.md` 写对了（"我们的本地插件，
+被官方版加载"），但代码照抄了一份内置版，导致名单里出现两条同名 agent。
+
+- [x] ~~创建 `src/tools/AgentTool/built-in/codeSimplifierAgent.ts`~~（已删除）
+- [x] ~~注册到 `builtInAgents.ts`~~（已移除）
+- [x] 2026-11-02 恢复官方行为：只保留插件提供的 `code-simplifier:code-simplifier`
 
 ---
 

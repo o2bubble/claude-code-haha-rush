@@ -124,9 +124,10 @@ const coordinatorModeModule = feature('COORDINATOR_MODE')
 const SnipTool = feature('HISTORY_SNIP')
   ? require('./tools/SnipTool/SnipTool.js').SnipTool
   : null
-const ListPeersTool = feature('UDS_INBOX')
-  ? require('./tools/ListPeersTool/ListPeersTool.js').ListPeersTool
-  : null
+// ListAgents 取代了泄漏源码里的 ListPeers（后者只有接线、实现文件不存在）。
+// 我们不启动 UDS socket，只做同机会话发现（走文件邮箱），所以不受
+// UDS_INBOX 构建开关约束，始终可用。
+import { ListAgentsTool } from './tools/ListAgentsTool/ListAgentsTool.js'
 const WorkflowTool = feature('WORKFLOW_SCRIPTS')
   ? (() => {
       require('./tools/WorkflowTool/bundled/index.js').initBundledWorkflows()
@@ -226,7 +227,7 @@ export function getAllBaseTools(): Tools {
     ...(isEnvTruthy(process.env.ENABLE_LSP_TOOL) ? [LSPTool] : []),
     ...(isWorktreeModeEnabled() ? [EnterWorktreeTool, ExitWorktreeTool] : []),
     getSendMessageTool(),
-    ...(ListPeersTool ? [ListPeersTool] : []),
+    ListAgentsTool,
     ...(isAgentSwarmsEnabled()
       ? [getTeamCreateTool(), getTeamDeleteTool()]
       : []),

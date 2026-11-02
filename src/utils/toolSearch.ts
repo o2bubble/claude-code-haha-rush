@@ -33,6 +33,10 @@ import { count } from './array.js'
 import { getMergedBetas } from './betas.js'
 import { getContextWindowForModel } from './context.js'
 import { logForDebugging } from './debug.js'
+import {
+  isToolSearchUnsupported,
+  toolSearchBaseUrlHost,
+} from './toolSearchSupport.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from './envUtils.js'
 import {
   getAPIProvider,
@@ -280,31 +284,26 @@ export function isToolSearchEnabledOptimistic(): boolean {
   }
 
   // tool_reference is a beta content type that third-party API gateways
-  // (ANTHROPIC_BASE_URL proxies) typically don't support. When the provider
-  // is 'firstParty' but the base URL points elsewhere, the proxy will reject
-  // tool_reference blocks with a 400. Vertex/Bedrock/Foundry are unaffected —
-  // they have their own endpoints and beta headers.
-  // https://github.com/anthropics/claude-code/issues/30912
+  // (ANTHROPIC_BASE_URL proxies) *may* not support. Upstream issues
+  // (gh-30912 / gh-31936) reported some proxies rejecting it with a 400.
   //
-  // HOWEVER: some proxies DO support tool_reference (LiteLLM passthrough,
-  // Cloudflare AI Gateway, corp gateways that forward beta headers). The
-  // blanket disable breaks defer_loading for those users — all MCP tools
-  // loaded into main context instead of on-demand (gh-31936 / CC-457,
-  // likely the real cause of CC-330 "v2.1.70 defer_loading regression").
-  // This gate only applies when ENABLE_TOOL_SEARCH is unset/empty (default
-  // behavior). Setting any non-empty value — 'true', 'auto', 'auto:N' —
-  // means the user is explicitly configuring tool search and asserts their
-  // setup supports it. The falsy check (rather than === undefined) aligns
-  // with getToolSearchMode(), which also treats "" as unset.
-  if (
-    !process.env.ENABLE_TOOL_SEARCH &&
-    getAPIProvider() === 'firstParty' &&
-    !isFirstPartyAnthropicBaseUrl()
-  ) {
+  // ⚠️ 但**不能按 host 预判**（2026-11-02 实测纠正）：DeepSeek 的
+  // `api.deepseek.com/anthropic` 完整支持 —— `defer_loading: true` 与
+  // `tool_reference` 内容块都返回 200（带不带 advanced-tool-use beta 头都行）。
+  // 原来的"非官方 host 一律关掉"和已被删除的 `isRelayProvider()` 是同一类错误：
+  // 把"某些中转不行"当成"所有中转都不行"，代价是每次请求白白多带几十个工具定义。
+  //
+  // 现在改为 **先试后记**（见 utils/toolSearchSupport.ts）：默认开启，只有某 host
+  // 真的用 4xx 拒绝过 tool_reference/defer_loading，才把它记进名单、退回内联。
+  // 记忆是进程内的，下次启动重新探测。
+  //
+  // ENABLE_TOOL_SEARCH 仍然完全受控：显式设为假值（false/auto:100）→ 走 standard，
+  // 那条分支已经在上面的 getToolSearchMode 里返回了。
+  if (isToolSearchUnsupported(toolSearchBaseUrlHost())) {
     if (!loggedOptimistic) {
       loggedOptimistic = true
       logForDebugging(
-        `[ToolSearch:optimistic] disabled: ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL} is not a first-party Anthropic host. Set ENABLE_TOOL_SEARCH=true (or auto / auto:N) if your proxy forwards tool_reference blocks.`,
+        `[ToolSearch:optimistic] disabled: ${process.env.ANTHROPIC_BASE_URL} rejected defer_loading/tool_reference earlier this session`,
       )
     }
     return false

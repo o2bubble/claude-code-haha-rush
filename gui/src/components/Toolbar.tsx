@@ -575,15 +575,21 @@ function ModelTuningSections({ onPicked }: { onPicked: () => void }) {
   const cap = state.modelCapabilities;
 
   const canThink = !!cap && (cap.thinking || cap.reasoning);
-  const canEffort = !!cap && (cap.effort || cap.reasoning);
+  const canEffort =
+    !!cap && (cap.effort || cap.reasoning || cap.outputConfigEffort);
   if (!canThink && !canEffort) return null;
 
   const thinkingOn = state.thinkingModeEnabled;
 
-  // Reasoning-capable providers (DeepSeek) accept low/high/max, not 'medium'
-  // (Claude-native supports all four) — GUI decides the tiers, so drop medium.
+  // 档位列表：Claude 原生四档（low/medium/high/max）。
+  // `reasoning` 式端点（GLM 等）只认 low/high/max —— 去掉 medium。
+  // `output_config_effort` 式端点（DeepSeek）**接受 medium**（2026-11-02 实测
+  //   minimal/low/medium/high/max 全部 200，思考量随档位变化），保留四档。
   const effort = state.effort;
-  const baseLevels = cap?.reasoning ? ["low", "high"] : ["low", "medium", "high"];
+  const baseLevels =
+    cap?.reasoning && !cap?.outputConfigEffort
+      ? ["low", "high"]
+      : ["low", "medium", "high"];
   const levels: Array<{ id: string }> = baseLevels.map((id) => ({ id }));
   if (cap?.maxEffort) levels.push({ id: "max" });
   const effortNow = effort ?? cap?.defaultEffort;

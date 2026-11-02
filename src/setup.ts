@@ -83,23 +83,12 @@ export async function setup(
     switchSession(asSessionId(customSessionId))
   }
 
-  // --bare / SIMPLE: skip UDS messaging server and teammate snapshot.
-  // Scripted calls don't receive injected messages and don't use swarm teammates.
-  // Explicit --messaging-socket-path is the escape hatch (per #23222 gate pattern).
-  if (!isBareMode() || messagingSocketPath !== undefined) {
-    // Start UDS messaging server (Mac/Linux only).
-    // Enabled by default for ants — creates a socket in tmpdir if no
-    // --messaging-socket-path is passed. Awaited so the server is bound
-    // and $CLAUDE_CODE_MESSAGING_SOCKET is exported before any hook
-    // (SessionStart in particular) can spawn and snapshot process.env.
-    if (feature('UDS_INBOX')) {
-      const m = await import('./utils/udsMessaging.js')
-      await m.startUdsMessaging(
-        messagingSocketPath ?? m.getDefaultUdsSocketPath(),
-        { isExplicit: messagingSocketPath !== undefined },
-      )
-    }
-  }
+  // UDS messaging server: 泄漏源码只留了接线，`utils/udsMessaging.ts` 从未存在。
+  // 我们改用**文件邮箱**做同机会话通信（见 utils/sessionPeers.ts 与
+  // teammateMailbox.ts），不需要每个进程起 socket 监听，因此这里刻意不启动。
+  // --messaging-socket-path 参数保留但不再产生副作用（官方会话可能仍会写它，
+  // 我们只在 sessions/<pid>.json 里透传记录）。
+  void messagingSocketPath
 
   // Teammate snapshot — SIMPLE-only gate (no escape hatch, swarm not used in bare)
   if (!isBareMode() && isAgentSwarmsEnabled()) {
@@ -180,6 +169,20 @@ export async function setup(
 
   // Initialize FileChanged hook watcher — sync, reads hook config snapshot
   initializeFileChangedWatcher(cwd)
+
+  // 会话自述（`~/.claude/sessions/<pid>.json`）—— 同机其他会话靠它互相发现。
+  //
+  // ⚠️ 这个函数一直存在但从没被调用过（`countConcurrentSessions` / `claude ps`
+  // 也因此一直读到空目录）。放在这里是为了赶在任何 hook 之前落地：hook 可能
+  // spawn 子进程并快照环境，晚写就漏登记。失败只记日志，绝不影响启动。
+  try {
+    const { registerSession } = await import('./utils/concurrentSessions.js')
+    await registerSession()
+  } catch (e) {
+    logForDiagnosticsNoPII('warn', 'register_session_failed', {
+      error: String(e),
+    })
+  }
 
   // Handle worktree creation if requested
   // IMPORTANT: this must be called befiore getCommands(), otherwise /eject won't be available.

@@ -31,7 +31,10 @@ Send a message to another agent.
 | \`to\` | |
 |---|---|
 | \`"researcher"\` | Teammate by name |
-| \`"*"\` | Broadcast to all teammates — expensive (linear in team size), use only when everyone genuinely needs it |${udsRow}
+| \`"*"\` | Broadcast to all teammates — expensive (linear in team size), use only when everyone genuinely needs it |
+| \`"session-<pid>"\` | Another Claude session on **this machine** — get addresses from \`ListAgents\` |${udsRow}
+
+Plain text you write is NOT visible to other sessions — cross-session messages must go through this tool. A message to \`session-<pid>\` is delivered within about a second (the receiver polls its inbox) and arrives as a user-role turn; the receiver can reply with \`to: "session-<your pid>"\`.
 
 Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to teammates by name, never by UUID. When relaying, don't quote the original — it's already rendered to the user.${udsSection}
 

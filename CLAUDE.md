@@ -156,6 +156,21 @@ rm ~/.claude/projects/d-Development-claude-code-haha-dev/edit-history.jsonl
 5. **Setup skipped** — `preload.ts` originally set `LOCAL_RECOVERY=1` unconditionally. Removed this default.
 6. **Ripgrep missing in compiled claude.exe** — `bun build --compile` doesn't embed `vendor/ripgrep/` (it's resolved at runtime, not imported), and `USE_BUILTIN_RIPGREP` unset defaults to the builtin branch → compiled binary found no rg and degraded to plain grep. `getRipgrepConfig` now searches `{exe}/bin/rg.exe` (install's `bin/` = the `tools` update component) → `vendor/ripgrep/<arch>-win32/rg.exe` → system `rg`. rg.exe stays in `bin/` (not beside claude.exe) so the update system manages it as a component. See `src/utils/ripgrep.ts`.
 
+## Committing
+
+Prefer the built-in slash commands over hand-assembling git steps:
+
+- `/commit` — stages and commits. Its prompt already expands `git status` /
+  `git diff HEAD` / `git branch` / `git log` and carries the full safety rules
+  (never amend, never `--no-verify`, never `git add -A`, HEREDOC messages).
+- `/commit-push-pr` — same, plus branch / push / `gh pr create`.
+
+This is a **suggestion, not a rule**. Follow whatever the user asks for: if they
+have their own commit flow, use it; if they say "just commit", do the minimal
+thing; if they give an explicit command sequence, run that. The point is only to
+avoid re-deriving the long git procedure from scratch when the user hasn't
+specified anything.
+
 ## Agent skills
 
 ### Issue tracker

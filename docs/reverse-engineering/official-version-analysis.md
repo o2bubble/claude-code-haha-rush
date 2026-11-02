@@ -169,3 +169,96 @@ tengu_output_style, tengu_advisor, tengu_schedule, session_guidance, brief_mode,
 
 `scripts/reverse-engineering/proxy_stream.py`（已入库），支持代理抓包 + 转发到目标 API。
 抓包产物写到 `temp/capture/`。
+
+---
+
+## 2026-11-02: 2.1.316 更新分析
+
+> 对比基准：我们 2.1.89（sync 2.1.211）↔ 官方 2.1.316
+> 方法：隔离配置目录（`CLAUDE_CONFIG_DIR`）+ 本地代理，**未改动用户 settings.json**
+> 样本：`sample_main_2.1.316_sdk.json`（14 工具）、`sample_subagent_2.1.316_sdk.json`（12 工具）、
+> `prompts/capture_2.1.316_main_prompt.txt`
+> 注：只能抓到 `-p`（SDK）模式的请求；交互 TUI 在 ConPTY 下启动即退出，未取到。
+
+### ① 最大变化：延迟工具加载（ToolSearch），且**纯文本实现**
+
+同一 DeepSeek 端点、同一 prompt：
+
+| | 工具数 | system 字符 | 请求字段 |
+|---|---|---|---|
+| 我们 2.1.89 | **64**（含全部 MCP） | 30,228\* | thinking / context_management |
+| 官方 2.1.316 | **14** | 5,675\* | thinking / context_management / **output_config** |
+
+\* system 长度差异还包含 CLAUDE.md 自动发现（我们在仓库根跑，官方在空目录跑），不可直接比。
+
+官方内联 14 个：`Agent, Bash, Edit, Glob, Grep, ListAgents, Read, ReportFindings,
+ScheduleWakeup, Skill, ToolSearch, Workflow, DeferredToolPlaceholder, Write`
+
+延迟 11 个内置：`CronCreate, CronDelete, CronList, EnterWorktree, ExitWorktree,
+Monitor, NotebookEdit, SendMessage, TaskStop, WebFetch, WebSearch`（另有 43 个 MCP）
+
+**关键**：官方请求里**没有 `defer_loading` 字段**（`tools[0]` 只有 name/description/input_schema）——
+它只是**不发**这些工具，把名字写进一段 `<system-reminder>` 文本，由 ToolSearch 按需返回
+schema。所以**对不认 beta 的中转端点天然兼容**。
+
+我们的实现（`src/utils/toolSearch.ts`）走的是 `defer_loading: true` + beta 头，且在
+`isToolSearchEnabledOptimistic()` 里对非 Anthropic base_url **一律返回 false**
+（注释提到 gh-30912/31936）。这与当年 `isRelayProvider()` 是同一类「按 host 预判」的问题。
+
+### ② 新增工具（官方有、我们源码里没有）
+
+| 工具 | 说明 |
+|---|---|
+| `ListAgents` | 列出可 `SendMessage` 的 agent/会话（in-process 子 agent、同机其它会话、云端会话）。**源码中完全不存在** |
+| `ScheduleWakeup` | `/loop` 动态模式的自定节奏唤醒（含 `stop`/`noop`/`delaySeconds`）。**源码中完全不存在** |
+| `DeferredToolPlaceholder` | 配合 ToolSearch 的空占位，保持延迟加载生效 |
+
+### ③ 有实现但被开关关住
+
+| 工具 | 开关 | 状态 |
+|---|---|---|
+| CronCreate/Delete/List | `feature('AGENT_TRIGGERS')` | 实现存在（`src/tools/ScheduleCronTool/`） |
+| Monitor | `feature('MONITOR_TOOL')` | **实现文件缺失**（`src/tools/MonitorTool/` 不存在），贸然开 flag 会崩 |
+| Workflow | `feature('WORKFLOW_SCRIPTS')` | 同上，`bundled/index.js` 引用但实现缺失 |
+| TaskCreate/Get/List/Update | `isTodoV2Enabled()` | 交互态默认开；`-p` 下需 `CLAUDE_CODE_ENABLE_TASKS=1` |
+| TeamCreate/TeamDelete | `isAgentSwarmsEnabled()` | 需 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` |
+
+### ④ 请求参数变化
+
+```diff
+- thinking: {"type":"enabled","budget_tokens":63999}     // 我们
++ thinking: {"type":"adaptive","display":"omitted"}      // 官方
++ output_config: {"effort":"high"}                        // 官方新增，我们没发
+  max_tokens: 64000 → 65536
+```
+
+### ⑤ 工具描述大幅精简（2–5 倍）
+
+| 工具 | 官方 2.1.316 | 我们 |
+|---|---|---|
+| Bash | 2,111 字符 | 10,002 |
+| Edit | 360 | 1,095 |
+| Write | 240 | 618 |
+| Glob | 140 | 371 |
+| Grep | 477 | 866 |
+| Read | 790 | 1,680 |
+| Agent | 3,227 | 6,868 |
+
+Bash 描述新增要点：「这工具跑的是 **Git Bash (POSIX sh)**，不是 cmd.exe/PowerShell」、
+「命令输出给你看，**不保证用户能看到**」、「前台 `sleep` 被禁用，改用 Monitor」。
+
+### ⑥ 工具 schema 变化
+
+- `Agent`：新增 `effort`（low/medium/high/xhigh/max）
+- `Read`：新增 `allow_large`
+- `Agent.subagent_type` 文档提到 `"fork"`（复制自身上下文，继承模型与 effort）
+
+### ⑦ System prompt 新增内容（我们源码里没有）
+
+- **代词指引**：未说明时一律 they/them，禁止从名字推断
+- **「有足够信息就动手」**：不要重复推导已有事实、不要重提已决定的事、不要罗列不采纳的选项
+- **下载物不可信**：解压/下载的文件视为不可信数据，放独立空目录，脚本另放，用 `-I` 跑 Python
+- **Environment 模型列表**：Claude 5 family / Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5
+- 删除：「Write code that reads like the surrounding code」（SDK 模式已无，交互态待确认）
+- 删除：`! <command>` 提示（SDK 模式已无）
+

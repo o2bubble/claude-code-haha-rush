@@ -47,12 +47,18 @@ interface PresetTemplate {
 
 // 自动给 preset 写入模型能力 env，让后端 modelSupportsEffort/Thinking/Reasoning
 // 对这些 3P 模型返回 true（GUI 工具栏据此显示思考/effort 档位）。切换 profile 时
-// 后端 restart，这些静态能力 env 随 profile 生效。DeepSeek 用 reasoning 字段控思考，
-// Qwen 走 Claude 原生 thinking 块（不加 reasoning）。
+// 后端 restart，这些静态能力 env 随 profile 生效。
+//
+// DeepSeek 按**官方文档**声明：思考开关走 `thinking.type`，强度走
+// `output_config.effort`；`budget_tokens` 与 `reasoning:{effort}` 文档明确忽略
+// （2026-11-02 实测递增：minimal 1770 / low 1717 / medium 3634 / high 3254 /
+// max 3863 字思考）。所以这里**不声明 `reasoning`** —— 一旦声明，后端会把开关
+// 也交给 `reasoning:{effort}`，而 DeepSeek 不认，等于关不掉思考。
+// Qwen 走 Claude 原生 thinking 块 + 预算。
 const DEEPSEEK_CAP_VARS = {
-  ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: "effort,max_effort,thinking,reasoning",
-  ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: "effort,max_effort,thinking,reasoning",
-  ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: "effort,max_effort,thinking,reasoning",
+  ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: "effort,max_effort,thinking,output_config_effort",
+  ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES: "effort,max_effort,thinking,output_config_effort",
+  ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES: "effort,max_effort,thinking,output_config_effort",
 };
 const QWEN_CAP_VARS = {
   ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES: "effort,max_effort,thinking",
@@ -75,6 +81,7 @@ const CAPABILITY_OPTIONS: { key: string; labelKey: string }[] = [
   { key: "effort", labelKey: "profile.capEffort" },
   { key: "max_effort", labelKey: "profile.capMaxEffort" },
   { key: "reasoning", labelKey: "profile.capReasoning" },
+  { key: "output_config_effort", labelKey: "profile.capOutputConfigEffort" },
 ];
 function capabilityVarsFromSet(set: Set<string>): Record<string, string> {
   if (set.size === 0) return {};

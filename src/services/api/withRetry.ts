@@ -34,6 +34,11 @@ import {
 import { isNonCustomOpusModel } from '../../utils/model/model.js'
 import { disableKeepAlive } from '../../utils/proxy.js'
 import { sleep } from '../../utils/sleep.js'
+import {
+  isToolSearchRejectionError,
+  noteToolSearchRejected,
+  toolSearchBaseUrlHost,
+} from '../../utils/toolSearchSupport.js'
 import type { ThinkingConfig } from '../../utils/thinking.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../analytics/growthbook.js'
 import {
@@ -697,6 +702,17 @@ function shouldRetry(error: APIError): boolean {
   // Never retry mock errors - they're from /mock-limits command for testing
   if (isMockRateLimitError(error)) {
     return false
+  }
+
+  // 延迟工具加载被这个 host 拒绝了（不认识 defer_loading / tool_reference）：
+  // 记下来并重试一次。下次请求 isToolSearchEnabledOptimistic() 会返回 false，
+  // 工具全部内联，不会再撞同一个错误 —— 所以这里无条件重试不会死循环。
+  if (isToolSearchRejectionError(error)) {
+    noteToolSearchRejected(toolSearchBaseUrlHost())
+    logForDebugging(
+      `[ToolSearch] host rejected deferred tools (${error.status}); disabling tool search and retrying`,
+    )
+    return true
   }
 
   // Persistent mode: 429/529 always retryable, bypass subscriber gates and

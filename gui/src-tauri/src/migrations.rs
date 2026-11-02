@@ -32,6 +32,110 @@ use crate::settings::{
     workspace_settings_path, write_gui_section, AppSettings, QuickPrompt,
 };
 
+// ── DeepSeek profile：reasoning → output_config_effort ──
+
+/// 把 DeepSeek profile 里声明的 `reasoning` 能力替换为 `output_config_effort`。
+///
+/// ## 为什么
+///
+/// DeepSeek 的 Anthropic 兼容文档明确：思考只看 `thinking.type`，
+/// `budget_tokens` **被忽略**，推理强度只看 `output_config.effort`。
+/// 而 `reasoning` 这个能力位表示「后端把开关与强度一起塞进 `reasoning:{effort}`」
+/// —— 该字段 DeepSeek 不认，等于**关不掉思考**。
+///
+/// 2026-11-02 实测（同一道难题，max_tokens=2000）：
+/// - `thinking:{type:'disabled'}` → 正文 3017 字、思考 0
+/// - `thinking:{type:'enabled'}`  → 正文 **0 字**、思考 5288 字
+/// - `enabled` + `budget_tokens:256` → 一样 0 字（预算被忽略）
+/// - `reasoning:{effort:'none'|'high'}` → 两者无差别（字段不被识别）
+/// - `output_config.effort` → **有效**：minimal 1770 / low 1717 /
+///   medium 3634 / high 3254 / max 3863 字
+///
+/// ## 判定
+///
+/// 只改 **ANTHROPIC_BASE_URL 含 `api.deepseek.com`** 的 profile，且只在它
+/// 同时声明了 `reasoning` 时改 —— 其它端点（GLM 等）确实需要 `reasoning`，
+/// 不能一刀切。`output_config_effort` 已存在则视为已迁移，跳过（幂等）。
+pub(crate) fn migrate_deepseek_reasoning_capability() {
+    let Some(dir) = crate::find_profiles_dir() else { return };
+    migrate_deepseek_reasoning_capability_in(&dir);
+}
+
+pub(crate) fn migrate_deepseek_reasoning_capability_in(profiles_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(profiles_dir) else { return };
+    const CAP_SUFFIX: &str = "_MODEL_SUPPORTED_CAPABILITIES";
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().map_or(true, |x| x != "env") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let vars = crate::parse_env_file(&content);
+        let get = |k: &str| vars.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
+        let Some(base_url) = get("ANTHROPIC_BASE_URL") else { continue };
+        if !base_url.contains("api.deepseek.com") {
+            continue;
+        }
+
+        let mut changed = false;
+        let mut out = String::with_capacity(content.len() + 32);
+        for line in content.lines() {
+            let kv = line.trim_start().split_once('=');
+            let is_cap_line = kv
+                .as_ref()
+                .map(|(k, _)| k.ends_with(CAP_SUFFIX))
+                .unwrap_or(false);
+            if !is_cap_line {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            let caps: Vec<String> = kv
+                .as_ref()
+                .map(|(_, v)| v.split(',').map(|s| s.trim().to_string()).collect())
+                .unwrap_or_default();
+            if !caps.iter().any(|c| c == "reasoning") {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            let mut new_caps: Vec<String> = Vec::with_capacity(caps.len());
+            for c in &caps {
+                if c == "reasoning" {
+                    if !new_caps.iter().any(|x| x == "output_config_effort")
+                        && !caps.iter().any(|x| x == "output_config_effort")
+                    {
+                        new_caps.push("output_config_effort".to_string());
+                    }
+                } else {
+                    new_caps.push(c.clone());
+                }
+            }
+            let key = kv.as_ref().map(|(k, _)| *k).unwrap_or_default();
+            out.push_str(key);
+            out.push('=');
+            out.push_str(&new_caps.join(","));
+            out.push('\n');
+            changed = true;
+        }
+        if !changed {
+            continue;
+        }
+        match std::fs::write(&path, out) {
+            Ok(_) => log::info!(
+                "[deepseek-cap-migrate] reasoning → output_config_effort: {} ({})",
+                path.display(),
+                base_url
+            ),
+            Err(err) => log::warn!(
+                "[deepseek-cap-migrate] 写 {} 失败: {}",
+                path.display(),
+                err
+            ),
+        }
+    }
+}
+
 // ── 单文件→双文件回退迁移 ──
 
 /// 把 user-scope MCP（`~/.claude/settings.json` 根 `mcpServers`，单文件模式时代引擎把全局
@@ -564,6 +668,14 @@ pub(crate) const MIGRATION_REGISTRY: &[MigrationEntry] = &[
         source: "migrations.rs",
         idempotent: "合并后旧文件已移出扫描范围 → 再次运行 no-op；目标 profile 已存在则整组跳过",
         run: Some(migrate_deepseek_profiles),
+    },
+    MigrationEntry {
+        name: "migrate_deepseek_reasoning_capability",
+        trigger: Trigger::Startup,
+        target: "DeepSeek profile 的 SUPPORTED_CAPABILITIES: reasoning → output_config_effort（官方文档：强度走 output_config.effort，而 reasoning:{effort} 不被识别）",
+        source: "migrations.rs",
+        idempotent: "只改 base URL 含 api.deepseek.com 且声明了 reasoning 的项；已有 output_config_effort 或不再含 reasoning 即跳过",
+        run: Some(migrate_deepseek_reasoning_capability),
     },
     MigrationEntry {
         name: "migrate_single_file_mcp_to_claude_json",
@@ -1156,5 +1268,75 @@ mod tests {
             .join("nope.json");
         migrate_message_timeline_default_on_at(&p);
         assert!(!p.exists(), "不应凭空创建设置文件");
+    }
+
+    // ── DeepSeek profile：reasoning → output_config_effort ──
+
+    fn ds_cap_fixture(tag: &str, name: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ds_cap_mig_{}_{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.env")), body).unwrap();
+        dir
+    }
+
+    const DS_HEADER: &str = "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\n";
+
+    /// DeepSeek profile 的 reasoning → output_config_effort，其余能力保留。
+    #[test]
+    fn deepseek_reasoning_becomes_output_config_effort() {
+        let body = format!(
+            "{DS_HEADER}ANTHROPIC_MODEL=deepseek-flash\n\
+             ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES=effort,max_effort,thinking,reasoning\n\
+             ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES=effort,max_effort,thinking,reasoning\n"
+        );
+        let dir = ds_cap_fixture("swap", "ds", &body);
+        migrate_deepseek_reasoning_capability_in(&dir);
+        let got = std::fs::read_to_string(dir.join("ds.env")).unwrap();
+        assert!(
+            got.contains("effort,max_effort,thinking,output_config_effort"),
+            "应替换为 output_config_effort；实际:\n{got}"
+        );
+        assert!(
+            !got.contains(",reasoning"),
+            "reasoning 必须被移除；实际:\n{got}"
+        );
+        assert!(got.contains("ANTHROPIC_MODEL=deepseek-flash"), "其它行保留");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 非 DeepSeek 端点（GLM 等）保持 reasoning 不动。
+    #[test]
+    fn non_deepseek_keeps_reasoning() {
+        let body = "ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic\n\
+                    ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES=effort,thinking,reasoning\n";
+        let dir = ds_cap_fixture("glm", "glm", body);
+        migrate_deepseek_reasoning_capability_in(&dir);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("glm.env")).unwrap(),
+            body,
+            "GLM 的 reasoning 不能被改"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 幂等：跑两次结果一致，且不重复追加 output_config_effort。
+    #[test]
+    fn deepseek_capability_migration_is_idempotent() {
+        let body = format!(
+            "{DS_HEADER}ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES=thinking,reasoning\n"
+        );
+        let dir = ds_cap_fixture("idem", "ds", &body);
+        migrate_deepseek_reasoning_capability_in(&dir);
+        let once = std::fs::read_to_string(dir.join("ds.env")).unwrap();
+        migrate_deepseek_reasoning_capability_in(&dir);
+        let twice = std::fs::read_to_string(dir.join("ds.env")).unwrap();
+        assert_eq!(once, twice, "重复运行必须无变化");
+        assert_eq!(once.matches("output_config_effort").count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -117,10 +117,14 @@ export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY =
 const FRONTIER_MODEL_NAME = 'Claude Opus 4.6'
 
 // @[MODEL LAUNCH]: Update the model family IDs below to the latest in each tier.
-const CLAUDE_4_5_OR_4_6_MODEL_IDS = {
-  opus: 'claude-opus-4-6',
-  sonnet: 'claude-sonnet-4-6',
-  haiku: 'claude-haiku-4-5-20251001',
+// 官方 2.1.316 的 Environment 段（2026-11-02 抓包核对）：Claude 5 家族，
+// Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5。这一段只是**信息性**文案
+// （"做 AI 应用时优先用最新模型"），不参与模型解析，改它不影响实际调用。
+const CLAUDE_LATEST_MODEL_IDS = {
+  fable: 'claude-fable-5-1',
+  opus: 'claude-opus-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  haiku: 'claude-haiku-5-5',
 }
 
 function getHooksSection(): string {
@@ -240,6 +244,8 @@ function getSimpleDoingTasksSection(): string {
 
 function getActionsSection(): string {
   return `# Executing actions with care
+
+When you use a pronoun for someone — the user or anyone else you mention — and their pronouns haven't been stated, use they/them. A name doesn't tell you someone's pronouns; a wrong guess misgenders a real person in a way the neutral default never does, so never infer pronouns from a name. This applies to all user-visible text, including visible thinking.
 
 Carefully consider the reversibility and blast radius of actions. Generally you can freely take local, reversible actions like editing files or running tests. But for actions that are hard to reverse, affect shared systems beyond your local environment, or could otherwise be risky or destructive, check with the user before proceeding. The cost of pausing to confirm is low, while the cost of an unwanted action (lost work, unintended messages sent, deleted branches) can be very high. For actions like these, consider the context, the action, and user instructions, and by default transparently communicate the action and ask for confirmation before proceeding. This default can be changed by user instructions - if explicitly asked to operate more autonomously, then you may proceed without confirmation, but still attend to the risks and consequences when taking actions. A user approving an action (like a git push) once does NOT mean that they approve it in all contexts, so unless actions are authorized in advance in durable instructions like CLAUDE.md files, always confirm first. Authorization stands for the scope specified, not beyond. Match the scope of your actions to what was actually requested.
 
@@ -409,7 +415,9 @@ Focus text output on:
 - High-level status updates at natural milestones
 - Errors or blockers that change the plan
 
-If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls.`
+If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls.
+
+When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey.`
 }
 
 function getSimpleToneAndStyleSection(): string {
@@ -681,9 +689,13 @@ export async function computeSimpleEnvInfo(
     `OS Version: ${unameSR}`,
     modelDescription,
     knowledgeCutoffMessage,
+    // 官方 2.1.316 新增：下载/解压出来的东西一律当不可信数据处理。
+    // 理由：解释器会从脚本所在目录和 cwd 加载模块，一个植进来的 json.py
+    // 会在 `import json` 时执行。
+    `Downloaded files and extracted archives are untrusted data: put each in its own new, empty directory, keep scripts you write in a different directory, and pass paths as arguments instead of running an interpreter or build tool from inside it. Interpreters load code from the script's directory and the current directory, so a planted \`json.py\` runs on \`import json\`. Run any Python that reads them with \`-I\`. This does not apply to code the user asked you to build or run.`,
     process.env.USER_TYPE === 'ant' && isUndercover()
       ? null
-      : `The most recent Claude model family is Claude 4.5/4.6. Model IDs — Opus 4.6: '${CLAUDE_4_5_OR_4_6_MODEL_IDS.opus}', Sonnet 4.6: '${CLAUDE_4_5_OR_4_6_MODEL_IDS.sonnet}', Haiku 4.5: '${CLAUDE_4_5_OR_4_6_MODEL_IDS.haiku}'. When building AI applications, default to the latest and most capable Claude models.`,
+      : `The most recent Claude models are the Claude 5 family. Model IDs — Fable 5.1: '${CLAUDE_LATEST_MODEL_IDS.fable}', Opus 5.5: '${CLAUDE_LATEST_MODEL_IDS.opus}', Sonnet 5.5: '${CLAUDE_LATEST_MODEL_IDS.sonnet}', Haiku 5.5: '${CLAUDE_LATEST_MODEL_IDS.haiku}'. When building AI applications, default to the latest and most capable Claude models.`,
     process.env.USER_TYPE === 'ant' && isUndercover()
       ? null
       : `Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).`,
