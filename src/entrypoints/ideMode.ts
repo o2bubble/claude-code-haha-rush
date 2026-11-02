@@ -1305,6 +1305,24 @@ async function initialize(): Promise<void> {
   // Enable config reading (must happen before getTools / QueryEngine)
   enableConfigs()
 
+  // 会话自述（`~/.claude/sessions/<pid>.json`）—— 同机其他会话靠它互相发现
+  // （ListAgents / SendMessage(session-<pid>)）。
+  //
+  // ⚠️ 必须在这里再写一次：这段逻辑原本只加在 `setup()` 里，而 IDE 模式走的是
+  // **另一条初始化路径**（cli.tsx → runIdeMode → 本函数），根本不经过 setup →
+  // GUI 会话从来没登记过 → `~/.claude/sessions/` 永远是空目录 →
+  // ListAgents 看不到任何同机会话（2026-11-02 实测确认）。
+  // 早于任何 hook 落地，避免 hook spawn 子进程时快照到未登记的环境。
+  try {
+    const { registerSession } = await import('../utils/concurrentSessions.js')
+    await registerSession()
+  } catch (e) {
+    console.error(
+      '[ide-mode] session self-registration failed:',
+      e instanceof Error ? e.message : String(e),
+    )
+  }
+
   // Apply env vars, proxy, mTLS, and CA certs from settings (no trust dialog in IDE mode)
   applyConfigEnvironmentVariables()
   applyExtraCACertsFromConfig()

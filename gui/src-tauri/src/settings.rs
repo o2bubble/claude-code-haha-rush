@@ -481,10 +481,15 @@ fn register_office_mcp_at(
 
 // ── office-bridge 指南同步 ──
 
-/// GUI 启动时把 office 操作指南（office-bridge.md）同步到 ~/.claude/ 并确保
-/// `@office-bridge.md` 注入 CLAUDE.md。与 office MCP 注册同一时机——安装器只管
-/// 装文件，用户配置（AI 操作指南）由运行时维护：更新版本免重装、mac/win 统一、
-/// 每次启动幂等（内容相同不写盘、@ 已存在不重复注入）。
+/// GUI 启动时把 office 操作指南同步成**技能**
+/// （`~/.claude/skills/office-bridge/SKILL.md`）。
+///
+/// ⚠️ 2026-11-02 变更：以前写 `~/.claude/office-bridge.md` 并注入
+/// `@office-bridge.md` 到 CLAUDE.md —— 那会把 7.6K 字符塞进**每个**会话的上下文。
+/// 改成技能后，技能列表里只留一行 description，真问到 Office 时才加载全文。
+///
+/// 与 office MCP 注册同一时机：安装器只管装文件，用户配置由运行时维护
+/// （更新版本免重装、mac/win 统一、每次启动幂等）。
 pub fn sync_office_guide() {
     let Some(exe_dir) = std::env::current_exe()
         .ok()
@@ -500,6 +505,26 @@ pub fn sync_office_guide() {
     sync_office_guide_at(&claude_dir, &src);
 }
 
+/// 从一段文本里删掉某一行 `@ref`（整行，保留其余内容与行尾风格）。
+/// 幂等：没找到就原样返回。
+fn strip_at_ref_line(content: &str, ref_line: &str) -> String {
+    if !content.contains(ref_line) {
+        return content.to_string();
+    }
+    let mut out = String::with_capacity(content.len());
+    for line in content.split_inclusive('\n') {
+        if line.trim() == ref_line {
+            continue;
+        }
+        out.push_str(line);
+    }
+    // 删行后可能留下连续空行，收敛成最多一个空行。
+    while out.contains("\n\n\n") {
+        out = out.replace("\n\n\n", "\n\n");
+    }
+    out
+}
+
 /// 可注入核心（单测用临时目录，绝不碰真实 ~/.claude）。
 fn sync_office_guide_at(claude_dir: &std::path::Path, src: &std::path::Path) {
     if !src.exists() {
@@ -509,12 +534,14 @@ fn sync_office_guide_at(claude_dir: &std::path::Path, src: &std::path::Path) {
     let _ = std::fs::create_dir_all(claude_dir);
 
     // 内容不同才写，避免每次启动磁盘写。
-    let dst = claude_dir.join("office-bridge.md");
+    let skill_dir = claude_dir.join("skills").join("office-bridge");
+    let dst = skill_dir.join("SKILL.md");
     let needs_write = match std::fs::read(&dst) {
         Ok(existing) => std::fs::read(src).map(|cur| existing != cur).unwrap_or(true),
         Err(_) => true,
     };
     if needs_write {
+        let _ = std::fs::create_dir_all(&skill_dir);
         if let Ok(content) = std::fs::read(src) {
             if std::fs::write(&dst, content).is_ok() {
                 log::info!("Synced office guide → {}", dst.display());
@@ -522,19 +549,20 @@ fn sync_office_guide_at(claude_dir: &std::path::Path, src: &std::path::Path) {
         }
     }
 
-    // 注入 @office-bridge.md 到 CLAUDE.md（幂等：已存在则跳过）。
+    // ── 迁移：旧的 @import 形式（7.6K 常驻上下文）→ 技能（按需加载）──
+    // 删除旧文件 + CLAUDE.md 里的 `@office-bridge.md` 行。两者都幂等。
+    let legacy_file = claude_dir.join("office-bridge.md");
+    if legacy_file.exists() && std::fs::remove_file(&legacy_file).is_ok() {
+        log::info!("Removed legacy guide {}", legacy_file.display());
+    }
     let claude_md = claude_dir.join("CLAUDE.md");
-    let mut content = std::fs::read_to_string(&claude_md).unwrap_or_default();
-    if content.contains("@office-bridge.md") {
-        return;
-    }
-    if content.is_empty() {
-        content = "# Claude Code Global Instructions\n\n@office-bridge.md\n".to_string();
-    } else {
-        content = content.trim_end().to_string() + "\n\n@office-bridge.md\n";
-    }
-    if std::fs::write(&claude_md, content).is_ok() {
-        log::info!("Injected @office-bridge.md into {}", claude_md.display());
+    if let Ok(content) = std::fs::read_to_string(&claude_md) {
+        let cleaned = strip_at_ref_line(&content, "@office-bridge.md");
+        if cleaned != content {
+            if std::fs::write(&claude_md, cleaned).is_ok() {
+                log::info!("Removed @office-bridge.md from {}", claude_md.display());
+            }
+        }
     }
 }
 
@@ -1481,16 +1509,38 @@ mod tests {
         (claude_dir, src)
     }
 
-    /// 源存在 → 复制到 ~/.claude/ + 注入 @office-bridge.md 到 CLAUDE.md。
+    /// 源存在 → 装成技能（`skills/office-bridge/SKILL.md`），**不再**注入 @ 引用。
     #[test]
-    fn office_guide_copies_and_injects() {
+    fn office_guide_installs_skill() {
         let (c, src) = guide_fixture("basic");
-        std::fs::write(&src, "# Office MCP guide\n").unwrap();
+        std::fs::write(&src, "---\nname: office-bridge\ndescription: x\n---\n\n# Office MCP guide\n").unwrap();
         sync_office_guide_at(&c, &src);
 
-        assert_eq!(std::fs::read_to_string(c.join("office-bridge.md")).unwrap(), "# Office MCP guide\n");
-        let claude_md = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
-        assert!(claude_md.contains("@office-bridge.md"), "应注入 @ 引用");
+        let skill = c.join("skills").join("office-bridge").join("SKILL.md");
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), "---\nname: office-bridge\ndescription: x\n---\n\n# Office MCP guide\n");
+        assert!(!c.join("office-bridge.md").exists(), "不再写旧位置");
+        assert!(!c.join("CLAUDE.md").exists(), "不再创建/注入 CLAUDE.md");
+    }
+
+    /// 迁移：旧文件 + `@office-bridge.md` 引用 → 删掉，其余 @ 保留。
+    #[test]
+    fn office_guide_migrates_legacy_import() {
+        let (c, src) = guide_fixture("migrate");
+        std::fs::create_dir_all(&c).unwrap();
+        std::fs::write(c.join("office-bridge.md"), "old\n").unwrap();
+        std::fs::write(
+            c.join("CLAUDE.md"),
+            "# header\n\n@office-bridge.md\n\n@other.md\n",
+        )
+        .unwrap();
+        std::fs::write(&src, "---\nname: office-bridge\n---\nnew\n").unwrap();
+        sync_office_guide_at(&c, &src);
+
+        assert!(!c.join("office-bridge.md").exists(), "旧文件应删除");
+        let md = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
+        assert!(!md.contains("@office-bridge.md"), "旧 @ 引用应删除");
+        assert!(md.contains("@other.md"), "其余 @ 引用保留");
+        assert!(c.join("skills").join("office-bridge").join("SKILL.md").exists());
     }
 
     #[test]
@@ -1521,7 +1571,7 @@ mod tests {
         assert!(md.contains("@other.md"), "其他 @ 引用保留");
     }
 
-    /// 幂等：内容变化才更新 md，@ 引用不重复注入。
+    /// 幂等：内容变化才更新技能文件。
     #[test]
     fn office_guide_idempotent() {
         let (c, src) = guide_fixture("idem");
@@ -1530,9 +1580,9 @@ mod tests {
         std::fs::write(&src, "v2\n").unwrap();
         sync_office_guide_at(&c, &src);
 
-        assert_eq!(std::fs::read_to_string(c.join("office-bridge.md")).unwrap(), "v2\n", "内容变化应更新");
-        let md = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
-        assert_eq!(md.matches("@office-bridge.md").count(), 1, "@ 引用不重复注入");
+        let skill = c.join("skills").join("office-bridge").join("SKILL.md");
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), "v2\n", "内容变化应更新");
+        assert!(!c.join("office-bridge.md").exists());
     }
 
     /// 源缺失 → 跳过，不写任何文件。
@@ -1542,21 +1592,20 @@ mod tests {
         sync_office_guide_at(&c, &src);
         assert!(!c.join("office-bridge.md").exists());
         assert!(!c.join("CLAUDE.md").exists());
+        assert!(!c.join("skills").exists(), "源缺失时不该建技能目录");
     }
 
-    /// CLAUDE.md 已有 @ 引用 → 不重复注入；md 内容不同仍同步。
+    /// 幂等迁移：CLAUDE.md 没有旧 @ 引用时保持原样（不新增空行、不改行尾）。
     #[test]
-    fn office_guide_keeps_existing_injection() {
-        let (c, src) = guide_fixture("keep");
+    fn office_guide_leaves_claude_md_untouched_when_no_legacy_ref() {
+        let (c, src) = guide_fixture("untouched");
         std::fs::create_dir_all(&c).unwrap();
-        std::fs::write(c.join("CLAUDE.md"), "# header\n\n@office-bridge.md\n@other.md\n").unwrap();
+        let original = "# header\n\n@other.md\n";
+        std::fs::write(c.join("CLAUDE.md"), original).unwrap();
         std::fs::write(&src, "new\n").unwrap();
         sync_office_guide_at(&c, &src);
 
-        let md = std::fs::read_to_string(c.join("CLAUDE.md")).unwrap();
-        assert_eq!(md.matches("@office-bridge.md").count(), 1, "已有引用不重复");
-        assert!(md.contains("@other.md"), "其余行保留");
-        assert_eq!(std::fs::read_to_string(c.join("office-bridge.md")).unwrap(), "new\n");
+        assert_eq!(std::fs::read_to_string(c.join("CLAUDE.md")).unwrap(), original);
     }
 
     // ── python-env 指南同步（临时目录 + 临时 exe_dir，绝不碰真实 ~/.claude）──

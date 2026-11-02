@@ -8,12 +8,16 @@
  * Interactive: choose remote (Streamable HTTP URL) or local (Python + model).
  * Automatically:
  *   1. Add MCP server to ~/.claude/settings.json
- *   2. Install 3 slash-command skills to ~/.claude/skills/
- *   3. Copy agent instruction doc to ~/.claude/memory-mcp.md
- *   4. Add @memory-mcp.md reference to ~/.claude/CLAUDE.md
+ *   2. Install 4 skills to ~/.claude/skills/
+ *      (remember / recall / memory-status / memory-mcp)
+ *   3. Remove the legacy `~/.claude/memory-mcp.md` + `@memory-mcp.md` import
+ *
+ * The instruction doc is a SKILL now (2026-11-02): as an @import it put ~16K
+ * characters into every session's context. As a skill only its one-line
+ * description is resident; the body loads when the model actually needs it.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { createInterface } from 'readline';
@@ -61,7 +65,8 @@ function addToSettings(mcpConfig: Record<string, unknown>): void {
 function installSkills(): void {
   const skillsDir = join(CLAUDE_HOME, 'skills');
   const srcDir = join(MEMORY_DIR, 'skills');
-  const skillFiles = ['remember.md', 'recall.md', 'memory-status.md'];
+  // memory-mcp 从 2026-11-02 起也是一等技能（原先走 @import，太重）。
+  const skillFiles = ['remember.md', 'recall.md', 'memory-status.md', 'memory-mcp.md'];
 
   for (const file of skillFiles) {
     const name = file.replace('.md', '');
@@ -69,43 +74,43 @@ function installSkills(): void {
     mkdirSync(targetDir, { recursive: true });
     cpSync(join(srcDir, file), join(targetDir, 'SKILL.md'));
   }
-  log('3 skills installed to ~/.claude/skills/');
+  log(`${skillFiles.length} skills installed to ~/.claude/skills/`);
 }
 
-// ── Step: Agent instruction doc ─────────────────────────────────────────────
+// ── Step: migrate away from the @import form ────────────────────────────────
 
-function installAgentDoc(): void {
-  const src = join(ROOT, 'docs', 'agents', 'memory-mcp.md');
-  const dst = join(CLAUDE_HOME, 'memory-mcp.md');
-
-  if (!existsSync(src)) {
-    warn(`Agent doc not found: ${src}`);
-    return;
+/**
+ * 老版本把指南写成 `~/.claude/memory-mcp.md` 并在 CLAUDE.md 里 `@memory-mcp.md`
+ * —— 那会让**每个会话**都背上约 16K 字符。现在是技能（installSkills 装），
+ * 这里只负责把旧文件与旧引用清掉。两者都幂等。
+ */
+function removeLegacyAgentDoc(): void {
+  const legacy = join(CLAUDE_HOME, 'memory-mcp.md');
+  if (existsSync(legacy)) {
+    try {
+      unlinkSync(legacy);
+      log('Removed legacy ~/.claude/memory-mcp.md');
+    } catch (e) {
+      warn(`Could not remove legacy memory-mcp.md: ${e}`);
+    }
   }
-  cpSync(src, dst);
-  log('Agent doc copied to ~/.claude/memory-mcp.md');
 
-  // Add @ reference to CLAUDE.md if not already present
   const claudeMd = join(CLAUDE_HOME, 'CLAUDE.md');
+  if (!existsSync(claudeMd)) return;
+
   const refLine = '@memory-mcp.md';
+  const content = readFileSync(claudeMd, 'utf-8');
+  if (!content.includes(refLine)) return;
 
-  let content = '';
-  if (existsSync(claudeMd)) {
-    content = readFileSync(claudeMd, 'utf-8');
-  }
+  // 整行删除，保留其余内容与行尾；删完收敛多余空行。
+  const cleaned = content
+    .split(/\r?\n/)
+    .filter(line => line.trim() !== refLine)
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n');
 
-  if (content.includes(refLine)) {
-    log('CLAUDE.md already references memory-mcp.md');
-    return;
-  }
-
-  // Append reference (add blank line first if needed)
-  if (content.length > 0 && !content.endsWith('\n\n')) {
-    content = content.replace(/\n*$/, '\n\n');
-  }
-  content += refLine + '\n';
-  writeFileSync(claudeMd, content, 'utf-8');
-  log('@memory-mcp.md reference added to ~/.claude/CLAUDE.md');
+  writeFileSync(claudeMd, cleaned, 'utf-8');
+  log('Removed @memory-mcp.md from ~/.claude/CLAUDE.md (now a skill)');
 }
 
 // ── Modes ────────────────────────────────────────────────────────────────────
@@ -195,7 +200,7 @@ async function main(): Promise<void> {
   // Shared steps (both modes)
   console.log('');
   installSkills();
-  installAgentDoc();
+  removeLegacyAgentDoc();
 
   rl.close();
 

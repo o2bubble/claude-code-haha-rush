@@ -415,9 +415,11 @@ async function main() {
   copy('extensions/office/com/bridge.py', 'office/com/bridge.py')
   copy('extensions/office/com/bridge_mac.py', 'office/com/bridge_mac.py')
   copy('extensions/office/com/office_mcp_server.py', 'office/com/office_mcp_server.py')
-  // CLAUDE.md @refs (office-bridge.md, python-env.md) — installer copies these to
-  // ~/.claude/ and injects a single @-reference line into CLAUDE.md, so their
-  // content is maintained here in one place instead of pasted into CLAUDE.md.
+  // office-bridge.md 现在是**技能源**：GUI 启动时（settings::sync_office_guide）
+  // 或 scripts/inject-office-bridge.ts 把它装到
+  // ~/.claude/skills/office-bridge/SKILL.md。
+  // ⚠️ 2026-11-02 起不再注入 CLAUDE.md 的 @引用 —— 那会让 7.6K 字符常驻每轮上下文。
+  // python-env.md 仍走 @引用：只有 360 字符，没必要为它单开一个技能。
   copy('extensions/office/office-bridge.md', 'office/office-bridge.md')
   copy('extensions/python/python-env.md', 'python/python-env.md')
 
