@@ -31,8 +31,15 @@ const MAX_USER_TICKS = 120;
 /** 渲染聚类阈值（px）：中心距小于它就并作一个标记。
  *  点的视觉直径约 6-7px（5px + 1px 描边），取 8 保证相邻点不接触。 */
 const CLUSTER_MIN_GAP = 8;
+/** 悬停驻留多久才展开聚合浮层（防"划过一路弹窗"）。 */
 const CLUSTER_OPEN_DELAY = 400;
-const CLUSTER_CLOSE_DELAY = 240;
+/**
+ * 离开后多久收起聚合浮层。
+ *
+ * 必须给"从刻度点移到浮层"留足时间：两者之间隔着栏宽 + FLOAT_GAP 空隙，原来 240ms
+ * 鼠标稍慢一点就跨不过去 → 浮层自己收回去（用户实测）。700ms 够从容移动。
+ */
+const CLUSTER_CLOSE_DELAY = 700;
 
 // 精简态（未 hover）窄条，只显示刻度小点；hover/拖动时展开为详细宽条。
 // 展开态需容纳「MM-DD HH:MM」日期+时间，故较宽。
@@ -40,9 +47,18 @@ const COLLAPSED_WIDTH = 12;
 const EXPANDED_WIDTH = 72;
 /** 提示预览浮层最大宽度（也是拖动时向左翻边的偏移量） */
 const PREVIEW_MAX_WIDTH = 260;
-// 触发展开/收起的防抖延时 — 鼠标快速经过窄条时不会立即展开抖动
-const HOVER_EXPAND_DELAY = 350;
-const HOVER_COLLAPSE_DELAY = 200;
+/**
+ * 展开/收起的防抖延时。
+ *
+ * 用户反馈（2026-11-02）：「时间线自己收缩…加一点延时可以减少展开和收缩的抖动」。
+ * 原来的 350/200 太贴手：鼠标擦过窄条就展开、稍一偏就缩回去，来回抖。
+ * 展开稍慢（确认是真要停留），收起明显变慢（短暂离开时不闪）—— 收起比展开慢是关键，
+ * 这样"移开又回来"的抖动被吞掉，而真正离开时也不会滞留太久。
+ */
+const HOVER_EXPAND_DELAY = 420;
+const HOVER_COLLAPSE_DELAY = 700;
+/** 栏与浮层之间的空隙（px）。留 4px 视觉上分开，但不至于让鼠标"跨空而过"。 */
+const FLOAT_GAP = 4;
 
 function pad(n: number): string {
   return String(n).padStart(2, "0");
@@ -95,6 +111,9 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
     }
   }, []);
   useEffect(() => () => clearHoverTimer(), [clearHoverTimer]);
+  /** 指针是否在栏内。聚合浮层开着时我们不安排收起（见 onPointerLeave），
+   *  需要在浮层关闭时据此补一次 —— 否则从浮层离开后宽条会一直亮着。 */
+  const pointerInsideRef = useRef(false);
 
   // ── 精准定位交互（2026-10-28 用户反馈）──
   //
@@ -123,7 +142,16 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
   const closeCluster = useCallback(() => {
     clearClusterTimer();
     setOpenClusterKey(null);
-  }, [clearClusterTimer]);
+    // 聚合浮层开着期间 onPointerLeave 是空转的（怕收缩打断"移向浮层"）。
+    // 浮层关掉时指针若已在栏外（按 Esc / 点完条目 / 从浮层移开），在这里补一次收起。
+    if (!pointerInsideRef.current) {
+      clearHoverTimer();
+      hoverTimerRef.current = window.setTimeout(() => {
+        setHovered(false);
+        setHoverY(null);
+      }, HOVER_COLLAPSE_DELAY);
+    }
+  }, [clearClusterTimer, clearHoverTimer]);
 
   /** 悬停聚合点时延时展开（立刻展开会让快速划过一路弹窗）。 */
   const scheduleOpenCluster = useCallback(
@@ -315,10 +343,15 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerEnter={() => {
+        pointerInsideRef.current = true;
         clearHoverTimer();
         hoverTimerRef.current = window.setTimeout(() => setHovered(true), HOVER_EXPAND_DELAY);
       }}
       onPointerLeave={() => {
+        pointerInsideRef.current = false;
+        // 聚合浮层开着时不收起宽条 —— 鼠标正从刻度点移向浮层，此刻收缩会
+        // 让栏宽突变、浮层锚点跟着跳。浮层自己会在离开时安排关闭。
+        if (openClusterKey != null) return;
         clearHoverTimer();
         hoverTimerRef.current = window.setTimeout(() => {
           setHovered(false);
@@ -604,109 +637,137 @@ export function TimeLineBar({ timestamps, onSeek, userPrompts }: TimeLineBarProp
           Math.max(8, barRect.top + openCluster.pixel - 16),
           Math.max(8, viewportH - estH - 10),
         );
+        const left = Math.max(4, barRect.left + EXPANDED_WIDTH + FLOAT_GAP);
         return (
-          <div
-            // 阻止冒泡：浮层内的按下/滚动不该被当成"拖动时间轴"
-            onPointerDown={(e) => e.stopPropagation()}
-            onWheel={(e) => e.stopPropagation()}
-            onPointerEnter={() => clearClusterTimer()}
-            onPointerLeave={() => scheduleCloseCluster()}
-            style={{
-              position: "fixed",
-              left: Math.max(4, barRect.left + EXPANDED_WIDTH + 6),
-              top,
-              width: PREVIEW_MAX_WIDTH,
-              maxHeight: maxH,
-              display: "flex",
-              flexDirection: "column",
-              borderRadius: 6,
-              background: "var(--bg-root)",
-              border: "1px solid var(--border-medium)",
-              boxShadow: "var(--shadow-md)",
-              overflow: "hidden",
-              zIndex: 1001,
-              // 渐变入场：先透明且微上移，下一帧翻到可见（见 popoverShown 的 rAF）
-              opacity: popoverShown ? 1 : 0,
-              transform: popoverShown ? "translateY(0)" : "translateY(-4px)",
-              transition: "opacity 0.13s ease, transform 0.13s ease",
-            }}
-          >
+          <>
+            {/* 栏与浮层之间的透明桥：鼠标从刻度点移向浮层要跨过这段空隙，
+                没有它就会在空隙里触发收起计时器 —— 表现是"浮层自己收回去"。
+                视觉不可见、只承接指针事件。 */}
             <div
+              aria-hidden
+              onPointerEnter={() => {
+                clearClusterTimer();
+                clearHoverTimer();
+              }}
+              onPointerLeave={() => scheduleCloseCluster()}
               style={{
-                padding: "5px 9px",
-                fontSize: 10,
-                color: "var(--semantic-warning)",
-                background: "var(--bg-surface)",
-                borderBottom: "1px solid var(--border-light)",
-                fontFamily: "var(--font-sans)",
-                flexShrink: 0,
+                position: "fixed",
+                left: Math.max(0, barRect.left + EXPANDED_WIDTH),
+                top,
+                width: Math.max(0, left - (barRect.left + EXPANDED_WIDTH)),
+                height: estH,
+                zIndex: 1000,
+                // 不能 pointerEvents:none —— 它存在的意义就是接住指针
+                background: "transparent",
+              }}
+            />
+            <div
+              // 阻止冒泡：浮层内的按下/滚动不该被当成"拖动时间轴"
+              onPointerDown={(e) => e.stopPropagation()}
+              onWheel={(e) => e.stopPropagation()}
+              onPointerEnter={() => {
+                // 移进浮层 = 还在用这个簇：两个收起计时器都要取消
+                clearClusterTimer();
+                clearHoverTimer();
+              }}
+              onPointerLeave={() => scheduleCloseCluster()}
+              style={{
+                position: "fixed",
+                left,
+                top,
+                width: PREVIEW_MAX_WIDTH,
+                maxHeight: maxH,
+                display: "flex",
+                flexDirection: "column",
+                borderRadius: 6,
+                background: "var(--bg-root)",
+                border: "1px solid var(--border-medium)",
+                boxShadow: "var(--shadow-md)",
+                overflow: "hidden",
+                zIndex: 1001,
+                // 渐变入场：先透明且微上移，下一帧翻到可见（见 popoverShown 的 rAF）
+                opacity: popoverShown ? 1 : 0,
+                transform: popoverShown ? "translateY(0)" : "translateY(-4px)",
+                transition: "opacity 0.13s ease, transform 0.13s ease",
               }}
             >
-              {t("timeline.clusterTitle", { n: openCluster.items.length })}
-              <span style={{ color: "var(--fg-muted)", marginLeft: 6 }}>
-                {t("timeline.clusterHint")}
-              </span>
-            </div>
-            <div style={{ overflowY: "auto", minHeight: 0 }}>
-              {openCluster.items.map((it) => (
-                <div
-                  key={it.index}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => {
-                    onSeekRef.current(it.index);
-                    closeCluster();
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key !== "Enter" && e.key !== " ") return;
-                    e.preventDefault();
-                    onSeekRef.current(it.index);
-                    closeCluster();
-                  }}
-                  style={{
-                    display: "flex",
-                    gap: 8,
-                    alignItems: "baseline",
-                    padding: "5px 9px",
-                    height: rowH,
-                    boxSizing: "border-box",
-                    cursor: "pointer",
-                    borderBottom: "1px solid var(--border-light)",
-                    fontFamily: "var(--font-sans)",
-                    fontSize: 11,
-                    lineHeight: "16px",
-                  }}
-                  onPointerEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = "var(--bg-hover)";
-                  }}
-                  onPointerLeave={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = "transparent";
-                  }}
-                >
-                  <span
+              <div
+                style={{
+                  padding: "5px 9px",
+                  fontSize: 10,
+                  color: "var(--semantic-warning)",
+                  background: "var(--bg-surface)",
+                  borderBottom: "1px solid var(--border-light)",
+                  fontFamily: "var(--font-sans)",
+                  flexShrink: 0,
+                }}
+              >
+                {t("timeline.clusterTitle", { n: openCluster.items.length })}
+                <span style={{ color: "var(--fg-muted)", marginLeft: 6 }}>
+                  {t("timeline.clusterHint")}
+                </span>
+              </div>
+              <div style={{ overflowY: "auto", minHeight: 0 }}>
+                {openCluster.items.map((it) => (
+                  <div
+                    key={it.index}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      onSeekRef.current(it.index);
+                      closeCluster();
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter" && e.key !== " ") return;
+                      e.preventDefault();
+                      onSeekRef.current(it.index);
+                      closeCluster();
+                    }}
                     style={{
-                      flexShrink: 0,
-                      color: "var(--fg-muted)",
-                      fontSize: 10,
-                      fontVariantNumeric: "tabular-nums",
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "baseline",
+                      padding: "5px 9px",
+                      height: rowH,
+                      boxSizing: "border-box",
+                      cursor: "pointer",
+                      borderBottom: "1px solid var(--border-light)",
+                      fontFamily: "var(--font-sans)",
+                      fontSize: 11,
+                      lineHeight: "16px",
+                    }}
+                    onPointerEnter={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = "var(--bg-hover)";
+                    }}
+                    onPointerLeave={(e) => {
+                      (e.currentTarget as HTMLElement).style.background = "transparent";
                     }}
                   >
-                    {formatAxisTime(it.time, true, Date.now())}
-                  </span>
-                  <span
-                    style={{
-                      color: "var(--fg-primary)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {it.preview || t("timeline.emptyPrompt")}
-                  </span>
-                </div>
-              ))}
+                    <span
+                      style={{
+                        flexShrink: 0,
+                        color: "var(--fg-muted)",
+                        fontSize: 10,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {formatAxisTime(it.time, true, Date.now())}
+                    </span>
+                    <span
+                      style={{
+                        color: "var(--fg-primary)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {it.preview || t("timeline.emptyPrompt")}
+                    </span>
+                  </div>
+                ))}
             </div>
-          </div>
+            </div>
+          </>
         );
       })()}
 

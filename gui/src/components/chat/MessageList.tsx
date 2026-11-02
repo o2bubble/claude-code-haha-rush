@@ -95,14 +95,68 @@ export function MessageList({ messages, scrollTarget }: MessageListProps) {
     if (el) el.scrollTop = el.scrollHeight;
   }, []);
 
+  // ── 跳到某条消息：**必须校验落点**，不能只调一次 scrollToIndex ──
+  //
+  // 虚拟列表对未渲染的行只有估算高度（estimateHeight），scrollToIndex 是按估算
+  // 算偏移的；滚过去之后新渲染的行被真实测量、上方所有行的偏移随之改写，
+  // 目标行就会被推出视野。实测真实会话（232 条）：index 161 落在视口上方 133px，
+  // 完全看不见 —— 用户看到的就是「点了却定位到别的消息」。
+  //
+  // 做法：滚动 → 等一帧让测量发生 → 用目标行的**实际矩形**校正（直接调 scrollTop，
+  // 比再走一次估算更准）→ 再确认，直到落点稳定或达到上限。目标行比视口还高时
+  // 顶部对齐，避免居中把开头裁掉。
+  const scrollRafRef = useRef(0);
+
+  const scrollToIndexStable = useCallback(
+    (index: number) => {
+      const el = parentRef.current;
+      if (!el) return;
+      cancelAnimationFrame(scrollRafRef.current);
+
+      const MAX_TRIES = 8;
+      let tries = 0;
+
+      // 落点是否已稳定（或已校正）；返回 true 表示不用再等
+      const settle = (): boolean => {
+        const row = el.querySelector<HTMLElement>(`[data-index="${index}"]`);
+        if (!row) return false; // 还没渲染到目标 → 调用方会继续滚
+        const view = el.getBoundingClientRect();
+        const rect = row.getBoundingClientRect();
+        // 比视口还高的行居中会把开头裁到视野外 → 顶部对齐
+        const wantTop =
+          rect.height > view.height - 24
+            ? view.top + 8
+            : view.top + (view.height - rect.height) / 2;
+        const delta = rect.top - wantTop;
+        if (Math.abs(delta) <= 6) return true;
+        el.scrollTop += delta;
+        return false;
+      };
+
+      const tick = () => {
+        if (settle() || tries >= MAX_TRIES) return;
+        tries++;
+        // 目标行不在渲染窗口里（估算偏差太大）→ 再按索引滚一次
+        if (!el.querySelector(`[data-index="${index}"]`)) {
+          rowVirtualizer.scrollToIndex(index, { align: "center" });
+        }
+        scrollRafRef.current = requestAnimationFrame(tick);
+      };
+
+      rowVirtualizer.scrollToIndex(index, { align: "center" });
+      scrollRafRef.current = requestAnimationFrame(tick);
+    },
+    [rowVirtualizer],
+  );
+
   // 外部跳转（消息搜索 / 时间线）：滚动到指定消息并停止跟随，方便浏览匹配上下文
   useEffect(() => {
     if (!scrollTarget) return;
-    const { index, seq } = scrollTarget;
+    const { index } = scrollTarget;
     if (index < 0 || index >= messages.length) return;
-    void seq;
     followRef.current = false;
-    rowVirtualizer.scrollToIndex(index, { align: "center" });
+    scrollToIndexStable(index);
+    return () => cancelAnimationFrame(scrollRafRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTarget?.seq]);
 
