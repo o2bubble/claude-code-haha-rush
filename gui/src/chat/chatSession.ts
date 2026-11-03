@@ -26,7 +26,7 @@ import {
   resumeQueue as resumeQueueStore, sendNowAt as sendNowAtStore,
 } from "../stores/msgQueueStore";
 import type { QueuedMsg } from "../stores/msgQueueState";
-import { DEFAULT_STALL_WAKE_PROMPT } from "../utils/streamStallDecision";
+import { DEFAULT_STALL_WAKE_PROMPT, shouldAutoWake, WAKE_COOLDOWN_MS } from "../utils/streamStallDecision";
 import { clampRecentMax, recordSessionRecent } from "../utils/sessionRecents";
 import { BackendService } from "../services/backendService";
 import {
@@ -54,6 +54,10 @@ const pendingSideQuestions = new Map<
 
 /** 旁问超时（毫秒）。后端要起一次 API 调用，给足时间；超时后 UI 不会永远转圈。 */
 const SIDE_QUESTION_TIMEOUT_MS = 120_000;
+
+/** 上次「后端自救失败 → 前端自动唤醒」的时刻（冷却判定用，见 stream.autoRecover）。
+ *  模块级而非 ref：唤醒发生在 effect runner 里，不是 React 渲染路径。 */
+let lastRecoveryWakeAt: number | null = null;
 
 // ── WS 静默取证（2026-11-03）──
 //
@@ -591,6 +595,29 @@ export function createChatSession(): ChatSession {
         case "command.resendPermissionMode":
           send("set_permission_mode", { mode: cmd.mode });
           break;
+        case "status.notice":
+          addStatusMessage(cmd.text, cmd.level);
+          break;
+        case "stream.autoRecover": {
+          // 后端看门狗自救失败 → 前端接手唤醒。
+          // 冷却期内只提示，不重复唤醒（防"唤醒→又失败→又唤醒"的死循环，
+          // 那种情况会持续烧 token 且永远好不了）。
+          const now = Date.now();
+          if (!shouldAutoWake(lastRecoveryWakeAt, now)) {
+            addStatusMessage(
+              `上游连续中断，已停止自动重试（${Math.round(WAKE_COOLDOWN_MS / 60000)} 分钟内不再自动唤醒）。可以直接发消息继续。`,
+              "error",
+            );
+            break;
+          }
+          lastRecoveryWakeAt = now;
+          addStatusMessage(
+            `后端重试也失败了（等 ${cmd.waitedSecs} 秒无数据），正在自动唤醒继续…`,
+            "warn",
+          );
+          wakeStream();
+          break;
+        }
       }
     }
   }

@@ -112,6 +112,7 @@ import type { LogOption } from 'src/types/logs.js'
 import { clearSessionMetadata, clearSessionMessagesCache, flushSessionStorage, recordTranscript, resetSessionFilePointer, saveAgentName, saveCustomTitle, saveTag } from 'src/utils/sessionStorage.js'
 import { getCurrentUsage, tokenCountWithEstimation } from 'src/utils/tokens.js'
 import { setOnFileWritten } from 'src/utils/file.js'
+import { setOnStreamRecovering } from 'src/utils/streamRecovery.js'
 import {
   getContextWindowForModel,
   calculateContextPercentages,
@@ -192,6 +193,9 @@ let currentEngine: QueryEngine | null = null
 // Concurrency protection: only one user prompt at a time
 let busy = false
 let currentAbortController: AbortController | null = null
+/** 本回合是否已经因为流静默进入过「自救」（看门狗 abort → 非流式重试）。
+ *  回合结束时清空。用来判断后面出现的 error 是不是"自救也失败了"。 */
+let recoveringThisTurn: { reason: string; waitedMs: number } | null = null
 // Thinking mode toggle — user can enable/disable extended thinking
 let thinkingEnabled = false
 // GUI-set effort strength (drives `output_config.effort`; on reasoning-capable
@@ -769,6 +773,43 @@ function stopTurnHeartbeat(): void {
   }
 }
 
+
+/** 回合最终失败时调用：如果本回合已经走过「看门狗自救」，说明**自救也没救回来**。
+ *  额外广播一条，前端据此走自己的补救路径（唤醒/重试），而不是只看到一句错误。 */
+function reportRecoveryFailureIfAny(message: string): void {
+  if (!recoveringThisTurn) return
+  const info = recoveringThisTurn
+  recoveringThisTurn = null
+  console.error(
+    `[stream] recovery FAILED (${info.reason}): ${message.slice(0, 160)}`,
+  )
+  broadcastToAll({
+    type: 'stream_recovery_failed',
+    reason: info.reason,
+    waitedMs: info.waitedMs,
+    message,
+  })
+}
+
+/** 取出 assistant 消息的纯文本（用于错误识别与日志）。 */
+function extractAssistantText(message: unknown): string {
+  const content = (message as { content?: unknown })?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map(b =>
+      b && typeof b === 'object' && (b as { type?: string }).type === 'text'
+        ? ((b as { text?: string }).text ?? '')
+        : '',
+    )
+    .join('')
+}
+
+/** 是否为 query() 合成的 API 错误消息（以 "API Error" 开头）。 */
+function isApiErrorMessage(message: unknown): boolean {
+  return extractAssistantText(message).startsWith('API Error')
+}
+
 async function forwardSDKEvent(event: SDKMessage): Promise<void> {
   if (!isSDKMessage(event)) return
   // 心跳只在「模型侧真的开始有进展」时停 —— **不能无条件停**。
@@ -793,7 +834,13 @@ async function forwardSDKEvent(event: SDKMessage): Promise<void> {
 
   try {
     switch (event.type) {
-      case 'assistant':
+      case 'assistant': {
+        // query() 把运行时/API 错误**转成一条 `API Error: ...` 的 assistant
+        // 消息** yield 出来（不抛异常，subtype 仍是 success）。如果本回合已经
+        // 走过看门狗自救，这条就是「自救也失败了」的证据。
+        if (recoveringThisTurn && isApiErrorMessage(event.message)) {
+          reportRecoveryFailureIfAny(extractAssistantText(event.message))
+        }
         broadcastToAll({
           type: 'assistant',
           message: event.message as Record<string, unknown>,
@@ -803,6 +850,7 @@ async function forwardSDKEvent(event: SDKMessage): Promise<void> {
         })
         sendContextWindowStatus()
         break
+      }
 
       case 'user': {
         // Only forward tool results, not the user's own messages.
@@ -831,15 +879,25 @@ async function forwardSDKEvent(event: SDKMessage): Promise<void> {
         break
       }
 
-      case 'result':
+      case 'result': {
+        const subtype = (event as { subtype?: string }).subtype ?? 'success'
+        // query() 把 API 错误**吞成了 error 类型的 result**，不会抛到
+        // handleUserPrompt 的 catch —— 所以「自救失败」也要在这里判，否则
+        // 那条分支永远走不到（实测：只剩 result，根本没有 error 事件）。
+        if (subtype.startsWith('error')) {
+          reportRecoveryFailureIfAny(
+            (event as { error?: string }).error ?? subtype,
+          )
+        }
         broadcastToAll({
           type: 'result',
-          subtype: (event as { subtype?: string }).subtype ?? 'success',
+          subtype,
           result: (event as { result?: string }).result,
           error: (event as { error?: string }).error,
           busy: false,
         })
         break
+      }
 
       case 'status':
         broadcastToAll({
@@ -2039,9 +2097,11 @@ async function runPromptCommand(promptContent: ContentBlockParam[]): Promise<voi
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    reportRecoveryFailureIfAny(msg)
     broadcastToAll({ type: 'error', message: msg })
   } finally {
     stopTurnHeartbeat()
+    recoveringThisTurn = null
     mutableMessages = [...currentEngine!.getMessages()]
     readFileCache = currentEngine!.getReadFileState()
     // Final broadcast: interval only fires while busy, so without this the
@@ -2122,9 +2182,11 @@ async function handleUserPrompt(userContent: string | ContentBlockParam[], ws?: 
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    reportRecoveryFailureIfAny(message)
     broadcastToAll({ type: 'error', message })
   } finally {
     stopTurnHeartbeat()
+    recoveringThisTurn = null
     mutableMessages = [...engine.getMessages()]
     readFileCache = engine.getReadFileState()
 
@@ -3542,6 +3604,17 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
       path: filePath,
       messageId: '',
       label: `文件变更: ${filePath.split(/[/\\]/).pop() || filePath}`,
+    })
+  })
+
+  // 流看门狗触发 → 告诉界面「上游中断，正在改用非流式重试」。
+  // 没有这条通知的话，界面只看到死寂，用户以为卡死；实际上后端正在自救。
+  setOnStreamRecovering(info => {
+    recoveringThisTurn = { reason: info.reason, waitedMs: info.waitedMs }
+    broadcastToAll({
+      type: 'stream_recovering',
+      reason: info.reason,
+      waitedMs: info.waitedMs,
     })
   })
 

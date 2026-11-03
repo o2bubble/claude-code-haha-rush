@@ -175,6 +175,8 @@ export const getPrompt = memoize(async (_cwd: string): Promise<string> => {
 
 When users ask you to perform tasks, check if any of the available skills match. Skills provide specialized capabilities and domain knowledge.
 
+When the task at hand is one a listed skill covers, invoke it first. Most skills load their instructions into this turn for you to follow in place of your default approach; a few run in a subagent instead and return the finished result.
+
 When users reference a "slash command" or "/<something>" (e.g., "/commit", "/review-pr"), they are referring to a skill. Use this tool to invoke it.
 
 How to invoke:

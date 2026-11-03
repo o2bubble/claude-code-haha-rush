@@ -1,4 +1,8 @@
-const version = process.env.CLAUDE_CODE_LOCAL_VERSION ?? '2.1.89 (sync:2.1.211)';
+// 版本串的两个数字含义不同，别混：
+//   2.1.89  —— 本仓库所基于的泄漏源码版本（基线，不改）
+//   sync:X  —— 已对齐到的**官方最新版本**。每次做完一轮官方对比同步就更新它。
+// 2.1.316 是 2026-10-30 发布的官方版本（BUILD_TIME 2026-10-30T23:28:13Z）。
+const version = process.env.CLAUDE_CODE_LOCAL_VERSION ?? '2.1.89 (sync:2.1.316)';
 const packageUrl = process.env.CLAUDE_CODE_LOCAL_PACKAGE_URL ?? 'claude-code-local';
 const buildTime = process.env.CLAUDE_CODE_LOCAL_BUILD_TIME ?? new Date().toISOString();
 

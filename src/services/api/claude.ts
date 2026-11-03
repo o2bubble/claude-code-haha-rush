@@ -70,6 +70,7 @@ import {
 import { resolveAppliedEffort, type EffortLevel } from '../../utils/effort.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { errorMessage } from '../../utils/errors.js'
+import { notifyStreamRecovering } from '../../utils/streamRecovery.js'
 import { computeFingerprintFromMessages } from '../../utils/fingerprint.js'
 import { captureAPIRequest, logError } from '../../utils/log.js'
 import {
@@ -2528,6 +2529,15 @@ async function* queryModel(
       // If the stream was aborted by our idle timeout watchdog, fall back to
       // non-streaming retry rather than treating it as a completed stream.
       if (streamIdleAborted) {
+        // 告诉界面「我在自救」，而不是让它一直静默等待 —— 否则用户看到的
+        // 就是「卡死了」，实际后端正在重试。走全局回调（模块级 setter），
+        // 因为这里离 ideMode 的广播函数隔着 QueryEngine 整整两层。
+        notifyStreamRecovering({
+          reason: sawFirstChunk ? 'midstream-idle' : 'no-first-chunk',
+          waitedMs: sawFirstChunk
+            ? STREAM_MIDSTREAM_IDLE_TIMEOUT_MS
+            : STREAM_IDLE_TIMEOUT_MS,
+        })
         // Instrumentation: proves the for-await exited after the watchdog fired
         // (vs. hung forever). exit_delay_ms measures abort propagation latency:
         // 0-10ms = abort worked; >>1000ms = something else woke the loop.

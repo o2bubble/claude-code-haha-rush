@@ -84,6 +84,7 @@ Use the gh command via the Bash tool for other GitHub-related tasks including wo
   return `# Git
 - Interactive flags (\`-i\`, e.g. \`git rebase -i\`, \`git add -i\`) are not supported in this environment.
 - Use the \`gh\` CLI for GitHub operations (PRs, issues, API).
+- GitHub notifies the owner of any \`@name\` written in a PR, issue, or comment. Write a bare \`@name\` only for a real login you mean to notify. Put roles, placeholders, and code (\`@human\`, \`@reviewer\`, \`@types/node\`) in backticks or drop the \`@\`, even when copied from project files.
 - Commit or push only when the user asks. If on the default branch, branch first.
 - Never skip hooks (\`--no-verify\`, \`--no-gpg-sign\`) unless the user explicitly asks.
 - Never run destructive git commands (\`push --force\`, \`reset --hard\`, \`checkout .\`, \`restore .\`, \`clean -f\`, \`branch -D\`) unless the user explicitly requests them; never force-push to main/master.
@@ -269,7 +270,7 @@ export function getSimplePrompt(): string {
     // 「在 bash 里写 PowerShell 语法」的来回。
     'This tool runs Git Bash (POSIX sh), not cmd.exe or PowerShell. Use Unix shell syntax: `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`.',
     '',
-    "`cd` carries to the next call only in the main session, if the command succeeds and ends inside the working directories. Outside them the shell returns to the start folder. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile.",
+    "`cd` carries to the next call only in the main session, if the command succeeds and ends inside the working directories. Outside them the shell returns to the start folder. Shell state (env vars, functions) does not persist; the shell is initialized from the user's profile. Prefer absolute paths — `cd` in a compound command can trigger a permission prompt.",
     '',
     `IMPORTANT: Avoid using this tool to run ${avoidCommands} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user:`,
     ...prependBullets(toolPreferenceItems),

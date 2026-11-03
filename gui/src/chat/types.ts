@@ -31,7 +31,17 @@ export type ChatEffect =
   | { type: "emit.fileChanged"; path: string }
   | { type: "command.resumeSession"; sessionId: string }
   | { type: "command.listSessions" }
-  | { type: "command.resendPermissionMode"; mode: string };
+  | { type: "command.resendPermissionMode"; mode: string }
+  /** 后端流看门狗触发、正在改走非流式重试 —— 给用户一条可见提示，
+   *  避免「界面死寂 = 卡死」的误判。 */
+  | { type: "status.notice"; text: string; level: "info" | "warn" | "success" | "error" }
+  /** 后端自救失败 → 前端接手：唤醒（中断残留 + 发续写提示）。
+   *  带冷却，冷却期内只提示不重复唤醒，防「唤醒→又失败→又唤醒」死循环。 */
+  | {
+      type: "stream.autoRecover";
+      waitedSecs: number;
+      reason: "midstream-idle" | "no-first-chunk";
+    };
 
 /** Settings the fold needs to stay deterministic. The runner fills these from
  *  the settings store at dispatch time; tests pass explicit values. */

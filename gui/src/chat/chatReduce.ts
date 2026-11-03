@@ -209,7 +209,10 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
     msg.type === "stream_event" ||
     t === "tool_progress" ||
     isSubAgentActivity ||
-    msg.type === "stream_heartbeat"
+    msg.type === "stream_heartbeat" ||
+    // 后端在自救（看门狗触发 → 改走非流式重试）。它当然还活着，
+    // 但**不该掩盖问题** —— 下面单独提示用户，所以这里只记活动时间。
+    msg.type === "stream_recovering"
   ) {
     set({ lastStreamEventAt: now() });
   }
@@ -438,6 +441,32 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
     case "system": {
       if (inner.subtype === "compact_boundary") set({ streaming: false, compacting: false });
       if (inner.subtype === "slash_commands" && inner.commands) set({ slashCommands: inner.commands });
+      break;
+    }
+    case "stream_recovering": {
+      // 后端看门狗触发，正在放弃这条流、改用非流式重试。
+      // 没有这条提示的话，用户只看到界面死寂，会以为卡死并手动中断 ——
+      // 而实际上系统正在自救，再等一下就有结果。
+      const secs = Math.round((inner.waitedMs ?? 0) / 1000);
+      const midstream = inner.reason === "midstream-idle";
+      effects.push({
+        type: "status.notice",
+        text: midstream
+          ? `上游中断（已 ${secs} 秒无数据），正在改用非流式重试…`
+          : `等待响应超时（已 ${secs} 秒），正在改用非流式重试…`,
+        level: "warn",
+      });
+      break;
+    }
+    case "stream_recovery_failed": {
+      // 后端自救**也失败**了。这是前端该接手的时刻 —— 由 runner 决定是否
+      // 自动唤醒（带冷却，防死循环）。单靠一句 error 气泡，用户只能自己重打。
+      const secs = Math.round((inner.waitedMs ?? 0) / 1000);
+      effects.push({
+        type: "stream.autoRecover",
+        waitedSecs: secs,
+        reason: inner.reason === "midstream-idle" ? "midstream-idle" : "no-first-chunk",
+      });
       break;
     }
     case "context_window": {

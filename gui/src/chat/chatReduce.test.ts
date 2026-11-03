@@ -650,3 +650,65 @@ describe("chatReduce — switchingTo（会话切换中标记）", () => {
     expect(r.nextState.switchingTo).toBe("target-sess");
   });
 });
+
+describe("stream_recovering（后端看门狗自救通知）", () => {
+  it("流中途静默 → 出一条 warn 提示，文案含等待秒数", () => {
+    const base = { ...emptyChatState(), streaming: true, lastStreamEventAt: 1234567890 };
+    const r = reduce(
+      { type: "stream_recovering", reason: "midstream-idle", waitedMs: 120_000 },
+      base,
+    );
+    const notice = r.effects.find((e) => e.type === "status.notice") as any;
+    expect(notice).toBeTruthy();
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("120");
+    expect(notice.text).toContain("上游中断");
+  });
+
+  it("等首字节超时 → 文案说「等待响应超时」，不能说成上游中断", () => {
+    // 这两种情况的用户体验不同：首字节前可能是 prefill 真的慢，
+    // 说成"上游中断"会误导用户以为连接坏了。
+    const base = { ...emptyChatState(), streaming: true, lastStreamEventAt: 1234567890 };
+    const r = reduce(
+      { type: "stream_recovering", reason: "no-first-chunk", waitedMs: 300_000 },
+      base,
+    );
+    const notice = r.effects.find((e) => e.type === "status.notice") as any;
+    expect(notice.text).toContain("等待响应超时");
+    expect(notice.text).not.toContain("上游中断");
+  });
+
+  it("计入活动时间 —— 后端确实还活着，不该触发前端卡死判定", () => {
+    const base = { ...emptyChatState(), streaming: true, lastStreamEventAt: 1 };
+    const r = reduce(
+      { type: "stream_recovering", reason: "midstream-idle", waitedMs: 120_000 },
+      base,
+    );
+    expect(r.nextState.lastStreamEventAt).toBe(1234567890);
+  });
+});
+
+describe("stream_recovery_failed（后端自救也失败 → 前端接手）", () => {
+  it("产出 autoRecover effect，带等待秒数", () => {
+    const base = { ...emptyChatState(), streaming: true, lastStreamEventAt: 1 };
+    const r = reduce(
+      { type: "stream_recovery_failed", reason: "midstream-idle", waitedMs: 120_000 },
+      base,
+    );
+    const eff = r.effects.find((e) => e.type === "stream.autoRecover") as any;
+    expect(eff).toBeTruthy();
+    expect(eff.waitedSecs).toBe(120);
+    expect(eff.reason).toBe("midstream-idle");
+  });
+
+  it("两种 reason 透传正确", () => {
+    const base = emptyChatState();
+    const r = reduce(
+      { type: "stream_recovery_failed", reason: "no-first-chunk", waitedMs: 300_000 },
+      base,
+    );
+    const eff = r.effects.find((e) => e.type === "stream.autoRecover") as any;
+    expect(eff.reason).toBe("no-first-chunk");
+    expect(eff.waitedSecs).toBe(300);
+  });
+});
