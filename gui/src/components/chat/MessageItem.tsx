@@ -382,9 +382,6 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
   const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const outputRefs = useRef<Map<string, HTMLPreElement>>(new Map());
   const mdRef = useRef<HTMLDivElement>(null);
-  /** 思考块是固定 200px 的滚动区 —— 不跟随的话，流式追加的新内容会落在可视区外，
-   *  用户看到的就是「思考停在这一句、再也不动了」（实际后端还在输出）。 */
-  const thinkingRef = useRef<HTMLDivElement>(null);
   const text = stripSystemReminder(message.content || "");
 
   // Parse references for inline rendering in user messages
@@ -421,17 +418,6 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
       if (el) el.scrollTop = el.scrollHeight;
     }
   }, [toolOutputKey]);
-
-  // 思考块跟随到底部（与上面的工具输出同一套做法）。
-  // ⚠️ 2026-11-03：思考框是 maxHeight:200 + overflow:auto 的固定窗口，原先没有
-  // 跟随 —— 长思考流式追加时新文字全在可视区之下，界面看起来"卡在某一句话"，
-  // 用户据此判断"卡死"。实测该轮 transcript 里 thinking 有 9,564 字符，
-  // 而界面只显示了开头约 200px。
-  const thinkingLen = message.thinking?.length ?? 0;
-  useEffect(() => {
-    const el = thinkingRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [thinkingLen]);
 
   useEffect(() => {
     if (isUser || !text) {
@@ -537,7 +523,6 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
             {t("message.thinking")}
           </summary>
           <div
-            ref={thinkingRef}
             style={{
               fontSize: 12,
               color: "var(--fg-muted)",
@@ -548,11 +533,8 @@ export function MessageItem({ message, animateIn = true }: MessageItemProps) {
               fontFamily: "var(--font-sans)",
               whiteSpace: "pre-wrap",
               overflowWrap: "anywhere",
-              // 流式期间不封顶：内部滚动 + 自动跟随会让用户只能看到最后几行，
-              // 想回看开头就得跟滚动条较劲。结束后再收成 200px，保持列表紧凑。
-              ...(message.streaming
-                ? { maxHeight: "none" as const }
-                : { maxHeight: 200, overflow: "auto" as const }),
+              maxHeight: 200,
+              overflow: "auto",
               border: "1px solid var(--border-light)",
             }}
           >

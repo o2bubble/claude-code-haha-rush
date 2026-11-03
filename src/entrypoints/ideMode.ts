@@ -706,6 +706,40 @@ let heartbeatTimer: ReturnType<typeof setInterval> | null = null
 /** 最后一次「回合内有进展」的时刻。心跳的 10min 上限从这里算。 */
 let heartbeatLastActivityAt = 0
 
+// ── 事件循环卡顿探针（2026-11-03）──
+//
+// 心跳是 setInterval。**如果事件循环本身被阻塞，心跳永远不会触发** —— 那前端
+// 照样判卡死，而且日志里什么都看不到（连 `[req]` 都是异步打印的，会被推迟）。
+//
+// 实测线索：故障时 `[req] msgs=2016` 在 03:11:37 与 03:12:40 各出现一次，
+// 而日志本身是 `void getToolPermissionContext().then(...)` 发射的 —— 时间戳
+// 会被阻塞推迟。所以"请求挂了 63 秒"和"事件循环卡了 63 秒"目前分不清。
+//
+// 这个探针每秒登记一次实际触发时刻，把「该触发 vs 实际触发」的差值记下来：
+// 差值大 = 事件循环被同步操作卡住（不是网络问题）。
+const LOOP_LAG_INTERVAL_MS = 1_000
+const LOOP_LAG_WARN_MS = 3_000
+let loopLagTimer: ReturnType<typeof setInterval> | null = null
+let loopLagExpectedAt = 0
+
+function startEventLoopProbe(): void {
+  if (loopLagTimer) return
+  loopLagExpectedAt = Date.now() + LOOP_LAG_INTERVAL_MS
+  loopLagTimer = setInterval(() => {
+    const now = Date.now()
+    const lagMs = now - loopLagExpectedAt
+    loopLagExpectedAt = now + LOOP_LAG_INTERVAL_MS
+    if (lagMs >= LOOP_LAG_WARN_MS) {
+      // 走 stderr：GUI 的 backend.rs 只常驻读取 stderr（stdout 读循环 30s 超时后
+      // 就停了），诊断必须进 claude-code-gui.log 才看得到。
+      console.error(
+        `[loop-lag] 事件循环被阻塞 ${(lagMs / 1000).toFixed(1)}s` +
+          `（心跳/日志在这段时间内都不会发出）`,
+      )
+    }
+  }, LOOP_LAG_INTERVAL_MS)
+}
+
 /** 回合开始：开心跳。回合结束时 stopTurnHeartbeat()。 */
 function startTurnHeartbeat(): void {
   stopTurnHeartbeat()
@@ -714,7 +748,7 @@ function startTurnHeartbeat(): void {
     const silentMs = Date.now() - heartbeatLastActivityAt
     if (silentMs > HEARTBEAT_MAX_MS) {
       stopTurnHeartbeat()
-      console.log(
+      console.error(
         `[heartbeat] 静默 ${Math.round(silentMs / 1000)}s 超过上限，停止心跳（前端将据此判卡死）`,
       )
       return
@@ -3486,6 +3520,9 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
       },
     },
   })
+
+  // 事件循环卡顿探针：常驻运行，只在阻塞 ≥3s 时打一行（见 startEventLoopProbe）。
+  startEventLoopProbe()
 
   // Announce port to stdout so the IDE can discover the server
   // This is the ONLY stdout output — everything else goes over WebSocket
