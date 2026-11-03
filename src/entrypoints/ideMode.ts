@@ -694,25 +694,32 @@ function isSDKMessage(v: unknown): v is Record<string, unknown> {
 // 这段等待期会被误判成卡住。
 //
 // 每 HEARTBEAT_INTERVAL_MS 发一条轻量心跳，表示"后端还活着、在等模型"。
-// ⚠️ 上限 HEARTBEAT_MAX_MS：到点就停 —— 若 API 真挂住，心跳不能一直掩盖它，
-// 否则前端永远不会弹「是否中断」。
+// ⚠️ 上限 HEARTBEAT_MAX_MS 是**从最后一次真实活动算起**：模型一直有输出时
+// 心跳反复续期（其实那时前端也不需要它）；真挂住时最多覆盖 90s 就停 ——
+// 不能无限掩盖，否则前端永远不弹「是否中断」。
 const HEARTBEAT_INTERVAL_MS = 5_000
 const HEARTBEAT_MAX_MS = 90_000
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null
-let heartbeatStartedAt = 0
+/** 最后一次「模型侧有进展」的时刻。心跳的 90s 上限从这里算。 */
+let heartbeatLastActivityAt = 0
 
-/** 回合开始：开心跳。首条流事件或回合结束时会调 stopTurnHeartbeat()。 */
+/** 回合开始：开心跳。回合结束时 stopTurnHeartbeat()。 */
 function startTurnHeartbeat(): void {
   stopTurnHeartbeat()
-  heartbeatStartedAt = Date.now()
+  heartbeatLastActivityAt = Date.now()
   heartbeatTimer = setInterval(() => {
-    const waitedMs = Date.now() - heartbeatStartedAt
-    if (waitedMs > HEARTBEAT_MAX_MS) {
+    const silentMs = Date.now() - heartbeatLastActivityAt
+    if (silentMs > HEARTBEAT_MAX_MS) {
       stopTurnHeartbeat()
       return
     }
-    broadcastToAll({ type: 'stream_heartbeat', waitedMs })
+    broadcastToAll({ type: 'stream_heartbeat', waitedMs: silentMs })
   }, HEARTBEAT_INTERVAL_MS)
+}
+
+/** 模型侧有进展 → 续期（不是停）。见 forwardSDKEvent 里的调用说明。 */
+function refreshTurnHeartbeat(): void {
+  heartbeatLastActivityAt = Date.now()
 }
 
 function stopTurnHeartbeat(): void {
@@ -724,8 +731,21 @@ function stopTurnHeartbeat(): void {
 
 async function forwardSDKEvent(event: SDKMessage): Promise<void> {
   if (!isSDKMessage(event)) return
-  // 任何真实的流事件都意味着后端已拿到模型响应 —— 心跳到此为止。
-  stopTurnHeartbeat()
+  // 心跳只在「模型侧真的开始有进展」时停 —— **不能无条件停**。
+  //
+  // ⚠️ 2026-11-03 修：这里原本无条件 `stopTurnHeartbeat()`。但回合开始后最先
+  // 到达的是 `system`（init）这类与模型输出无关的事件，心跳刚开就被掐灭，
+  // 随后漫长的等首字节（大上下文 prefill）又变回无声静默 —— 前端照样 30s 弹
+  // 「是否中断」，加了心跳等于没加（用户实测复现）。
+  if (
+    event.type === 'stream_event' ||
+    event.type === 'assistant' ||
+    event.type === 'tool_progress'
+  ) {
+    // 续期而不是停：流中途也可能静默（思考期、大 prefill），停掉就又回到
+    // 「静默 30s 弹条」。续期后 90s 内仍无新活动会自动停。
+    refreshTurnHeartbeat()
+  }
 
   try {
     switch (event.type) {
