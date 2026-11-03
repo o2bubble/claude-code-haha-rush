@@ -203,6 +203,10 @@ import {
   isDeferredTool,
   TOOL_SEARCH_TOOL_NAME,
 } from '../../tools/ToolSearchTool/prompt.js'
+import {
+  DEFERRED_TOOL_PLACEHOLDER_NAME,
+  DeferredToolPlaceholder,
+} from '../../tools/ToolSearchTool/DeferredToolPlaceholder.js'
 import { count } from '../../utils/array.js'
 import { insertBlockAfterToolResults } from '../../utils/contentArray.js'
 import { validateBoundedIntEnvVar } from '../../utils/envValidation.js'
@@ -1228,15 +1232,23 @@ async function* queryModel(
   // Even if tool search mode is enabled, skip if there are no deferred tools
   // AND no MCP servers are still connecting. When servers are pending, keep
   // ToolSearch available so the model can discover tools after they connect.
+  //
+  // ⚠️ 2026-11-03 改：不再直接关掉 tool search，而是补一个 DeferredToolPlaceholder。
+  //
+  // 直接关掉的后果是 tools 数组的形状随 MCP 连接状态变化（ToolSearch 时有时无）。
+  // tools 块在缓存前缀最前面，形状一变整个请求的 prompt cache 作废 —— 而 MCP
+  // 断开/重连在会话里很常见。官方 2.1.316 同样用这个占位符保持形状稳定。
+  let extraTools: Tools = []
   if (
     useToolSearch &&
     deferredToolNames.size === 0 &&
     !options.hasPendingMcpServers
   ) {
     logForDebugging(
-      'Tool search disabled: no deferred tools available to search',
+      'Tool search: no deferred tools — adding DeferredToolPlaceholder to keep the mode active',
     )
-    useToolSearch = false
+    extraTools = [DeferredToolPlaceholder] as unknown as Tools
+    deferredToolNames.add(DEFERRED_TOOL_PLACEHOLDER_NAME)
   }
 
   // Filter out ToolSearchTool if tool search is not enabled for this model
@@ -1257,6 +1269,11 @@ async function* queryModel(
       // Only include deferred tools that have been discovered
       return discoveredToolNames.has(tool.name)
     })
+    // 占位符必须**始终**出现在 tools 里，否则它起不到稳定形状的作用
+    // （上面那条"只保留已发现的延迟工具"会把它滤掉）。
+    if (extraTools.length > 0) {
+      filteredTools = [...filteredTools, ...extraTools]
+    }
   } else {
     filteredTools = tools.filter(
       t => !toolMatchesName(t, TOOL_SEARCH_TOOL_NAME),
@@ -2044,9 +2061,27 @@ async function* queryModel(
     const streamWatchdogEnabled = isEnvTruthy(
       process.env.CLAUDE_ENABLE_STREAM_WATCHDOG,
     )
+    // 两级超时：**首字节前**和**流中途**的合理静默长度差一个数量级。
+    //
+    //  - 首字节前：大上下文冷启动的 prefill 可以是长时间完全静默，给足
+    //    （GUI 传 300s）。
+    //  - 流中途：已经收到 message_start / thinking 之后还静默 2 分钟，那不是
+    //    prefill，是连接死了。
+    //
+    // ⚠️ 2026-11-03 实测：cloud-ui 会话在「thinking 刚吐出 "Let" 就再无下文」
+    // 的状态下卡了 **5 分 25 秒**才恢复 —— 因为原来只有一个 300s 超时，中途中
+    // 断也要等满 5 分钟。同一份记录里 03:30:02 → 03:35:27 之间没有任何输出，
+    // 5 分钟后看门狗触发、回退非流式重试才救回来。
     const STREAM_IDLE_TIMEOUT_MS =
       parseInt(process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS || '', 10) || 90_000
-    const STREAM_IDLE_WARNING_MS = STREAM_IDLE_TIMEOUT_MS / 2
+    /** 收到首块之后的静默上限。默认 120s —— 比首字节宽松，但远短于 300s。 */
+    const STREAM_MIDSTREAM_IDLE_TIMEOUT_MS =
+      parseInt(
+        process.env.CLAUDE_STREAM_MIDSTREAM_IDLE_TIMEOUT_MS || '',
+        10,
+      ) || 120_000
+    /** 首块是否已到达 —— 决定用哪一档超时。 */
+    let sawFirstChunk = false
     let streamIdleAborted = false
     // performance.now() snapshot when watchdog fires, for measuring abort propagation delay
     let streamWatchdogFiredAt: number | null = null
@@ -2067,6 +2102,10 @@ async function* queryModel(
       if (!streamWatchdogEnabled) {
         return
       }
+      const idleTimeoutMs = sawFirstChunk
+        ? STREAM_MIDSTREAM_IDLE_TIMEOUT_MS
+        : STREAM_IDLE_TIMEOUT_MS
+      const warnMs = idleTimeoutMs / 2
       streamIdleWarningTimer = setTimeout(
         warnMs => {
           logForDebugging(
@@ -2075,14 +2114,20 @@ async function* queryModel(
           )
           logForDiagnosticsNoPII('warn', 'cli_streaming_idle_warning')
         },
-        STREAM_IDLE_WARNING_MS,
-        STREAM_IDLE_WARNING_MS,
+        warnMs,
+        warnMs,
       )
       streamIdleTimer = setTimeout(() => {
         streamIdleAborted = true
         streamWatchdogFiredAt = performance.now()
+        // 同时走 stderr：GUI 只把 stderr 常驻写进 claude-code-gui.log，
+        // logForDebugging 进的是另一个调试文件 —— 排查时看不到。
+        console.error(
+          `[stream] idle timeout: no chunks for ${idleTimeoutMs / 1000}s` +
+            `${sawFirstChunk ? ' (mid-stream)' : ' (waiting for first chunk)'}, aborting and retrying non-streaming`,
+        )
         logForDebugging(
-          `Streaming idle timeout: no chunks received for ${STREAM_IDLE_TIMEOUT_MS / 1000}s, aborting stream`,
+          `Streaming idle timeout: no chunks received for ${idleTimeoutMs / 1000}s, aborting stream`,
           { level: 'error' },
         )
         logForDiagnosticsNoPII('error', 'cli_streaming_idle_timeout')
@@ -2091,10 +2136,10 @@ async function* queryModel(
             options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
           request_id: (streamRequestId ??
             'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          timeout_ms: STREAM_IDLE_TIMEOUT_MS,
+          timeout_ms: idleTimeoutMs,
         })
         releaseStreamResources()
-      }, STREAM_IDLE_TIMEOUT_MS)
+      }, idleTimeoutMs)
     }
     resetStreamIdleTimer()
 
@@ -2144,6 +2189,11 @@ async function* queryModel(
           }
           endQueryProfile()
           isFirstChunk = false
+          // 切到「流中途」档超时：此刻起再长时间静默就不是 prefill 了。
+          // resetStreamIdleTimer 在循环顶部已经用长档重设过一次，这里立刻
+          // 用短档覆盖，避免第一段中途静默仍等满 300s。
+          sawFirstChunk = true
+          resetStreamIdleTimer()
         }
 
         switch (part.type) {

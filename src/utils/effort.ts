@@ -10,10 +10,13 @@ import type { EffortLevel } from 'src/entrypoints/sdk/runtimeTypes.js'
 
 export type { EffortLevel }
 
+// 与官方 2.1.316 一致：五档，`xhigh` 在 high 与 max 之间。
+// 已实测 DeepSeek 端点对五档全部返回 200（2026-11-03）。
 export const EFFORT_LEVELS = [
   'low',
   'medium',
   'high',
+  'xhigh',
   'max',
 ] as const satisfies readonly EffortLevel[]
 

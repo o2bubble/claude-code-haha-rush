@@ -19,6 +19,7 @@ import { runWithAgentContext } from '../../utils/agentContext.js';
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js';
 import { getCwd, runWithCwdOverride } from '../../utils/cwd.js';
 import { logForDebugging } from '../../utils/debug.js';
+import { EFFORT_LEVELS } from '../../utils/effort.js';
 import { isEnvTruthy } from '../../utils/envUtils.js';
 import { AbortError, errorMessage, toError } from '../../utils/errors.js';
 import type { CacheSafeParams } from '../../utils/forkedAgent.js';
@@ -84,6 +85,7 @@ const baseInputSchema = lazySchema(() => z.object({
   prompt: z.string().describe('The task for the agent to perform'),
   subagent_type: z.string().optional().describe('The type of specialized agent to use for this task'),
   model: z.enum(['sonnet', 'opus', 'haiku']).optional().describe("Optional model override for this agent. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent."),
+  effort: z.enum(EFFORT_LEVELS).optional().describe("Reasoning effort for this agent. Set this ONLY when the user, or instructions such as CLAUDE.md or a skill, explicitly ask that this agent or delegated work run at a specific effort level, never on your own judgment; otherwise omit it and the agent runs at its usual effort. Ignored for subagent_type: \"fork\": a fork runs at your own effort."),
   run_in_background: z.boolean().optional().describe('Set to true to run this agent in the background. You will be notified when it completes.')
 }));
 
@@ -241,6 +243,7 @@ export const AgentTool = buildTool({
     subagent_type,
     description,
     model: modelParam,
+    effort: effortParam,
     run_in_background,
     name,
     team_name,
@@ -644,7 +647,10 @@ the task will appear to have failed with zero output.
         useExactTools: true
       }),
       worktreePath: worktreeInfo?.worktreePath,
-      description
+      description,
+      // Fork runs at the parent's effort — runAgent ignores this on the fork
+      // path (the schema description promises exactly that).
+      effortOverride: isForkPath ? undefined : effortParam
     };
 
     // Helper to wrap execution with a cwd override: explicit cwd arg (KAIROS)

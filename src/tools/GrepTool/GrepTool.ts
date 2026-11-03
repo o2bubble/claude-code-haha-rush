@@ -71,6 +71,9 @@ const inputSchema = lazySchema(() =>
     '-i': semanticBoolean(z.boolean().optional()).describe(
       'Case insensitive search (rg -i)',
     ),
+    '-o': semanticBoolean(z.boolean().optional()).describe(
+      'Print only the matched (non-empty) parts of each matching line, one match per output line (rg -o / --only-matching). Requires output_mode: "content", ignored otherwise. Defaults to false.',
+    ),
     type: z
       .string()
       .optional()
@@ -320,6 +323,7 @@ export const GrepTool = buildTool({
       context,
       '-n': show_line_numbers = true,
       '-i': case_insensitive = false,
+      '-o': only_matching = false,
       head_limit,
       offset = 0,
       multiline = false,
@@ -357,6 +361,12 @@ export const GrepTool = buildTool({
     // Add line numbers if requested
     if (show_line_numbers && output_mode === 'content') {
       args.push('-n')
+    }
+
+    // -o: print only the matched parts, one per line. Content mode only —
+    // ripgrep rejects/ignores it for -l / -c, matching the schema's wording.
+    if (only_matching && output_mode === 'content') {
+      args.push('-o')
     }
 
     // Add context flags (-C/context takes precedence over context_before/context_after)

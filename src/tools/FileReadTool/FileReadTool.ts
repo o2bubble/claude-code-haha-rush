@@ -239,6 +239,12 @@ const inputSchema = lazySchema(() =>
       .describe(
         `Page range for PDF files (e.g., "1-5", "3", "10-20"). Only applicable to PDF files. Maximum ${PDF_MAX_PAGES_PER_READ} pages per request.`,
       ),
+    allow_large: z
+      .boolean()
+      .optional()
+      .describe(
+        'Set to true to read a text file, or a line range of one, that is over the usual size limits, up to what still fits in your context. Only use this when you genuinely need all of it or the user asked for the whole file; otherwise read it in parts with offset and limit, or search it.',
+      ),
   }),
 )
 type InputSchema = ReturnType<typeof inputSchema>
@@ -494,7 +500,7 @@ export const FileReadTool = buildTool({
     return { result: true }
   },
   async call(
-    { file_path, offset = 1, limit = undefined, pages },
+    { file_path, offset = 1, limit = undefined, pages, allow_large },
     context,
     _canUseTool?,
     parentMessage?,
@@ -599,7 +605,7 @@ export const FileReadTool = buildTool({
         offset,
         limit,
         pages,
-        maxSizeBytes,
+        allow_large === true ? undefined : maxSizeBytes,
         maxTokens,
         readFileState,
         context,
@@ -622,7 +628,7 @@ export const FileReadTool = buildTool({
               offset,
               limit,
               pages,
-              maxSizeBytes,
+              allow_large === true ? undefined : maxSizeBytes,
               maxTokens,
               readFileState,
               context,
@@ -809,7 +815,8 @@ async function callInner(
   offset: number,
   limit: number | undefined,
   pages: string | undefined,
-  maxSizeBytes: number,
+  /** `undefined` = skip the total-file-size cap (Read's `allow_large`). */
+  maxSizeBytes: number | undefined,
   maxTokens: number,
   readFileState: ToolUseContext['readFileState'],
   context: ToolUseContext,
@@ -824,7 +831,8 @@ async function callInner(
     const cellsJson = jsonStringify(cells)
 
     const cellsJsonBytes = Buffer.byteLength(cellsJson)
-    if (cellsJsonBytes > maxSizeBytes) {
+    // maxSizeBytes === undefined means the caller used `allow_large`.
+    if (maxSizeBytes !== undefined && cellsJsonBytes > maxSizeBytes) {
       throw new Error(
         `Notebook content (${formatFileSize(cellsJsonBytes)}) exceeds maximum allowed size (${formatFileSize(maxSizeBytes)}). ` +
           `Use ${BASH_TOOL_NAME} with jq to read specific portions:\n` +
