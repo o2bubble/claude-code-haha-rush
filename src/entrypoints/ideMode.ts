@@ -694,13 +694,16 @@ function isSDKMessage(v: unknown): v is Record<string, unknown> {
 // 这段等待期会被误判成卡住。
 //
 // 每 HEARTBEAT_INTERVAL_MS 发一条轻量心跳，表示"后端还活着、在等模型"。
-// ⚠️ 上限 HEARTBEAT_MAX_MS 是**从最后一次真实活动算起**：模型一直有输出时
-// 心跳反复续期（其实那时前端也不需要它）；真挂住时最多覆盖 90s 就停 ——
-// 不能无限掩盖，否则前端永远不弹「是否中断」。
+//
+// ⚠️ 2026-11-03 再修：90s 上限太短。实测「工具返回 → 下一条模型输出」之间
+// 可以有 **3 分钟**（大上下文 + effort=max 的思考时间），90s 一到心跳停、
+// 前端 30s 后照弹决策条 —— 用户看到的就是"工具跑完了但界面说卡死"。
+// 现在放到 10 分钟：仍在一次 API 调用的合理量级内，真挂住（连接断/服务端不回）
+// 最终由上层超时终结，不需要靠心跳去假装。
 const HEARTBEAT_INTERVAL_MS = 5_000
-const HEARTBEAT_MAX_MS = 90_000
+const HEARTBEAT_MAX_MS = 600_000
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null
-/** 最后一次「模型侧有进展」的时刻。心跳的 90s 上限从这里算。 */
+/** 最后一次「回合内有进展」的时刻。心跳的 10min 上限从这里算。 */
 let heartbeatLastActivityAt = 0
 
 /** 回合开始：开心跳。回合结束时 stopTurnHeartbeat()。 */
@@ -711,6 +714,9 @@ function startTurnHeartbeat(): void {
     const silentMs = Date.now() - heartbeatLastActivityAt
     if (silentMs > HEARTBEAT_MAX_MS) {
       stopTurnHeartbeat()
+      console.log(
+        `[heartbeat] 静默 ${Math.round(silentMs / 1000)}s 超过上限，停止心跳（前端将据此判卡死）`,
+      )
       return
     }
     broadcastToAll({ type: 'stream_heartbeat', waitedMs: silentMs })
@@ -740,10 +746,14 @@ async function forwardSDKEvent(event: SDKMessage): Promise<void> {
   if (
     event.type === 'stream_event' ||
     event.type === 'assistant' ||
-    event.type === 'tool_progress'
+    event.type === 'tool_progress' ||
+    event.type === 'user'
   ) {
-    // 续期而不是停：流中途也可能静默（思考期、大 prefill），停掉就又回到
-    // 「静默 30s 弹条」。续期后 90s 内仍无新活动会自动停。
+    // 续期而不是停：流中途也可能静默（思考期、大 prefill、工具返回后等下一轮
+    // 模型响应），停掉就又回到「静默 30s 弹条」。
+    //
+    // `user`（= tool_result）必须算：工具刚跑完是**进展**，之后等模型响应
+    // 可能几分钟，这段正是用户看到「工具跑完了却说卡死」的地方。
     refreshTurnHeartbeat()
   }
 

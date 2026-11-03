@@ -334,6 +334,8 @@ export function ChatInputPanel() {
   // 流静默决策期：模型流静默超过阈值时弹「是否中断？」，让用户裁量而非硬杀。
   const [showStallDecision, setShowStallDecision] = useState(false);
   const stallDecisionRef = useRef<StreamStallDecisionState>({ status: "idle", lastSeenActivity: null });
+  /** 上一次 tick 时决策条是否可见 —— 只用于「从无到有」打一次取证日志。 */
+  const stallWasShownRef = useRef(false);
   const interruptRef = useRef(interrupt);
   interruptRef.current = interrupt; // 每渲染更新，避免 interval 闭包捕旧值
   const wakeRef = useRef(wakeStream);
@@ -364,6 +366,21 @@ export function ChatInputPanel() {
         activeToolNames: activeToolNames(st),
       });
       stallDecisionRef.current = res.nextState;
+      // 取证：决策条每次**从无到有**时打一条，带上判定依据。
+      // 前几次修卡死都只能靠"事后猜"，这条日志让下次直接看到是谁报的静默、
+      // 静默里有没有在跑工具、后端最后一次心跳等了多久。
+      if (res.show && !stallWasShownRef.current) {
+        const silentSecs =
+          st.lastStreamEventAt != null ? (Date.now() - st.lastStreamEventAt) / 1000 : null;
+        console.warn(
+          `[stall] 触发决策条 | silent=${silentSecs?.toFixed(1) ?? "?"}s` +
+            ` | streaming=${st.streaming}` +
+            ` | backendBusy=${st.backendBusy}` +
+            ` | activeTools=[${activeToolNames(st).join(",")}]` +
+            ` | msgs=${st.messages.length}`,
+        );
+      }
+      stallWasShownRef.current = res.show;
       setShowStallDecision(res.show);
       if (res.autoInterrupt) {
         // 决策期无响应超时：中断后视冷却决定是否"唤醒"(发醒词接力)。
