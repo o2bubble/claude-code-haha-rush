@@ -2,7 +2,7 @@ import { z } from 'zod/v4'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { REPORT_FINDINGS_TOOL_NAME } from './constants.js'
-import { DESCRIPTION, PROMPT } from './prompt.js'
+import { DESCRIPTION } from './prompt.js'
 
 const FindingSchema = z.object({
   file: z.string().describe('Repo-relative path of the file the finding is in'),
@@ -76,7 +76,12 @@ export const ReportFindingsTool = buildTool({
   },
 
   async prompt() {
-    return PROMPT
+    // 与官方 2.1.316 一致：发 DESCRIPTION，而不是原来那份更长的 PROMPT。
+    // 原来那份把每个字段的说明又抄了一遍 —— input_schema 里每个字段都已经
+    // 有 describe()，属于纯冗余；而且它缺了官方最重要的一句保护：
+    // "Use this only when the active code-review instructions tell you to..."
+    // （没有这句，模型可能在任意对话里拿它输出「发现」）
+    return DESCRIPTION
   },
 
   toAutoClassifierInput(input) {
