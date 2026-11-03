@@ -128,7 +128,19 @@ function buildBackendCategory(): DiagnosticCategory {
   // WS 最近连接事件摘要 — 复现「backend 已启动但 WS 未连接」时区分连错端口/被拒/断开
   const evs = getWsDiag()
     .slice(0, 4)
-    .map((e) => `${e.kind}@${e.port}${e.kind === "close" ? (e.code ? `[${e.code}]` : "") : ""}`)
+    .map((e) => {
+      switch (e.kind) {
+        case "close":
+          return `close@${e.port}${e.code ? `[${e.code}]` : ""}`;
+        case "gap":
+          // 静默取证：`gap 45.0s status:thinking→stream_event:message_start`
+          return `gap ${(e.gapMs / 1000).toFixed(1)}s ${e.prevType ?? "?"}→${e.nextType ?? "?"}`;
+        case "send":
+          return "send";
+        default:
+          return `${e.kind}@${e.port}`;
+      }
+    })
     .join(" ");
   return {
     id: "backend",

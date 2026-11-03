@@ -55,6 +55,34 @@ const pendingSideQuestions = new Map<
 /** 旁问超时（毫秒）。后端要起一次 API 调用，给足时间；超时后 UI 不会永远转圈。 */
 const SIDE_QUESTION_TIMEOUT_MS = 120_000;
 
+// ── WS 静默取证（2026-11-03）──
+//
+// 「消息流因未知原因卡死」的判定只看 `lastStreamEventAt`，而那条时间线平时
+// **不落任何痕迹** —— 事后翻日志只能看到"卡了"，看不到卡在哪个阶段。
+// 这里把超过阈值的 WS 静默连同前后消息类型一起记进诊断面板。
+//
+// 阈值取 10s：低于决策条 30s，能提前看到；高于正常的工具往返，不刷屏。
+const WS_GAP_LOG_MS = 10_000;
+/** 逐条打印所有 WS 消息（每个 thinking 字符一条，一次响应几千行）。
+ *  要抓包时在控制台 `localStorage.setItem("wsVerbose","1")` 后重连。 */
+const WS_VERBOSE =
+  typeof localStorage !== "undefined" && localStorage.getItem("wsVerbose") === "1";
+
+let lastWsMessageAt = 0;
+let lastWsType: string | undefined;
+
+/** 把一条 WS 消息压成可读短标签，用于静默取证（不保留正文，避免日志爆量）。 */
+function describeWsType(msg: unknown): string {
+  if (!msg || typeof msg !== "object") return "?";
+  const m = msg as { type?: unknown; status?: unknown; event?: { type?: unknown } };
+  if (m.type === "stream_event") {
+    const inner = m.event?.type;
+    return `stream_event:${typeof inner === "string" ? inner : "?"}`;
+  }
+  if (m.type === "status" && typeof m.status === "string") return `status:${m.status}`;
+  return typeof m.type === "string" ? m.type : "?";
+}
+
 /**
  * 本实例是否是**当前绑定工作区**的第一个 GUI 实例。
  *
@@ -377,6 +405,13 @@ export function createChatSession(): ChatSession {
     }
     const json = JSON.stringify(msg);
     if (ws && ws.readyState === WebSocket.OPEN) {
+      // 记号：这是"流的起点"。之后若有长静默，诊断面板能看到静默是从这里开始
+      // 算起的（配合 gap 事件定位卡在哪个阶段）。
+      if (type === "user") {
+        wsDiagAdd({ kind: "send", ts: Date.now() });
+        lastWsMessageAt = Date.now();
+        lastWsType = "user(sent)";
+      }
       ws.send(json);
     } else if (ws === null && !p?.port) {
       // Leaf mode — no WebSocket, publish command to DataBus
@@ -594,6 +629,9 @@ export function createChatSession(): ChatSession {
     }
     ws.onopen = () => {
       wsDiagAdd({ kind: "open", port, ts: Date.now() });
+      // 重置静默基线：断线期间的时间不该算进「静默」。
+      lastWsMessageAt = 0;
+      lastWsType = undefined;
       console.log("[WS] connected");
       reconnectDelay = 1000;
       // Connected — cancel any pending reconnect timer (belt-and-braces with
@@ -632,8 +670,37 @@ export function createChatSession(): ChatSession {
       dispatch({ type: "status", status: "connected" });
     };
     ws.onmessage = (e) => {
-      console.log("[WS] onmessage:", e.data.substring(0, 200));
-      try { dispatch(JSON.parse(e.data)); } catch (_) { console.error("[WS] parse error"); }
+      const nowMs = Date.now();
+      const gapMs = lastWsMessageAt ? nowMs - lastWsMessageAt : 0;
+      lastWsMessageAt = nowMs;
+
+      let parsed: WireMessage;
+      try {
+        parsed = JSON.parse(e.data);
+      } catch (_) {
+        console.error("[WS] parse error");
+        return;
+      }
+      const msgType = describeWsType(parsed);
+
+      // 静默取证：两条消息间隔超过阈值就记一条。
+      // 「流卡死」的判定只看 lastStreamEventAt，但那条时间线平时不落痕迹 ——
+      // 事后翻日志只能看到"卡了"，不知道卡在哪个阶段。这里把静默前后的消息
+      // 类型一起记下来（status:thinking → stream_event 说明卡在等首字节）。
+      if (gapMs > WS_GAP_LOG_MS) {
+        wsDiagAdd({ kind: "gap", ts: nowMs, gapMs, prevType: lastWsType, nextType: msgType });
+        console.warn(
+          `[WS] 静默 ${(gapMs / 1000).toFixed(1)}s：${lastWsType ?? "?"} → ${msgType}`,
+        );
+      }
+      lastWsType = msgType;
+
+      // 逐条打印会把每个 thinking 字符都刷出来（一次响应几千行），默认关闭。
+      // 需要抓包时在控制台执行 localStorage.setItem("wsVerbose","1") 后重连。
+      if (WS_VERBOSE) {
+        console.log("[WS] onmessage:", e.data.substring(0, 200));
+      }
+      try { dispatch(parsed); } catch (_) { console.error("[WS] dispatch error"); }
     };
     ws.onclose = (e) => {
       ws = null;

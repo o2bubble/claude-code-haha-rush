@@ -196,10 +196,21 @@ export function chatReduce(state: ChatState, msg: WireMessage, ctx: ReduceCtx = 
   // 活动（长 bash 工具不是卡死）；task_*（子代理运行/进度）同样——主回合等在
   // 子代理结果上时流静默 ≠ 卡死（实测长 Task 运行会被误弹「是否中断」甚至自动
   // 唤醒）；status/context_window 等周期性消息不算，防止掩盖真实卡停。
+  //
+  // stream_heartbeat（2026-11-03）：后端在「已收到消息、还没拿到模型首字节」
+  // 这段静默期里每 5s 发一条。这段时间后端可能在做消息规范化 / hook / 等 API
+  // 首字节，前端看不到任何东西，会被误判成卡死。心跳**由后端封顶 90s**，
+  // 到点自己停 —— 所以它不会无限掩盖真正的卡停，只是把"后端还活着"这件事
+  // 如实告诉前端。
   const isSubAgentActivity =
     t === "task_started" || t === "task_progress" ||
     t === "task_completed" || t === "task_messages";
-  if (msg.type === "stream_event" || t === "tool_progress" || isSubAgentActivity) {
+  if (
+    msg.type === "stream_event" ||
+    t === "tool_progress" ||
+    isSubAgentActivity ||
+    msg.type === "stream_heartbeat"
+  ) {
     set({ lastStreamEventAt: now() });
   }
 

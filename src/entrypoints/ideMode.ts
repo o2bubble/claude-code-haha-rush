@@ -686,9 +686,46 @@ function isSDKMessage(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && 'type' in v
 }
 
+// ── 「等首字节」心跳 ──
+//
+// 从「收到用户消息」到「第一个 stream_event」之间，前端看不到任何活动：
+// 后端可能在规范化 2000 条消息、跑 hook、或等 API 首字节。
+// 前端把「30s 无流事件」判成卡死（见 gui/src/utils/streamStallDecision.ts），
+// 这段等待期会被误判成卡住。
+//
+// 每 HEARTBEAT_INTERVAL_MS 发一条轻量心跳，表示"后端还活着、在等模型"。
+// ⚠️ 上限 HEARTBEAT_MAX_MS：到点就停 —— 若 API 真挂住，心跳不能一直掩盖它，
+// 否则前端永远不会弹「是否中断」。
+const HEARTBEAT_INTERVAL_MS = 5_000
+const HEARTBEAT_MAX_MS = 90_000
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+let heartbeatStartedAt = 0
+
+/** 回合开始：开心跳。首条流事件或回合结束时会调 stopTurnHeartbeat()。 */
+function startTurnHeartbeat(): void {
+  stopTurnHeartbeat()
+  heartbeatStartedAt = Date.now()
+  heartbeatTimer = setInterval(() => {
+    const waitedMs = Date.now() - heartbeatStartedAt
+    if (waitedMs > HEARTBEAT_MAX_MS) {
+      stopTurnHeartbeat()
+      return
+    }
+    broadcastToAll({ type: 'stream_heartbeat', waitedMs })
+  }, HEARTBEAT_INTERVAL_MS)
+}
+
+function stopTurnHeartbeat(): void {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+}
 
 async function forwardSDKEvent(event: SDKMessage): Promise<void> {
   if (!isSDKMessage(event)) return
+  // 任何真实的流事件都意味着后端已拿到模型响应 —— 心跳到此为止。
+  stopTurnHeartbeat()
 
   try {
     switch (event.type) {
@@ -1791,6 +1828,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
     if (rawName === 'memory') {
       // Trigger memory recall via the conversation (send a prompt to the API)
       broadcastToAll({ type: 'status', status: 'thinking', busy: true })
+      startTurnHeartbeat()
       busy = true
       const promptContent: ContentBlockParam[] = [{ type: 'text', text: 'Please recall any saved memories about the user and this project. Use the memory tool to retrieve them, then summarize what you know.' }]
       await runPromptCommand(promptContent)
@@ -1939,6 +1977,7 @@ async function runPromptCommand(promptContent: ContentBlockParam[]): Promise<voi
     const msg = err instanceof Error ? err.message : String(err)
     broadcastToAll({ type: 'error', message: msg })
   } finally {
+    stopTurnHeartbeat()
     mutableMessages = [...currentEngine!.getMessages()]
     readFileCache = currentEngine!.getReadFileState()
     // Final broadcast: interval only fires while busy, so without this the
@@ -1988,6 +2027,7 @@ async function handleUserPrompt(userContent: string | ContentBlockParam[], ws?: 
   })
 
   broadcastToAll({ type: 'status', status: 'thinking', busy: true })
+  startTurnHeartbeat()
 
   const ideContextPrompt = buildIDEContextPrompt()
 
@@ -2020,6 +2060,7 @@ async function handleUserPrompt(userContent: string | ContentBlockParam[], ws?: 
     const message = err instanceof Error ? err.message : String(err)
     broadcastToAll({ type: 'error', message })
   } finally {
+    stopTurnHeartbeat()
     mutableMessages = [...engine.getMessages()]
     readFileCache = engine.getReadFileState()
 
