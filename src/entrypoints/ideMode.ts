@@ -51,6 +51,7 @@ import { getTools } from 'src/tools.js'
 import { transitionPermissionMode } from '../utils/permissions/permissionSetup.js'
 import { createAbortController } from 'src/utils/abortController.js'
 import { createFileStateCacheWithSizeLimit } from 'src/utils/fileStateCache.js'
+import { singleFlight } from 'src/utils/singleFlight.js'
 import { setCwd } from 'src/utils/Shell.js'
 import { preconnectAnthropicApi } from '../utils/apiPreconnect.js'
 import { applyExtraCACertsFromConfig } from '../utils/caCertsConfig.js'
@@ -111,6 +112,7 @@ import type { LogOption } from 'src/types/logs.js'
 import { clearSessionMetadata, clearSessionMessagesCache, flushSessionStorage, recordTranscript, resetSessionFilePointer, saveAgentName, saveCustomTitle, saveTag } from 'src/utils/sessionStorage.js'
 import { getCurrentUsage, tokenCountWithEstimation } from 'src/utils/tokens.js'
 import { setOnFileWritten } from 'src/utils/file.js'
+import { setOnStreamRecovering } from 'src/utils/streamRecovery.js'
 import {
   getContextWindowForModel,
   calculateContextPercentages,
@@ -121,6 +123,7 @@ import {
   convertEffortValueToLevel,
   modelSupportsEffort,
   modelSupportsMaxEffort,
+  modelSupportsOutputConfigEffort,
   getDefaultEffortForModel,
   type EffortLevel,
   type EffortValue,
@@ -190,6 +193,9 @@ let currentEngine: QueryEngine | null = null
 // Concurrency protection: only one user prompt at a time
 let busy = false
 let currentAbortController: AbortController | null = null
+/** 本回合是否已经因为流静默进入过「自救」（看门狗 abort → 非流式重试）。
+ *  回合结束时清空。用来判断后面出现的 error 是不是"自救也失败了"。 */
+let recoveringThisTurn: { reason: string; waitedMs: number } | null = null
 // Thinking mode toggle — user can enable/disable extended thinking
 let thinkingEnabled = false
 // GUI-set effort strength (drives `output_config.effort`; on reasoning-capable
@@ -241,6 +247,10 @@ function getModelCapabilities(model: string) {
     thinking: modelSupportsThinking(model),
     adaptiveThinking: modelSupportsAdaptiveThinking(model),
     reasoning: modelSupportsReasoning(model),
+    // 推理强度走 `output_config.effort`（DeepSeek 官方兼容端点的方式）。
+    // 与 `reasoning` 互斥 —— 声明 reasoning 时后端会把强度并进
+    // `reasoning:{effort}`，而 DeepSeek 不认该字段。
+    outputConfigEffort: modelSupportsOutputConfigEffort(model),
     defaultEffort: getDefaultEffortForModel(model),
   }
 }
@@ -680,13 +690,157 @@ function isSDKMessage(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && 'type' in v
 }
 
+// ── 「等首字节」心跳 ──
+//
+// 从「收到用户消息」到「第一个 stream_event」之间，前端看不到任何活动：
+// 后端可能在规范化 2000 条消息、跑 hook、或等 API 首字节。
+// 前端把「30s 无流事件」判成卡死（见 gui/src/utils/streamStallDecision.ts），
+// 这段等待期会被误判成卡住。
+//
+// 每 HEARTBEAT_INTERVAL_MS 发一条轻量心跳，表示"后端还活着、在等模型"。
+//
+// ⚠️ 2026-11-03 再修：90s 上限太短。实测「工具返回 → 下一条模型输出」之间
+// 可以有 **3 分钟**（大上下文 + effort=max 的思考时间），90s 一到心跳停、
+// 前端 30s 后照弹决策条 —— 用户看到的就是"工具跑完了但界面说卡死"。
+// 现在放到 10 分钟：仍在一次 API 调用的合理量级内，真挂住（连接断/服务端不回）
+// 最终由上层超时终结，不需要靠心跳去假装。
+const HEARTBEAT_INTERVAL_MS = 5_000
+const HEARTBEAT_MAX_MS = 600_000
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+/** 最后一次「回合内有进展」的时刻。心跳的 10min 上限从这里算。 */
+let heartbeatLastActivityAt = 0
+
+// ── 事件循环卡顿探针（2026-11-03）──
+//
+// 心跳是 setInterval。**如果事件循环本身被阻塞，心跳永远不会触发** —— 那前端
+// 照样判卡死，而且日志里什么都看不到（连 `[req]` 都是异步打印的，会被推迟）。
+//
+// 实测线索：故障时 `[req] msgs=2016` 在 03:11:37 与 03:12:40 各出现一次，
+// 而日志本身是 `void getToolPermissionContext().then(...)` 发射的 —— 时间戳
+// 会被阻塞推迟。所以"请求挂了 63 秒"和"事件循环卡了 63 秒"目前分不清。
+//
+// 这个探针每秒登记一次实际触发时刻，把「该触发 vs 实际触发」的差值记下来：
+// 差值大 = 事件循环被同步操作卡住（不是网络问题）。
+const LOOP_LAG_INTERVAL_MS = 1_000
+const LOOP_LAG_WARN_MS = 3_000
+let loopLagTimer: ReturnType<typeof setInterval> | null = null
+let loopLagExpectedAt = 0
+
+function startEventLoopProbe(): void {
+  if (loopLagTimer) return
+  loopLagExpectedAt = Date.now() + LOOP_LAG_INTERVAL_MS
+  loopLagTimer = setInterval(() => {
+    const now = Date.now()
+    const lagMs = now - loopLagExpectedAt
+    loopLagExpectedAt = now + LOOP_LAG_INTERVAL_MS
+    if (lagMs >= LOOP_LAG_WARN_MS) {
+      // 走 stderr：GUI 的 backend.rs 只常驻读取 stderr（stdout 读循环 30s 超时后
+      // 就停了），诊断必须进 claude-code-gui.log 才看得到。
+      console.error(
+        `[loop-lag] 事件循环被阻塞 ${(lagMs / 1000).toFixed(1)}s` +
+          `（心跳/日志在这段时间内都不会发出）`,
+      )
+    }
+  }, LOOP_LAG_INTERVAL_MS)
+}
+
+/** 回合开始：开心跳。回合结束时 stopTurnHeartbeat()。 */
+function startTurnHeartbeat(): void {
+  stopTurnHeartbeat()
+  heartbeatLastActivityAt = Date.now()
+  heartbeatTimer = setInterval(() => {
+    const silentMs = Date.now() - heartbeatLastActivityAt
+    if (silentMs > HEARTBEAT_MAX_MS) {
+      stopTurnHeartbeat()
+      console.error(
+        `[heartbeat] 静默 ${Math.round(silentMs / 1000)}s 超过上限，停止心跳（前端将据此判卡死）`,
+      )
+      return
+    }
+    broadcastToAll({ type: 'stream_heartbeat', waitedMs: silentMs })
+  }, HEARTBEAT_INTERVAL_MS)
+}
+
+/** 模型侧有进展 → 续期（不是停）。见 forwardSDKEvent 里的调用说明。 */
+function refreshTurnHeartbeat(): void {
+  heartbeatLastActivityAt = Date.now()
+}
+
+function stopTurnHeartbeat(): void {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+}
+
+
+/** 回合最终失败时调用：如果本回合已经走过「看门狗自救」，说明**自救也没救回来**。
+ *  额外广播一条，前端据此走自己的补救路径（唤醒/重试），而不是只看到一句错误。 */
+function reportRecoveryFailureIfAny(message: string): void {
+  if (!recoveringThisTurn) return
+  const info = recoveringThisTurn
+  recoveringThisTurn = null
+  console.error(
+    `[stream] recovery FAILED (${info.reason}): ${message.slice(0, 160)}`,
+  )
+  broadcastToAll({
+    type: 'stream_recovery_failed',
+    reason: info.reason,
+    waitedMs: info.waitedMs,
+    message,
+  })
+}
+
+/** 取出 assistant 消息的纯文本（用于错误识别与日志）。 */
+function extractAssistantText(message: unknown): string {
+  const content = (message as { content?: unknown })?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map(b =>
+      b && typeof b === 'object' && (b as { type?: string }).type === 'text'
+        ? ((b as { text?: string }).text ?? '')
+        : '',
+    )
+    .join('')
+}
+
+/** 是否为 query() 合成的 API 错误消息（以 "API Error" 开头）。 */
+function isApiErrorMessage(message: unknown): boolean {
+  return extractAssistantText(message).startsWith('API Error')
+}
 
 async function forwardSDKEvent(event: SDKMessage): Promise<void> {
   if (!isSDKMessage(event)) return
+  // 心跳只在「模型侧真的开始有进展」时停 —— **不能无条件停**。
+  //
+  // ⚠️ 2026-11-03 修：这里原本无条件 `stopTurnHeartbeat()`。但回合开始后最先
+  // 到达的是 `system`（init）这类与模型输出无关的事件，心跳刚开就被掐灭，
+  // 随后漫长的等首字节（大上下文 prefill）又变回无声静默 —— 前端照样 30s 弹
+  // 「是否中断」，加了心跳等于没加（用户实测复现）。
+  if (
+    event.type === 'stream_event' ||
+    event.type === 'assistant' ||
+    event.type === 'tool_progress' ||
+    event.type === 'user'
+  ) {
+    // 续期而不是停：流中途也可能静默（思考期、大 prefill、工具返回后等下一轮
+    // 模型响应），停掉就又回到「静默 30s 弹条」。
+    //
+    // `user`（= tool_result）必须算：工具刚跑完是**进展**，之后等模型响应
+    // 可能几分钟，这段正是用户看到「工具跑完了却说卡死」的地方。
+    refreshTurnHeartbeat()
+  }
 
   try {
     switch (event.type) {
-      case 'assistant':
+      case 'assistant': {
+        // query() 把运行时/API 错误**转成一条 `API Error: ...` 的 assistant
+        // 消息** yield 出来（不抛异常，subtype 仍是 success）。如果本回合已经
+        // 走过看门狗自救，这条就是「自救也失败了」的证据。
+        if (recoveringThisTurn && isApiErrorMessage(event.message)) {
+          reportRecoveryFailureIfAny(extractAssistantText(event.message))
+        }
         broadcastToAll({
           type: 'assistant',
           message: event.message as Record<string, unknown>,
@@ -696,6 +850,7 @@ async function forwardSDKEvent(event: SDKMessage): Promise<void> {
         })
         sendContextWindowStatus()
         break
+      }
 
       case 'user': {
         // Only forward tool results, not the user's own messages.
@@ -724,15 +879,25 @@ async function forwardSDKEvent(event: SDKMessage): Promise<void> {
         break
       }
 
-      case 'result':
+      case 'result': {
+        const subtype = (event as { subtype?: string }).subtype ?? 'success'
+        // query() 把 API 错误**吞成了 error 类型的 result**，不会抛到
+        // handleUserPrompt 的 catch —— 所以「自救失败」也要在这里判，否则
+        // 那条分支永远走不到（实测：只剩 result，根本没有 error 事件）。
+        if (subtype.startsWith('error')) {
+          reportRecoveryFailureIfAny(
+            (event as { error?: string }).error ?? subtype,
+          )
+        }
         broadcastToAll({
           type: 'result',
-          subtype: (event as { subtype?: string }).subtype ?? 'success',
+          subtype,
           result: (event as { result?: string }).result,
           error: (event as { error?: string }).error,
           busy: false,
         })
         break
+      }
 
       case 'status':
         broadcastToAll({
@@ -1067,6 +1232,9 @@ async function handleCompact(ws: WebSocket): Promise<void> {
           message:
             ((m as Record<string, unknown>).message as Record<string, unknown>) ??
             (m as unknown as Record<string, unknown>),
+          isMeta:
+            ((m as Record<string, unknown>).isMeta as boolean | undefined) ??
+            undefined,
           parent_tool_use_id:
             ((m as Record<string, unknown>).parent_tool_use_id as
               | string
@@ -1296,6 +1464,24 @@ async function initialize(): Promise<void> {
   // Enable config reading (must happen before getTools / QueryEngine)
   enableConfigs()
 
+  // 会话自述（`~/.claude/sessions/<pid>.json`）—— 同机其他会话靠它互相发现
+  // （ListAgents / SendMessage(session-<pid>)）。
+  //
+  // ⚠️ 必须在这里再写一次：这段逻辑原本只加在 `setup()` 里，而 IDE 模式走的是
+  // **另一条初始化路径**（cli.tsx → runIdeMode → 本函数），根本不经过 setup →
+  // GUI 会话从来没登记过 → `~/.claude/sessions/` 永远是空目录 →
+  // ListAgents 看不到任何同机会话（2026-11-02 实测确认）。
+  // 早于任何 hook 落地，避免 hook spawn 子进程时快照到未登记的环境。
+  try {
+    const { registerSession } = await import('../utils/concurrentSessions.js')
+    await registerSession()
+  } catch (e) {
+    console.error(
+      '[ide-mode] session self-registration failed:',
+      e instanceof Error ? e.message : String(e),
+    )
+  }
+
   // Apply env vars, proxy, mTLS, and CA certs from settings (no trust dialog in IDE mode)
   applyConfigEnvironmentVariables()
   applyExtraCACertsFromConfig()
@@ -1415,6 +1601,31 @@ async function refreshMcpTools(): Promise<void> {
     console.error('[ideMode] Failed to refresh MCP tools:', err instanceof Error ? err.message : String(err))
   }
 }
+
+/**
+ * 后台刷新 MCP（会话加载/恢复用）——**不阻塞调用方**。
+ *
+ * 两条纪律：
+ *  ① 不 await：刷新可能因失败 server 重连而耗时（含 30s 超时），绝不能挡在读会话
+ *     文件之前 —— 那会把"MCP 慢"变成"切会话慢"（用户实测反馈）。
+ *  ② **并发合并**（singleFlight）：快速连切会话会连着触发多次；`refreshMcpTools`
+ *     内部是"读 tools → 追加新工具"的写法，并发跑可能重复追加。已有刷新在飞时
+ *     后来者复用同一个 Promise —— 它跑完拿到的就是最新列表，不必再跑一遍。
+ *
+ * 内部吞错：调用方不 await，抛出去只会变成 unhandled rejection。
+ * 先吞 refresh 的错再广播，保证将来 refreshMcpTools 改成会抛时命令列表也照常刷新。
+ */
+const refreshMcpToolsInBackground = singleFlight(async () => {
+  try {
+    await refreshMcpTools()
+    broadcastSlashCommands()
+  } catch (err) {
+    console.error(
+      '[ideMode] background MCP refresh failed:',
+      err instanceof Error ? err.message : String(err),
+    )
+  }
+})
 
 // ============================================================================
 // Handle a single user prompt turn
@@ -1739,6 +1950,7 @@ async function tryHandleSlashCommand(input: string, ws?: WebSocket): Promise<boo
     if (rawName === 'memory') {
       // Trigger memory recall via the conversation (send a prompt to the API)
       broadcastToAll({ type: 'status', status: 'thinking', busy: true })
+      startTurnHeartbeat()
       busy = true
       const promptContent: ContentBlockParam[] = [{ type: 'text', text: 'Please recall any saved memories about the user and this project. Use the memory tool to retrieve them, then summarize what you know.' }]
       await runPromptCommand(promptContent)
@@ -1885,8 +2097,11 @@ async function runPromptCommand(promptContent: ContentBlockParam[]): Promise<voi
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    reportRecoveryFailureIfAny(msg)
     broadcastToAll({ type: 'error', message: msg })
   } finally {
+    stopTurnHeartbeat()
+    recoveringThisTurn = null
     mutableMessages = [...currentEngine!.getMessages()]
     readFileCache = currentEngine!.getReadFileState()
     // Final broadcast: interval only fires while busy, so without this the
@@ -1936,6 +2151,7 @@ async function handleUserPrompt(userContent: string | ContentBlockParam[], ws?: 
   })
 
   broadcastToAll({ type: 'status', status: 'thinking', busy: true })
+  startTurnHeartbeat()
 
   const ideContextPrompt = buildIDEContextPrompt()
 
@@ -1966,8 +2182,11 @@ async function handleUserPrompt(userContent: string | ContentBlockParam[], ws?: 
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    reportRecoveryFailureIfAny(message)
     broadcastToAll({ type: 'error', message })
   } finally {
+    stopTurnHeartbeat()
+    recoveringThisTurn = null
     mutableMessages = [...engine.getMessages()]
     readFileCache = engine.getReadFileState()
 
@@ -2137,9 +2356,11 @@ async function handleLoadSession(
 
   // 会话加载时自动刷新 MCP — 用户在会话 A 期间往配置加了新 MCP server（或某 server
   // 刚恢复），不 refresh 的话旧会话里工具列表缺失，只能手动 /mcp-refresh（用户实测
-  // 高频痛点）。已连接 server 被 memoize 跳过，只有失败/新增的才会重连，开销可控。
-  await refreshMcpTools()
-  broadcastSlashCommands()
+  // 高频痛点）。已连接 server 被 memoize 跳过，只有失败/新增的才会重连。
+  //
+  // 后台刷新（不 await）—— 见 refreshMcpToolsInBackground 的注释：
+  // 绝不能挡在读会话文件之前，否则"MCP 慢"会变成"切会话慢"（用户实测反馈）。
+  refreshMcpToolsInBackground()
 
   try {
     const projectsDir = getProjectsDir()
@@ -2206,6 +2427,9 @@ async function handleLoadSession(
             uuid: entry.uuid as string | undefined,
             type: entryType,
             message: (entry.message as Record<string, unknown>) ?? entry,
+            // isMeta: 程序合成、非用户实际输入的消息（如恢复中断回合时补的
+            // "Continue from where you left off."）。GUI 据此弱化渲染。
+            isMeta: (entry.isMeta as boolean | undefined) ?? undefined,
             parent_tool_use_id:
               (entry.parent_tool_use_id as string | null) ?? null,
             timestamp: entry.timestamp as string | undefined,
@@ -2249,8 +2473,8 @@ async function handleResumeSession(
 
   // 会话加载自动刷新 MCP（理由同 handleLoadSession）——恢复旧会话同样要拿到
   // 最新工具列表。放在 try 外: refresh 自带容错, 失败不应阻断会话恢复。
-  await refreshMcpTools()
-  broadcastSlashCommands()
+  // 后台刷新（不 await）：同 handleLoadSession，见 refreshMcpToolsInBackground。
+  refreshMcpToolsInBackground()
 
   try {
     const projectsDir = getProjectsDir()
@@ -2311,12 +2535,29 @@ async function handleResumeSession(
     }
 
     // Clean messages (filter unresolved tool uses, orphaned thinking, etc.)
+    //
+    // 用带中断检测的版本：若上一轮被中断（停在 tool_result / attachment 上），
+    // 它会补一条 `"Continue from where you left off."`（isMeta 合成消息）+
+    // `"No response requested."` 哨兵，保证下一轮 API 调用合法。
+    //
+    // ⚠️ **合成的那条不能出现在上下文里**（2026-10-30 用户反馈）：
+    //  - 它在 GUI 里只是一句空话（`--ide-mode` 没有 print.ts 的自动续跑逻辑），
+    //    却会被 recordTranscript 落盘，永久污染历史；
+    //  - GUI 侧开启「自动续跑」时会**自己发**一条同样的续写 —— 两条会重复。
+    // 所以：从上下文里剔除它，但**保留在发给 GUI 的展示列表**里（用户要能看到
+    // "程序在这里插过一句话"）。哨兵保留，它是下一轮 API 合法的保证。
     let cleanedMessages: Message[]
+    let syntheticContinuationId: string | undefined
     try {
-      const { deserializeMessages } = await import(
+      const { deserializeMessagesWithInterruptDetection } = await import(
         '../utils/conversationRecovery.js'
       )
-      cleanedMessages = deserializeMessages(rawMessages)
+      const result = deserializeMessagesWithInterruptDetection(rawMessages)
+      cleanedMessages = result.messages
+      const state = result.turnInterruptionState
+      if (state.kind !== 'none' && state.message.isMeta === true) {
+        syntheticContinuationId = state.message.uuid as string
+      }
     } catch {
       cleanedMessages = rawMessages
     }
@@ -2341,6 +2582,16 @@ async function handleResumeSession(
       console.error('[ide-mode] SessionStart(resume) hooks failed:', err)
     }
 
+    // 展示列表（含合成的续写消息）—— 与上下文分开，见上面的说明
+    const messagesForDisplay = cleanedMessages
+
+    // 上下文里剔除合成续写，避免它被 recordTranscript 落盘污染历史
+    if (syntheticContinuationId) {
+      cleanedMessages = cleanedMessages.filter(
+        m => (m as Record<string, unknown>).uuid !== syntheticContinuationId,
+      )
+    }
+
     // Set the message context so the next turn continues this session
     mutableMessages = cleanedMessages
 
@@ -2348,12 +2599,15 @@ async function handleResumeSession(
     const response: IDESessionLoadedResponse = {
       type: 'session_loaded',
       session_id: sessionId,
-      messages: cleanedMessages.map(m => ({
+      messages: messagesForDisplay.map(m => ({
         uuid: (m as Record<string, unknown>).uuid as string | undefined,
         type: m.type,
         message:
           ((m as Record<string, unknown>).message as Record<string, unknown>) ??
           (m as unknown as Record<string, unknown>),
+        isMeta:
+          ((m as Record<string, unknown>).isMeta as boolean | undefined) ??
+          undefined,
         parent_tool_use_id:
           ((m as Record<string, unknown>).parent_tool_use_id as
             | string
@@ -3329,6 +3583,9 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
     },
   })
 
+  // 事件循环卡顿探针：常驻运行，只在阻塞 ≥3s 时打一行（见 startEventLoopProbe）。
+  startEventLoopProbe()
+
   // Announce port to stdout so the IDE can discover the server
   // This is the ONLY stdout output — everything else goes over WebSocket
   process.stdout.write(`CLAUDE_CODE_IDE_PORT=${server.port}\n`)
@@ -3347,6 +3604,17 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
       path: filePath,
       messageId: '',
       label: `文件变更: ${filePath.split(/[/\\]/).pop() || filePath}`,
+    })
+  })
+
+  // 流看门狗触发 → 告诉界面「上游中断，正在改用非流式重试」。
+  // 没有这条通知的话，界面只看到死寂，用户以为卡死；实际上后端正在自救。
+  setOnStreamRecovering(info => {
+    recoveringThisTurn = { reason: info.reason, waitedMs: info.waitedMs }
+    broadcastToAll({
+      type: 'stream_recovering',
+      reason: info.reason,
+      waitedMs: info.waitedMs,
     })
   })
 

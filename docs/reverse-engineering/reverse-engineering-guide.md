@@ -1,17 +1,17 @@
 # 官方版本逆向分析操作手册
 
 > 目标: 从官方 `claude.exe` 提取运行时信息（agent 类型、系统提示词、工具列表等）
-> 方法: HTTPS 代理抓包（最有效）+ PE 二进制字符串提取
+> 方法: 代理抓包（最有效）+ PE 二进制字符串提取
 > 最新分析版本: 2.1.211 (2026-07-16)
 
 ## 环境准备
 
-```bash
-# 依赖
-pip install frida  # 可选，用于内存分析
-```
+`proxy_stream.py` **只用 Python 标准库，无需安装任何依赖**。
 
-官方 exe 路径: `temp/claude.exe`（~241 MB，Bun --compile 产物）
+官方 exe 自行准备，放 `temp/claude.exe`（~241 MB，Bun --compile 产物）。
+**`temp/` 不入 git** —— 该文件历史上被清理过，仓库里现在没有，需要时从官方安装包取。
+
+> 抓包产物也写到 `temp/capture/`（同样不入 git），不会污染仓库。
 
 ## 方法一：代理抓包（最有效）
 
@@ -26,11 +26,12 @@ pip install frida  # 可选，用于内存分析
 **1. 启动代理脚本**
 
 ```bash
-# temp/proxy_stream.py — 拦截 + 转发到真实 API
-python temp/proxy_stream.py
+# 拦截 + 转发到真实 API（默认目标 DeepSeek，可用 --target 改）
+python scripts/reverse-engineering/proxy_stream.py
 ```
 
-代理会在 `127.0.0.1:8899` 监听，把收到的每个请求保存为 `temp/capture_{timestamp}_{seq}.json`，然后转发到 DeepSeek API。
+代理在 `127.0.0.1:8899` 监听，把每个 POST 请求保存为
+`temp/capture/capture_{timestamp}_{seq}.json`，然后转发到目标 API。
 
 **2. 修改 settings.json 指向代理**
 
@@ -47,7 +48,7 @@ temp/claude.exe -p "你的prompt"
 
 **4. 分析捕获的 JSON**
 
-捕获的文件在 `temp/capture_*.json`。关键字段：
+捕获的文件在 `temp/capture/capture_*.json`。关键字段：
 - `system` — 系统提示词（数组，每个 block 的 `text` 字段）
 - `tools` — 工具列表，其中 `name: "Agent"` 的工具描述里包含所有可用 agent 类型
 - `messages` — 对话历史
@@ -93,26 +94,39 @@ temp/claude.exe -p "Use Agent tool with subagent_type=general-purpose to say hel
 | 问题 | 原因 | 解决 |
 |------|------|------|
 | 代理没抓到请求 | settings.json 里 ANTHROPIC_BASE_URL 没改 | 直接改 settings.json 的 env 段 |
+| 改了 settings.json **仍**抓不到 | 工作区 `.claude/settings.local.json` **优先级更高**（项目级覆盖全局） | 一并改它，或临时改名移走 |
 | 转发报错 418/502 | Host header 或自定义 header 问题 | 清除 x- 前缀的 header 再转发 |
 | 子 agent 没 spawn | prompt 不够明确 | 明确说 "Use Agent tool with subagent_type=xxx" |
-| Frida 找不到字符串 | JSC 内部用 rope string，非连续内存 | 放弃 memory scan，用代理抓包 |
+| Frida 找不到字符串 | JSC 内部用 rope string，非连续内存 | 放弃 memory scan，用代理抓包（见方法二） |
+| **抓包目录被删后拿不到新数据** | 代理启动时创建的目录，删了它不会重建，写入静默失败 | 跑之前先 `mkdir -p` 那个目录 |
+| **改了源码但抓包没变化** | 测的是**安装目录的旧二进制**（GUI 连的是那个），不是源码 | 用 `bun --preload ./preload.ts ./src/entrypoints/cli.tsx` 跑源码；或先确认 `--version` |
+| **单条请求超时** | 代理是单线程时，第一条卡住会堵死后续 | 用 `ThreadingHTTPServer`（`proxy_stream.py` 已用） |
+| 改了配置好了几秒又变回去 | 项目的 `.claude/settings.local.json` 与 `--settings` 同时生效，后者被覆盖 | 只改一个来源 |
 
-## 方法二：Frida 内存分析（备选）
+### 分析层面的坑
 
-### 适用场景
-- 不想消耗 API 额度时快速扫描
-- 已知字符串在二进制中的位置
+抓包本身没问题、但**结论**容易错的地方：
 
-### 脚本
-- `temp/frida_hook.py` — Hook WriteFile/fwrite/printf 捕获 stdout
-- `temp/frida_dump.py` — 扫描内存找系统提示词
-- `temp/frida_dump2.py` — 支持 UTF-16 扫描（JSC 字符串编码）
-- `temp/frida_ssl_capture.py` — Hook SSL_write 捕获明文 HTTP 请求（BoringSSL 静态链接，未导出符号）
+| 现象 | 容易得出的错误结论 | 正确做法 |
+|------|------|------|
+| 官方描述里一堆句子"我们缺" | "我们少了很多功能" | 多数是**拆句方式不同**。逐条人工核对，只挑真缺的 |
+| 系统提示比官方长 5 倍 | "官方精简了我们啰嗦" | 先量**分段**，找出最大的那一块再判断 |
+| 某个功能在 system prompt 里有说明 | "这功能是启用的" | 去查**它自己的 gate 条件** —— 可能永远不启用 |
 
-### 局限性
-- JSC 内部字符串存储是非连续的（rope string），`Memory.scanSync` 找不到
-- BoringSSL 静态链接且符号未导出，`SSL_write` hook 不到
-- 不如代理抓包可靠
+详细方法论见 [gap-analysis-playbook.md](./gap-analysis-playbook.md)。
+
+## 方法二：Frida 内存分析 —— **已判定不可行，不要重试**
+
+试过四个方向，**全部失败**，脚本本身也没保留（曾在 `temp/`，已随临时目录清理）：
+
+| 尝试 | 结果 | 原因 |
+|---|---|---|
+| Hook `WriteFile` / `fwrite` / `printf` 抓 stdout | ❌ | 输出走 Bun 内部缓冲，不经过这些点 |
+| `Memory.scanSync` 找 system prompt | ❌ | JSC 用 **rope string**，长字符串在内存中非连续 |
+| UTF-16 变体扫描 | ❌ | 同上，编码不是问题所在 |
+| Hook `SSL_write` 抓明文 HTTP | ❌ | BoringSSL **静态链接 + 符号未导出** |
+
+→ 想拿运行时信息，**直接用方法一的代理抓包**。
 
 ## 方法三：PE 二进制字符串提取（静态分析）
 
@@ -156,20 +170,19 @@ for s in strings:
 
 | 文件 | 用途 |
 |------|------|
-| `scripts/reverse-engineering/proxy_stream.py` | HTTPS 代理抓包 + DeepSeek 转发 |
+| `scripts/reverse-engineering/proxy_stream.py` | 代理抓包 + 转发（**唯一保留的工具**） |
 | `docs/reverse-engineering/prompts/capture_*_prompt.txt` | 提取的 6 种子 agent system prompt |
-| `docs/reverse-engineering/sample_main_26tools.json` | 主 agent `-p` 模式请求样本 |
-| `docs/reverse-engineering/sample_claude_subagent.json` | claude 子 agent 请求样本 |
-| `docs/reverse-engineering/sample_main_interactive_29tools.json` | 主 agent 交互模式请求样本 |
+| `docs/reverse-engineering/sample_main_26tools.json` | 主 agent `-p` 模式请求样本（26 工具） |
+| `docs/reverse-engineering/sample_main_interactive_29tools.json` | 主 agent 交互模式请求样本（29 工具） |
+| `docs/reverse-engineering/sample_claude_subagent.json` | claude 子 agent 请求样本（15 工具） |
 | `docs/reverse-engineering/capture_claude_subagent_tools.json` | claude 子 agent 工具 schema |
-| `docs/reverse-engineering-guide.md` | 本文件 — 逆向操作手册 |
-| `docs/official-version-analysis.md` | 版本差异分析报告 |
+| `docs/reverse-engineering/official-version-analysis.md` | 版本差异分析报告 |
+| `docs/reverse-engineering/reverse-engineering-guide.md` | 本文件 |
 
-### `temp/` 目录（gitignored）
+### `temp/` 目录（gitignored，需自行准备）
 
 | 文件 | 用途 |
 |------|------|
-| `claude.exe` | 官方 2.1.211 二进制 (241 MB) |
-| `python-full.exe` | 嵌入式 Python 运行时 (25 MB) |
-| `captured_full.json` | 最后一次成功捕获的完整 API 请求体（已丢失，方法见本指南） |
-| `claude_agent_prompt.txt` | 历史：提取到的 claude agent system prompt（已移至 docs/） |
+| `claude.exe` | 官方二进制（~241 MB）。**当前不存在**，需从官方安装包取 |
+| `capture/` | 抓包产物（`proxy_stream.py` 自动创建） |
+| `mitm_anthropic_capture.py` | mitmproxy addon（若装了 mitmproxy 可作真 HTTPS MITM 用；**默认环境未安装**） |

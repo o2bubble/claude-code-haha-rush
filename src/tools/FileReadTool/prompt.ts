@@ -14,8 +14,11 @@ export const DESCRIPTION = 'Read a file from the local filesystem.'
 export const LINE_FORMAT_INSTRUCTION =
   '- Results are returned using cat -n format, with line numbers starting at 1'
 
+// 官方 2.1.316 把「只读需要的部分」变成**默认**建议 —— 旧版（2.1.89 基线）
+// 是"建议通读全文"。方向相反，而后者在长文件上会白白烧掉大量上下文。
+// 两个常量都保留：GrowthBook 下发的 targetedRangeNudge 仍可切换。
 export const OFFSET_INSTRUCTION_DEFAULT =
-  "- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters"
+  '- When you already know which part of the file you need, only read that part. This can be important for larger files.'
 
 export const OFFSET_INSTRUCTION_TARGETED =
   '- When you already know which part of the file you need, only read that part. This can be important for larger files.'
@@ -29,21 +32,27 @@ export function renderPromptTemplate(
   maxSizeInstruction: string,
   offsetInstruction: string,
 ): string {
-  return `Reads a file from the local filesystem. You can access any file directly by using this tool.
-Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+  // ⚠️ 2026-11-04 精简（1779 → ~790 字符，对齐官方量级）。
+  //
+  // 删掉的都是**模型默认就会做 / 做了也没代价**的：
+  //   · "Assume this tool can read all files… it's okay to read a file that does
+  //     not exist" —— 模型本来就会直接试
+  //   · "You will regularly be asked to read screenshots… ALWAYS use this tool"
+  //     —— 传图片路径时没有别的工具可选
+  //   · "can only read files, not directories" —— 读目录会直接报错
+  //   · "empty contents → system reminder" —— 是通知不是行为指引
+  //
+  // 保留的是**会改变行为**的：绝对路径要求、默认读多少行、offset/limit 策略、
+  // 图片/PDF/notebook 的能力边界（模型需要知道"我能读这些"才会去用）。
+  return `Reads a file from the local filesystem.
 
-Usage:
-- The file_path parameter must be an absolute path, not a relative path
-- By default, it reads up to ${MAX_LINES_TO_READ} lines starting from the beginning of the file${maxSizeInstruction}
+- \`file_path\` must be an absolute path.
+- Reads up to ${MAX_LINES_TO_READ} lines by default${maxSizeInstruction}
 ${offsetInstruction}
 ${lineFormat}
-- This tool allows Claude Code to read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually as Claude Code is a multimodal LLM.${
-    isPDFSupported()
-      ? '\n- This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), you MUST provide the pages parameter to read specific page ranges (e.g., pages: "1-5"). Reading a large PDF without the pages parameter will fail. Maximum 20 pages per request.'
-      : ''
+- Reads images (PNG, JPG, …) and presents them visually. Reads PDFs via the \`pages\` parameter (e.g. "1-5", max 20 pages/request; required for PDFs over 10 pages). Reads Jupyter notebooks (.ipynb) as cells with outputs.${
+    isPDFSupported() ? '' : ` (PDF reading unavailable in this build.)`
   }
-- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.
-- This tool can only read files, not directories. To read a directory, use an ls command via the ${BASH_TOOL_NAME} tool.
-- You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view the file at the path. This tool will work with all temporary file paths.
-- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.`
+- Reading a directory, a missing file, or an empty file returns an error or system reminder rather than content.
+- Do NOT re-read a file you just edited to verify — Edit/Write would have errored if the change failed, and the harness tracks file state for you.`
 }

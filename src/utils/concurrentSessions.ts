@@ -83,15 +83,21 @@ export async function registerSession(): Promise<boolean> {
         startedAt: Date.now(),
         kind,
         entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT,
-        ...(feature('UDS_INBOX')
+        // 总是写：官方会话可能起 UDS 监听，我们虽然走文件邮箱，但把它记下来
+        // 便于 ListAgents 区分"官方 TUI"与"本 fork"。
+        ...(process.env.CLAUDE_CODE_MESSAGING_SOCKET
           ? { messagingSocketPath: process.env.CLAUDE_CODE_MESSAGING_SOCKET }
           : {}),
-        ...(feature('BG_SESSIONS')
-          ? {
-              name: process.env.CLAUDE_CODE_SESSION_NAME,
-              logPath: process.env.CLAUDE_CODE_SESSION_LOG,
-              agent: process.env.CLAUDE_CODE_AGENT,
-            }
+        // 同上：会话名对"同机发现"有用（用户能给会话起名互相辨认），
+        // 不再要求 BG_SESSIONS。
+        ...(process.env.CLAUDE_CODE_SESSION_NAME
+          ? { name: process.env.CLAUDE_CODE_SESSION_NAME }
+          : {}),
+        ...(process.env.CLAUDE_CODE_SESSION_LOG
+          ? { logPath: process.env.CLAUDE_CODE_SESSION_LOG }
+          : {}),
+        ...(process.env.CLAUDE_CODE_AGENT
+          ? { agent: process.env.CLAUDE_CODE_AGENT }
           : {}),
       }),
     )
@@ -156,7 +162,8 @@ export async function updateSessionActivity(patch: {
   status?: SessionStatus
   waitingFor?: string
 }): Promise<void> {
-  if (!feature('BG_SESSIONS')) return
+  // 不再要求 BG_SESSIONS：ListAgents 靠这两个字段告诉同机其他会话
+  // 「我现在忙不忙、在做什么」。写入失败时 updatePidFile 自己会吞掉。
   await updatePidFile({ ...patch, updatedAt: Date.now() })
 }
 

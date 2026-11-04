@@ -1,6 +1,6 @@
 // Validate the new minimal provider output
 const fs = require('fs');
-const src = fs.readFileSync('extensions/vscode/out/webview/provider.js', 'utf8');
+const src = fs.readFileSync('apps/extensions/vscode/out/webview/provider.js', 'utf8');
 
 // Find the template literal... wait, the new version uses string concatenation, not template literal
 // Look for the pattern: return '\x3C!DOCTYPE html>

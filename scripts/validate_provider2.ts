@@ -1,7 +1,7 @@
 // Simulate what the HTML script content would look like at runtime
 // by evaluating the string concatenation (with mock values for nonce/cspSource)
 const fs = require('fs');
-const src = fs.readFileSync('extensions/vscode/out/webview/provider.js', 'utf8');
+const src = fs.readFileSync('apps/extensions/vscode/out/webview/provider.js', 'utf8');
 const lines = src.split('\n');
 
 // Extract lines from getHtmlContent return statement (line 119 to line 677)

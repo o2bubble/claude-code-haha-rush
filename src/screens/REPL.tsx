@@ -4032,7 +4032,10 @@ export function REPL({
     interimRange: null
   };
   useInboxPoller({
-    enabled: isAgentSwarmsEnabled(),
+    // 曾被 isAgentSwarmsEnabled() 独占 —— 那时它只服务 swarm teammates。
+    // 现在普通会话也靠它收「同机其他会话」发来的消息（ListAgents 发现的
+    // session-<pid>），所以无条件启用；没有消息时每秒一次 readFile 很便宜。
+    enabled: true,
     isLoading,
     focusedInputDialog,
     onSubmitMessage: handleIncomingPrompt

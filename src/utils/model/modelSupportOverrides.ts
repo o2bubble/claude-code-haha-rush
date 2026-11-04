@@ -7,6 +7,18 @@ export type ModelCapabilityOverride =
   | 'adaptive_thinking'
   | 'interleaved_thinking'
   | 'reasoning'
+  /**
+   * 推理强度通过 **`output_config.effort`** 表达（而不是 `reasoning:{effort}`
+   * 或顶层 `reasoning_effort`）。
+   *
+   * DeepSeek 的 Anthropic 兼容文档明确：`thinking.budget_tokens` 被忽略、
+   * 强度只看 `output_config.effort`（2026-11-02 实测：effort=low 让思考量
+   * 从 3879 字降到 2318 字，而 `reasoning_effort` 无效）。
+   *
+   * 与 `reasoning` 互斥：声明 `reasoning` 时后端会把思考开关也一起交给
+   * `reasoning:{effort}`，而该字段 DeepSeek 不认 → 等于关不掉思考。
+   */
+  | 'output_config_effort'
 
 const TIERS = [
   {

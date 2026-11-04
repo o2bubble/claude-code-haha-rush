@@ -1,7 +1,186 @@
-# Handoff — Claude Code GUI 开发 · 2026-09-18（main @9c24a08）
+# Handoff — Claude Code GUI 开发 · 2026-09-20（main @90b7537）
 
 > 跨机器 / 跨会话继续用。当前状态以 git 为准；架构细节在 `docs/ARCHITECTURE.md`；**本文件不含凭据**——服务器账号/密码/密钥见内部凭据记录（`.private/api-keys.md`，gitignored）与 GUI 笔记「账号密码」。
 > ⚠️ 维护本文件时：**不要把任何真实密码/密钥写进来**。本文件曾两次因此出事（2026-09-11 云 root 密码、2026-09-14 上传 key 硬编码进脚本），**都推到了公开的 gitee**。
+
+## 🆕 2026-09-20 续②：pointer 视觉重做（tldraw）+ 配色设置项；穿透探索**终结**
+
+### 🎨 视觉重做（用户对比 5 种风格后选定）
+
+做了 **legacy / Excalidraw 手绘 / tldraw / Apple Markup / 发光** 五档对比图
+（`temp/style_catalog.py`），用户选定 **tldraw**，原话：
+> "文字显示部分有个背景色，不会发生任何阅读和识别的障碍"
+
+改动（`render.py`，**纯 Pillow，零新依赖**）：冷蓝 `#4d82f0`（弃"红+白双描边"）·
+线宽 5px（原 9+4.5）· 圆角 14px · 箭头改 **V 形两笔** · 角标去白圈 ·
+**保留标签深色底框**（用户明确要求）· 超采样 2x→**4x** · **所有尺寸 × scale**。
+
+### 🎛️ 配色设置项（用户提议）
+
+> "有些人会认为这么多年对红色的认知已经刻在骨子里了，天然感觉红色系就有强烈的提醒的视觉意义"
+
+`contributes.settings.colorScheme`（select）：现代蓝（默认）/ **警示红** / 确认绿 / 醒目橙。
+链路：`plugin.json` 声明 → 宿主随命令下发 `{tool,args,settings}` →
+`server.cjs` 收值（变更时重启绘制进程）→ `spawn --color` → `render.py` 应用。
+
+⚠️ **`plugin.json` 新增设置项后需重启 GUI** 才能在设置面板看到下拉框。
+
+### 🧱 穿透探索终结：**WebView2 覆盖层做不到**（三条路全试过）
+
+| 方案 | 结果 |
+|---|---|
+| `WS_EX_TRANSPARENT`（顶层 + 全部子窗口轮询）| ❌ |
+| `EnableWindow(FALSE)`（顶层 + 全部子窗口）| ❌ |
+| 两者并施 | ❌ |
+
+**根因（实测确认）**：输入由 **WebView2 浏览器进程**的子窗口接收
+（`Chrome_RenderWidgetHostHWND`，pid ≠ 宿主）—— **跨进程**。
+`WS_EX_TRANSPARENT` 的 `HTTRANSPARENT` 机制**只在同线程窗口链内有效**；
+`EnableWindow` 也只作用于本进程窗口 → 宿主侧无解。
+
+→ **WebView2 覆盖层不能作为可用路径**（不穿透 = 绑架用户操作）。用户原话：
+> "不能穿透的话很麻烦…用户完全无法做其他任何交互，有点绑架的意思"
+
+`lib.rs` 里失败尝试的代码**已移除**，原位留成因注释防重走。
+
+**副产品（都已修，回退路径因此"能看但不能点"）**：
+- `overlay.html` 读顶层 `st.arrows`，而 server 从 0.2.0 起放在 `shapes` 下
+  → **一个形状都画不出来**（实测 `<g>` 为空）→ 改 `st.shapes || st`
+- `overlay.html` 的 `cursor: none` **把用户光标整个隐藏** → 移除
+
+### 📦 已发布
+
+**pointer `0.2.1`** 两端市场（回包字节一致校验通过）。
+
+---
+
+## 🆕 2026-09-20 续：pointer「黑屏」**真根因找到 —— 在页面层，不在窗口层**
+
+> 用户说"对之前的 rust 实现还是存在幻想，再研究研究"。结果推翻了 09-19 的结论：
+> **不是 WebView2 做不到透明，是页面自己画了背景色把它挡住。**
+
+### 🔴 真根因（两层背景，都在页面里）
+
+1. **`gui/index.html:13-15`**（提交 `90089f3a` 引入）：
+   ```js
+   if (location.hash.indexOf("#overlay/") === 0)
+     document.documentElement.style.backgroundColor = "#000";
+   ```
+   **是故意加的** —— 为截图框选防 WebView2 白闪（框选底色必然是黑的）。
+2. **`gui/src/tokens.css:217`**：`html { background: var(--bg-root) }` —— 主题背景，所有窗口共用。
+
+→ 窗口层修得再好（`WS_EX_NOREDIRECTIONBITMAP` ✓、softbuffer 跳过 ✓、exstyle 全对），
+**页面自己铺的底色照样把透明挡死**。
+
+### 为什么长期没找到（两次误判）
+
+- 09-18 试了 **10 种窗口层/WebView2 层方案**，全部无效 —— 因为**方向从一开始就偏了**
+  （真正的问题在页面 CSS，不在窗口/合成层）
+- 09-19 的结论"WebView2 做不到透明"**是错的**：那轮试的三种也都只动窗口层
+- 教训：**"窗口是全黑/全白"时，先问一句"是不是页面自己画的"** ——
+  在页面里 `document.body.style.background` 一测便知，比读窗口 API 快得多
+
+### 修法（`?overlay-clear=1`）
+
+宿主在 `transparent=true` 时给 URL 加 query，页面据此**不铺任何底色**：
+
+| 位置 | 改动 |
+|---|---|
+| `gui/src-tauri/src/lib.rs`（`open_plugin_overlay`）| transparent 时 path 加 `?overlay-clear=1` |
+| `gui/index.html` | 读 query：有标记 → `html { background: transparent }`（内联覆盖 tokens.css）；无 → 维持铺黑 |
+
+**用 query 而非改 `#overlay/` 前缀**：hash 协议（前端 `parseOverlayHash`）保持不变，避免波及多处解析。
+
+### 影响面（精准）
+
+| 谁 | 行为 |
+|---|---|
+| `transparent=true` 的插件 overlay | **变透明**（当前仅 pointer 的回退路径）|
+| 截图框选（`#overlay/` 无标记）| **完全不变**（仍是黑底防白闪）|
+| AI 浮标（`open_plugin_indicator`）| 不变（它**故意**不透明，靠 HTML 画深色块）|
+| 主窗口 | 不变（hash 非 `#overlay/`）|
+
+### 验证
+
+- **页面逻辑**：Vite dev + Playwright，两组对照都对
+  （`?overlay-clear=1` → `rgba(0,0,0,0)`；无标记 → `rgb(0,0,0)`）
+- **发布**：GUI `2026.09.20.1` 两端，回包字节一致、含标记 ✓
+- **真实窗口**：⏳ 待用户更新后验证 —— 方法：**临时把插件目录的 `render.py` 改名**
+  → pointer 走现成的 WebView2 回退路径（`server.cjs` 里有）→ 看是否透明 → 恢复
+
+---
+
+## 🆕 2026-09-20：插件发布链路 + 文档架构收敛（4 个插件已上线）
+
+### 🔴 修复：市场 `pointer.zip` 是坏包（用户拿到挡屏的覆盖层）
+
+已发布的 `pointer.zip` **只有 6 个文件，缺 `render.py`** —— 真正画图的脚本。
+`server.cjs` 找不到它 → 降级到 WebView2 回退路径 →
+**所有市场用户拿到"不透明、挡住屏幕"的覆盖层**，正是 `render.py` 要解决的问题。
+
+**为什么长期没发现**：**开发机有该文件**，本地测永远正常。
+`render.py` 由 `169e2d7` 引入，**恰好就是那次更新 zip 的 commit** —— 手打包漏了。
+**`.zip` 是二进制，git diff 看不出内容变化。**
+
+→ 新工具 **`scripts/pack-plugins.py`**：打包**前**核对关键文件清单（缺了拒绝）、
+打包**后**读回 zip 比对、`--check` 只验不写。**已实测**：移走 `render.py` 即报
+`[FAIL] ... 缺关键文件 → ['render.py']` + 退出码 1。教训见 `memory://5e505a7f`。
+
+### 📐 架构收敛：坐标换算改为单一来源（用户纠正）
+
+我原先把换算公式**编码进 MCP 工具描述**。用户指出这会**每次改算法都要改 N 处**。
+**他是对的** —— 同一件事当时散在**四处且已互相矛盾**（`AI_NOTES.md` 那处写错了
+「要减 monitorOrigin」，`render.py` 注释写「屏幕绝对」）。
+
+**定下的原则**：**MCP 描述只回答「有技能，去读它」，不含算术**。
+公式唯一来源 = `plugins/computer-use/skill/references/coordinates.md`。
+验证方式：逐文件 grep「公式行数」，只有该文件 > 0。教训见 `memory://d8870ad1`。
+
+### 📦 已发布（云端 `release.17lumen.cloud`，已下载回包实测）
+
+| 插件 | 版本 | 要点 |
+|---|---|---|
+| pointer | `0.2.0` | 补 `render.py` + 新增 `skill/` + 硬依赖 `screenshot` |
+| mouse-keyboard | `0.4.0` | 描述指向技能（原公式漏 `pixelRatio`，会点错） |
+| screenshot | `0.3.0` | 描述补齐；**补进仓库**（之前只在市场有包） |
+| computer-use | `0.1.5` | 技能文档更新 |
+
+- 线上校验方式：`GET /api/packages/<slug>/download` 拉回来比对文件清单与
+  `plugin.json`，**不能只看上传返回的 200**。
+- ⚠️ 云直连**可用**（`https://release.17lumen.cloud`，~1.9s）。之前记的
+  「云发布一律走 workbench」**已不必要** —— 那是 96 受限时的结论。
+- ⚠️ 96 从这台机器**不可达**。
+
+### 🆕 pointer 加了技能（`contributes.skills`）
+
+**背景**：`AI_NOTES.md` 是**拉取式** —— `plugin_docs` 的描述写着"AI **排查故障时**"
+才读，**正常使用不会有人看**。所以新会话的 AI 可能压根不知道坐标规则。
+
+**两个必进上下文的位置**：
+1. **MCP 工具描述** → 加「⚠️ READ THE `pointer` SKILL FIRST」（每会话必在上下文）
+2. **技能列表** → 需 manifest 声明 `contributes.skills: [{name, path}]`
+
+现已生效：`~/.claude/skills/pointer` 软链已建、`skill-diag.linked` 含 `pointer`、
+**技能已出现在会话技能列表里**。
+
+### 🔧 另外两个 pointer 修复（本轮早期）
+
+- **状态卡死**（`d69526d`）：`overlayOpen` 原由 `/hello` `/bye` 握手维护 →
+  进程被强杀时 `/bye` 发不出 → 永久卡 `true` → **再也不 spawn**。
+  改为**从进程句柄派生**（`isOverlayOpen()`，`server.cjs:87`）。教训 `memory://ca47928a`。
+- **EPIPE 打死 server**（`c84ffb0`）：我上一版加的 `console.log` 撞上管道断开
+  → **EPIPE 是 socket 的 `error` 事件，`try/catch` 抓不住** → **整个 server 退出**。
+  加进程级兜底 `process.stdout.on("error", ...)`。教训 `memory://166c1c7f`。
+  > **给长驻进程加日志不是"无害的小改动"**。
+
+### 🧭 本轮踩的坑（都记进记忆了）
+
+- **测量工具本身不可信**（`memory://6dffe65f`）：我用 **DPI unaware 的 PowerShell**
+  读窗口位置（拿到**逻辑像素**）→ 算出错误结论「三插件坐标不一致/偏 1.5 倍」。
+  **实际三者一致。** 正解：**让被测对象自己报告**（`winfo_rootx`）。
+  > 判据：**先确认测量工具可信，再下结论。**
+- **验证要看对象自身状态，别读日志**：靶窗口明明写着"命中"，我却去 grep 日志
+  （读到上一轮旧内容）→ 误判"没点中"。
 
 ## 🆕 2026-09-19：pointer「覆盖层透明」**已解决 —— 放弃 WebView2，改 Python 原生绘制**
 
@@ -20,7 +199,8 @@
 > ⚠️ **另一条**：**GDI 截图对 layered/DComp 窗口会失真**（透明渲染成黑），本项目
 > 已被骗过两次。**窗口颜色一律以人眼实测为准。**
 >
-> ⏳ **待办**：宿主侧 pointer 进程需**重启 GUI 重扫**才会用上新版（`render.py`）。
+> ✅ **已收尾（2026-09-20）**：宿主侧 pointer 进程已随 GUI 重启用上新版 `render.py`。
+> ⚠️ 但市场包当时**漏发了 `render.py`**（见顶部 09-20 节）—— 本地正常、市场是坏的。
 
 ### （历史）09-18 排查记录 —— 保留供参考
 
@@ -346,13 +526,15 @@ StatReload 进程持续扫描 160MB 的 `skills-store`，5 天烧 22 小时 CPU�
 
 ## 当前状态
 
-- **分支**: `main`（`9c24a08`）；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
-- **本批主题**: **pointer 插件（屏幕指示器）+ 覆盖层透明排查（未攻克，见上）**
-- **Windows 版本**: **两端均 `2026.09.18.5`**
-  —— 本轮连续五个版本（`.18.1`~`.18.5`）都在改覆盖层：全黑 → 关不掉 → 仍不透明 → **仍不透明（未攻克）**
-  —— 可用能力：覆盖层点击穿透、自动关闭、**硬超时兜底**（`hardTtlSec`，防"关不掉锁死屏幕"）
-  —— ⚠️ 覆盖层**仍不透明**：目前的 pointer 插件会遮住屏幕，`duration` 到了才自动消失
-- **pointer 插件**: **`0.1.1`**（两端）；⚠️ 功能不完整（覆盖层不透明）—— **考虑先下架或标注**
+- **分支**: `main`（`90b7537`）；`github-clean` 已同步（sha 每次同步都变，以 `git log github-clean` 为准）
+- **本批主题**: **pointer 视觉重做（tldraw）+ 配色设置项 + 穿透探索终结**
+- **Windows 版本**: **两端均 `2026.09.20.1`**
+  —— `.20.1` = 覆盖层黑屏真根因修复（页面背景色）+ `?overlay-clear=1` 协议
+  —— 更早 `.18.1`~`.18.5` 是覆盖层系列修复（全黑 → 关不掉 → 透明），见「续」章节
+- **pointer 插件**: **`0.2.1`**（两端市场）✓ 功能完整
+  —— 可用路径 = `render.py` **原生绘制**（透明 ✓ 穿透 ✓ 光标 ✓）
+  —— tldraw 风格 + 四档配色（设置面板「配色方案」；**需重启 GUI 才见该下拉框**）
+  —— ⚠️ WebView2 覆盖层**仅作降级**（能看不能点，见「续②」的成因）
 - **⚠️ 依赖已 vendor + patch**: `gui/src-tauri/vendor/tauri-runtime-wry`（改动标 `PATCH(gui:overlay-transparency)`）
   —— **升级 Tauri 时必须重新应用那 3 处补丁**，否则 transparent 窗口会退化成白色实心
 - ⚠️ **上传前先查服务器已有版本** —— 曾误发 `.15.1` 孤儿版本（号比用户已发的低，
@@ -974,6 +1156,7 @@ manifest 的 release_notes，`MAX_RELEASE_NOTES = 5`）。13.1 漏了，13.2 已
 | 架构 | `docs/ARCHITECTURE.md` · `docs/agents/issue-tracker.md` | 架构与工单约定 |
 | **部署（memory）** | `docs/memory-deploy-playbook.md` | **memory 服务发版手册**（本地构建→workbench 上传→云端切换） |
 | **部署（release-platform）** | `claude-code-gui-release-platform/DEPLOY.md` | **发布平台部署手册**（WSL 构建→上传→服务器只 load；含禁 build/禁 reload 的理由） |
+| **备案主页** | `docs/17lumen-homepage-playbook.md` · `homepage/` | **17lumen.com/.cn 站点手册**（改内容 / 证书 / 安全组 / 排障；含公安备案待办） |
 | **CF Tunnel（实战）** | `docs/cloudflare-tunnel-cloud-playbook.md` | 本环境完整记录：为什么弃 frp 转 CF、7 个实测坑、诊断方法论 |
 | **CF Tunnel（通用）** | `docs/cloudflare-tunnel-playbook.md` | 通用用法：快速隧道/命名隧道/服务化/原理 |
 | 工具配置 | `tools/cloudflared/config-17lumen.yml` | 隧道 ingress 配置（二进制不入库，用时按手册下载） |

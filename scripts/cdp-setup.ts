@@ -45,7 +45,7 @@ function main(): void {
   // Project-level .mcp.json
   console.log('=== CDP Inspector — Setup .mcp.json ===\n')
   const mcpFile = join(ROOT, '.mcp.json')
-  const entry = './extensions/cdp-inspector/entry.ts'
+  const entry = './apps/extensions/cdp-inspector/entry.ts'
 
   let config: Record<string, unknown> = {}
   if (existsSync(mcpFile)) {

@@ -5493,6 +5493,79 @@ export function ensureToolResultPairing(
 }
 
 /**
+ * Enforce BLOCK-level tool adjacency that strict Anthropic-compatible
+ * endpoints require: the block immediately after a `tool_use` must be its
+ * `tool_result` — i.e. `tool_use` blocks must END their assistant message and
+ * `tool_result` blocks must LEAD the following user message.
+ *
+ * The official API checks pairing at the message level and happily accepts a
+ * text block after a tool_use; DeepSeek's Anthropic endpoint (confirmed
+ * 2026-10-09 by direct probe) rejects it with "`tool_use` ids were found
+ * without `tool_result` blocks immediately after" — surfacing in the GUI as
+ * "API Error: 400 due to tool use concurrency issues" and deadlocking every
+ * subsequent request until the transcript is repaired by hand.
+ *
+ * Why reordering is safe: streaming emits blocks in arrival order
+ * (thinking → text → tool_use), and tool_use normally lands last; a
+ * transcript only violates this when the write path persisted blocks out of
+ * order (sessionStorage drain race, see 2026-10-09). Stable partitioning
+ * restores that natural order without changing any block's content, and is a
+ * no-op for well-formed messages.
+ */
+export function enforceToolBlockOrdering(
+  messages: (UserMessage | AssistantMessage)[],
+): (UserMessage | AssistantMessage)[] {
+  let repaired = 0
+
+  const result = messages.map(msg => {
+    const content = msg.message.content
+    if (!Array.isArray(content) || content.length < 2) return msg
+
+    // For assistants: no-op iff every tool_use is already after every other
+    // block (tool_use ends the message). For users: no-op iff every
+    // tool_result is already before every other block. Cheap positional check.
+    const key = msg.type === 'assistant' ? 'tool_use' : 'tool_result'
+    let firstKey = -1
+    let lastKey = -1
+    let firstOther = -1
+    let lastOther = -1
+    for (let i = 0; i < content.length; i++) {
+      if (content[i]!.type === key) {
+        if (firstKey === -1) firstKey = i
+        lastKey = i
+      } else {
+        if (firstOther === -1) firstOther = i
+        lastOther = i
+      }
+    }
+    // Nothing to move if the message has no keyed blocks, or nothing but them.
+    if (firstKey === -1 || firstOther === -1) return msg
+    const alreadyOrdered =
+      msg.type === 'assistant' ? firstKey > lastOther : lastKey < firstOther
+    if (alreadyOrdered) return msg
+
+    repaired++
+    const keyed = content.filter(b => b.type === key)
+    const rest = content.filter(b => b.type !== key)
+    const reordered =
+      msg.type === 'assistant' ? [...rest, ...keyed] : [...keyed, ...rest]
+    return {
+      ...msg,
+      message: { ...msg.message, content: reordered },
+    } as typeof msg
+  })
+
+  if (repaired > 0) {
+    logEvent('tengu_tool_block_ordering_repaired', { count: repaired })
+    logForDebugging(
+      `enforceToolBlockOrdering: reordered tool blocks in ${repaired} message(s) for strict endpoints`,
+    )
+  }
+
+  return result
+}
+
+/**
  * Strip advisor blocks from messages. The API rejects server_tool_use blocks
  * with name "advisor" unless the advisor beta header is present.
  */

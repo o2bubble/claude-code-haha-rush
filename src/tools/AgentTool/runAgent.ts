@@ -3,6 +3,7 @@ import type { UUID } from 'crypto'
 import { randomUUID } from 'crypto'
 import uniqBy from 'lodash-es/uniqBy.js'
 import { logForDebugging } from 'src/utils/debug.js'
+import { type EffortValue } from 'src/utils/effort.js'
 import { getProjectRoot, getSessionId } from '../../bootstrap/state.js'
 import { getCommand, getSkillToolCommands, hasCommand } from '../../commands.js'
 import {
@@ -267,6 +268,7 @@ export async function* runAgent({
   description,
   transcriptSubdir,
   onQueryProgress,
+  effortOverride,
 }: {
   agentDefinition: AgentDefinition
   promptMessages: Message[]
@@ -326,6 +328,10 @@ export async function* runAgent({
    * during long single-block streams (e.g. thinking) where no assistant
    * message is yielded for >60s. */
   onQueryProgress?: () => void
+  /** Explicit effort level from the Agent tool's `effort` parameter.
+   * Takes precedence over the agent definition's own effort, which in turn
+   * takes precedence over the inherited session effort. */
+  effortOverride?: EffortValue
 }): AsyncGenerator<Message, void> {
   // Track subagent usage for feature discovery
 
@@ -478,11 +484,15 @@ export async function* runAgent({
       }
     }
 
-    // Override effort level if agent defines one
+    // Effort precedence: the Agent tool's explicit `effort` argument (caller
+    // asked for a specific level) → the agent definition's own effort → the
+    // level inherited from the session.
     const effortValue =
-      agentDefinition.effort !== undefined
-        ? agentDefinition.effort
-        : state.effortValue
+      effortOverride !== undefined
+        ? effortOverride
+        : agentDefinition.effort !== undefined
+          ? agentDefinition.effort
+          : state.effortValue
 
     if (
       toolPermissionContext === state.toolPermissionContext &&

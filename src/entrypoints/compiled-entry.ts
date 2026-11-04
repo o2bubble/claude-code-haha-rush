@@ -4,7 +4,11 @@
  */
 
 // ── Inlined preload.ts ─────────────────────────────────────────────────────
-const version = process.env.CLAUDE_CODE_LOCAL_VERSION ?? '2.1.89 (sync:2.1.211)';
+// ⚠️ 必须与 preload.ts 保持一致 —— 编译版不读 preload.ts，用的是这份副本。
+// 两处不同步的话，`claude.exe --version` 和源码运行会显示不同的版本号。
+//   2.1.89  = 本仓库所基于的泄漏源码版本（基线）
+//   sync:X  = 已对齐到的官方版本
+const version = process.env.CLAUDE_CODE_LOCAL_VERSION ?? '2.1.89 (sync:2.1.316)';
 const packageUrl = process.env.CLAUDE_CODE_LOCAL_PACKAGE_URL ?? 'claude-code-local';
 const buildTime = process.env.CLAUDE_CODE_LOCAL_BUILD_TIME ?? new Date().toISOString();
 

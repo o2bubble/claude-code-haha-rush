@@ -1,18 +1,12 @@
-import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js'
-
 export const FILE_WRITE_TOOL_NAME = 'Write'
 export const DESCRIPTION = 'Write a file to the local filesystem.'
 
-function getPreReadInstruction(): string {
-  return `\n- If this is an existing file, you MUST use the ${FILE_READ_TOOL_NAME} tool first to read the file's contents. This tool will fail if you did not read the file first.`
-}
-
+// ⚠️ 2026-11-02 精简（官方 2.1.316 同名工具仅 240 字符）。
+// 保留的两条都有实际后果：不先读就覆盖会失败；局部改动走 Edit 才只发 diff。
+// "别创建 .md / 别加 emoji" 已由系统提示覆盖，这里不再重复。
+// Read-first 规则由工具运行时强制（FileWriteTool 自身会校验），提示里只需说明后果。
 export function getWriteToolDescription(): string {
-  return `Writes a file to the local filesystem.
+  return `Writes a file to the local filesystem, overwriting if one exists.
 
-Usage:
-- This tool will overwrite the existing file if there is one at the provided path.${getPreReadInstruction()}
-- Prefer the Edit tool for modifying existing files \u2014 it only sends the diff. Only use this tool to create new files or for complete rewrites.
-- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.
-- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.`
+When to use: creating a new file, or fully replacing one you've already Read. Overwriting an existing file you haven't Read will fail. For partial changes, use Edit instead.`
 }

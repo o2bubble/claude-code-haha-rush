@@ -252,9 +252,11 @@ export function buildMemoryLines(
     ...TRUSTING_RECALL_SECTION,
     '',
     '## Memory and other forms of persistence',
-    'Memory is one of several persistence mechanisms available to you as you assist the user in a given conversation. The distinction is often that memory can be recalled in future conversations and should not be used for persisting information that is only useful within the scope of the current conversation.',
-    '- When to use or update a plan instead of memory: If you are about to start a non-trivial implementation task and would like to reach alignment with the user on your approach you should use a Plan rather than saving this information to memory. Similarly, if you already have a plan within the conversation and you have changed your approach persist that change by updating the plan rather than saving a memory.',
-    '- When to use or update tasks instead of memory: When you need to break your work in current conversation into discrete steps or keep track of your progress use tasks instead of saving to memory. Tasks are great for persisting information about the work that needs to be done in the current conversation, but memory should be reserved for information that will be useful in future conversations.',
+    // 2026-11-04 精简（1156 → 约 320 字符）：原文用两段长句解释
+    // 「计划和任务为什么不用记忆」，其实判据就一条 —— 未来的会话才值得存。
+    'Memory is for what future conversations need. Anything that only matters within this conversation belongs elsewhere:',
+    '- **Plan** — an approach you want to align on before a non-trivial implementation. If you already have one and change it, update the plan, don\'t save a memory.',
+    '- **Tasks** — discrete steps and progress within the current work.',
     '',
     ...(extraGuidelines ?? []),
     '',

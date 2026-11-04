@@ -19,6 +19,7 @@ import { runWithAgentContext } from '../../utils/agentContext.js';
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js';
 import { getCwd, runWithCwdOverride } from '../../utils/cwd.js';
 import { logForDebugging } from '../../utils/debug.js';
+import { EFFORT_LEVELS } from '../../utils/effort.js';
 import { isEnvTruthy } from '../../utils/envUtils.js';
 import { AbortError, errorMessage, toError } from '../../utils/errors.js';
 import type { CacheSafeParams } from '../../utils/forkedAgent.js';
@@ -50,6 +51,7 @@ import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
 import type { AgentDefinition } from './loadAgentsDir.js';
+import { checkConcurrentLimit, checkDepthLimit, readLimitEnv } from './subagentLimits.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
 import { getPrompt } from './prompt.js';
 import { runAgent } from './runAgent.js';
@@ -84,6 +86,7 @@ const baseInputSchema = lazySchema(() => z.object({
   prompt: z.string().describe('The task for the agent to perform'),
   subagent_type: z.string().optional().describe('The type of specialized agent to use for this task'),
   model: z.enum(['sonnet', 'opus', 'haiku']).optional().describe("Optional model override for this agent. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent."),
+  effort: z.enum(EFFORT_LEVELS).optional().describe("Reasoning effort for this agent. Set this ONLY when the user, or instructions such as CLAUDE.md or a skill, explicitly ask that this agent or delegated work run at a specific effort level, never on your own judgment; otherwise omit it and the agent runs at its usual effort. Ignored for subagent_type: \"fork\": a fork runs at your own effort."),
   run_in_background: z.boolean().optional().describe('Set to true to run this agent in the background. You will be notified when it completes.')
 }));
 
@@ -241,6 +244,7 @@ export const AgentTool = buildTool({
     subagent_type,
     description,
     model: modelParam,
+    effort: effortParam,
     run_in_background,
     name,
     team_name,
@@ -577,6 +581,28 @@ the task will appear to have failed with zero output.
     // below (registerAsyncAgentTask + notifyOnCompletion).
     const assistantForceAsync = feature('KAIROS') ? appState.kairosEnabled : false;
     const shouldRunAsync = (run_in_background === true || selectedAgent.background === true || isCoordinator || forceAsync || assistantForceAsync || (proactiveModule?.isProactiveActive() ?? false)) && !isBackgroundTasksDisabled;
+
+    // 并发 / 嵌套限额（对齐官方 CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS 与
+    // CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH）。判定逻辑在 subagentLimits.ts，
+    // 这里只负责取数并抛出。
+    const maxConcurrent = readLimitEnv(
+      process.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
+    )
+    if (shouldRunAsync && maxConcurrent > 0) {
+      const runningAgents = Object.values(appState.tasks ?? {}).filter(
+        isLocalAgentTask,
+      ).length
+      const check = checkConcurrentLimit(runningAgents, maxConcurrent)
+      if (check.ok === false) throw new Error(check.message)
+    }
+
+    const maxDepth = readLimitEnv(process.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH)
+    if (maxDepth > 0) {
+      const depth = toolUseContext.queryTracking?.depth ?? 0
+      const check = checkDepthLimit(depth, maxDepth)
+      if (check.ok === false) throw new Error(check.message)
+    }
+
     // Assemble the worker's tool pool independently of the parent's.
     // Workers always get their tools from assembleToolPool with their own
     // permission mode, so they aren't affected by the parent's tool
@@ -644,7 +670,10 @@ the task will appear to have failed with zero output.
         useExactTools: true
       }),
       worktreePath: worktreeInfo?.worktreePath,
-      description
+      description,
+      // Fork runs at the parent's effort — runAgent ignores this on the fork
+      // path (the schema description promises exactly that).
+      effortOverride: isForkPath ? undefined : effortParam
     };
 
     // Helper to wrap execution with a cwd override: explicit cwd arg (KAIROS)

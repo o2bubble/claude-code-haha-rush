@@ -1,4 +1,5 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
+import { logForDebugging } from './utils/debug.js'
 import addDir from './commands/add-dir/index.js'
 import autofixPr from './commands/autofix-pr/index.js'
 import backfillSessions from './commands/backfill-sessions/index.js'
@@ -40,6 +41,7 @@ import resume from './commands/resume/index.js'
 import review, { ultrareview } from './commands/review.js'
 import session from './commands/session/index.js'
 import share from './commands/share/index.js'
+import skillDoctor from './commands/skill-doctor/index.js'
 import skills from './commands/skills/index.js'
 import status from './commands/status/index.js'
 import tasks from './commands/tasks/index.js'
@@ -105,20 +107,44 @@ const ultraplan = feature('ULTRAPLAN')
   ? require('./commands/ultraplan.js').default
   : null
 const torch = feature('TORCH') ? require('./commands/torch.js').default : null
+// 这三个目录在泄漏源码里**不存在** —— 被剥掉的正是未启用特性对应的命令。
+// 开关一旦打开，无保护的 require 会抛 MODULE_NOT_FOUND → 启动直接崩溃。
+// optionalRequire 把它降级成「该命令不可用」，其余功能照常。
+//
+// ⚠️ fork 的**能力**走 Agent 工具（省略 subagent_type 即 fork），
+// 不依赖这个 /fork 斜杠命令 —— 所以命令缺失不影响 fork 本身。
+function optionalRequire<T>(path: string, label: string): T | null {
+  try {
+    return require(path) as T
+  } catch (err) {
+    if ((err as { code?: string }).code === 'MODULE_NOT_FOUND') {
+      logForDebugging(
+        `[commands] ${label} 模块缺失，该命令不可用（底层能力不受影响）：${path}`,
+        { level: 'warn' },
+      )
+      return null
+    }
+    throw err
+  }
+}
+
 const peersCmd = feature('UDS_INBOX')
-  ? (
-      require('./commands/peers/index.js') as typeof import('./commands/peers/index.js')
-    ).default
+  ? (optionalRequire<{ default: Command }>(
+      './commands/peers/index.js',
+      '/peers',
+    )?.default ?? null)
   : null
 const forkCmd = feature('FORK_SUBAGENT')
-  ? (
-      require('./commands/fork/index.js') as typeof import('./commands/fork/index.js')
-    ).default
+  ? (optionalRequire<{ default: Command }>(
+      './commands/fork/index.js',
+      '/fork',
+    )?.default ?? null)
   : null
 const buddy = feature('BUDDY')
-  ? (
-      require('./commands/buddy/index.js') as typeof import('./commands/buddy/index.js')
-    ).default
+  ? (optionalRequire<{ default: Command }>(
+      './commands/buddy/index.js',
+      '/buddy',
+    )?.default ?? null)
   : null
 /* eslint-enable @typescript-eslint/no-require-imports */
 import thinkback from './commands/thinkback/index.js'
@@ -152,7 +178,6 @@ import stickers from './commands/stickers/index.js'
 import advisor from './commands/advisor.js'
 import { logError } from './utils/log.js'
 import { toError } from './utils/errors.js'
-import { logForDebugging } from './utils/debug.js'
 import {
   getSkillDirCommands,
   clearSkillCaches,
@@ -297,6 +322,7 @@ const COMMANDS = memoize((): Command[] => [
   rename,
   resume,
   session,
+  skillDoctor,
   skills,
   stats,
   status,

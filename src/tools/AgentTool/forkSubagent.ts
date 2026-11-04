@@ -32,7 +32,22 @@ import type { BuiltInAgentDefinition } from './loadAgentsDir.js'
 export function isForkSubagentEnabled(): boolean {
   if (feature('FORK_SUBAGENT')) {
     if (isCoordinatorMode()) return false
-    if (getIsNonInteractiveSession()) return false
+    // 非交互会话不启用 fork：一次性运行里没有后台通知的消费者。
+    //
+    // ⚠️ 但 **GUI（--ide-mode）也是「非交互」** —— 它绕过 main.tsx，
+    // `setIsInteractive()` 从没被调用过，所以 `getIsNonInteractiveSession()`
+    // 永远是 true。而 GUI 其实有完整的后台任务 UI（subAgentStore +
+    // task_started/completed 事件）。不看这个区别的话，fork 在 GUI 里
+    // 永远静默失效 —— 实测确认过：子代理拿到的是普通 prompt（4527 字符），
+    // 而不是父级 fork prompt（29151 字符）。
+    //
+    // ideMode.ts:3415 会设 CLAUDE_CODE_IDE=1，用它区分。
+    if (
+      getIsNonInteractiveSession() &&
+      process.env.CLAUDE_CODE_IDE !== '1'
+    ) {
+      return false
+    }
     return true
   }
   return false

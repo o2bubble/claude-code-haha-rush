@@ -363,7 +363,11 @@ export const getClaudeTempDir = memoize(function getClaudeTempDir(): string {
 export const getBundledSkillsRoot = memoize(
   function getBundledSkillsRoot(): string {
     const nonce = randomBytes(16).toString('hex')
-    return join(getClaudeTempDir(), 'bundled-skills', MACRO.VERSION, nonce)
+    // MACRO.VERSION 可能是 `2.1.89 (sync:2.1.316)` —— **包含冒号和括号**，
+    // Windows 上直接拼进路径会 ENOTDIR（整条路径建不出来，技能文件永远落不了盘）。
+    // 净化成文件系统安全的形式。
+    const safeVersion = MACRO.VERSION.replace(/[<>:"/\|?*]/g, '_')
+    return join(getClaudeTempDir(), 'bundled-skills', safeVersion, nonce)
   },
 )
 

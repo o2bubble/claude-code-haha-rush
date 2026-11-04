@@ -57,6 +57,13 @@ gui/src/prototypes/
 .codex/
 AGENTS.md
 
+# 插件运行期数据目录（dev 下由插件进程写在 repo 根；
+# 安装环境下宿主用的是 %APPDATA%/com.claudecode.gui/plugins-data/，不受此条影响）
+plugins-data/
+
+# memsearch 插件运行期状态（本机索引状态 + PID，不跨机共享）
+.memsearch/
+
 # 私有（含 API key 等敏感值，勿提交）
 .private/
 

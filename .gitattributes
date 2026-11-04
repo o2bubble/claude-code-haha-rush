@@ -5,3 +5,11 @@
 # `install-mac.sh` 正是要在 mac 上跑的（.25.6 实测踩到）。
 # Git Bash 两种行尾都接受，所以这里统一 LF 无副作用。
 *.sh text eol=lf
+
+# 插件 vendor 目录下的第三方库：原样保留，绝不能做行尾转换
+# （minified JS 里可能含模板字符串/正则，CRLF 转换会改变字节、破坏 sourcemap 校验）
+plugins/*/vendor/*.js binary
+plugins/*/vendor/*.mjs binary
+# 子目录也要覆盖（ooxml 的 chunks 在 vendor/ooxml/chunks/ 下）
+plugins/*/vendor/**/*.js binary
+plugins/*/vendor/**/*.mjs binary

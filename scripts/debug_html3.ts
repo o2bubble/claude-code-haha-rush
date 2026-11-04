@@ -1,6 +1,6 @@
 // Check generated HTML for issues
 const fs = require('fs');
-const src = fs.readFileSync('extensions/vscode/out/webview/provider.js', 'utf8');
+const src = fs.readFileSync('apps/extensions/vscode/out/webview/provider.js', 'utf8');
 
 // Find the template literal
 const startMarker = 'return `<!DOCTYPE html>';

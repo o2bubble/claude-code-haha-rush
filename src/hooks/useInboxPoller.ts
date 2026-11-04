@@ -16,6 +16,7 @@ import { isInProcessTeammateTask } from '../tasks/InProcessTeammateTask/types.js
 import { getAllBaseTools } from '../tools.js'
 import type { PermissionUpdate } from '../types/permissions.js'
 import { logForDebugging } from '../utils/debug.js'
+import { SESSION_INBOX_TEAM, sessionAddress } from '../utils/sessionPeers.js'
 import {
   findInProcessTeammateTaskId,
   handlePlanApprovalResponse,
@@ -101,7 +102,9 @@ function getAgentNameToPoll(appState: AppState): string | undefined {
     const leadName = appState.teamContext!.teammates[leadAgentId]?.name
     return leadName || 'team-lead'
   }
-  return undefined
+  // 既不是 teammate 也不是 team lead —— 普通会话。同机其他会话通过 ListAgents
+  // 发现我们、用 SendMessage({to:"session-<pid>"}) 投递，收件箱就在这里。
+  return sessionAddress(process.pid)
 }
 
 const INBOX_POLL_INTERVAL_MS = 1000
@@ -146,7 +149,7 @@ export function useInboxPoller({
 
     const unread = await readUnreadMessages(
       agentName,
-      currentAppState.teamContext?.teamName,
+      currentAppState.teamContext?.teamName ?? SESSION_INBOX_TEAM,
     )
 
     if (unread.length === 0) return

@@ -175,6 +175,8 @@ export const getPrompt = memoize(async (_cwd: string): Promise<string> => {
 
 When users ask you to perform tasks, check if any of the available skills match. Skills provide specialized capabilities and domain knowledge.
 
+When the task at hand is one a listed skill covers, invoke it first. Most skills load their instructions into this turn for you to follow in place of your default approach; a few run in a subagent instead and return the finished result.
+
 When users reference a "slash command" or "/<something>" (e.g., "/commit", "/review-pr"), they are referring to a skill. Use this tool to invoke it.
 
 How to invoke:
@@ -187,6 +189,7 @@ How to invoke:
 
 Important:
 - Available skills are listed in system-reminder messages in the conversation
+- \`skill\` must be the **exact name from that listing**, no leading slash. Only names from the listing — or ones the user typed explicitly — are valid; do not guess. Plugin skills use \`plugin:skill\`.
 - When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
 - NEVER mention a skill without actually calling this tool
 - Do not invoke a skill that is already running

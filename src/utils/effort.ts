@@ -10,10 +10,13 @@ import type { EffortLevel } from 'src/entrypoints/sdk/runtimeTypes.js'
 
 export type { EffortLevel }
 
+// 与官方 2.1.316 一致：五档，`xhigh` 在 high 与 max 之间。
+// 已实测 DeepSeek 端点对五档全部返回 200（2026-11-03）。
 export const EFFORT_LEVELS = [
   'low',
   'medium',
   'high',
+  'xhigh',
   'max',
 ] as const satisfies readonly EffortLevel[]
 
@@ -326,4 +329,16 @@ export function getDefaultEffortForModel(
   // Fallback to undefined, which means we don't set an effort level. This
   // should resolve to high effort level in the API.
   return undefined
+}
+
+/**
+ * 该模型的推理强度是否走 `output_config.effort`（而非 `reasoning:{effort}`
+ * 或顶层 `reasoning_effort`）。由 profile 显式声明 `output_config_effort`。
+ *
+ * 为什么需要单独一个能力位：同样是"中继 + 思考"的端点，字段约定并不统一 ——
+ * GLM 只认顶层 `reasoning_effort`（发 output_config.effort 会 400 或让思考流
+ * 消失），DeepSeek 只认 `output_config.effort`（见 modelSupportOverrides）。
+ */
+export function modelSupportsOutputConfigEffort(model: string): boolean {
+  return get3PModelCapabilityOverride(model, 'output_config_effort') === true
 }

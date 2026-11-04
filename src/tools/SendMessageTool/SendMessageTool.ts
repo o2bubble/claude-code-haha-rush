@@ -20,6 +20,12 @@ import { gracefulShutdown } from '../../utils/gracefulShutdown.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { parseAddress } from '../../utils/peerAddress.js'
 import { semanticBoolean } from '../../utils/semanticBoolean.js'
+import {
+  pidFromSessionAddress,
+  resolvePeerSession,
+  SESSION_INBOX_TEAM,
+  sessionAddress,
+} from '../../utils/sessionPeers.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
 import type { BackendType } from '../../utils/swarm/backends/types.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
@@ -533,7 +539,11 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
     shouldDefer: true,
 
     isEnabled() {
-      return isAgentSwarmsEnabled()
+      // 曾被 isAgentSwarmsEnabled() 独占（只服务 swarm teammates）。现在它也
+      // 承担「同机其他会话」的投递（to: "session-<pid>"，走文件邮箱），
+      // 那部分与 swarm 无关，所以无条件可用 —— 没有 peer 时顶多多出一个工具，
+      // 调用会返回明确的 "no live session"。
+      return true
     },
 
     isReadOnly(input) {
@@ -739,6 +749,50 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
     },
 
     async call(input, context, canUseTool, assistantMessage) {
+      // ── 同机其他 Claude 会话（文件邮箱，不走 UDS）──
+      //
+      // 地址形如 `session-<pid>`。目标会话的 useInboxPoller 每秒读一次自己的
+      // 信箱，收到就注入成新回合 —— 所以我们这里只管把消息写进它的 inbox。
+      // 复用 teammateMailbox 的写锁，避免并发写坏 JSON。
+      if (typeof input.message === 'string' && pidFromSessionAddress(input.to) !== null) {
+        const resolved = await resolvePeerSession(input.to)
+        if ('error' in resolved) {
+          return { data: { success: false, message: resolved.error } }
+        }
+        const target = resolved.session
+        /* eslint-disable @typescript-eslint/no-require-imports */
+        const { writeToMailbox } =
+          require('../../utils/teammateMailbox.js') as typeof import('../../utils/teammateMailbox.js')
+        /* eslint-enable @typescript-eslint/no-require-imports */
+        try {
+          await writeToMailbox(
+            target.address,
+            {
+              from: sessionAddress(process.pid),
+              text: input.message,
+              timestamp: new Date().toISOString(),
+              ...(input.summary ? { summary: input.summary } : {}),
+            },
+            SESSION_INBOX_TEAM,
+          )
+          const preview = input.summary || truncate(input.message, 50)
+          const where = (target.cwd ?? '').replace(/\\/g, '/').split('/').filter(Boolean).pop()
+          return {
+            data: {
+              success: true,
+              message: `“${preview}” → ${target.address}${where ? ` (${where})` : ''}`,
+            },
+          }
+        } catch (e) {
+          return {
+            data: {
+              success: false,
+              message: `Failed to send to ${input.to}: ${errorMessage(e)}`,
+            },
+          }
+        }
+      }
+
       if (feature('UDS_INBOX') && typeof input.message === 'string') {
         const addr = parseAddress(input.to)
         if (addr.scheme === 'bridge') {

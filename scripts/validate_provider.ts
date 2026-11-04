@@ -1,5 +1,5 @@
 const fs = require('fs');
-const src = fs.readFileSync('extensions/vscode/out/webview/provider.js', 'utf8');
+const src = fs.readFileSync('apps/extensions/vscode/out/webview/provider.js', 'utf8');
 
 // Find the HTML string start: line 119
 const lines = src.split('\n');

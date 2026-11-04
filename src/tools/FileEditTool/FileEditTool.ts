@@ -74,6 +74,9 @@ import {
   findActualString,
   getPatchForEdit,
   preserveQuoteStyle,
+  escapeSwapDirection,
+  escapeUnicode,
+  unescapeUnicode,
 } from './utils.js'
 
 // V8/Bun string length limit is ~2^30 characters (~1 billion). For typical
@@ -313,12 +316,33 @@ export const FileEditTool = buildTool({
     const file = fileContent
 
     // Use findActualString to handle quote normalization
-    const actualOldString = findActualString(file, old_string)
+    let actualOldString = findActualString(file, old_string)
+    // 再试一次「转义互换」（字面 \uXXXX ↔ 实际字符）—— 模型抄 old_string
+    // 时常见的混淆，官方 2.1.316 也会这么兜一次。
+    let effectiveNewString = new_string
+    if (!actualOldString) {
+      const direction = escapeSwapDirection(old_string)
+      if (direction !== null) {
+        const swappedOld =
+          direction === 'unescape' ? unescapeUnicode(old_string) : escapeUnicode(old_string)
+        actualOldString = findActualString(file, swappedOld)
+        // 命中后 new_string 必须**同方向**转换 —— 否则写进去的是字面的
+        // \uXXXX 而不是字符（方向搞反会静默损坏内容）。
+        if (actualOldString !== null) {
+          effectiveNewString =
+            direction === 'unescape' ? unescapeUnicode(new_string) : escapeUnicode(new_string)
+        }
+      }
+    }
     if (!actualOldString) {
       return {
         result: false,
         behavior: 'ask',
-        message: `String to replace not found in file.\nString: ${old_string}`,
+        message:
+          `String to replace not found in file.\nString: ${old_string}` +
+          (escapeSwapDirection(old_string) !== null
+            ? '\n(note: Edit also tried swapping \\uXXXX escapes and their characters; neither form matched, so the mismatch is likely elsewhere in old_string. Re-read the file and copy the exact surrounding text.)'
+            : ''),
         meta: {
           isFilePathAbsolute: String(isAbsolute(file_path)),
         },

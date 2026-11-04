@@ -334,6 +334,11 @@ export class QueryEngine {
 
     let processUserInputContext: ProcessUserInputContext = {
       messages: this.mutableMessages,
+      // fork 子代理要靠这个值复用父级的**逐字节** system prompt（否则重建
+      // 出来的字符串可能与父级不同 → prompt cache 全废）。原先只有 TUI 的
+      // REPL.tsx 会写它，GUI 走 QueryEngine 这条路径从来没人写 ——
+      // 实测 fork 走了「重算」分支。这里补上，两条路径一致。
+      renderedSystemPrompt: systemPrompt,
       // Slash commands that mutate the message array (e.g. /force-snip)
       // call setMessages(fn).  In interactive mode this writes back to
       // AppState; in print mode we write back to mutableMessages so the
@@ -491,6 +496,10 @@ export class QueryEngine {
     // model (from slash commands).
     processUserInputContext = {
       messages,
+      // 这个字面量是**重建**而非展开，漏字段就会静默丢失 ——
+      // renderedSystemPrompt 必须一起带上，否则 fork 子代理拿不到父级
+      // 已渲染的 system prompt（实测：丢了它 fork 就走「重算」分支）。
+      renderedSystemPrompt: systemPrompt,
       setMessages: () => {},
       onChangeAPIKey: () => {},
       handleElicitation: this.config.handleElicitation,

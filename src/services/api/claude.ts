@@ -70,11 +70,13 @@ import {
 import { resolveAppliedEffort, type EffortLevel } from '../../utils/effort.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { errorMessage } from '../../utils/errors.js'
+import { notifyStreamRecovering } from '../../utils/streamRecovery.js'
 import { computeFingerprintFromMessages } from '../../utils/fingerprint.js'
 import { captureAPIRequest, logError } from '../../utils/log.js'
 import {
   createAssistantAPIErrorMessage,
   createUserMessage,
+  enforceToolBlockOrdering,
   ensureToolResultPairing,
   normalizeContentFromAPI,
   normalizeMessagesForAPI,
@@ -166,7 +168,11 @@ import { CHROME_TOOL_SEARCH_INSTRUCTIONS } from 'src/utils/claudeInChrome/prompt
 import { getMaxThinkingTokensForModel } from 'src/utils/context.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { logForDiagnosticsNoPII } from 'src/utils/diagLogs.js'
-import { type EffortValue, modelSupportsEffort } from 'src/utils/effort.js'
+import {
+  type EffortValue,
+  modelSupportsEffort,
+  modelSupportsOutputConfigEffort,
+} from 'src/utils/effort.js'
 import {
   isFastModeAvailable,
   isFastModeCooldown,
@@ -179,6 +185,7 @@ import { isMcpInstructionsDeltaEnabled } from 'src/utils/mcpInstructionsDelta.js
 import { calculateUSDCost } from 'src/utils/modelCost.js'
 import { endQueryProfile, queryCheckpoint } from 'src/utils/queryProfiler.js'
 import {
+  isRelayEndpoint,
   modelSupportsAdaptiveThinking,
   modelSupportsReasoning,
   modelSupportsThinking,
@@ -197,6 +204,10 @@ import {
   isDeferredTool,
   TOOL_SEARCH_TOOL_NAME,
 } from '../../tools/ToolSearchTool/prompt.js'
+import {
+  DEFERRED_TOOL_PLACEHOLDER_NAME,
+  DeferredToolPlaceholder,
+} from '../../tools/ToolSearchTool/DeferredToolPlaceholder.js'
 import { count } from '../../utils/array.js'
 import { insertBlockAfterToolResults } from '../../utils/contentArray.js'
 import { validateBoundedIntEnvVar } from '../../utils/envValidation.js'
@@ -439,7 +450,7 @@ function should1hCacheTTL(querySource?: QuerySource): boolean {
  * Configure effort parameters for API request.
  *
  */
-function configureEffortParams(
+export function configureEffortParams(
   effortValue: EffortValue | undefined,
   outputConfig: BetaOutputConfig,
   extraBodyParams: Record<string, unknown>,
@@ -448,6 +459,20 @@ function configureEffortParams(
   thinkingOn: boolean,
 ): void {
   if (!modelSupportsEffort(model) || 'effort' in outputConfig) {
+    return
+  }
+
+  // Endpoints that take reasoning strength via `output_config.effort` (DeepSeek's
+  // Anthropic-compatible surface — documented, and the ONLY field it honors;
+  // `budget_tokens` and `reasoning*` are ignored). Declared per-profile so the
+  // GLM-style branch below keeps working for the endpoints that need it.
+  if (modelSupportsOutputConfigEffort(model)) {
+    if (effortValue === undefined) {
+      betas.push(EFFORT_BETA_HEADER)
+    } else if (typeof effortValue === 'string') {
+      outputConfig.effort = effortValue
+      betas.push(EFFORT_BETA_HEADER)
+    }
     return
   }
 
@@ -1208,15 +1233,23 @@ async function* queryModel(
   // Even if tool search mode is enabled, skip if there are no deferred tools
   // AND no MCP servers are still connecting. When servers are pending, keep
   // ToolSearch available so the model can discover tools after they connect.
+  //
+  // ⚠️ 2026-11-03 改：不再直接关掉 tool search，而是补一个 DeferredToolPlaceholder。
+  //
+  // 直接关掉的后果是 tools 数组的形状随 MCP 连接状态变化（ToolSearch 时有时无）。
+  // tools 块在缓存前缀最前面，形状一变整个请求的 prompt cache 作废 —— 而 MCP
+  // 断开/重连在会话里很常见。官方 2.1.316 同样用这个占位符保持形状稳定。
+  let extraTools: Tools = []
   if (
     useToolSearch &&
     deferredToolNames.size === 0 &&
     !options.hasPendingMcpServers
   ) {
     logForDebugging(
-      'Tool search disabled: no deferred tools available to search',
+      'Tool search: no deferred tools — adding DeferredToolPlaceholder to keep the mode active',
     )
-    useToolSearch = false
+    extraTools = [DeferredToolPlaceholder] as unknown as Tools
+    deferredToolNames.add(DEFERRED_TOOL_PLACEHOLDER_NAME)
   }
 
   // Filter out ToolSearchTool if tool search is not enabled for this model
@@ -1237,6 +1270,11 @@ async function* queryModel(
       // Only include deferred tools that have been discovered
       return discoveredToolNames.has(tool.name)
     })
+    // 占位符必须**始终**出现在 tools 里，否则它起不到稳定形状的作用
+    // （上面那条"只保留已发现的延迟工具"会把它滤掉）。
+    if (extraTools.length > 0) {
+      filteredTools = [...filteredTools, ...extraTools]
+    }
   } else {
     filteredTools = tools.filter(
       t => !toolMatchesName(t, TOOL_SEARCH_TOOL_NAME),
@@ -1375,6 +1413,13 @@ async function* queryModel(
   // Strip assistant thinking blocks — some Anthropic-compatible relays (qnaigc/GLM
   // gateways) reject them ("content[0].type类型错误" → 502). Safe for Anthropic too.
   messagesForAPI = stripThinkingFromAssistantMessages(messagesForAPI)
+
+  // Self-heal block-level tool adjacency for strict endpoints (e.g. DeepSeek):
+  // tool_use must end its assistant message and tool_result must lead the next
+  // user message. Runs after the thinking strip so the "last block" reflects
+  // the final payload; no-op for well-formed history. See the function's doc
+  // for the 2026-10-09 transcript-out-of-order incident.
+  messagesForAPI = enforceToolBlockOrdering(messagesForAPI)
 
   // Strip advisor blocks — the API rejects them without the beta header.
   if (!betas.includes(ADVISOR_BETA_HEADER)) {
@@ -1675,17 +1720,31 @@ async function* queryModel(
       thinkingConfig.type !== 'disabled' &&
       !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_THINKING)
     let thinking: BetaMessageStreamParams['thinking'] | undefined = undefined
-    // 3P reasoning-capable provider (e.g. DeepSeek): thinking on/off + intensity
-    // ride on `reasoning:{effort}`. Mutually exclusive with the Claude `thinking`
-    // block — never send both to the same provider.
-    const reasoningParams = options.reasoningEffort
+    // 中继端点（自定义 ANTHROPIC_BASE_URL）按**官方文档**发字段。
+    //
+    // 以 DeepSeek 的 Anthropic 兼容文档为准（2026-11-02 实测逐条验证）：
+    //   · `thinking.type`          —— 支持，且**只有它说了算**
+    //   · `thinking.budget_tokens` —— **被忽略**（给 256 也照样思考 5000+ 字）
+    //   · `reasoning:{effort}`     —— 文档未提及，实测无效
+    //   · `reasoning_effort`       —— 实测无效
+    //   · `output_config.effort`   —— **支持，唯一能真正调节思考量的字段**
+    //
+    // 所以中继端点：thinking 开关用 `thinking.type`，强度交给 `output_config.effort`
+    // （由 configureEffortParams 处理），**不夹带** `reasoning` 与 `budget_tokens`。
+    const relay = isRelayEndpoint()
+
+    // 3P reasoning-capable provider: thinking on/off + intensity ride on
+    // `reasoning:{effort}`. Mutually exclusive with the Claude `thinking` block
+    // — never send both to the same provider. 中继端点不参与：它已由上方规则
+    // 限定为「thinking 开关 + output_config.effort」。
+    const reasoningParams = !relay && options.reasoningEffort
       ? { effort: options.reasoningEffort }
       : undefined
 
     // IMPORTANT: Do not change the adaptive-vs-budget thinking selection below
     // without notifying the model launch DRI and research. This is a sensitive
     // setting that can greatly affect model quality and bashing.
-    if (!reasoningParams && modelSupportsThinking(options.model)) {
+    if (!reasoningParams && (modelSupportsThinking(options.model) || relay)) {
       if (!hasThinking) {
         // Thinking OFF (GUI default). Some 3P adaptive models (e.g. qwen3.8-flash)
         // fall back to their own default reasoning when the request omits the
@@ -1708,6 +1767,12 @@ async function* queryModel(
         // enabled ≡ always-think).
         thinking = {
           type: modelSupportsReasoning(options.model) ? 'adaptive' : 'enabled',
+        } satisfies BetaMessageStreamParams['thinking']
+      } else if (relay) {
+        // 中继端点：官方文档明确 `budget_tokens` 被忽略，发它只会造成"有上限"
+        // 的错觉。只发 `type`，强度交给 `output_config.effort`。
+        thinking = {
+          type: 'enabled',
         } satisfies BetaMessageStreamParams['thinking']
       } else {
         // For models that do not support adaptive thinking, use the default
@@ -1997,9 +2062,40 @@ async function* queryModel(
     const streamWatchdogEnabled = isEnvTruthy(
       process.env.CLAUDE_ENABLE_STREAM_WATCHDOG,
     )
+    // 两级超时：**首字节前**和**流中途**的合理静默长度差一个数量级。
+    //
+    //  - 首字节前：大上下文冷启动的 prefill 可以是长时间完全静默，给足
+    //    （GUI 传 300s）。
+    //  - 流中途：已经收到 message_start / thinking 之后还静默 2 分钟，那不是
+    //    prefill，是连接死了。
+    //
+    // ⚠️ 2026-11-03 实测：cloud-ui 会话在「thinking 刚吐出 "Let" 就再无下文」
+    // 的状态下卡了 **5 分 25 秒**才恢复 —— 因为原来只有一个 300s 超时，中途中
+    // 断也要等满 5 分钟。同一份记录里 03:30:02 → 03:35:27 之间没有任何输出，
+    // 5 分钟后看门狗触发、回退非流式重试才救回来。
     const STREAM_IDLE_TIMEOUT_MS =
       parseInt(process.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS || '', 10) || 90_000
-    const STREAM_IDLE_WARNING_MS = STREAM_IDLE_TIMEOUT_MS / 2
+    /** 收到首块之后的静默上限。默认 120s —— 比首字节宽松，但远短于 300s。 */
+    const STREAM_MIDSTREAM_IDLE_TIMEOUT_MS =
+      parseInt(
+        process.env.CLAUDE_STREAM_MIDSTREAM_IDLE_TIMEOUT_MS || '',
+        10,
+      ) || 120_000
+    /** 首块是否已到达 —— 决定用哪一档超时。 */
+    let sawFirstChunk = false
+
+    // ── 断流诊断（2026-11-04）────────────────────────────────────────────
+    // 超时时报告"收到了多少、首字节等了多久、最后是什么事件"，用来区分：
+    //   · receivedBytes=0 且无 ttfb  → 上游压根没开始（网关/认证/DNS）
+    //   · 有 ttfb 但字节很少        → 刚建流就断（多半是链路）
+    //   · 字节不少 + lastEvent 明确 → 传到一半断（真·中途断流）
+    // ⚠️ 只能按**事件负载**估算，看不到 keepalive/ping 这类无事件字节。
+    //    实测 DeepSeek 断流时确实零字节，所以关键场景够用。
+    // 必须声明在计时器之前 —— 超时回调会闭包引用它们。
+    let receivedBytes = 0
+    let ttfbMs: number | null = null
+    let lastEventType: string | null = null
+
     let streamIdleAborted = false
     // performance.now() snapshot when watchdog fires, for measuring abort propagation delay
     let streamWatchdogFiredAt: number | null = null
@@ -2020,6 +2116,10 @@ async function* queryModel(
       if (!streamWatchdogEnabled) {
         return
       }
+      const idleTimeoutMs = sawFirstChunk
+        ? STREAM_MIDSTREAM_IDLE_TIMEOUT_MS
+        : STREAM_IDLE_TIMEOUT_MS
+      const warnMs = idleTimeoutMs / 2
       streamIdleWarningTimer = setTimeout(
         warnMs => {
           logForDebugging(
@@ -2028,14 +2128,29 @@ async function* queryModel(
           )
           logForDiagnosticsNoPII('warn', 'cli_streaming_idle_warning')
         },
-        STREAM_IDLE_WARNING_MS,
-        STREAM_IDLE_WARNING_MS,
+        warnMs,
+        warnMs,
       )
       streamIdleTimer = setTimeout(() => {
         streamIdleAborted = true
         streamWatchdogFiredAt = performance.now()
+        // 同时走 stderr：GUI 只把 stderr 常驻写进 claude-code-gui.log，
+        // logForDebugging 进的是另一个调试文件 —— 排查时看不到。
+        //
+        // 带上 receivedBytes / ttfb / lastEvent，用来区分三种情况：
+        //   · receivedBytes=0 且无 ttfb  → 上游压根没开始（网关/认证/DNS 问题）
+        //   · 有 ttfb 但字节很少        → 刚建立流就断（多半是链路）
+        //   · 字节不少 + lastEvent 明确 → 传到一半断（真·中途断流）
+        const diag =
+          `bytes=${receivedBytes}, ttfb=${ttfbMs === null ? 'none' : `${(ttfbMs / 1000).toFixed(1)}s`}` +
+          `, lastEvent=${lastEventType ?? 'none'}`
+        console.error(
+          `[stream] idle timeout: no chunks for ${idleTimeoutMs / 1000}s` +
+            `${sawFirstChunk ? ' (mid-stream)' : ' (waiting for first chunk)'}` +
+            ` [${diag}], aborting and retrying non-streaming`,
+        )
         logForDebugging(
-          `Streaming idle timeout: no chunks received for ${STREAM_IDLE_TIMEOUT_MS / 1000}s, aborting stream`,
+          `Streaming idle timeout: no chunks received for ${idleTimeoutMs / 1000}s, aborting stream (${diag})`,
           { level: 'error' },
         )
         logForDiagnosticsNoPII('error', 'cli_streaming_idle_timeout')
@@ -2044,10 +2159,13 @@ async function* queryModel(
             options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
           request_id: (streamRequestId ??
             'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-          timeout_ms: STREAM_IDLE_TIMEOUT_MS,
+          timeout_ms: idleTimeoutMs,
+          received_bytes: receivedBytes,
+          ttfb_ms: ttfbMs ?? -1,
+          saw_first_chunk: sawFirstChunk,
         })
         releaseStreamResources()
-      }, STREAM_IDLE_TIMEOUT_MS)
+      }, idleTimeoutMs)
     }
     resetStreamIdleTimer()
 
@@ -2059,9 +2177,15 @@ async function* queryModel(
       const STALL_THRESHOLD_MS = 30_000 // 30 seconds
       let totalStallTime = 0
       let stallCount = 0
-
       for await (const part of stream) {
         resetStreamIdleTimer()
+        if (ttfbMs === null) ttfbMs = Date.now() - start
+        lastEventType = part.type
+        try {
+          receivedBytes += JSON.stringify(part).length
+        } catch {
+          // 循环引用等异常不影响主流程
+        }
         const now = Date.now()
 
         // Detect and log streaming stalls (only after first event to avoid counting TTFB)
@@ -2097,6 +2221,11 @@ async function* queryModel(
           }
           endQueryProfile()
           isFirstChunk = false
+          // 切到「流中途」档超时：此刻起再长时间静默就不是 prefill 了。
+          // resetStreamIdleTimer 在循环顶部已经用长档重设过一次，这里立刻
+          // 用短档覆盖，避免第一段中途静默仍等满 300s。
+          sawFirstChunk = true
+          resetStreamIdleTimer()
         }
 
         switch (part.type) {
@@ -2431,6 +2560,15 @@ async function* queryModel(
       // If the stream was aborted by our idle timeout watchdog, fall back to
       // non-streaming retry rather than treating it as a completed stream.
       if (streamIdleAborted) {
+        // 告诉界面「我在自救」，而不是让它一直静默等待 —— 否则用户看到的
+        // 就是「卡死了」，实际后端正在重试。走全局回调（模块级 setter），
+        // 因为这里离 ideMode 的广播函数隔着 QueryEngine 整整两层。
+        notifyStreamRecovering({
+          reason: sawFirstChunk ? 'midstream-idle' : 'no-first-chunk',
+          waitedMs: sawFirstChunk
+            ? STREAM_MIDSTREAM_IDLE_TIMEOUT_MS
+            : STREAM_IDLE_TIMEOUT_MS,
+        })
         // Instrumentation: proves the for-await exited after the watchdog fired
         // (vs. hung forever). exit_delay_ms measures abort propagation latency:
         // 0-10ms = abort worked; >>1000ms = something else woke the loop.
