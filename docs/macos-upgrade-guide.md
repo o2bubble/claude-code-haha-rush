@@ -2,7 +2,7 @@
 
 > **目标**：把目标 mac 上的 Claude Code 升级到 `2026.08.26.4`（含 DeepSeek/3P 思考+Effort、Profile 自动迁移、预设压缩修复、presetId 迁移）。
 > **输入**：`gui.zip` —— 当前构建，ditto 打包的**完整 `.app`**（约 260MB），解压得 `Claude Code.app`，内部 `Contents/MacOS/` 已 embed **全部组件**（claude / bun / tools / python / extensions）。
-> **参考**：`scripts/install-mac.sh`（首次安装流程）、`docs/macos-build-playbook.md`（mac 更新机制）。本指导针对**已有旧版 → 升级**；首次安装可简化直接走 §3。
+> **参考**：`scripts/install-mac.sh`（首次安装流程）、`lumen-agent-desktop` 仓的 `docs/macos-build-playbook.md`（mac 更新机制；2026-11-10 拆仓后移到那边）。本指导针对**已有旧版 → 升级**；首次安装可简化直接走 §3。
 
 ## AI 先判断（§0）
 ```bash

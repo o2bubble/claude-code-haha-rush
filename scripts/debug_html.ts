@@ -1,5 +1,5 @@
 const fs = require('fs');
-const src = fs.readFileSync('extensions/vscode/out/webview/provider.js', 'utf8');
+const src = fs.readFileSync('apps/extensions/vscode/out/webview/provider.js', 'utf8');
 const start = src.indexOf('return `<!DOCTYPE html>') + 8;
 let i = start;
 while (i < src.length) { if (src[i] === '`' && src[i-1] !== '\\') break; i++; }

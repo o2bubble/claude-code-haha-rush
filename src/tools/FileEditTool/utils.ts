@@ -92,6 +92,40 @@ export function findActualString(
   return null
 }
 
+/** 转义互换的方向：字面 `\uXXXX` → 字符，还是字符 → 字面 `\uXXXX`。 */
+export type EscapeSwapDirection = 'unescape' | 'escape'
+
+/** 字面 `\uXXXX` → 实际字符。没有可换的内容时原样返回。 */
+export function unescapeUnicode(s: string): string {
+  return s.replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex: string) =>
+    String.fromCharCode(parseInt(hex, 16)),
+  )
+}
+
+/** 非 ASCII 字符 → 字面 `\uXXXX`。没有可换的内容时原样返回。 */
+export function escapeUnicode(s: string): string {
+  let out = ''
+  for (const ch of s) {
+    const code = ch.codePointAt(0) ?? 0
+    out += code > 0x7f ? `\\u${code.toString(16).padStart(4, '0')}` : ch
+  }
+  return out
+}
+
+/**
+ * 判断该往哪个方向做转义互换 —— 模型从工具输出里抄 `old_string` 时，
+ * 经常搞混「文件里是字面的 \u4e2d」和「文件里是字符 中」（读 JSON /
+ * 源码字符串时尤其常见）。官方 2.1.316 在找不到匹配时会自动再试一次。
+ *
+ * @returns 方向；**两边都没可换内容时返回 null**（避免拿原串再查一遍、
+ *          白白多一次查找）。
+ */
+export function escapeSwapDirection(s: string): EscapeSwapDirection | null {
+  if (unescapeUnicode(s) !== s) return 'unescape'
+  if (escapeUnicode(s) !== s) return 'escape'
+  return null
+}
+
 /**
  * When old_string matched via quote normalization (curly quotes in file,
  * straight quotes from model), apply the same curly quote style to new_string
@@ -214,6 +248,28 @@ export function applyEditToFile(
         content.replaceAll(search, () => replace)
     : (content: string, search: string, replace: string) =>
         content.replace(search, () => replace)
+
+  // 兜底：原样匹配不到时，试一次「转义互换」（字面 \uXXXX ↔ 实际字符）。
+  //
+  // ⚠️ 必须在**这里**做，不能只放在 FileEditTool 的 not-found 分支 ——
+  // 那个分支只在 `findActualString` 失败时才走；而这条 applyEdit 来自
+  // 多处编辑序列中间、或有引号差异时都会绕过它直接到这里，表现为
+  // 「String not found in file」，兜底根本没触发（实测踩过）。
+  const trySwapped = (): string | null => {
+    if (originalContent.includes(oldString)) return null // 原样能匹配，不需要
+    const direction = escapeSwapDirection(oldString)
+    if (direction === null) return null
+    const swappedOld =
+      direction === 'unescape' ? unescapeUnicode(oldString) : escapeUnicode(oldString)
+    if (!originalContent.includes(swappedOld)) return null
+    // 方向必须与 old_string 一致，否则会把字面转义写进文件
+    const swappedNew =
+      direction === 'unescape' ? unescapeUnicode(newString) : escapeUnicode(newString)
+    return f(originalContent, swappedOld, swappedNew)
+  }
+
+  const swapped = trySwapped()
+  if (swapped !== null) return swapped
 
   if (newString !== '') {
     return f(originalContent, oldString, newString)

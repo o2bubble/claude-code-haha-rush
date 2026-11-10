@@ -99,23 +99,23 @@ Forks are cheap because they share your prompt cache. Don't set \`model\` on a f
 **Don't race.** After launching, you know nothing about what the fork found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
 
 **Writing a fork prompt.** Since the fork inherits your context, the prompt is a *directive* — what to do, not what the situation is. Be specific about scope: what's in, what's out, what another agent is handling. Don't re-explain background.
+
+**If you ARE the fork** (your system prompt says "default to forking"): that instruction is for the parent. Execute directly — don't re-delegate your whole assignment to another agent. A fork keeps its tool output out of the parent's context; spawning a grandchild would just move the noise somewhere else while adding a layer of indirection.
 `
     : ''
 
+  // ⚠️ 2026-11-04：原来这里有一整段「## Writing the prompt」，和上面
+  // `## When to use` 里的 "brief it like the peer it is…" 讲的是同一件事
+  // （说清目标/已排除什么/给出足够上下文）。同一份指引写两遍 = 白占上下文，
+  // 而且两处措辞不一致时会让模型困惑哪条才是标准。
+  // 保留上面那处（它与"何时该用/何时不该用"在同一节，上下文更完整），
+  // 这里只留下**那一处没覆盖**的两条：报告长度约定、不要委托"理解"本身。
   const writingThePromptSection = `
 
 ## Writing the prompt
 
-${forkEnabled ? 'When spawning a fresh agent (with a `subagent_type`), it starts with zero context. ' : ''}Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
-- Explain what you're trying to accomplish and why.
-- Describe what you've already learned or ruled out.
-- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
 - If you need a short response, say so ("report in under 200 words").
-- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
-
-${forkEnabled ? 'For fresh agents, terse' : 'Terse'} command-style prompts produce shallow, generic work.
-
-**Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.
+- **Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.
 `
 
   const forkExamples = `Example usage:
@@ -241,6 +241,7 @@ When you do spawn one, brief it like the peer it is: state the goal and what you
 - Always include a short description (3-5 words) summarizing what the agent will do${concurrencyNote}
 - The agent's final report is **not shown to the user** — relay what matters in your own message.
 - Each agent type's model, reasoning effort, and tools come from its definition (\`.claude/agents/*.md\` frontmatter or SDK \`agents\`).
+- **The subagent already has your CLAUDE.md** (injected at start, same as yours) — don't tell it to re-read those files or paste their rules into the prompt; name the specific rule a stage needs, if any. (Exception: read-only types like Explore and Plan skip it to keep their context lean, so pass along the convention explicitly if it matters for their task.)
 - Use ${SEND_MESSAGE_TOOL_NAME} with the agent's ID or name to continue a previously spawned agent with its context intact; a new ${AGENT_TOOL_NAME} call starts fresh.${
     !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS) &&
     !isInProcessTeammate() &&

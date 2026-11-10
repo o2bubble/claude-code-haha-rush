@@ -40,7 +40,10 @@ import {
 } from '../../utils/permissions/filesystem.js'
 import type { PermissionDecision } from '../../utils/permissions/PermissionResult.js'
 import { matchWildcardPattern } from '../../utils/permissions/shellRuleMatching.js'
-import { FILE_UNEXPECTEDLY_MODIFIED_ERROR } from '../FileEditTool/constants.js'
+import {
+  FILE_EDIT_TOOL_NAME,
+  FILE_UNEXPECTEDLY_MODIFIED_ERROR,
+} from '../FileEditTool/constants.js'
 import { gitDiffSchema, hunkSchema } from '../FileEditTool/types.js'
 import { FILE_WRITE_TOOL_NAME, getWriteToolDescription } from './prompt.js'
 import {
@@ -277,8 +280,27 @@ export const FileWriteTool = buildTool({
     }
 
     if (meta !== null) {
-      const lastWriteTime = getFileModificationTime(fullFilePath)
       const lastRead = readFileState.get(fullFilePath)
+
+      // ⚠️ 只读过文件**开头**时禁止整文件 Write（2026-11-04，对齐官方）。
+      //
+      // Write 是**全量替换**：模型以为在"改一段"，实际会把没读到的那部分
+      // 一起抹掉。大文件用 offset/limit 看了一段就来 Write，是典型的数据丢失路径。
+      //
+      // 判据：有读取记录，但那次带了 offset 或 limit（即不是完整读）。
+      if (
+        lastRead &&
+        (lastRead.offset !== undefined || lastRead.limit !== undefined)
+      ) {
+        throw new Error(
+          'You were given only the start of this file, and nothing shows that you have since read all of it in one call, so a Write could lose the rest. ' +
+            `To change part of it, use ${FILE_EDIT_TOOL_NAME}. ` +
+            'To replace it whole, first Read it in one call with no offset or limit. ' +
+            'If Read returns only a page or says the file is too large, read the remaining ranges before writing.',
+        )
+      }
+
+      const lastWriteTime = getFileModificationTime(fullFilePath)
       if (!lastRead || lastWriteTime > lastRead.timestamp) {
         // Timestamp indicates modification, but on Windows timestamps can change
         // without content changes (cloud sync, antivirus, etc.). For full reads,

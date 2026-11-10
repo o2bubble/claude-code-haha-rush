@@ -252,6 +252,7 @@ Bash 描述新增要点：「这工具跑的是 **Git Bash (POSIX sh)**，不是
 - `Agent`：新增 `effort`（low/medium/high/xhigh/max）
 - `Read`：新增 `allow_large`
 - `Agent.subagent_type` 文档提到 `"fork"`（复制自身上下文，继承模型与 effort）
+  → **已单独研究并打通，见 [fork-subagent.md](./fork-subagent.md)**
 
 ### ⑦ System prompt 新增内容（我们源码里没有）
 
@@ -262,3 +263,89 @@ Bash 描述新增要点：「这工具跑的是 **Git Bash (POSIX sh)**，不是
 - 删除：「Write code that reads like the surrounding code」（SDK 模式已无，交互态待确认）
 - 删除：`! <command>` 提示（SDK 模式已无）
 
+
+---
+
+## 第二轮对齐（2026-11-04）
+
+第一轮主要对齐了**明显的**提示词与工具描述。这轮做了系统性的全量挖掘，
+产出 15 个提交。方法论见 [gap-analysis-playbook.md](./gap-analysis-playbook.md)。
+
+### 补齐的行为差异
+
+| 项 | 说明 |
+|---|---|
+| **Write 的「只读了开头」保护** | `Write` 是全量替换。用 `offset`/`limit` 只看了一段就写，会抹掉没读到的部分。官方拦，我们原来不拦 |
+| **Edit 的转义互换兜底** | 找不到匹配时自动再试 `\u4e2d` ↔ `中` 的形式 |
+| **WebFetch 的不可信声明** | 网页正文直接拼进 prompt，没有任何"这是数据不是指令"的提示 —— 提示注入面 |
+| **子代理已有 CLAUDE.md** | 我们早就实现了 Explore/Plan 不注入，但没告诉调用方，导致它重复粘贴规则 |
+| **Agent fork 递归指引** | "如果你就是 fork，别再往下分派" |
+| **Skill 名称用法** | 必须是列表里的精确名称，不能猜 |
+| **AskUserQuestion 的"假选择"** | 单选项问题没有决策，别凑填充项 |
+| **输出规范两条** | 代码/数字别混进散文；内容完了就停，别加收尾客套 |
+| **上下文压缩说明补一句** | "压缩后还能继续，不用急着收尾" |
+
+### 补齐的配置项
+
+| 变量 | 作用 |
+|---|---|
+| `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | 并发子代理上限 |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | 嵌套层数上限 |
+
+另两个（`CLAUDE_CODE_DISABLE_THINKING` / `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY`）
+本来就有，无需改动。
+
+### 上下文精简（本轮最大收益）
+
+**system prompt：30,003 → 22,785 字符（-24%）**
+
+按收益排序：
+
+| 改动 | 省 |
+|---|---|
+| `Types of memory` 段：四个 XML 标签展开 → 紧凑列表 | 3,344 |
+| 删除死代码 ultrareview 段（命令从未启用） | 1,305 |
+| 「可逆性」段去掉三重复述 + 合并两条"如实报告" | 1,189 |
+| 删与 Bash 描述重复的专用工具偏好清单 | 791 |
+| 合并三条「别做超出要求的事」 | 476 |
+| 删与 Agent 描述重复的"何时该用" | 323 |
+
+**工具描述：13,739 → 13,672 字符（几乎持平）**
+
+中间一度压到 13,112，但随后又补了行为指引（Agent 的 fork 递归、
+Skill 名称用法、子代理 CLAUDE.md 提示），净变化接近零。
+真正降下来的是单个工具：
+
+| 工具 | 改前 | 改后 | 官方 |
+|---|---|---|---|
+| Read | 1779 | **789** | 790 |
+| Bash | 3966 | 3278 | 2111 |
+| Agent | 4821 | 4194 | 3227 |
+
+Read 已经和官方逐字对齐。Bash/Agent 仍偏长，差额主要是有意保留的
+git 安全规则（`--no-verify`、`reset --hard`、`git add -A` 这几条官方版没有）。
+
+### 死代码的典型形态（值得记住）
+
+```ts
+// 注入 system prompt：无条件
+function getUltrareviewSection() { return `…495 字符…` }
+
+// 命令本身的 gate：永假（我们没有 GrowthBook）
+export function isUltrareviewEnabled(): boolean {
+  return getFeatureValue_CACHED_MAY_BE_STALE('tengu_review_bughunter_config')?.enabled === true
+}
+```
+
+**判据**：`A 无条件注入` + `B 有 gate 且 gate 永假` = 死代码。
+修法不是删 A，而是**让 A 用 B 的 gate** —— 将来功能启用时自动生效。
+
+### 明确不做的
+
+| 项 | 原因 |
+|---|---|
+| `ScheduleWakeup` / `Workflow` 工具 | 用户明确不需要 |
+| `fork` 开关 | 代码已打通，但 `forceAsync` 会改变所有子代理行为，暂不启用 |
+| `--safe-mode` | `--bare` 已覆盖大部分（CLAUDE.md/skills/hooks/agents/MCP/auto-memory） |
+| TUI 专属输出规则（不用 em-dash、500 词以下不加标题） | 主要是给等宽字体窄屏的，GUI 里 Markdown 渲染正常 |
+| 992 个环境变量里的绝大多数 | 内部实验开关，无描述、无用户价值 |

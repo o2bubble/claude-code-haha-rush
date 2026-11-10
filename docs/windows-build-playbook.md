@@ -98,7 +98,7 @@ workbench exec   -i i-2ze2rouoikcqrlbseu8a -r cn-beijing -o json -c "curl -s -X 
 
 **⚠️ workbench exec 踩坑（2026-08-26 实战）**：
 - **`missing port in address`（`\\.\pipe\workbench-exec-...`）是 v1.0.0 的 bug**：`net.Dial("tcp", "\\.\pipe\...")` 不识别 Windows named pipe。daemon 在跑（`daemon status` = running）也没用。**修复：`workbench upgrade` 到 ≥v1.0.1**（`workbench version` 会提示新版本）。升级后 exec 立即可用。↔ `daemon start` 报 `Access is denied` 是另一回事（本机 pipe 权限）。
-- Git Bash 直接调报 `missing port in address` → 必须 **Python subprocess** 调（`docs/macos-build-playbook.md` 记录过）。
+- Git Bash 直接调报 `missing port in address` → 必须 **Python subprocess** 调（`lumen-agent-desktop` 仓的 `docs/macos-build-playbook.md` 记录过）。
 - **`-F "manifest=@file"` 会把 field 当 UploadFile** → FastAPI `manifest: str = Form(...)` 报 "should be a valid string"。必须用 **`-F "manifest=<file"`**（`<` = 文件内容作普通字符串字段）；`components` 类文件字段才用 `@`。
 - **`.sh` 传 Linux 必须 LF**：Windows 上用 Python `open(sh,"w",newline="\n")`，否则 bash 报 `$'/tmp\r': No such file`（CRLF 的 `\r`）。bash rc=26 即此。
 - **subprocess 调 workbench 用 `encoding="utf-8", errors="replace"`**：Windows 默认 GBK 解码 workbench 输出会抛 `UnicodeDecodeError: 'gbk' codec can't decode byte 0x8b`（乱码/二进制），吞掉真实 rc/输出。

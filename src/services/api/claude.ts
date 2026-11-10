@@ -2083,6 +2083,19 @@ async function* queryModel(
       ) || 120_000
     /** 首块是否已到达 —— 决定用哪一档超时。 */
     let sawFirstChunk = false
+
+    // ── 断流诊断（2026-11-04）────────────────────────────────────────────
+    // 超时时报告"收到了多少、首字节等了多久、最后是什么事件"，用来区分：
+    //   · receivedBytes=0 且无 ttfb  → 上游压根没开始（网关/认证/DNS）
+    //   · 有 ttfb 但字节很少        → 刚建流就断（多半是链路）
+    //   · 字节不少 + lastEvent 明确 → 传到一半断（真·中途断流）
+    // ⚠️ 只能按**事件负载**估算，看不到 keepalive/ping 这类无事件字节。
+    //    实测 DeepSeek 断流时确实零字节，所以关键场景够用。
+    // 必须声明在计时器之前 —— 超时回调会闭包引用它们。
+    let receivedBytes = 0
+    let ttfbMs: number | null = null
+    let lastEventType: string | null = null
+
     let streamIdleAborted = false
     // performance.now() snapshot when watchdog fires, for measuring abort propagation delay
     let streamWatchdogFiredAt: number | null = null
@@ -2123,12 +2136,21 @@ async function* queryModel(
         streamWatchdogFiredAt = performance.now()
         // 同时走 stderr：GUI 只把 stderr 常驻写进 claude-code-gui.log，
         // logForDebugging 进的是另一个调试文件 —— 排查时看不到。
+        //
+        // 带上 receivedBytes / ttfb / lastEvent，用来区分三种情况：
+        //   · receivedBytes=0 且无 ttfb  → 上游压根没开始（网关/认证/DNS 问题）
+        //   · 有 ttfb 但字节很少        → 刚建立流就断（多半是链路）
+        //   · 字节不少 + lastEvent 明确 → 传到一半断（真·中途断流）
+        const diag =
+          `bytes=${receivedBytes}, ttfb=${ttfbMs === null ? 'none' : `${(ttfbMs / 1000).toFixed(1)}s`}` +
+          `, lastEvent=${lastEventType ?? 'none'}`
         console.error(
           `[stream] idle timeout: no chunks for ${idleTimeoutMs / 1000}s` +
-            `${sawFirstChunk ? ' (mid-stream)' : ' (waiting for first chunk)'}, aborting and retrying non-streaming`,
+            `${sawFirstChunk ? ' (mid-stream)' : ' (waiting for first chunk)'}` +
+            ` [${diag}], aborting and retrying non-streaming`,
         )
         logForDebugging(
-          `Streaming idle timeout: no chunks received for ${idleTimeoutMs / 1000}s, aborting stream`,
+          `Streaming idle timeout: no chunks received for ${idleTimeoutMs / 1000}s, aborting stream (${diag})`,
           { level: 'error' },
         )
         logForDiagnosticsNoPII('error', 'cli_streaming_idle_timeout')
@@ -2138,6 +2160,9 @@ async function* queryModel(
           request_id: (streamRequestId ??
             'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
           timeout_ms: idleTimeoutMs,
+          received_bytes: receivedBytes,
+          ttfb_ms: ttfbMs ?? -1,
+          saw_first_chunk: sawFirstChunk,
         })
         releaseStreamResources()
       }, idleTimeoutMs)
@@ -2152,9 +2177,15 @@ async function* queryModel(
       const STALL_THRESHOLD_MS = 30_000 // 30 seconds
       let totalStallTime = 0
       let stallCount = 0
-
       for await (const part of stream) {
         resetStreamIdleTimer()
+        if (ttfbMs === null) ttfbMs = Date.now() - start
+        lastEventType = part.type
+        try {
+          receivedBytes += JSON.stringify(part).length
+        } catch {
+          // 循环引用等异常不影响主流程
+        }
         const now = Date.now()
 
         // Detect and log streaming stalls (only after first event to avoid counting TTFB)

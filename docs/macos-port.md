@@ -2,6 +2,12 @@
 
 > 目标：让 Claude Code Haha 在 macOS 上可编译、可运行、可分发。本文档随实施更新。
 > 分支：`feature/macos-port`（已合并进 main 工作流）。当前平台状态：**构建管线完成，arm64 已发布；最新 mac 版 2026.08.26.4，Windows 侧已迭代至 2026.09.04.1 待同步**。
+>
+> ⚠️ **2026-11-10 拆仓后**：mac 构建管线（`build/build.ts`、`.github/workflows/macos-build.yml`、
+> `codemagic.yaml`、`docs/macos-build-playbook.md`、`scripts/release_mac.py`）**全部移到
+> `lumen-agent-desktop` 仓**——mac 产物是完整 `.app`，只有 GUI 源码那边能跑全流程。
+> 本仓只保留「编译 claude 二进制」这一步（`build/build-claude.ts`）。本文档以下内容
+> 记录的是拆分**之前**的历史，路径按当时状态书写，仅供追溯。
 
 ## 0. 结论先行
 

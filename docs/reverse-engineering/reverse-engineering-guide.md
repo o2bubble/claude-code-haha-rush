@@ -98,6 +98,22 @@ temp/claude.exe -p "Use Agent tool with subagent_type=general-purpose to say hel
 | 转发报错 418/502 | Host header 或自定义 header 问题 | 清除 x- 前缀的 header 再转发 |
 | 子 agent 没 spawn | prompt 不够明确 | 明确说 "Use Agent tool with subagent_type=xxx" |
 | Frida 找不到字符串 | JSC 内部用 rope string，非连续内存 | 放弃 memory scan，用代理抓包（见方法二） |
+| **抓包目录被删后拿不到新数据** | 代理启动时创建的目录，删了它不会重建，写入静默失败 | 跑之前先 `mkdir -p` 那个目录 |
+| **改了源码但抓包没变化** | 测的是**安装目录的旧二进制**（GUI 连的是那个），不是源码 | 用 `bun --preload ./preload.ts ./src/entrypoints/cli.tsx` 跑源码；或先确认 `--version` |
+| **单条请求超时** | 代理是单线程时，第一条卡住会堵死后续 | 用 `ThreadingHTTPServer`（`proxy_stream.py` 已用） |
+| 改了配置好了几秒又变回去 | 项目的 `.claude/settings.local.json` 与 `--settings` 同时生效，后者被覆盖 | 只改一个来源 |
+
+### 分析层面的坑
+
+抓包本身没问题、但**结论**容易错的地方：
+
+| 现象 | 容易得出的错误结论 | 正确做法 |
+|------|------|------|
+| 官方描述里一堆句子"我们缺" | "我们少了很多功能" | 多数是**拆句方式不同**。逐条人工核对，只挑真缺的 |
+| 系统提示比官方长 5 倍 | "官方精简了我们啰嗦" | 先量**分段**，找出最大的那一块再判断 |
+| 某个功能在 system prompt 里有说明 | "这功能是启用的" | 去查**它自己的 gate 条件** —— 可能永远不启用 |
+
+详细方法论见 [gap-analysis-playbook.md](./gap-analysis-playbook.md)。
 
 ## 方法二：Frida 内存分析 —— **已判定不可行，不要重试**
 

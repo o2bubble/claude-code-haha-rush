@@ -235,22 +235,19 @@ export function getSimplePrompt(): string {
     'DO NOT use newlines to separate commands (newlines are ok in quoted strings).',
   ]
 
-  const sleepSubitems = [
-    'Do not sleep between commands that can run immediately — just run them.',
-    'Never use `sleep` to wait for a background command you started (you will be notified) or to retry a failing command (diagnose the cause instead). Poll external processes with a check command (e.g. `gh run view`).',
-    'If you must sleep, keep it short (1-5 seconds) to avoid blocking the user.',
-  ]
   const backgroundNote = getBackgroundUsageNote()
 
   const instructionItems: Array<string | string[]> = [
-    'If your command will create new directories or files, first use this tool to run `ls` to verify the parent directory exists and is the correct location.',
-    'Always quote file paths that contain spaces with double quotes in your command (e.g., cd "path with spaces/file.txt")',
+    // ⚠️ 这一段被刻意压过（2026-11-04）：官方 Bash 描述 2111 字符、我们曾 3966。
+    // 被删掉的都是**模型默认就会做**的：建目录前先 ls 确认、路径带空格要加引号
+    // （不加直接报错，不用提示）、sleep 的三条细则（"别拿 sleep 等后台任务"
+    // 已经写在 run_in_background 那一句里了）。
+    // 保留的是**不会默认做**或**默认做错**的：多条命令怎么组合、超时上限、
+    // 后台用法（模型容易忘记有这回事）。
     `You may specify an optional timeout in milliseconds (up to ${getMaxTimeoutMs()}ms / ${getMaxTimeoutMs() / 60000} minutes). By default, your command will timeout after ${getDefaultTimeoutMs()}ms (${getDefaultTimeoutMs() / 60000} minutes).`,
     ...(backgroundNote !== null ? [backgroundNote] : []),
     'When issuing multiple commands:',
     multipleCommandsSubitems,
-    'Avoid unnecessary `sleep` commands:',
-    sleepSubitems,
     ...(embedded
       ? [
           // bfs (which backs `find`) uses Oniguruma for -regex, which picks the

@@ -189,6 +189,7 @@ How to invoke:
 
 Important:
 - Available skills are listed in system-reminder messages in the conversation
+- \`skill\` must be the **exact name from that listing**, no leading slash. Only names from the listing — or ones the user typed explicitly — are valid; do not guess. Plugin skills use \`plugin:skill\`.
 - When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
 - NEVER mention a skill without actually calling this tool
 - Do not invoke a skill that is already running

@@ -1,5 +1,0 @@
-name: "computer-use"
-author: "官方"
-version: "0.1.7"
-description: "操作电脑（组合技能包）— 把「鼠标键盘」与「截屏」组合成完整的「看屏幕 + 操作电脑」能力，附赠实战心得技能（坐标换算、批量操作、防误触、错误恢复），并含两个窗口定位/调整辅助脚本"
-tags: ["automation", "computer-use", "skill", "combo", "plugin"]

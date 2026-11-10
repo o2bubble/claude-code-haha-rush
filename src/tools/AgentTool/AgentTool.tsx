@@ -51,6 +51,7 @@ import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
 import type { AgentDefinition } from './loadAgentsDir.js';
+import { checkConcurrentLimit, checkDepthLimit, readLimitEnv } from './subagentLimits.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
 import { getPrompt } from './prompt.js';
 import { runAgent } from './runAgent.js';
@@ -580,6 +581,28 @@ the task will appear to have failed with zero output.
     // below (registerAsyncAgentTask + notifyOnCompletion).
     const assistantForceAsync = feature('KAIROS') ? appState.kairosEnabled : false;
     const shouldRunAsync = (run_in_background === true || selectedAgent.background === true || isCoordinator || forceAsync || assistantForceAsync || (proactiveModule?.isProactiveActive() ?? false)) && !isBackgroundTasksDisabled;
+
+    // 并发 / 嵌套限额（对齐官方 CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS 与
+    // CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH）。判定逻辑在 subagentLimits.ts，
+    // 这里只负责取数并抛出。
+    const maxConcurrent = readLimitEnv(
+      process.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
+    )
+    if (shouldRunAsync && maxConcurrent > 0) {
+      const runningAgents = Object.values(appState.tasks ?? {}).filter(
+        isLocalAgentTask,
+      ).length
+      const check = checkConcurrentLimit(runningAgents, maxConcurrent)
+      if (check.ok === false) throw new Error(check.message)
+    }
+
+    const maxDepth = readLimitEnv(process.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH)
+    if (maxDepth > 0) {
+      const depth = toolUseContext.queryTracking?.depth ?? 0
+      const check = checkDepthLimit(depth, maxDepth)
+      if (check.ok === false) throw new Error(check.message)
+    }
+
     // Assemble the worker's tool pool independently of the parent's.
     // Workers always get their tools from assembleToolPool with their own
     // permission mode, so they aren't affected by the parent's tool
