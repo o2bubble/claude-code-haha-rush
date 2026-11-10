@@ -17,52 +17,42 @@ git checkout main
 git pull origin main 2>/dev/null || true
 
 git checkout github-clean
-# Rebuild the index+worktree from main's latest tree.
-# 不要 exclude .gitignore —— main 的 .gitignore 是权威（含 .private/、.codex/、
-# AGENTS.md）。曾经 exclude 它、靠快照分支自带的旧版 .gitignore，结果那份缺
-# .private/ 条目 → 下面 `git add -A` 把 .private/ 里的 API key 收进快照并推到
-# 公开 gitee（2026-09-12 事故）。忽略规则必须与 main 一致。
-git rm -r --cached --quiet . 2>/dev/null || true
-git checkout main -- .
-# 删除 main 已不存在、但工作树仍残留的文件。
-#
-# ⚠️ 顺序陷阱：`git checkout main -- .` 只**覆盖/新增** main 里有的路径，对 main
-# 没有的文件既不删索引也不删工作树。它在上面 `git rm --cached .` 之后执行，于是
-# 这些文件处于「不在索引、但留在工作树」的状态 —— 紧接着的 `git add -A` 又原样
-# 加回来，**每轮同步都保留**。
-#
-# 实际事故（2026-09-13）：services/ 下 4 个改名前的旧文件（dataBus*.ts /
-# serviceBus.ts → crossWindowBus*.ts / windowBus.ts）作为孤儿在快照里存续数周。
-# CI 的 tsc（include: ["src"]）把它们一并编译，直到它们引用的旧 API
-# （terminalStore.appendToLastEntry）被删除才报错 → **CI 构建失败，而本地怎么
-# 跑都是绿的**（本地在 main 上，根本没有这些文件）。
-#
-# 用 `--others` 一并列出**未跟踪**文件再比差集 —— 孤儿此刻正处于
-# 「已从索引移除、但仍在工作树」的状态，只看索引（旧版 `comm` 的做法）会漏掉。
-#
-# 删除分两步，且**不能吞错误**（`git rm` 对「不在索引但存在于工作树」的文件会
-# 报 pathspec 错误；早先版本用 `2>/dev/null || true` 把它盖住，于是命令看似成功
-# 实则一个都没删 —— 这正是本次孤儿能存续数周的直接原因）：
-#   ① `git rm --cached` 清索引（忽略错误：本来就不在索引里）
-#   ② `rm -f` 清工作树（这才是关键 —— 文件留在工作树，下一行 `git add -A` 就会把它加回来）
-ORPHANS=$(comm -23 <(git ls-files --cached --others --exclude-standard | sort -u) \
-                   <(git ls-tree -r --name-only main | sort))
-if [ -n "$ORPHANS" ]; then
-    echo "删除 main 已不存在的孤儿文件（$(echo "$ORPHANS" | wc -l | tr -d ' ') 个）："
-    echo "$ORPHANS" | sed 's/^/  - /'
-    echo "$ORPHANS" | xargs -r -d '\n' git rm -q --cached --ignore-unmatch -- 2>/dev/null || true
-    echo "$ORPHANS" | xargs -r -d '\n' rm -f --
-fi
-git add -A
 
-# ── 安全闸：敏感路径一旦入 stage 立即中止 ────────────────────────────────
-# 这是最后一道防线。上面已对齐忽略规则，但 ignore 规则可能再次漂移（或有人在
-# 快照分支加了 force-add），所以提交前显式核对一次，宁可失败也不泄露。
-FORBIDDEN='^\.private/|^\.codex/|^AGENTS\.md$|^\.env$|^\.env\.'
-if git diff --cached --name-only | grep -qE "$FORBIDDEN"; then
-    echo "!! 中止：暂存区出现敏感路径，拒绝提交 ——" >&2
-    git diff --cached --name-only | grep -E "$FORBIDDEN" >&2
-    echo "!! 修复：git reset 后把这些路径加入快照分支的 .gitignore" >&2
+# ── 快照的树 = main 的树，直接构造索引 ──────────────────────────────────
+#
+# `git read-tree main` 一次把索引整体换成 main 的树。**提交读的是索引**，
+# 所以得到的快照树与 main 逐字节相同 —— 不需要碰工作树、不需要 add。
+#
+# 为什么不用「`git checkout main -- .` + 删除孤儿 + `git add -A`」：
+#
+#   · **非 ASCII 路径删不掉**。`git ls-files` / `git ls-tree` 默认
+#     `core.quotePath=true`，对中文路径输出 C 引号 + 八进制转义
+#     （`"plugins/.../01-\345\220\257..."`），这个字符串喂给 `git rm` /
+#     `rm -f` 匹配不上任何文件。实测：`plugins/gui-manual` 下 17 个中文
+#     文件名作为孤儿连续多轮同步都留在快照里，而脚本一声不吭。
+#   · **`git add -A` 会把工作树里任何未跟踪文件扫进快照**。对公开仓来说，
+#     那条路径上的任何东西（临时文件、刚写的 .env）都会跟着发布出去。
+#     read-tree 只认 main 里已跟踪的内容，从结构上排除这一类事故。
+#
+# 2026-09-12 的泄露事故（快照自带的旧 .gitignore 漏了 `.private/`，`add -A`
+# 把 API key 收进来推到公开 gitee）正是上面第二条的形态。现在的做法根本不
+# 走那条路。（下面的安全闸仍保留，作为「main 自己也被污染」时的兜底。）
+git read-tree main
+
+# ── 安全闸：敏感路径/密钥一旦进快照立即中止 ─────────────────────────────
+# 最后一道防线。现在索引来自 main，所以这里检的是「main 自己有没有被污染」。
+# `core.quotePath=false`：默认会 C 引号转义非 ASCII 路径，而下面几条都是
+# 锚定行首的正则（`^\.private/`），被引号打头就匹配不上了。
+FORBIDDEN='^\.private/|^\.codex/|^AGENTS\.md$'
+# `.env.example` 是**该公开**的模板，不能和真 `.env` 一起拦。
+ENV_LEAK='(^|/)\.env(\.[^/]*)?$'
+sensitive=$(git -c core.quotePath=false ls-files \
+    | grep -E "$FORBIDDEN" || true)
+env_leak=$(git -c core.quotePath=false ls-files \
+    | grep -E "$ENV_LEAK" | grep -v '\.env\.example$' || true)
+if [ -n "$sensitive" ] || [ -n "$env_leak" ]; then
+    echo "!! 中止：快照里出现敏感路径，拒绝提交 ——" >&2
+    printf '%s\n%s\n' "$sensitive" "$env_leak" | sed '/^$/d' >&2
     exit 1
 fi
 if git diff --cached -U0 | grep -qE '^\+.*(sk-[a-zA-Z0-9]{20,}|LTAI[0-9A-Za-z]{12,}|AKID[A-Za-z0-9]{13,})'; then
@@ -77,12 +67,25 @@ else
     git commit -m "sync from main @$(git rev-parse --short main)"
 fi
 
+# ── 不变量：快照的树必须与 main 逐字节相同 ───────────────────────────────
+# 上面所有步骤的意义就是这一条。不成立就说明同步逻辑本身坏了 ——
+# 宁可在这里失败，也不要推一个内容不明的快照到公开仓。
+snapshot_tree=$(git rev-parse "HEAD^{tree}")
+main_tree=$(git rev-parse "main^{tree}")
+if [ "$snapshot_tree" != "$main_tree" ]; then
+    echo "!! 中止：快照树与 main 不一致（$snapshot_tree != $main_tree）" >&2
+    echo "!! 差异：" >&2
+    git -c core.quotePath=false diff --stat HEAD main | tail -20 >&2
+    exit 1
+fi
+echo "快照树 == main 树 ✓"
+
 # Push GitHub (private) and persist the snapshot branch to gitee.
 git push github HEAD:main --force
 git push origin github-clean --force
 
-# `-f`：即便工作树仍有个别未跟踪文件，也强制切回（否则 git 会以
-# "untracked working tree files would be removed by checkout" 拒绝，
-# 配合 `set -e` 让脚本在最后一步失败）。孤儿已在上面显式清理。
+# `-f`：工作树里还留着上一轮快照的旧文件（read-tree 不碰工作树），
+# 不用 -f 会被 "untracked working tree files would be removed by checkout" 拒绝，
+# 配合 `set -e` 让脚本在最后一步失败。
 git checkout -f main
 echo "done"
