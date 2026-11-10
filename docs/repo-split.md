@@ -8,11 +8,15 @@
 
 原先的单体仓库拆成了三个：
 
-| 仓库 | 内容 | 协议 | 地址 |
-|---|---|---|---|
-| **claude-code-haha-dev**（本仓） | Claude Code CLI 引擎 | 无（泄露源码衍生，仅学习研究） | gitee `randomlife/claude-code-haha-dev` |
-| **lumen-agent-desktop** | 桌面 GUI 客户端 | MIT | gitee `randomlife/lumen-agent-desktop` |
-| **self-homepage** | 17lumen 备案主页 | 无 | gitee `randomlife/self-homepage` |
+| 仓库 | 内容 | 协议 | gitee | GitHub |
+|---|---|---|---|---|
+| **claude-code-haha-dev**（本仓） | Claude Code CLI 引擎 | 无（泄露源码衍生，仅学习研究） | `randomlife/claude-code-haha-dev` | `o2bubble/claude-code-haha-rush`（**孤儿快照分支**） |
+| **lumen-agent-desktop** | 桌面 GUI 客户端 | MIT | `randomlife/lumen-agent-desktop` | `o2bubble/lumen-agent-desktop`（直接推 `main`） |
+| **self-homepage** | 17lumen 备案主页 | 无 | `randomlife/self-homepage` | — |
+
+GitHub 两端形态不同不是配置疏漏：本仓老历史里有明文凭据和大文件，只能靠
+**孤儿快照**（`github-clean` 无共同祖先，那些提交从它出发不可达）；
+GUI 仓历史干净，直接推 `main`。
 
 拆分动机：GUI 与主页都是独立可维护的部分，混在引擎仓里导致
 ① 想给 GUI 加开源协议时，整个仓库都沾着泄露源码；
