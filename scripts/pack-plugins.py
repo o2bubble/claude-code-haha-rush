@@ -42,11 +42,41 @@ for _s in (sys.stdout, sys.stderr):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PLUGINS_DIR = os.path.join(ROOT, "packages", "plugins")
+
+# 2026-11-04 仓库拆分后，插件目录搬到了 GUI 仓：
+#   本仓（引擎）   → bin/claude-haha、src/
+#   GUI 仓         → packages/plugins/
+# 这个脚本还留在引擎仓（它同时服务两边），所以插件目录要能指向外面。
+# 默认按老布局找；拆分后布局用 GUI_PLUGINS_DIR 覆盖，本仓下不存在就自动探测。
+def _resolve_plugins_dir():
+    """找到真正放着插件的目录。
+
+    ⚠️ 不能只判 `isdir`（2026-11-07 踩到）：仓库拆分后本仓残留了一个
+    **空的** `packages/plugins/`，`isdir` 为真 → 探测被它骗过去 →
+    报「目录为空或不存在」，而真正的内容在同级 GUI 仓里。
+    所以按「该插件目录下确实有插件」来判定。
+    """
+    cands = [
+        os.environ.get("GUI_PLUGINS_DIR") or "",
+        os.path.join(ROOT, "packages", "plugins"),                                        # 拆分前
+        os.path.join(os.path.dirname(ROOT), "lumen-agent-desktop", "packages", "plugins"),  # 拆分后
+    ]
+    for c in cands:
+        if not c or not os.path.isdir(c):
+            continue
+        if any(os.path.isdir(os.path.join(c, x)) for x in os.listdir(c) if not x.startswith(".")):
+            return c
+    return cands[1]
+
+
+PLUGINS_DIR = _resolve_plugins_dir()
 
 # 目录名 / 扩展名级别的排除
 SKIP_DIRS = {"node_modules", "__pycache__", ".git"}
-SKIP_EXT = {".zip", ".pyc"}
+# `.sig` 必须排除：它是**对 zip 内容的签名**，若打进 zip 就成了循环依赖
+# （签名要覆盖含签名的 zip → 永远不自洽）。2026-11-07 实测踩到：
+# 加了自动签名后 zip 里多出一个 config-export.sig，sha256 每次都变。
+SKIP_EXT = {".zip", ".pyc", ".sig"}
 
 # 打包时按 LF 归一化的文本扩展名（见 pack() 里 write 处的说明）
 # 工作树在 Windows 上是 CRLF，直接写进 zip 会让"重新打包"产生一堆二进制
@@ -77,6 +107,7 @@ DEV_ONLY = {
         "rehearsal.test.cjs", "restore-guide.test.cjs",
         "tools.test.cjs", "audit.test.cjs", "ai-flow.test.cjs",
         "cors.test.cjs", "single-file.test.cjs", "panel-static.test.cjs", "tar-writer.test.cjs",
+        "zip-sync.test.cjs",
     },
 }
 
@@ -96,6 +127,11 @@ REQUIRED = {
     "computer-use": {"plugin.json", "skill/SKILL.md"},
     "gui-manual": {"plugin.json", "skill/SKILL.md"},
     "git-viewer": {"plugin.json"},
+    # 这三个是恢复端的全部工具：少了 restore-tools 或 tar-writer，
+    # 用户拿到包却无法校验/解压（2026-11-07：包内曾打的是旧版 tar-writer，
+    # 读 manifest 要 172 秒，恢复端白等半小时）
+    "config-export": {"plugin.json", "meta.yaml", "export-server.cjs",
+                      "restore-tools.cjs", "tar-writer.cjs", "extract.py"},
 }
 
 
@@ -166,6 +202,29 @@ def pack(plugin: str, check_only: bool = False) -> bool:
     return True
 
 
+def sign(plugin: str, check_only: bool = False) -> bool:
+    """打包后立刻签名。
+
+    🔴 **为什么必须自动化**（2026-11-07 事故）：
+    签名一直是靠人手做的（仓库里甚至没有签名脚本）。第一次改走 web 发布路径时
+    上传没带 signature，服务端 `elif sig_path.exists(): unlink()` 把**原有签名删了** ——
+    marketplace 里 config-export 从 signed=true 变 signed=false，
+    用户直接失去「安装」按钮，只能走「AI 安装 + 安全审查」。
+
+    失败不阻断打包（没私钥的机器照样要能打包），但会**大声提示**未签名。
+    """
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_sign_plugin", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sign-plugin.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] {plugin}: 加载签名脚本失败（{e}），跳过了签名")
+        return True
+    return mod.sign_one(plugin, check_only)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Pack GUI plugins into marketplace zips")
     ap.add_argument("plugins", nargs="*", help="plugin directory names")
@@ -188,6 +247,10 @@ def main() -> int:
     if not ok:
         print("\n有插件未通过 —— 上面标 [FAIL] 的就是要修的地方。")
         return 1
+    # 打包完顺手签名 —— 让「漏签」变成不可能，而不是靠人记得
+    if not args.check:
+        for p in targets:
+            sign(p)
     print("\n全部通过。")
     return 0
 

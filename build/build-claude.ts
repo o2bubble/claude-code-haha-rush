@@ -1,14 +1,14 @@
 // ── claude 仓的构建入口 ──
 //
 // 只负责一件事：把 src/ 编译成 claude 二进制，并生成/更新发布 manifest 里的
-// claude 组件。GUI、Python、Git、工具链那些全在 claude-code-gui 仓。
+// claude 组件。GUI、Python、Git、工具链那些全在 lumen-agent-desktop 仓。
 //
 // 单独用：
 //   bun run build/build-claude.ts
 //   bun run build/build-claude.ts --release 2026.11.05.1 --notes "..."
 //
 // 与 GUI 仓联合构建（产物完整、manifest 统一）：
-//   bun run build/joint.ts --gui-repo ../claude-code-gui --release 2026.11.05.1
+//   bun run build/joint.ts --gui-repo ../lumen-agent-desktop --release 2026.11.05.1
 
 import { existsSync, copyFileSync, mkdirSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'

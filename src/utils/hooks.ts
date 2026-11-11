@@ -1709,6 +1709,18 @@ export async function getMatchingHooks(
       }))
     })
 
+    if (process.env.CLAUDE_IDE_PROFILE && hookEvent === 'SessionStart') {
+      for (const h of matchedHooks) {
+        const cmd =
+          'command' in h.hook
+            ? String(h.hook.command)
+            : 'prompt' in h.hook
+              ? '[prompt]'
+              : '[callback]'
+        console.error(`[ide-profile]     matched(${h.hookSource}) ${cmd.slice(0, 90)}`)
+      }
+    }
+
     // Deduplicate hooks by command/prompt/url within the same source context.
     // Key is namespaced by pluginRoot/skillRoot (see hookDedupKey above) so
     // cross-plugin template collisions don't drop hooks (gh-29724).

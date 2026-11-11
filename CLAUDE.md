@@ -175,12 +175,18 @@ specified anything.
 
 ### Issue tracker
 
-Issues/PRDs live as local markdown: specs under `.scratch/<feature-slug>/`, implementation tickets in a root `tickets.md`. See `docs/agents/issue-tracker.md`.
+Local markdown. Specs at `.scratch/<feature-slug>/spec.md`, one ticket per file
+under `.scratch/<feature-slug>/issues/NN-<slug>.md`. A root `tickets.md` exists
+but is **history only** — don't add new work there. No GitHub/GitLab Issues
+(`gh` and `glab` aren't installed). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-Five canonical labels, using the default strings. See `docs/agents/triage-labels.md`.
+Five canonical labels, default strings (`needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`), recorded as a `Status:` line.
+See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-Single-context repo. `CONTEXT.md` and `docs/adr/` when present. See `docs/agents/domain.md`.
+Single-context. `GLOSSARY.md`, `CONTEXT.md`, `docs/adr/` — none exist yet;
+read `CLAUDE.md` + `docs/architecture-reference.md` instead. See `docs/agents/domain.md`.

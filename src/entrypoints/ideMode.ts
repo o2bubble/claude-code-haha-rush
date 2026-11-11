@@ -94,7 +94,7 @@ import type { Base64ImageSource, ContentBlockParam, ImageBlockParam } from '@ant
 
 
 import { tmpdir, homedir } from 'os'
-import { readdir, readFile, unlink, writeFile } from 'fs/promises'
+import { readdir, readFile, rename, unlink, writeFile } from 'fs/promises'
 import { existsSync, readFileSync, readdirSync, appendFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -108,6 +108,12 @@ import {
   validateUuid,
 } from 'src/utils/sessionStoragePortable.js'
 import { getLogDisplayTitle } from 'src/utils/log.js'
+import {
+  deleteTurns,
+  groupTurns,
+  validateAfterDelete,
+  type TranscriptEntry,
+} from 'src/utils/sessionTurns.js'
 import type { LogOption } from 'src/types/logs.js'
 import { clearSessionMetadata, clearSessionMessagesCache, flushSessionStorage, recordTranscript, resetSessionFilePointer, saveAgentName, saveCustomTitle, saveTag } from 'src/utils/sessionStorage.js'
 import { getCurrentUsage, tokenCountWithEstimation } from 'src/utils/tokens.js'
@@ -192,6 +198,16 @@ let agents: AgentDefinition[] = []
 let currentEngine: QueryEngine | null = null
 // Concurrency protection: only one user prompt at a time
 let busy = false
+/**
+ * SessionStart hooks 的完成信号。
+ *
+ * hooks 可能很慢（实测 memsearch 插件 7.8s、cbm 0.2s），而 GUI 等的只是
+ * WebSocket 端口出现。两者解耦：WS 先就绪让界面可用，hooks 在后台跑，
+ * **第一条用户消息**处理前 `await` 它，保证上下文注入完整。
+ *
+ * 默认 resolved —— 非 ide-mode 路径不该被这个挡住。
+ */
+let sessionStartHooksReady: Promise<void> = Promise.resolve()
 let currentAbortController: AbortController | null = null
 /** 本回合是否已经因为流静默进入过「自救」（看门狗 abort → 非流式重试）。
  *  回合结束时清空。用来判断后面出现的 error 是不是"自救也失败了"。 */
@@ -2632,6 +2648,144 @@ async function handleResumeSession(
   }
 }
 
+/** 某个会话的 transcript 文件路径（与 handleResumeSession / handleDeleteSession 同源）。 */
+function transcriptPathFor(sessionId: string): string {
+  const projectsDir = getProjectsDir()
+  const projectDirName = sanitizePath(process.cwd())
+  return join(projectsDir, projectDirName, `${sessionId}.jsonl`)
+}
+
+/** 按行解析 transcript；解析不了的行原样保留（返回 raw，写回时不动它）。 */
+function parseTranscriptLines(raw: string): Array<{ raw: string; entry?: TranscriptEntry }> {
+  return raw
+    .split('\n')
+    .filter(line => line.trim().length > 0)
+    .map(line => {
+      try {
+        return { raw: line, entry: JSON.parse(line) as TranscriptEntry }
+      } catch {
+        return { raw: line }
+      }
+    })
+}
+
+/**
+ * 只读：返回某条会话的消息与轮分组（**不切换当前会话**）。
+ *
+ * 消息转换成 GUI 的 ChatMessage 形态交给前端；分组的轮信息单独给，
+ * 前端按 turn.id 勾选即可。
+ */
+async function handleLoadSessionMessages(
+  ws: WebSocket,
+  sessionId: string,
+): Promise<void> {
+  try {
+    const filePath = transcriptPathFor(sessionId)
+    const raw = await readFile(filePath, 'utf8')
+    const parsed = parseTranscriptLines(raw)
+    const entries = parsed.map(p => p.entry).filter((e): e is TranscriptEntry => !!e)
+    const turns = groupTurns(entries)
+
+    ws.send(jsonStringify({
+      type: 'session_messages',
+      session_id: sessionId,
+      turns: turns.map(t => ({
+        id: t.id,
+        preview: t.preview,
+        entryCount: t.entryCount,
+        startIndex: t.startIndex,
+        // 前端按 uuid 切出这一轮的消息来渲染（复用主聊天的合并逻辑）
+        uuids: t.uuids,
+      })),
+      entries: entries.map(e => ({
+        uuid: e.uuid,
+        type: e.type,
+        isMeta: e.isMeta,
+        message: e.message ?? e,
+      })),
+    }))
+  } catch (err) {
+    ws.send(jsonStringify({
+      type: 'error',
+      message: `Failed to load session messages: ${err instanceof Error ? err.message : String(err)}`,
+    }))
+  }
+}
+
+/**
+ * 按轮删除消息并修复 parentUuid 链，然后**原子写回**。
+ *
+ * 顺序很重要（用户 2026-11-06 的设计）：
+ *   ① interrupt 当前回合 —— 别让正在生成的回复往这个文件里追加
+ *   ② 读 → 改 → 写临时文件 → rename（断电/失败不会留下半个文件）
+ *   ③ 如果删的就是当前会话，**顺手重载**，让内存与磁盘一致
+ * 不要求用户先切走：切走反而多一次写盘窗口。
+ */
+async function handleDeleteSessionTurns(
+  ws: WebSocket,
+  sessionId: string,
+  turnIds: string[],
+): Promise<void> {
+  const isCurrent = getSessionId() === sessionId
+  try {
+    if (isCurrent) {
+      // 正在生成的回复必须先停，否则它会在我们写完之后继续 append
+      interruptCurrentTurn()
+      try { await flushSessionStorage() } catch {}
+    }
+
+    const filePath = transcriptPathFor(sessionId)
+    const raw = await readFile(filePath, 'utf8')
+    const parsed = parseTranscriptLines(raw)
+    const entries = parsed.map(p => p.entry).filter((e): e is TranscriptEntry => !!e)
+    const unparsable = parsed.filter(p => !p.entry)
+
+    const result = deleteTurns(entries, turnIds)
+    if (result.rejected.length > 0) {
+      ws.send(jsonStringify({
+        type: 'error',
+        message: `部分轮次无法删除（找不到或受保护）：${result.rejected.join(', ')}`,
+      }))
+      return
+    }
+
+    const check = validateAfterDelete(result.entries)
+    if (!check.ok) {
+      ws.send(jsonStringify({ type: 'error', message: check.reason }))
+      return
+    }
+
+    // 写回：保留无法解析的行（宁可留着，也不静默丢数据）
+    const lines = [
+      ...result.entries.map(e => jsonStringify(e)),
+      ...unparsable.map(p => p.raw),
+    ]
+    const tmp = `${filePath}.tmp-${process.pid}`
+    await writeFile(tmp, lines.join('\n') + '\n', 'utf8')
+    await rename(tmp, filePath)
+
+    // 内存与磁盘对齐：当前会话重新走一遍 resume，前端收到的 session_loaded
+    // 会自然刷新消息列表
+    if (isCurrent) {
+      clearSessionMessagesCache()
+      await handleResumeSession(ws, sessionId)
+    }
+
+    ws.send(jsonStringify({
+      type: 'session_turns_deleted',
+      session_id: sessionId,
+      removed: result.removedCount,
+      repaired: result.repairedCount,
+      reloaded: isCurrent,
+    }))
+  } catch (err) {
+    ws.send(jsonStringify({
+      type: 'error',
+      message: `Failed to delete turns: ${err instanceof Error ? err.message : String(err)}`,
+    }))
+  }
+}
+
 async function handleDeleteSession(
   ws: WebSocket,
   sessionId: string,
@@ -3101,6 +3255,10 @@ async function handleClientMessage(
 
   switch (message.type) {
     case 'user': {
+      // SessionStart hooks 在 WS 就绪之后才跑（它们可能很慢，见 runIdeMode 的
+      // 说明）。这里等它们完成 —— **第一条用户消息必须带上 hook 注入的上下文**，
+      // 否则「上一个会话做了什么」这类记忆会缺一整轮。
+      await sessionStartHooksReady
       if (busy) {
         ws.send(jsonStringify({
           type: 'error',
@@ -3248,6 +3406,16 @@ async function handleClientMessage(
 
     case 'delete_session': {
       void handleDeleteSession(ws, message.session_id)
+      break
+    }
+
+    case 'load_session_messages': {
+      await handleLoadSessionMessages(ws, message.session_id)
+      break
+    }
+
+    case 'delete_session_turns': {
+      await handleDeleteSessionTurns(ws, message.session_id, message.turn_ids)
       break
     }
 
@@ -3412,6 +3580,17 @@ async function handleClientMessage(
 // ============================================================================
 
 export async function runIdeMode(workspaceDir?: string): Promise<void> {
+  // 启动分段计时（`CLAUDE_IDE_PROFILE=1` 时打到 stderr）。
+  // GUI 等的是下方 `CLAUDE_CODE_IDE_PORT=` 那一行 —— 它之前的每一步都计入
+  // 用户感知的「IDE 后台就绪」等待。
+  const t0 = performance.now()
+  const mark = (label: string) => {
+    if (process.env.CLAUDE_IDE_PROFILE) {
+      console.error(`[ide-profile] ${label}: ${(performance.now() - t0).toFixed(0)}ms`)
+    }
+  }
+  mark('start')
+
   process.env.CLAUDE_CODE_IDE = '1'
   // Enable file history snapshots so /rewind (code restore) works.
   // IDE mode is non-interactive (no Ink TUI), so fileHistoryEnabled()
@@ -3441,21 +3620,33 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
   })
 
   await initialize()
+  mark('initialize()')
 
   // A 通道: 启动时自扫 GUI 插件目录, 注册 runtime PATH 前置（plugin-nodejs-runtime）。
   // 失败静默——无注入即现状。B 通道(set_plugin_runtime_paths)重扫后覆盖此值。
   scanAndApplyPluginRuntimePaths()
+  mark('pluginRuntimePaths')
 
-  // Execute SessionStart hooks for plugin context injection (e.g. claude-mem)
-  // Also directly notify claude-mem worker to ensure session context is retrieved
-  try {
-    const hookMessages = await processSessionStartHooks('startup')
-    if (hookMessages.length > 0) {
-      mutableMessages = [...hookMessages, ...mutableMessages]
+  // SessionStart hooks —— **不阻塞 WS 就绪**。
+  //
+  // 背景（2026-11-06 实测）：GUI 侧要等 stdout 出现 `CLAUDE_CODE_IDE_PORT=`，
+  // 而这一步原先排在 hooks 之后。用户装了慢 hook（memsearch 的 session-start.sh
+  // 单次要 7.8s：多次 memsearch CLI 调用 + PyPI 版本查询），于是**打开面板要等
+  // 十几秒**，而 WS 服务器本身起得只要 7ms。
+  //
+  // 现在 hooks 放后台跑，`case 'user'` 处理第一条消息前再 await ——
+  // 界面立刻可用，上下文注入一点不少。hooks 若在用户打字期间跑完，则完全无感。
+  sessionStartHooksReady = (async () => {
+    try {
+      const hookMessages = await processSessionStartHooks('startup')
+      if (hookMessages.length > 0) {
+        mutableMessages = [...hookMessages, ...mutableMessages]
+      }
+    } catch (err) {
+      console.error('[ide-mode] SessionStart hooks failed:', err)
     }
-  } catch (err) {
-    console.error('[ide-mode] SessionStart hooks failed:', err)
-  }
+    mark('sessionStartHooks(后台)')
+  })()
   // Direct fire-and-forget to claude-mem worker (supplements hook system)
   void runClaudeMemHook('context', {
     hook_event_name: 'SessionStart',
@@ -3588,6 +3779,7 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
 
   // Announce port to stdout so the IDE can discover the server
   // This is the ONLY stdout output — everything else goes over WebSocket
+  mark('wsListening')
   process.stdout.write(`CLAUDE_CODE_IDE_PORT=${server.port}\n`)
 
   // Log to stderr for debugging

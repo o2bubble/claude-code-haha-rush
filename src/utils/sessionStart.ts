@@ -62,7 +62,11 @@ export async function processSessionStartHooks(
     // This function is memoized, so if hooks are already loaded, this returns immediately
     // with negligible overhead (just a cache lookup).
     try {
+      const _t = performance.now()
       await withDiagnosticsTiming('load_plugin_hooks', () => loadPluginHooks())
+      if (process.env.CLAUDE_IDE_PROFILE) {
+        console.error(`[ide-profile]   loadPluginHooks(): ${(performance.now() - _t).toFixed(0)}ms`)
+      }
     } catch (error) {
       // Log error but don't crash - continue with session start without plugin hooks
       /* eslint-disable no-restricted-syntax -- both branches wrap with context, not a toError case */
@@ -129,6 +133,8 @@ export async function processSessionStartHooks(
   // Execute SessionStart hooks, ignoring blocking errors
   // Use the provided agentType or fall back to the one stored in bootstrap state
   const resolvedAgentType = agentType ?? getMainThreadAgentType()
+  const _tExec = performance.now()
+  let _nHooks = 0
   for await (const hookResult of executeSessionStartHooks(
     source,
     sessionId,
@@ -138,6 +144,14 @@ export async function processSessionStartHooks(
     undefined,
     forceSyncExecution,
   )) {
+    _nHooks++
+    if (process.env.CLAUDE_IDE_PROFILE) {
+      console.error(
+        `[ide-profile]   hook#${_nHooks} @ ${(performance.now() - _tExec).toFixed(0)}ms` +
+          ` source=${hookResult.hookSource ?? '-'}` +
+          ` ctx=${hookResult.additionalContexts?.length ?? 0}`,
+      )
+    }
     if (hookResult.message) {
       hookMessages.push(hookResult.message)
     }

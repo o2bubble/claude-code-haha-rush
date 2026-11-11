@@ -49,9 +49,11 @@ const jobClassifierModule = feature('TEMPLATES')
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 import type { QuerySource } from '../constants/querySource.js'
+import { getSessionId } from '../bootstrap/state.js'
 import { executeAutoDream } from '../services/autoDream/autoDream.js'
 import { executePromptSuggestion } from '../services/PromptSuggestion/promptSuggestion.js'
-import { isBareMode, isEnvDefinedFalsy } from '../utils/envUtils.js'
+import { formatNudge, shouldNudge } from './todoStopCheck.js'
+import { isBareMode, isEnvDefinedFalsy, isEnvTruthy } from '../utils/envUtils.js'
 import {
   createCacheSafeParams,
   saveCacheSafeParams,
@@ -60,6 +62,32 @@ import {
 type StopHookResult = {
   blockingErrors: Message[]
   preventContinuation: boolean
+}
+
+/**
+ * 内置 todo 收尾检查是否该跑。
+ *
+ * 排除三种情况：
+ *  · **子代理** —— 它们有自己的 todo 命名空间，提醒会打到主线程的上下文里；
+ *  · **重试轮**（`stopHookActive`）—— 刚提醒过一次，让模型把话说完；
+ *  · **`--bare` 模式** —— 脚本化调用，多一轮就是多一次计费。
+ *
+ * 关掉：`CLAUDE_CODE_DISABLE_TODO_NUDGE=1`。
+ */
+function shouldCheckTodos(
+  stopHookActive: boolean | undefined,
+  toolUseContext: ToolUseContext,
+): boolean {
+  if (stopHookActive) return false
+  if (toolUseContext.agentId) return false
+  if (isBareMode()) return false
+  if (isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_TODO_NUDGE)) return false
+  return true
+}
+
+/** 与 Stop hook 的拦截文案同样的前缀，用户/模型都能看出是引擎在说话。 */
+function getTodoNudgeMessage(body: string): string {
+  return `Stop hook feedback:\n${body}`
 }
 
 export async function* handleStopHooks(
@@ -329,6 +357,26 @@ export async function* handleStopHooks(
     // Collect blocking errors from stop hooks
     if (blockingErrors.length > 0) {
       return { blockingErrors, preventContinuation: false }
+    }
+
+    // ── 内置收尾检查：todo 还没做完 ──
+    //
+    // 放在用户配置的 hook 之后：hook 已经表态了就让 hook 说，不叠加噪音。
+    // 判据、去重、文案都在 todoStopCheck.ts（纯函数，可单测）。
+    if (shouldCheckTodos(stopHookActive, toolUseContext)) {
+      const todoKey = toolUseContext.agentId ?? getSessionId()
+      const todos = appState.todos[todoKey] ?? []
+      if (shouldNudge(todoKey, todos)) {
+        return {
+          blockingErrors: [
+            createUserMessage({
+              content: getTodoNudgeMessage(formatNudge(todos)),
+              isMeta: true, // 与 hook 拦截一致：不在 UI 里显示，走摘要
+            }),
+          ],
+          preventContinuation: false,
+        }
+      }
     }
 
     // After Stop hooks pass, run TeammateIdle and TaskCompleted hooks if this is a teammate

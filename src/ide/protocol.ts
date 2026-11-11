@@ -88,6 +88,29 @@ export interface IDESessionDeleteRequest extends IDEBaseMessage {
   session_id: string
 }
 
+/**
+ * 只读读取某条会话的消息 + 轮分组，**不切换当前会话**。
+ *
+ * 编辑面板用它展示"这条会话里有哪些轮"。不能用 resume —— 那会把当前会话
+ * 切走，而用户只是想看看、删几轮。
+ */
+export interface IDESessionMessagesRequest extends IDEBaseMessage {
+  type: 'load_session_messages'
+  session_id: string
+}
+
+/**
+ * 按轮删除。`turn_ids` 取自 `load_session_messages` 的返回。
+ *
+ * 后端先 interrupt 当前回合再改写文件；若删的正是当前会话，写完顺手重载，
+ * GUI 不需要再发 resume_session（避免我们自己制造一次竞争写）。
+ */
+export interface IDESessionDeleteTurnsRequest extends IDEBaseMessage {
+  type: 'delete_session_turns'
+  session_id: string
+  turn_ids: string[]
+}
+
 export interface IDESessionRenameRequest extends IDEBaseMessage {
   type: 'rename_session'
   session_id: string
@@ -167,6 +190,8 @@ export type StdinMessage =
   | IDESessionLoadRequest
   | IDESessionResumeRequest
   | IDESessionDeleteRequest
+  | IDESessionMessagesRequest
+  | IDESessionDeleteTurnsRequest
   | IDESessionRenameRequest
   | IDESessionNewRequest
   | IDESessionForkRequest

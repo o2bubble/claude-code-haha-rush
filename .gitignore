@@ -1,72 +1,81 @@
+# ════════════════════════════════════════════════════════════════
+#  忽略规则（按用途分组，每组说明「为什么忽略」）
+#
+#  本仓是 CLI 引擎。GUI / 插件 / 扩展 / 安装器 / 发布平台已拆到
+#  lumen-agent-desktop 仓，它们的产物规则不再适用本仓。
+#
+#  ⚠️ 注释必须独占一行。Git 只把**行首**的 # 当注释，
+#     行尾的 # 会变成模式的一部分，整条规则静默失效。
+# ════════════════════════════════════════════════════════════════
+
+# ── 密钥与本地私有配置 ──────────────────────────────────────────
 .env
 .env.*
 !.env.example
-node_modules
-.claude/settings.local.json
-.claude/active-profile
-.claude/profile.env
-bin/bun.exe
-src/utils/vendor/
-extensions/vscode/.claude/settings.local.json
-refs/
-bin.zip
-*.bak
-*.tsbuildinfo
-**/.vs/
-**/bin/
-!/bin/cla-bypass.cmd
-!/bin/claude-gui.cmd
-!/bin/cla.cmd
-!/bin/claude.cmd
-!/bin/claude-haha.cmd
-!/bin/claude-ide.cmd
-!/bin/claude-profile.cmd
-!/bin/cdp-browser.cmd
-!/bin/cdp-setup.cmd
-!/bin/codegraph-cleanup.cmd
-!/bin/kill-claude.cmd
-!/bin/*.ps1
-**/obj/
-**/UpgradeLog*.htm
-.codegraph/
-/dist/
-temp/
-.playwright-mcp/
-.scratch/
-claude-code-gui-release-platform/feedback-images/
-claude-code-gui-release-platform/updates-store/
-docs/memory-export/
-offline-tools/
-# tools/ 下只保留**自己写的配置与文档**；第三方二进制一律忽略。
-# 用白名单（先全忽略再逐项放行）—— 靠扩展名枚举会漏掉解压出来的无扩展名
-# Linux 二进制（实测 cloudflared-linux-amd64 38MB 差点被提交）。
-# 需要二进制时按 `docs/cloudflare-tunnel-*.md` 里的命令重新下载。
-tools/*
-!tools/cloudflared/
-tools/cloudflared/*
-!tools/cloudflared/config-*.yml
-__pycache__/
-# 运行环境诊断等功能相关的运行时/实例文件
-.mcp.json
-.claude/
-*.bun-build
-gui/prototypes/
-gui/src/prototypes/
-
-# Codex 本地工具配置（保留但不跟踪）
-.codex/
-AGENTS.md
-
-# 插件运行期数据目录（dev 下由插件进程写在 repo 根；
-# 安装环境下宿主用的是 %APPDATA%/com.claudecode.gui/plugins-data/，不受此条影响）
-plugins-data/
-
-# memsearch 插件运行期状态（本机索引状态 + PID，不跨机共享）
-.memsearch/
-
-# 私有（含 API key 等敏感值，勿提交）
+# API key / 服务器密码等真实凭据，绝不入库
 .private/
 
-# mac 发布产物 —— release_mac.py make 从 gui.zip 内嵌 manifest 派生，
-# 每次发布内容不同，不是源码
+# ── 依赖与构建产物 ─────────────────────────────────────────────
+node_modules/
+/dist/
+# bun 编译中断留下的临时文件（实测单个 143 MB）
+*.bun-build
+*.tsbuildinfo
+*.bak
+**/obj/
+**/.vs/
+**/UpgradeLog*.htm
+__pycache__/
+# mac 发布产物，从 gui.zip 内嵌 manifest 派生，每次发布内容不同
 scripts/manifest.json
+
+# ── 运行期状态（本机数据，不跨机共享）──────────────────────────
+# data.db / settings.local.json / 实例锁 / 截图等
+.claude/
+# 运行时生成的 MCP 配置
+.mcp.json
+# 代码索引库（本机索引，可重建）
+.codegraph/
+# memsearch 插件的索引状态与 PID
+.memsearch/
+# Codex 本地工具配置：保留在本地，不跟踪
+.codex/
+AGENTS.md
+# 本地脚本、抓包记录、临时产物（锚定根目录，避免匹配 src 下同名目录）
+/temp/
+# Playwright 会话日志
+.playwright-mcp/
+# 设计规格草稿（GUI 侧的已随拆仓迁走）
+.scratch/
+# 记忆导出快照
+docs/memory-export/
+
+# ── 上游源码内嵌的 vendor ──────────────────────────────────────
+src/utils/vendor/
+
+# ── bin/：只跟踪启动脚本，不跟踪工具二进制 ─────────────────────
+#
+# 工具二进制（rg / fd / jq / yq / shellcheck / bun）由 install-tools.sh
+# 或更新系统的 tools 组件提供，不入库。
+#
+# ⚠️ 必须先 `!/bin/` 再放行文件。父目录被排除时，Git **不会**再包含
+# 其中的文件 —— 只写 `!bin/cla.cmd` 这类逐文件规则是**无效的**，
+# 新加的启动脚本会被静默忽略（memory-setup.cmd 就这样漏掉过）。
+**/bin/
+!/bin/
+# 启动脚本一律跟踪（含无扩展名的 cla / claude / claude-haha）
+!bin/*
+# 但二进制不跟踪
+bin/*.exe
+
+# ── tools/：第三方二进制 ───────────────────────────────────────
+#
+# cloudflared / frp 等，需要时按 docs/cloudflare-tunnel-*.md 重新下载。
+# 靠扩展名枚举会漏掉解压出来的无扩展名 Linux 二进制
+# （实测 cloudflared-linux-amd64 38 MB 差点被提交），故整目录忽略。
+#
+# ⚠️ 必须写 `/tools/`（前导斜杠锚定根目录）。不锚定时 Git 会匹配**任意层级**
+# 名为 tools 的目录，`src/tools/` 整个被吞掉（实测 200+ 个源文件）。
+#
+# ⚠️ 将来要跟踪其中的某个配置（如 frpc.toml），需先 `!/tools/` 再放行具体文件。
+/tools/
