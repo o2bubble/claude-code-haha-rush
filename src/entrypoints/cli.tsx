@@ -96,8 +96,16 @@ async function main(): Promise<void> {
     profileCheckpoint('cli_ide_mode_path');
     const cwdIndex = args.indexOf('--cwd');
     const cwd = cwdIndex !== -1 ? args[cwdIndex + 1] : undefined;
+    // `--resume <id>`：无窗口唤醒一个已退出的会话时用。
+    // 两个值形式都要支持（`--resume X` 与 `--resume=X`），否则调用方
+    // 拼参数的方式不同就会静默丢掉 —— 症状是"唤醒了但开了个空会话"。
+    const resumeEq = args.find(a => a.startsWith('--resume='));
+    const resumeIdx = args.indexOf('--resume');
+    const resumeId =
+      resumeEq?.slice('--resume='.length) ??
+      (resumeIdx !== -1 ? args[resumeIdx + 1] : undefined);
     const { runIdeMode } = await import('../entrypoints/ideMode.js');
-    await runIdeMode(cwd);
+    await runIdeMode(cwd, resumeId || undefined);
     return;
   }
 

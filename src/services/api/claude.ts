@@ -84,6 +84,7 @@ import {
   stripCallerFieldFromAssistantMessage,
   stripToolReferenceBlocksFromUserMessage,
 } from '../../utils/messages.js'
+import { downgradeDocumentBlocks } from '../../utils/pdfDocumentSupport.js'
 import {
   getDefaultOpusModel,
   getDefaultSonnetModel,
@@ -1862,7 +1863,10 @@ async function* queryModel(
     const params = {
       model: normalizeModelStringForAPI(options.model),
       messages: addCacheBreakpoints(
-        messagesForAPI,
+        // 端点若不接受内联 base64 PDF（第三方中转常见），把它换成文字占位，
+        // 免得整个会话卡在这个 400 上。标记由 withRetry 在真的撞到错误时打开，
+        // 这里只读 —— 没标记时原样返回，零开销。详见 pdfDocumentSupport.ts。
+        downgradeDocumentBlocks(messagesForAPI),
         enablePromptCaching,
         options.querySource,
         useCachedMC,

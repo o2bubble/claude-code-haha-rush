@@ -266,7 +266,20 @@ When you do spawn one, brief it like the peer it is: state the goal and what you
         ? `
 - The name, team_name, and mode parameters are not available in this context — teammates cannot spawn other teammates.`
         : ''
-  }${whenToForkSection}${writingThePromptSection}
+  }
+
+## Monitoring a background agent
+
+A background agent can spend ten rounds in a dead end without ever telling you. When the work will change code and may run long, pair it with the \`overseer\` agent type:
+
+1. Launch the worker with \`run_in_background: true\`; keep its \`agentId\` and \`outputFile\`.
+2. **Ask the user whether the overseer should run foreground or background, and wait for their answer.** Recommend one and say why in a sentence:
+   - **Background** (\`run_in_background: true\`) when the main session has other useful work to do meanwhile — research, reading files, answering the user. The oversight still happens; the report arrives later as a notification.
+   - **Foreground** (omit \`run_in_background\`) when you have nothing else to do, or when the user prefers blocking — the report comes back inline and you can act on it immediately.
+   Never choose silently. If the user already stated a preference this session, or a memory / CLAUDE.md records one, follow it and say which mode you are using and why. In a non-interactive run there is nobody to ask — pick what fits, and state which mode you chose and why in your reply.
+3. Launch \`subagent_type: "overseer"\` with the worker's agentId, its outputFile, and the task it was given. List several IDs to have one overseer watch several workers.
+
+Do NOT launch a worker and its overseer in the same parallel batch: the overseer's prompt needs the agentId from the worker's result. In background mode its report arrives in a later turn — give status until then, never a predicted result.${whenToForkSection}${writingThePromptSection}
 
 ${forkEnabled ? forkExamples : currentExamples}`
 }

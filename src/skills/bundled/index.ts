@@ -1,5 +1,9 @@
 import { feature } from 'bun:bundle'
 import { shouldAutoEnableClaudeInChrome } from 'src/utils/claudeInChrome/setup.js'
+// cross-session 用 ESM import（而非下面的 require）：它的 SKILL.md 走
+// `with { type: 'text' }`，而 require() 不认这个属性 —— 会被 Markdown loader
+// 渲染成 HTML。见 crossSessionContent.ts 的注释。
+import { registerCrossSessionSkill } from './crossSession.js'
 
 /**
  * Initialize all bundled skills.
@@ -22,6 +26,7 @@ export function initBundledSkills(): void {
   require('./simplify.js').registerSimplifySkill()
   require('./batch.js').registerBatchSkill()
   require('./stuck.js').registerStuckSkill()
+  registerCrossSessionSkill()
   if (feature('KAIROS') || feature('KAIROS_DREAM')) {
     const { registerDreamSkill } = require('./dream.js')
     registerDreamSkill()

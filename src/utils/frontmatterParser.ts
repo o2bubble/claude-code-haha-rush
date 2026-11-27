@@ -13,7 +13,12 @@ export type FrontmatterData = {
   description?: string | null
   // Memory type: 'user', 'feedback', 'project', or 'reference'
   // Only applicable to memory files; narrowed via parseMemoryType() in src/memdir/memoryTypes.ts
+  //
+  // Two placements exist: official 2.1.316 writes `metadata.type`, older files
+  // (including every memory written before 2026-11-27) use top-level `type`.
+  // Readers must accept both — see memoryScan.ts.
   type?: string | null
+  metadata?: { type?: string | null } | null
   'argument-hint'?: string | null
   when_to_use?: string | null
   version?: string | null

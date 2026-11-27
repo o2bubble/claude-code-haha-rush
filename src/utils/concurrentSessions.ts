@@ -1,5 +1,13 @@
 import { feature } from 'bun:bundle'
-import { chmod, mkdir, readdir, readFile, unlink, writeFile } from 'fs/promises'
+import {
+  chmod,
+  mkdir,
+  readdir,
+  readFile,
+  unlink,
+  utimes,
+  writeFile,
+} from 'fs/promises'
 import { join } from 'path'
 import {
   getOriginalCwd,
@@ -20,6 +28,41 @@ export type SessionStatus = 'busy' | 'idle' | 'waiting'
 
 function getSessionsDir(): string {
   return join(getClaudeConfigHomeDir(), 'sessions')
+}
+
+/** 心跳间隔：定期刷新 PID 文件的 mtime，证明"这个 PID 还是我"。 */
+const HEARTBEAT_INTERVAL_MS = 60_000
+
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+
+/**
+ * 定期刷新自己的 PID 文件 mtime。
+ *
+ * ## 为什么需要（2026-11-23）
+ *
+ * `isProcessRunning(pid)` 只回答「这个号码有没有活着的进程」。而 PID 会被
+ * 回收：实测一台机器上，3 天前死掉的会话 `19692` 已经被 `MSPCManager` 占用
+ * → 记录"看起来还活着"，实际早没了。表现是 ListAgents 里冒出幽灵会话，
+ * 往里发消息会写进一个永远没人读的信箱（不报错、不回复）。
+ *
+ * 心跳让 mtime 成为可靠信号：活着就刷新，死了就停在最后一次；被回收的 PID
+ * 属于别的进程，它不会替我们刷新。
+ *
+ * 用 `utimes` 而不是重写内容 —— 一次系统调用，不动 JSON。
+ * 覆盖所有注册过会话的进程（interactive / `-p` / SDK），因为它们都会走
+ * `registerSession`。
+ */
+function startHeartbeat(): void {
+  if (heartbeatTimer) return
+  const pidFile = join(getSessionsDir(), `${process.pid}.json`)
+  heartbeatTimer = setInterval(() => {
+    const now = new Date()
+    void utimes(pidFile, now, now).catch(() => {
+      // 文件被清理掉了 —— 会话正在退出，忽略
+    })
+  }, HEARTBEAT_INTERVAL_MS)
+  // 心跳不该让进程活着：后台/SDK 进程该退就退
+  heartbeatTimer.unref?.()
 }
 
 /**
@@ -81,6 +124,9 @@ export async function registerSession(): Promise<boolean> {
         sessionId: getSessionId(),
         cwd: getOriginalCwd(),
         startedAt: Date.now(),
+        // 声明"我会心跳"：同机其他会话据此用"mtime 是否新鲜"判断我在不在。
+        // 没有这个标记的老记录只能用 pid 存活判定（PID 回收会骗人）。
+        heartbeat: true,
         kind,
         entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT,
         // 总是写：官方会话可能起 UDS 监听，我们虽然走文件邮箱，但把它记下来
@@ -107,6 +153,7 @@ export async function registerSession(): Promise<boolean> {
     onSessionSwitch(id => {
       void updatePidFile({ sessionId: id })
     })
+    startHeartbeat()
     return true
   } catch (e) {
     logForDebugging(`[concurrentSessions] register failed: ${errorMessage(e)}`)
@@ -161,6 +208,8 @@ export async function updateSessionBridgeId(
 export async function updateSessionActivity(patch: {
   status?: SessionStatus
   waitingFor?: string
+  /** IDE 模式 WS 端口 —— 写进记录里，别的进程才能连上来只读围观。 */
+  idePort?: number
 }): Promise<void> {
   // 不再要求 BG_SESSIONS：ListAgents 靠这两个字段告诉同机其他会话
   // 「我现在忙不忙、在做什么」。写入失败时 updatePidFile 自己会吞掉。

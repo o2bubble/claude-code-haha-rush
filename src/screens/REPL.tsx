@@ -1155,15 +1155,17 @@ export function REPL({
   const sessionStatus: TabStatusKind = isWaitingForApproval || isShowingLocalJSXCommand ? 'waiting' : isLoading ? 'busy' : 'idle';
   const waitingFor = sessionStatus !== 'waiting' ? undefined : toolUseConfirmQueue.length > 0 ? `approve ${toolUseConfirmQueue[0]!.tool.name}` : pendingWorkerRequest ? 'worker request' : pendingSandboxRequest ? 'sandbox request' : isShowingLocalJSXCommand ? 'dialog open' : 'input needed';
 
-  // Push status to the PID file for `claude ps`. Fire-and-forget; ps falls
-  // back to transcript-tail derivation when this is missing/stale.
+  // Push status to the PID file for `claude ps` + peer sessions. Fire-and-forget.
+  //
+  // 不再要求 BG_SESSIONS（2026-11-23）：`updateSessionActivity` 早就放开了
+  // 这个门控（concurrentSessions.ts 里有注释说明 ListAgents 靠这两个字段
+  // 告诉同机其他会话「我现在忙不忙、在做什么」），但调用点忘了跟。
+  // 结果是 ListAgents 里所有 peer 的状态永远显示「未知」。
   useEffect(() => {
-    if (feature('BG_SESSIONS')) {
-      void updateSessionActivity({
-        status: sessionStatus,
-        waitingFor
-      });
-    }
+    void updateSessionActivity({
+      status: sessionStatus,
+      waitingFor
+    });
   }, [sessionStatus, waitingFor]);
 
   // 3P default: off — OSC 21337 is ant-only while the spec stabilizes.

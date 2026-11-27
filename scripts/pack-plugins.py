@@ -72,11 +72,22 @@ def _resolve_plugins_dir():
 PLUGINS_DIR = _resolve_plugins_dir()
 
 # 目录名 / 扩展名级别的排除
-SKIP_DIRS = {"node_modules", "__pycache__", ".git"}
+# `.data` 是插件的**运行时目录**（2026-11-26 加 dbx 时补的）：
+# 里面是用户凭据密钥（secret.key）和本地库（dbx.db）。打进包有两重问题 ——
+# ① 把开发者的密钥/连接信息发出去；② 用户装完拿到的是一份复刻来的库，
+# 首次启动会撞上"密钥对不上"的 SECRET_KEY_MISMATCH。
+SKIP_DIRS = {"node_modules", "__pycache__", ".git", ".data"}
 # `.sig` 必须排除：它是**对 zip 内容的签名**，若打进 zip 就成了循环依赖
 # （签名要覆盖含签名的 zip → 永远不自洽）。2026-11-07 实测踩到：
 # 加了自动签名后 zip 里多出一个 config-export.sig，sha256 每次都变。
 SKIP_EXT = {".zip", ".pyc", ".sig"}
+
+# 文件名后缀级别的排除：测试文件不进用户的插件包。
+#
+# 用户下载到一堆 .test.cjs 没有意义，只会让人怀疑"这是不是给我看的"。
+# 按**后缀**而不是扩展名：`.test.cjs` 的扩展名是 `.cjs`，正常源码要用，
+# 不能整类排除。
+SKIP_NAME_SUFFIXES = (".test.cjs", ".test.mjs", ".test.js", ".spec.cjs", ".spec.mjs", ".spec.js")
 
 # 打包时按 LF 归一化的文本扩展名（见 pack() 里 write 处的说明）
 # 工作树在 Windows 上是 CRLF，直接写进 zip 会让"重新打包"产生一堆二进制
@@ -87,6 +98,17 @@ TEXT_EXTS = {".md", ".yaml", ".yml", ".json", ".cjs", ".mjs", ".js",
 # zip entry 的固定时间戳（1980-01-01 = zip 格式最早合法值）。
 # 不固定的话，同样内容每次打包的字节都不同（mtime 参与），git 里全是噪音 diff。
 FIXED_TIME = (1980, 1, 1, 0, 0, 0)
+
+# "开发用、不进包"的**整个目录**（相对插件目录，只写顶层目录名）。
+#
+# 与下面的 DEV_ONLY 分开：那个是逐个文件列，适合三五个文件；这个用于整棵
+# 源码树（含 node_modules，几百上千个文件，逐个列不现实）。
+#
+# 采用它的前提是：**产物另有去处**。dbx 的 `ui/` 是 Vite 工程的源码，
+# 构建产物在 `dist/` 且已入库 —— 打包时源码树纯属负担。
+DEV_ONLY_DIRS = {
+    "dbx": {"ui"},
+}
 
 # 明确列出的"开发用、不进包"文件（相对插件目录）。
 # 之所以逐个列而不是用通配：新增源文件时**默认进包**，漏发比多发的代价大得多。
@@ -109,6 +131,9 @@ DEV_ONLY = {
         "cors.test.cjs", "single-file.test.cjs", "panel-static.test.cjs", "tar-writer.test.cjs",
         "zip-sync.test.cjs",
     },
+    # dbx 的测试辅助（fixture/server 启动器）—— 测试文件本身已由
+    # SKIP_NAME_SUFFIXES 排除，这个文件名不带 .test 所以单独列
+    "dbx": {"test-helpers.cjs"},
 }
 
 # 每个插件**必须**在包里的关键文件（缺了就是坏包）。
@@ -124,7 +149,8 @@ REQUIRED = {
                        "slides.html", "meta.yaml",
                        "vendor/docx-preview.min.js", "vendor/jszip.min.js",
                        "vendor/pptx-renderer.es.js", "vendor/ooxml/core.js"},
-    "computer-use": {"plugin.json", "skill/SKILL.md"},
+    # locate.py 是技能里的定位工具；缺了它 SKILL.md 那节就是指向空气
+    "computer-use": {"plugin.json", "skill/SKILL.md", "skill/scripts/locate.py"},
     "gui-manual": {"plugin.json", "skill/SKILL.md"},
     "git-viewer": {"plugin.json"},
     # 这三个是恢复端的全部工具：少了 restore-tools 或 tar-writer，
@@ -132,6 +158,12 @@ REQUIRED = {
     # 读 manifest 要 172 秒，恢复端白等半小时）
     "config-export": {"plugin.json", "meta.yaml", "export-server.cjs",
                       "restore-tools.cjs", "tar-writer.cjs", "extract.py"},
+    # dbx-mcp.exe 是**整个插件的引擎** —— 少了它插件装上也只会报
+    # 「找不到内嵌的数据库引擎」，面板和 9 个工具全废。
+    # 它是 35 MB 的原生二进制，最容易被"只打源码"的忽略掉。
+    # dist/index.html 是 Vite 构建产物；源码在 ui/（DEV_ONLY_DIRS 里排除）。
+    "dbx": {"plugin.json", "meta.yaml", "server.cjs", "dist/index.html",
+            "vendor/win32-x64/dbx-mcp.exe"},
 }
 
 
@@ -139,11 +171,18 @@ def collect(plugin: str):
     """Return [(abs_path, zip_rel_path)] for everything that should ship."""
     d = os.path.join(PLUGINS_DIR, plugin)
     dev = DEV_ONLY.get(plugin, set())
+    dev_dirs = DEV_ONLY_DIRS.get(plugin, set())
     out = []
     for root, dirs, names in os.walk(d):
         dirs[:] = sorted(x for x in dirs if x not in SKIP_DIRS)
+        # 只按**顶层**目录名裁：插件根下的 `ui/` 属于源码树；
+        # 更深层的同名目录不一定是同一回事，不跟着一起排除。
+        if os.path.normpath(root) == os.path.normpath(d):
+            dirs[:] = [x for x in dirs if x not in dev_dirs]
         for n in sorted(names):
             if os.path.splitext(n)[1] in SKIP_EXT:
+                continue
+            if n.endswith(SKIP_NAME_SUFFIXES):
                 continue
             full = os.path.join(root, n)
             rel = os.path.relpath(full, d).replace(os.sep, "/")

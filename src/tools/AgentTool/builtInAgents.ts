@@ -6,6 +6,7 @@ import { CLAUDE_AGENT } from './built-in/claudeAgent.js'
 import { CLAUDE_CODE_GUIDE_AGENT } from './built-in/claudeCodeGuideAgent.js'
 import { EXPLORE_AGENT } from './built-in/exploreAgent.js'
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
+import { OVERSEER_AGENT } from './built-in/overseerAgent.js'
 import { PLAN_AGENT } from './built-in/planAgent.js'
 import { STATUSLINE_SETUP_AGENT } from './built-in/statuslineSetup.js'
 import { VERIFICATION_AGENT } from './built-in/verificationAgent.js'
@@ -37,6 +38,7 @@ export function getBuiltInAgents(): AgentDefinition[] {
   const agents: AgentDefinition[] = [
     CLAUDE_AGENT,
     GENERAL_PURPOSE_AGENT,
+    OVERSEER_AGENT,
     STATUSLINE_SETUP_AGENT,
     EXPLORE_AGENT,
     PLAN_AGENT,

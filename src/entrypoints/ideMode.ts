@@ -57,6 +57,15 @@ import { preconnectAnthropicApi } from '../utils/apiPreconnect.js'
 import { applyExtraCACertsFromConfig } from '../utils/caCertsConfig.js'
 import { registerCleanup } from '../utils/cleanupRegistry.js'
 import { enableConfigs, recordFirstStartTime } from '../utils/config.js'
+import { logForDebugging } from '../utils/debug.js'
+import {
+  deliverMailboxPermission,
+  forgetForwardedRequest,
+  getSessionOriginator,
+  rememberForwardedRequest,
+  takeForwardedRequest,
+  waitForMailboxPermission,
+} from '../utils/sessionApproval.js'
 import { applyConfigEnvironmentVariables } from '../utils/managedEnv.js'
 import { configureGlobalMTLS } from '../utils/mtls.js'
 import {
@@ -384,6 +393,65 @@ function runClaudeMemHook(
 
 // Track connected WebSocket clients for broadcasting
 const connectedClients = new Set<WebSocket>()
+/**
+ * 「只看不操作」的连接 —— GUI 的镜像面板。
+ *
+ * 它们照样收广播（才看得到实时消息），但：
+ *   · 不能发用户消息（镜像只能看）
+ *   · **不算"有界面"** —— 审批仍走唤醒方的信箱。
+ *     这点很关键：镜像一连接就让 `connectedClients.size > 0` 的话，
+ *     后台会话会把审批广播给一个只会看的窗口，然后干等 300 秒超时。
+ */
+const observerClients = new Set<WebSocket>()
+
+/** 有操作能力的客户端数量（排除镜像观察者）。审批决策看这个。 */
+function interactiveClientCount(): number {
+  let n = 0
+  for (const c of connectedClients) if (!observerClients.has(c)) n++
+  return n
+}
+
+/** 解析 `{type:'client_role', role:'observer'}`；不是这条消息返回 null。 */
+function tryParseClientRole(raw: string): string | null {
+  if (!raw.includes('client_role')) return null
+  try {
+    const v = JSON.parse(raw) as { type?: string; role?: string }
+    return v.type === 'client_role' ? (v.role ?? null) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 观察者能做什么：**只读**。
+ *
+ * 只放行 `load_session_messages`（拉历史）和 `ping` —— 其余全部丢弃。
+ * 这样"镜像只能看"是结构上的保证，而不是靠前端自觉不发。
+ *
+ * 特别地，`user` 被挡掉：否则镜像窗口就成了第二个对话入口，
+ * 用户以为只是看一眼，实际把话发进了后台会话。
+ */
+function allowObserverMessage(ws: WebSocket, raw: string): void {
+  let type: string | undefined
+  try {
+    type = (JSON.parse(raw) as { type?: string }).type
+  } catch {
+    return
+  }
+  if (type === 'load_session_messages') {
+    void handleClientMessage(ws, raw)
+    return
+  }
+  if (type === 'ping') {
+    try {
+      ws.send(jsonStringify({ type: 'pong' }))
+    } catch {
+      /* 连接已断 */
+    }
+    return
+  }
+  logForDebugging(`[ide-mode] 镜像只读，忽略消息 type=${type}`)
+}
 // Queue messages sent before any client connects (prevents lost ready/status events)
 const preConnectQueue: StdoutMessage[] = []
 
@@ -401,6 +469,273 @@ function broadcastToAll(msg: StdoutMessage): void {
       connectedClients.delete(ws)
     }
   }
+  // IDE/GUI 会话不渲染 REPL，所以 REPL 里那段「写 status 给同机会话看」的逻辑
+  // 在这里**根本不会执行**。GUI 会话占绝大多数，结果 ListAgents 里所有
+  // peer 的状态永远显示「未知」（2026-11-23 实测：4 个 GUI 会话 status 全是 None）。
+  // 状态广播是所有状态变化的汇聚点，在这里同步一份最省事也最不容易漏。
+  const typed = msg as { type?: string; status?: string | null }
+  if (typed.type === 'status') {
+    reportSessionActivity(typed.status)
+  }
+}
+
+/** 上次写给 PID 文件的状态 —— 广播很频繁，状态没变就不必重复写盘。 */
+let lastReportedStatus: string | null = null
+
+// ── 跨会话收件箱轮询 ──
+//
+// `useInboxPoller` 只挂在 REPL（终端 TUI）里，而 GUI 走的是本文件这条路径 ——
+// **GUI 会话能发消息给对方，但完全收不到**。2026-11-23 实测：给 GUI 会话发的
+// 消息在对方 inbox 里 `read:false` 躺了一整天，界面上什么都没发生。
+// （这和 status 那次是同一类疏漏：改了 REPL，忘了 GUI 才是主力。）
+
+/** 轮询间隔。REPL 用的是 1s，保持一致。 */
+const CROSS_SESSION_POLL_MS = 1000
+
+/** 待注入的跨会话消息队列 —— 忙的时候排队，不丢弃。 */
+const crossSessionQueue: Array<{ from: string; text: string }> = []
+
+let crossSessionPollerStarted = false
+
+/** 把一条跨会话消息包成模型能识别的 XML（`SendMessage` 的 prompt 里承诺的形状）。 */
+export function formatCrossSessionMessage(from: string, text: string): string {
+  return `<cross-session-message from="${from}">\n${text}\n</cross-session-message>`
+}
+
+/**
+ * 信箱里的结构化消息（审批相关）。
+ *
+ * teammate 那套把 JSON 直接塞在 `text` 字段里（`createPermissionRequestMessage`
+ * 返回对象、写入时 stringify）。守卫住解析失败 —— 普通用户消息也可能是
+ * 以 `{` 开头的文本。
+ */
+type StructuredMailboxMessage = {
+  type: string
+  request_id: string
+  subtype?: string
+  tool_name?: string
+  tool_use_id?: string
+  description?: string
+  input?: Record<string, unknown>
+  updated_input?: Record<string, unknown>
+  permission_suggestions?: unknown[]
+}
+
+function parseStructuredMessage(text: unknown): StructuredMailboxMessage | null {
+  if (typeof text !== 'string' || !text.trimStart().startsWith('{')) return null
+  try {
+    const v = JSON.parse(text) as Partial<StructuredMailboxMessage>
+    if (typeof v?.type !== 'string' || typeof v?.request_id !== 'string') return null
+    if (v.type !== 'permission_request' && v.type !== 'permission_response') return null
+    return v as StructuredMailboxMessage
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 我是「有界面的那一方」：把别的会话的审批请求推给自己的前端弹窗。
+ *
+ * 不重做审批 UI —— 前端认的 `control_request` 形状与本地触发时完全一样，
+ * 所以 Bash 高亮、文件 diff 预览这些都照常工作。
+ */
+function forwardPermissionRequestToGui(
+  msg: StructuredMailboxMessage,
+  from: string,
+): void {
+  // 没有前端连上就没人能看见 —— 但仍然是**记下来**的：
+  // 前端稍后连上时那份请求还在等（内存里的 pendingControlRequests）。
+  // 实际上没前端时记了也没用，直接回一条拒绝更干脆，免得请求方干等。
+  if (interactiveClientCount() === 0) {
+    void respondToForwardedPermission(msg.request_id, from, false, 'no UI attached')
+    logForDebugging(
+      `[ide-mode] 收到 ${from} 的审批请求但本会话没有界面，已自动拒绝`,
+    )
+    return
+  }
+
+  rememberForwardedRequest(msg.request_id, from)
+  const toolName = msg.tool_name ?? ''
+  // 登记进本地 pending 表：用户在弹窗上点完，control_response 会按 request_id
+  // 走常规处理流程（含 session-allow / always-allow 的持久化）。
+  pendingControlRequests.set(msg.request_id, {
+    resolve: () => {
+      /* 结果通过 forwarded 表回给请求方，见 control_response 分支 */
+    },
+    reject: () => {
+      forgetForwardedRequest(msg.request_id)
+    },
+    toolName,
+  })
+
+  broadcastToAll({
+    type: 'control_request',
+    request_id: msg.request_id,
+    request: {
+      subtype: 'can_use_tool',
+      tool_name: toolName,
+      tool_use_id: msg.tool_use_id ?? '',
+      input: msg.input ?? {},
+      action_description: msg.description || toolName,
+      // 前端据此显示「来自别的会话」
+      forwarded_from: from,
+    },
+  })
+  logForDebugging(`[ide-mode] 已把 ${from} 的 ${toolName} 审批转发给前端`)
+  reportWaiting(`approve ${toolName} (${from})`)
+}
+
+/** 把审批结果写回请求方的信箱。 */
+async function respondToForwardedPermission(
+  requestId: string,
+  from: string,
+  allow: boolean,
+  reason?: string,
+): Promise<void> {
+  try {
+    const { writeToMailbox, createPermissionResponseMessage } = await import(
+      '../utils/teammateMailbox.js'
+    )
+    const { SESSION_INBOX_TEAM, sessionAddress } = await import(
+      '../utils/sessionPeers.js'
+    )
+    // text 必须是字符串 —— 结构化消息是 stringify 后塞进去的（收端解析对称）
+    await writeToMailbox(
+      from,
+      {
+        from: sessionAddress(process.pid),
+        text: JSON.stringify(
+          createPermissionResponseMessage({
+            request_id: requestId,
+            subtype: allow ? 'success' : 'error',
+            ...(allow ? {} : { error: reason || 'Permission denied by peer session' }),
+          }),
+        ),
+        timestamp: new Date().toISOString(),
+      },
+      SESSION_INBOX_TEAM,
+    )
+  } catch (e) {
+    logForDebugging(`[ide-mode] 回写审批结果失败: ${e}`)
+  }
+}
+
+function startCrossSessionInboxPoll(): void {
+  if (crossSessionPollerStarted) return
+  crossSessionPollerStarted = true
+
+  const tick = async () => {
+    try {
+      const {
+        readUnreadMessages,
+        markMessagesAsRead,
+      } = await import('../utils/teammateMailbox.js')
+      const { SESSION_INBOX_TEAM, sessionAddress } = await import(
+        '../utils/sessionPeers.js'
+      )
+      const me = sessionAddress(process.pid)
+
+      // 🔴 **忙也要读**，不能像原来那样直接跳过。
+      //
+      // 审批响应恰恰是在"忙"的时候才需要读：本回合正卡在等待审批上，
+      // 不读信箱就永远收不到结果 → 双方互等 → 只能等超时。
+      // （第一版就是这么写的，端到端实测卡死。）
+      //
+      // 读出来的普通文本消息仍然只入队不注入，注入交给
+      // drainCrossSessionQueue（它自己判 busy），所以不会打断当前回合。
+
+      const unread = await readUnreadMessages(me, SESSION_INBOX_TEAM)
+      if (unread.length === 0) return
+
+      // 信箱里混着三种东西，语义完全不同，不能一律当用户消息注入：
+      //   · 普通文本        → 注入成一回合（跨会话对话）
+      //   · permission_request  → 转发给前端弹审批（我是"有界面的那一方"）
+      //   · permission_response → 我在等的结果（我是"无界面的请求方"）
+      for (const m of unread) {
+        const structured = parseStructuredMessage(m.text)
+        if (structured?.type === 'permission_response') {
+          const allow = structured.subtype === 'success'
+          const delivered = deliverMailboxPermission(
+            structured.request_id,
+            allow,
+            structured.updated_input as Record<string, unknown> | undefined,
+          )
+          logForDebugging(
+            `[ide-mode] 收到审批结果 ${structured.request_id} allow=${allow} ` +
+              `(${delivered ? '已送达等待方' : '无人等待，忽略'})`,
+          )
+          continue
+        }
+        if (structured?.type === 'permission_request') {
+          forwardPermissionRequestToGui(structured, m.from)
+          continue
+        }
+        if (typeof m.text === 'string' && m.text.length > 0) {
+          crossSessionQueue.push({ from: m.from, text: m.text })
+        }
+      }
+      await markMessagesAsRead(me, SESSION_INBOX_TEAM)
+      await drainCrossSessionQueue()
+    } catch (e) {
+      logForDebugging(`[ide-mode] 跨会话收件轮询失败: ${e}`)
+    }
+  }
+
+  const drainCrossSessionQueue = async (): Promise<void> => {
+    if (busy || crossSessionQueue.length === 0) return
+    const next = crossSessionQueue.shift()!
+    // 先广播给已连上的 GUI 客户端 —— 这条消息**不是**用户在界面上打的，
+    // 前端不会自己加，不推的话要重新载入会话才看得见。
+    // 形状与 transcript 里的一致（formatCrossSessionMessage），
+    // 这样实时渲染和重载后的渲染走同一套解析。
+    broadcastToAll({
+      type: 'cross_session_message',
+      from: next.from,
+      text: next.text,
+      content: formatCrossSessionMessage(next.from, next.text),
+      timestamp: new Date().toISOString(),
+    })
+    await handleUserPrompt(formatCrossSessionMessage(next.from, next.text))
+  }
+
+  setInterval(() => void tick(), CROSS_SESSION_POLL_MS)
+  logForDebugging('[ide-mode] 跨会话收件轮询已启动')
+}
+
+/**
+ * 把 ideMode 的状态词映射成 `SessionStatus` 并写进 PID 文件。
+ *
+ * 映射：thinking / compacting / interrupting → busy
+ *       ready → idle
+ *       其它（含 null）→ 不写（不知道就别猜）
+ */
+/** 写「在等用户操作」—— 审批弹窗期间调用。 */
+function reportWaiting(what: string): void {
+  lastReportedStatus = 'waiting'
+  void import('../utils/concurrentSessions.js')
+    .then(m => m.updateSessionActivity({ status: 'waiting', waitingFor: what }))
+    .catch(() => {})
+}
+
+export function mapIdeStatus(status: string | null | undefined): 'busy' | 'idle' | null {
+  if (!status) return null
+  if (status === 'ready') return 'idle'
+  // 这三种都是"这台机器上的 AI 正在干活"，对外一律是 busy。
+  if (status === 'thinking' || status === 'compacting' || status === 'interrupting') {
+    return 'busy'
+  }
+  return null
+}
+
+function reportSessionActivity(status: string | null | undefined): void {
+  const mapped = mapIdeStatus(status)
+  if (mapped === null || mapped === lastReportedStatus) return
+  lastReportedStatus = mapped
+  void import('../utils/concurrentSessions.js')
+    .then(m => m.updateSessionActivity({ status: mapped }))
+    .catch(() => {
+      // 写失败不影响会话本身（PID 文件是 best-effort 的旁路信息）
+    })
 }
 
 function broadcastToAllExcept(msg: StdoutMessage, exclude: WebSocket): void {
@@ -494,8 +829,111 @@ function detectAndBroadcastFileEdits(event: { message?: Record<string, unknown> 
 }
 
 // ============================================================================
+// Session ownership
+// ============================================================================
+
+/**
+ * 切到某个会话前，先确认没有别的**活进程**正在用它。
+ *
+ * 失败时给自己发一条 error（前端会弹出来），返回 null 让调用方中止。
+ * 不清空当前会话 —— 切不过去就留在原地，比切到一半状态不一致好。
+ */
+async function acquireSessionForIdeMode(
+  sessionId: string,
+  ws?: WebSocket,
+): Promise<true | null> {
+  try {
+    const { tryAcquireSessionLock } = await import('../utils/sessionLock.js')
+    const r = await tryAcquireSessionLock(sessionId)
+    if (r.kind === 'acquired') return true
+
+    const mins = Math.max(1, Math.round((Date.now() - r.by.startedAt) / 60_000))
+    const where = r.by.cwd ? ` (${r.by.cwd})` : ''
+    const msg =
+      `这个会话正被另一个窗口使用中（PID ${r.by.pid}，已运行 ${mins} 分钟）${where}。` +
+      `同时打开会把对话记录写坏 —— 请先关掉那边，或切换到别的会话。`
+    logForDebugging(`[ide-mode] 会话占用中: ${sessionId} by pid ${r.by.pid}`)
+    // stderr 也要一份：无窗口唤醒时**没有任何客户端连上来**，
+    // broadcastToAll 是发给零个接收者的 —— 只广播的话，被拒的进程会
+    // 安静地停在空会话上，调用方完全不知道发生了什么（实测踩到）。
+    console.error(`[ide-mode] ${msg}`)
+    broadcastToAll({ type: 'error', message: msg })
+    ws?.send(jsonStringify({ type: 'error', message: msg }))
+    return null
+  } catch (e) {
+    // 锁机制本身出错时**放行**：宁可冒险，也不要因为一个辅助机制打不开会话
+    logForDebugging(`[ide-mode] 会话锁检查失败（放行）: ${e}`)
+    return true
+  }
+}
+
 // Permission handling
 // ============================================================================
+
+/**
+ * 无界面实例的审批：把请求写进唤醒者的信箱，然后等结果。
+ *
+ * 这是「唤醒一个已退出的会话」能跑通的最后一环 —— 没有它，那个会话一碰
+ * Bash/Edit 就只能干等到超时。
+ *
+ * 超时按拒绝处理（不是报错）：模型自己换条路，整轮工作不会因为没人搭理
+ * 一条审批而报废。
+ */
+async function askOriginatorForPermission(
+  originator: string,
+  requestId: string,
+  request: IDEControlRequest,
+  toolName: string,
+): Promise<PermissionDecision> {
+  try {
+    const { writeToMailbox, createPermissionRequestMessage } = await import(
+      '../utils/teammateMailbox.js'
+    )
+    const { SESSION_INBOX_TEAM, sessionAddress } = await import(
+      '../utils/sessionPeers.js'
+    )
+    await writeToMailbox(
+      originator,
+      {
+        from: sessionAddress(process.pid),
+        text: JSON.stringify(
+          createPermissionRequestMessage({
+            request_id: requestId,
+            agent_id: sessionAddress(process.pid),
+            tool_name: toolName,
+            tool_use_id: request.request.tool_use_id,
+            description: request.request.action_description,
+            input: request.request.input,
+          }),
+        ),
+        timestamp: new Date().toISOString(),
+      },
+      SESSION_INBOX_TEAM,
+    )
+    logForDebugging(`[ide-mode] 无界面会话：审批已投给 ${originator} (${toolName})`)
+    reportWaiting(`approve ${toolName} @ ${originator}`)
+
+    const { allow, updatedInput } = await waitForMailboxPermission(requestId)
+    if (allow) {
+      return {
+        behavior: 'allow',
+        ...(updatedInput ? { updatedInput } : {}),
+      }
+    }
+    return {
+      behavior: 'deny',
+      message: 'Permission denied (no approval from the waking session)',
+      decisionReason: { type: 'other', reason: 'mailbox_denied' },
+    }
+  } catch (e) {
+    logForDebugging(`[ide-mode] 信箱审批失败: ${e}`)
+    return {
+      behavior: 'deny',
+      message: `Permission unavailable: ${e instanceof Error ? e.message : String(e)}`,
+      decisionReason: { type: 'other', reason: 'mailbox_error' },
+    }
+  }
+}
 
 function buildCanUseTool(): CanUseToolFn {
   return async (
@@ -552,7 +990,24 @@ function buildCanUseTool(): CanUseToolFn {
       },
     }
 
+    // 没有前端连上时广播等于没人收到（之后干等超时）。这种会话只能是被
+    // 「唤醒」的无窗口实例，把审批转给唤醒它的那个会话去弹窗。
+    if (interactiveClientCount() === 0) {
+      const originator = getSessionOriginator()
+      if (originator) {
+        return await askOriginatorForPermission(
+          originator,
+          requestId,
+          request,
+          tool.name,
+        )
+      }
+    }
+
     broadcastToAll(request)
+    // 等用户点「允许/拒绝」—— 这正是同机会话最想看到的信息
+    // （「那个窗口卡住了吗？原来是在等审批」）。
+    reportWaiting(`approve ${tool.name}`)
 
     try {
       const response = await new Promise<IDEControlResponse>(
@@ -1490,7 +1945,16 @@ async function initialize(): Promise<void> {
   // 早于任何 hook 落地，避免 hook spawn 子进程时快照到未登记的环境。
   try {
     const { registerSession } = await import('../utils/concurrentSessions.js')
-    await registerSession()
+    const registered = await registerSession()
+    // 初始状态：刚起来 = 空闲。不能指望后面的 status 广播——
+    // 没有前端连上时一次都不会广播（实测启动 25s 内 0 条 status），
+    // 那时记录里 status 是空的，同机会话只能看到「未知」。
+    // 只在真登记成功时写：子 agent 进程 registerSession 返回 false（有意跳过），
+    // 它们的 PID 文件不存在，写了也是白发。
+    if (registered) {
+      reportSessionActivity('ready')
+      startCrossSessionInboxPoll()
+    }
   } catch (e) {
     console.error(
       '[ide-mode] session self-registration failed:',
@@ -2370,6 +2834,11 @@ async function handleLoadSession(
     return
   }
 
+  // 同一份对话只允许一个活进程（与 resume 同一条规则），否则两边各写各的
+  if (!(await acquireSessionForIdeMode(sessionId, ws))) {
+    return
+  }
+
   // 会话加载时自动刷新 MCP — 用户在会话 A 期间往配置加了新 MCP server（或某 server
   // 刚恢复），不 refresh 的话旧会话里工具列表缺失，只能手动 /mcp-refresh（用户实测
   // 高频痛点）。已连接 server 被 memoize 跳过，只有失败/新增的才会重连。
@@ -2482,6 +2951,11 @@ async function handleResumeSession(
   ws: WebSocket,
   sessionId: string,
 ): Promise<void> {
+  // 先抢锁再动任何状态：两个进程 resume 同一份对话会把 transcript 写坏
+  // （各自拿一份内存快照、各自追加）。见 utils/sessionLock.ts。
+  const lock = await acquireSessionForIdeMode(sessionId, ws)
+  if (!lock) return
+
   // Interrupt any in-progress turn to prevent token waste before switching sessions
   interruptCurrentTurn()
   // Clear session-scoped tool approvals so they don't leak across sessions
@@ -3364,6 +3838,22 @@ async function handleClientMessage(
     }
 
     case 'control_response': {
+      // 先看这条是不是**别的会话**转发过来、由我代为批准的。
+      // 是的话要把结果写回它的信箱 —— take 而不是 get：一次响应只回一次。
+      const requester = takeForwardedRequest(message.request_id)
+      if (requester) {
+        const allowed = message.response?.allowed === true
+        void respondToForwardedPermission(
+          message.request_id,
+          requester,
+          allowed,
+          allowed ? undefined : 'Rejected by peer session',
+        )
+        logForDebugging(
+          `[ide-mode] 审批 ${message.request_id} 已回写 ${requester}: allowed=${allowed}`,
+        )
+      }
+
       const pending = pendingControlRequests.get(message.request_id)
       if (pending) {
         pendingControlRequests.delete(message.request_id)
@@ -3579,7 +4069,17 @@ async function handleClientMessage(
 // Main entrypoint
 // ============================================================================
 
-export async function runIdeMode(workspaceDir?: string): Promise<void> {
+export async function runIdeMode(
+  workspaceDir?: string,
+  /**
+   * 启动即恢复到指定会话（`--resume <id>`）。
+   *
+   * 用于「无窗口唤醒一个已退出的会话」：没有前端连上来点会话列表，所以必须
+   * 在启动阶段就把历史装进去，否则起来的是个空会话 —— 消息注进去也接不上
+   * 之前的上下文。
+   */
+  resumeSessionId?: string,
+): Promise<void> {
   // 启动分段计时（`CLAUDE_IDE_PROFILE=1` 时打到 stderr）。
   // GUI 等的是下方 `CLAUDE_CODE_IDE_PORT=` 那一行 —— 它之前的每一步都计入
   // 用户感知的「IDE 后台就绪」等待。
@@ -3765,11 +4265,24 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
 
       message(ws, data) {
         const raw = typeof data === 'string' ? data : new TextDecoder().decode(data as ArrayBuffer)
+        // 观察者只允许声明身份 + 读历史；其余一律不理（结构上保证只读）
+        if (observerClients.has(ws)) {
+          allowObserverMessage(ws, raw)
+          return
+        }
+        // 前端开场就声明自己是镜像 —— 必须**先于**任何别的消息
+        const role = tryParseClientRole(raw)
+        if (role === 'observer') {
+          observerClients.add(ws)
+          logForDebugging(`[ide-mode] 镜像观察者已接入（只读）`)
+          return
+        }
         void handleClientMessage(ws, raw)
       },
 
       close(ws) {
         connectedClients.delete(ws)
+        observerClients.delete(ws)
       },
     },
   })
@@ -3781,6 +4294,15 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
   // This is the ONLY stdout output — everything else goes over WebSocket
   mark('wsListening')
   process.stdout.write(`CLAUDE_CODE_IDE_PORT=${server.port}\n`)
+
+  // 把端口写进 PID 文件：别的 GUI 进程据此连上来做**只读镜像**。
+  // 写记录里而不是只留在 spawn 方内存里 —— 端口要跨 GUI 重启存活，
+  // 手工起的会话也该能被围观。
+  void import('../utils/concurrentSessions.js')
+    .then(m => m.updateSessionActivity({ idePort: server.port }))
+    .catch(() => {
+      /* 旁路信息，写失败不影响会话 */
+    })
 
   // Log to stderr for debugging
   const log = (...args: unknown[]) =>
@@ -3821,6 +4343,52 @@ export async function runIdeMode(workspaceDir?: string): Promise<void> {
   })
   // Also broadcast initial task state (in case tasks exist from a previous session)
   void broadcastPlanTasks()
+
+  // 启动即恢复指定会话（`--ide-mode --resume <id>`）。
+  //
+  // 无窗口唤醒走这条路：没有前端连上来点会话列表，必须在这里把历史装进去。
+  // 放在 WS 就绪**之后** —— 调用方要先拿到 `CLAUDE_CODE_IDE_PORT=` 那行才能
+  // 连上来观察进度，而且 handleResumeSession 内部会广播 session_loaded。
+  //
+  // 用 mockWs 把它的 ws.send 转进 broadcastToAll：此刻可能一个客户端都没有，
+  // 消息会丢，但状态（mutableMessages / 锁）是留着正确的，客户端后来连上时
+  // 会自己发 load_session 拿到完整历史。
+  if (resumeSessionId) {
+    const mockWs = {
+      send: (msg: string) => {
+        try {
+          broadcastToAll(JSON.parse(msg))
+        } catch {
+          /* 解析不了就丢，不影响恢复本身 */
+        }
+      },
+    } as unknown as WebSocket
+    log(`Resuming session ${resumeSessionId} at startup`)
+    const before = getSessionId()
+    await handleResumeSession(mockWs, resumeSessionId)
+    if (getSessionId() !== resumeSessionId) {
+      // 恢复没成功（会话被别的进程占着 / 文件不存在 / 解析失败）。
+      // **必须退出**：继续跑的话，进程会以一个空的新会话待在那儿，
+      // 唤醒方以为旧会话被接管了，往里投的消息就全进了空会话 ——
+      // 比直接失败更糟，因为它是静默的。
+      console.error(
+        `[ide-mode] 启动恢复失败，退出（sid 仍为 ${before}）：${resumeSessionId}`,
+      )
+      // 先跑清理再退出：registerSession 登记的 cleanup 会删掉
+      // `sessions/<pid>.json`。`process.exit()` 不会触发它 ——
+      // 不跑的话每次「重复唤醒被拒」都会攒一条孤儿记录（实测踩到）。
+      try {
+        const { runCleanupFunctions } = await import('../utils/cleanupRegistry.js')
+        await runCleanupFunctions()
+      } catch (e) {
+        console.error('[ide-mode] 退出前清理失败:', e)
+      }
+      process.exit(1)
+    }
+    log(
+      `Resume done: ${mutableMessages.length} message(s) loaded, sessionId=${getSessionId()}`,
+    )
+  }
 
   // Keep the process alive. Bun.serve() keeps the event loop running, but
   // handle signals for graceful shutdown.

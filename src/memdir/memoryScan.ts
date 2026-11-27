@@ -58,7 +58,12 @@ export async function scanMemoryFiles(
           filePath,
           mtimeMs,
           description: frontmatter.description || null,
-          type: parseMemoryType(frontmatter.type),
+          // 官方 2.1.316 把类型写在 `metadata.type` 下；本仓 2026-11-27 之前的
+          // 记忆文件全部用顶层 `type`。两种都要认，否则新格式的记忆会静默
+          // 丢类型（不进日志、不影响注入，只是清单里少了 [feedback] 标签）。
+          type: parseMemoryType(
+            frontmatter.metadata?.type ?? frontmatter.type,
+          ),
         }
       }),
     )

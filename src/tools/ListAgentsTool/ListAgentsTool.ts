@@ -21,7 +21,7 @@ import { isInProcessTeammateTask } from '../../tasks/InProcessTeammateTask/types
 import { lazySchema } from '../../utils/lazySchema.js'
 import { describePeer, listPeerSessions } from '../../utils/sessionPeers.js'
 
-const LIST_AGENTS_TOOL_NAME = 'ListAgents'
+import { LIST_AGENTS_TOOL_NAME } from './constants.js'
 
 const inputSchema = lazySchema(() => z.strictObject({}))
 type InputSchema = ReturnType<typeof inputSchema>

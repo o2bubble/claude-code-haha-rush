@@ -63,6 +63,7 @@ import {
 } from '../../utils/auth.js'
 import { registerCleanup } from '../../utils/cleanupRegistry.js'
 import { detectCodeIndexingFromMcpServerName } from '../../utils/codeIndexing.js'
+import { normalizeMcpInputSchema } from './normalizeInputSchema.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from '../../utils/envUtils.js'
 import {
@@ -1810,7 +1811,11 @@ export const fetchToolsForClient = memoizeWithLRU(
             isSearchOrReadCommand() {
               return classifyMcpToolForCollapse(client.name, tool.name)
             },
-            inputJSONSchema: tool.inputSchema as Tool['inputJSONSchema'],
+            inputJSONSchema: normalizeMcpInputSchema(
+              tool.inputSchema,
+              client.name,
+              tool.name,
+            ),
             async checkPermissions() {
               return {
                 behavior: 'passthrough' as const,

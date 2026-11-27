@@ -184,16 +184,23 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
 ]
 
 /**
- * Frontmatter format example with the `type` field.
+ * Frontmatter format example. `type` sits under `metadata:` to match official
+ * 2.1.316; readers still accept the older top-level `type:` (two accepted
+ * placements documented in frontmatterParser.ts).
  */
 export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```markdown',
   '---',
   'name: {{memory name}}',
   'description: {{one-line description — used to decide relevance in future conversations, so be specific}}',
-  `type: {{${MEMORY_TYPES.join(', ')}}}`,
+  'metadata:',
+  `  type: {{${MEMORY_TYPES.join(', ')}}}`,
   '---',
   '',
   '{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}',
   '```',
+  '',
+  'Link related memories with `[[their-name]]`, where `their-name` is the other memory\'s `name:` slug. Link liberally — a `[[name]]` that does not match an existing memory yet is fine; it marks something worth writing later, not an error.',
+  '',
+  'Older memories may have a top-level `type:` instead of `metadata.type`; both are read. Write new ones with `metadata.type`.',
 ]

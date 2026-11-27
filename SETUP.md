@@ -218,7 +218,6 @@ claude-profile switch <name>       # 切换配置
 | `claude-haha` | 同上 |
 | `cla-bypass` | 绕过权限模式（实验性） |
 | `claude-ide` | IDE 模式后端 |
-| `claude-gui` | 浏览器聊天 UI |
 
 ### 配置
 

@@ -4,6 +4,7 @@ import { clearInvokedSkillsForAgent } from '../../bootstrap/state.js'
 import {
   ALL_AGENT_DISALLOWED_TOOLS,
   ASYNC_AGENT_ALLOWED_TOOLS,
+  ASYNC_AGENT_OPT_IN_TOOLS,
   CUSTOM_AGENT_DISALLOWED_TOOLS,
   IN_PROCESS_TEAMMATE_ALLOWED_TOOLS,
 } from '../../constants/tools.js'
@@ -73,11 +74,18 @@ export function filterToolsForAgent({
   isBuiltIn,
   isAsync = false,
   permissionMode,
+  declaredTools,
 }: {
   tools: Tools
   isBuiltIn: boolean
   isAsync?: boolean
   permissionMode?: PermissionMode
+  /**
+   * The agent definition's own `tools` allowlist. Async agents are otherwise
+   * denied SendMessage/ListAgents wholesale; an agent that names one of them
+   * explicitly opts in (see ASYNC_AGENT_OPT_IN_TOOLS).
+   */
+  declaredTools?: string[]
 }): Tools {
   return tools.filter(tool => {
     // Allow MCP tools for all agents
@@ -99,6 +107,16 @@ export function filterToolsForAgent({
       return false
     }
     if (isAsync && !ASYNC_AGENT_ALLOWED_TOOLS.has(tool.name)) {
+      // Explicit opt-in: a background agent that names SendMessage/ListAgents
+      // in its own allowlist gets them. Wildcard (`['*']`) does not count —
+      // it means "whatever is available", not "plus the denied ones".
+
+      if (
+        declaredTools?.includes(tool.name) &&
+        ASYNC_AGENT_OPT_IN_TOOLS.has(tool.name)
+      ) {
+        return true
+      }
       if (isAgentSwarmsEnabled() && isInProcessTeammate()) {
         // Allow AgentTool for in-process teammates to spawn sync subagents.
         // Validation in AgentTool.call() prevents background agents and teammate spawning.
@@ -145,6 +163,7 @@ export function resolveAgentTools(
         isBuiltIn: source === 'built-in',
         isAsync,
         permissionMode,
+        declaredTools: agentTools,
       })
 
   // Create a set of disallowed tool names for quick lookup

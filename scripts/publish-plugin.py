@@ -121,10 +121,10 @@ def main() -> int:
     ap.add_argument("--zip", required=True, help="Path to plugin zip (must contain plugin.json at root)")
     ap.add_argument("--api-key", required=True, help="Registry API key (sk-...)")
     ap.add_argument("--host", default="http://192.168.186.96:8765", help="Registry base URL")
-    # 🔴 `--no-sign` 已**移除**（2026-11-07）：签名是不可跳过的发布门控。
-    # 服务端规则是 `elif sig_path.exists(): unlink()` —— 无签名覆盖会**删掉原有签名**，
-    # 市场上的包会从 signed=true 变 signed=false，用户直接失去「安装」按钮。
-    # 拿不准就不发，别为了"先传上去看看"把签名扔掉。
+    # 🔴 `--no-sign` 已移除（2026-11-07）：签名是不可跳过的发布门控。
+    # 服务端规则 `elif sig_path.exists(): unlink()` —— 无签名覆盖会**删掉原有签名**，
+    # 市场上的包从 signed=true 变 signed=false，用户直接失去「安装」按钮。
+    # 拿不准就**不发**，别为了"先传上去看看"把签名扔掉。
     ap.add_argument("--force", action="store_true", help="Overwrite existing package (re-sign/re-publish).")
     ap.add_argument("--type", default="plugin", choices=["plugin", "skill"],
                     help="Package type (default: plugin). Skill packages use the same endpoint.")

@@ -11,6 +11,11 @@ import { isAwsCredentialsProviderError } from 'src/utils/aws.js'
 import { logForDebugging } from 'src/utils/debug.js'
 import { logError } from 'src/utils/log.js'
 import { createSystemAPIErrorMessage } from 'src/utils/messages.js'
+import {
+  isDocumentSourceUnsupported,
+  isDocumentSourceUnsupportedError,
+  markDocumentSourceUnsupported,
+} from 'src/utils/pdfDocumentSupport.js'
 import { getAPIProviderForStatsig } from 'src/utils/model/providers.js'
 import {
   clearApiKeyHelperCache,
@@ -379,6 +384,33 @@ export async function* withRetry<T>(
       // AWS/GCP errors aren't always APIError, but can be retried
       const handledCloudAuthError =
         handleAwsCredentialError(error) || handleGcpCredentialError(error)
+
+      // 端点不接受内联 base64 PDF（第三方中转常见）→ 降级后重试。
+      //
+      // 这是**能力探测**，不是重试：第一次撞上说明这个端点的 PDF 通道走不通，
+      // 把历史里的 document 块换成文字占位（claude.ts 里读标记决定是否降级），
+      // 再试一次请求就一定能过。
+      //
+      // `attempt--` 是刻意的：这次修正不消耗重试配额 —— 否则刚好在最后一次
+      // attempt 撞上时，降级了却没有机会再发。标记只会被设一次，
+      // 所以不会因此变成死循环。
+      if (
+        !handledCloudAuthError &&
+        !isDocumentSourceUnsupported() &&
+        isDocumentSourceUnsupportedError(error)
+      ) {
+        markDocumentSourceUnsupported()
+        logForDebugging(
+          'Endpoint rejected inline PDF document source — downgrading PDF blocks to text placeholder and retrying',
+        )
+        logEvent('tengu_api_pdf_document_downgraded', {
+          model: options.model as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+          provider: getAPIProviderForStatsig(),
+        })
+        attempt--
+        continue
+      }
+
       if (
         !handledCloudAuthError &&
         (!(error instanceof APIError) || !shouldRetry(error))

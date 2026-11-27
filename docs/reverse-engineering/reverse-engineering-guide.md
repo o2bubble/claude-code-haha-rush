@@ -2,7 +2,11 @@
 
 > 目标: 从官方 `claude.exe` 提取运行时信息（agent 类型、系统提示词、工具列表等）
 > 方法: 代理抓包（最有效）+ PE 二进制字符串提取
-> 最新分析版本: 2.1.211 (2026-07-16)
+> 最新分析版本: 2.1.316 (2026-11-02)
+>
+> ⚠️ 仓库里的样本**不是同一个版本**：主 agent 的 prompt 和 `sample_*_2.1.316_*.json`
+> 是 2.1.316；6 份子 agent prompt 还是 2.1.211。重新抓包时以最新版为准，
+> 但别把不同版本的差异当成"我们缺了什么"。
 
 ## 环境准备
 
@@ -171,13 +175,35 @@ for s in strings:
 | 文件 | 用途 |
 |------|------|
 | `scripts/reverse-engineering/proxy_stream.py` | 代理抓包 + 转发（**唯一保留的工具**） |
-| `docs/reverse-engineering/prompts/capture_*_prompt.txt` | 提取的 6 种子 agent system prompt |
+| `docs/reverse-engineering/prompts/capture_*_prompt.txt` | 提取的 system prompt：**1 份主 agent（2.1.316）+ 6 份子 agent（2.1.211）**，见下表 |
 | `docs/reverse-engineering/sample_main_26tools.json` | 主 agent `-p` 模式请求样本（26 工具） |
 | `docs/reverse-engineering/sample_main_interactive_29tools.json` | 主 agent 交互模式请求样本（29 工具） |
+| `docs/reverse-engineering/sample_main_2.1.316_sdk.json` | 主 agent SDK 模式请求样本（14 工具，2.1.316） |
+| `docs/reverse-engineering/sample_subagent_2.1.316_sdk.json` | 子 agent SDK 模式请求样本（12 工具，2.1.316） |
 | `docs/reverse-engineering/sample_claude_subagent.json` | claude 子 agent 请求样本（15 工具） |
 | `docs/reverse-engineering/capture_claude_subagent_tools.json` | claude 子 agent 工具 schema |
 | `docs/reverse-engineering/official-version-analysis.md` | 版本差异分析报告 |
+| `docs/reverse-engineering/gap-analysis-playbook.md` | **差异挖掘手册**：抓到数据之后怎么找出值得改的东西 |
+| `docs/reverse-engineering/fork-subagent.md` | fork 子代理的完整研究记录（含 DeepSeek 端点实测） |
 | `docs/reverse-engineering/reverse-engineering-guide.md` | 本文件 |
+
+#### 各 prompt 的来源版本
+
+版本号取自抓到的请求头 `x-anthropic-billing-header: cc_version=`。
+
+| 文件 | 来源版本 | 对应 agent |
+|------|----------|-----------|
+| `capture_2.1.316_main_prompt.txt` | 2.1.316.572 | **主** agent |
+| `capture_claude_subagent_prompt.txt` | 2.1.211.e10 | `claude`（catch-all） |
+| `capture_claude_code_guide_prompt.txt` | 2.1.211.eec | `claude-code-guide` |
+| `capture_code_simplifier_prompt.txt` | 2.1.211.205 | `code-simplifier` |
+| `capture_explore_agent_prompt.txt` | 2.1.211.a3c | `Explore` |
+| `capture_general_purpose_prompt.txt` | 2.1.211.5c2 | `general-purpose` |
+| `capture_plan_prompt.txt` | 2.1.211.ef2 | `Plan` |
+
+> 主 agent 是 2.1.316、子 agent 停留在 2.1.211，**这不是笔误**：子 agent 的
+> prompt 是更早一轮抓的，之后没重抓。重抓时记得两边都要，否则对比会出现
+> "版本差"伪装成的"行为差"。
 
 ### `temp/` 目录（gitignored，需自行准备）
 

@@ -17,6 +17,7 @@ import { getErrnoCode, isENOENT } from '../errors.js'
 import { writeFileSyncAndFlush_DEPRECATED } from '../file.js'
 import { readFileSync } from '../fileRead.js'
 import { getFsImplementation, safeResolvePath } from '../fsOperations.js'
+import * as lockfile from '../lockfile.js'
 import { addFileGlobRuleToGitignore } from '../git/gitignore.js'
 import { safeParseJSON } from '../json.js'
 import { logError } from '../log.js'
@@ -407,6 +408,59 @@ export function getPolicySettingsOrigin():
 }
 
 /**
+ * 同步等待若干毫秒。
+ *
+ * `Atomics.wait` 是唯一可靠且不烧 CPU 的同步 sleep（Node/Bun 都有）。
+ * 不能用 `setTimeout` —— 这里整段读-改-写必须是同步的，调用方指望它返回时
+ * 磁盘已经写好。
+ */
+function sleepSyncMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * 拿到 settings.json 的跨进程排它锁，**抢不到就等**。
+ *
+ * `proper-lockfile` 的 `lockSync` 在锁被占时立刻抛 `ELOCKED`，而且它**明确
+ * 不支持 `retries` 选项**（传了会报 `ESYNC: Cannot use retries with the sync api`）。
+ * 所以自己写等待循环 —— 不重试的话，"拿不到锁就照常写"等于无锁直写，
+ * 并发下照样丢字段（实测：6 进程各写 12 次，72 个字段只剩 18 个）。
+ *
+ * 预算：最多等 2s 就放弃。
+ *
+ * 为什么是 2s 而不是"300ms 意思一下"—— 实测（6 进程各连续写 12 次）：
+ *   · 300ms → 丢 10/72 个字段
+ *   · 2000ms → 一个不丢
+ * 只有**真的发生争用**时才会等满；无争用时拿锁是即时的。
+ * 超时后退回无锁写入（宁可冒竞态的险，也不要让"保存设置"整个失败）。
+ */
+function acquireSyncLock(filePath: string): () => void {
+  const deadline = Date.now() + 2000
+  let delay = 2
+  for (;;) {
+    try {
+      return lockfile.lockSync(filePath, {
+        // 目标文件可能还不存在（首次保存）。默认会 realpath 目标，
+        // 文件不存在就抛 ENOENT —— 关掉它，只按 `<path>.lock` 建锁。
+        realpath: false,
+        lockfilePath: `${filePath}.lock`,
+        onCompromised: err => {
+          // 默认行为是从 setTimeout 里抛出 → 未捕获异常直接杀进程。
+          // 锁被抢走（如事件循环卡了 10s）是可恢复的，记下来即可。
+          logForDebugging(`Settings lock compromised: ${err}`, {
+            level: 'error',
+          })
+        },
+      })
+    } catch (e) {
+      if (getErrnoCode(e) !== 'ELOCKED' || Date.now() >= deadline) throw e
+      sleepSyncMs(delay)
+      delay = Math.min(30, Math.ceil(delay * 1.5))
+    }
+  }
+}
+
+/**
  * Merges `settings` into the existing settings for `source` using lodash mergeWith.
  *
  * To delete a key from a record field (e.g. enabledPlugins, extraKnownMarketplaces),
@@ -432,7 +486,27 @@ export function updateSettingsForSource(
 
   try {
     getFsImplementation().mkdirSync(dirname(filePath))
+  } catch {
+    // 目录建不出来时下面照样会失败，错误由后面的 catch 统一上报
+  }
 
+  // 读-改-写必须整体在锁内：两个进程各自读到旧快照再先后写回，
+  // 后写者的快照会静默吃掉先写者的改动（官方 2.1.330 修的就是这类）。
+  // 之前只有 `config.ts` 的 `~/.claude.json` 有锁，settings.json 完全没有。
+  //
+  // 拿不到锁也照常往下走（只是少了并发保护）：让"保存设置"因为锁文件而
+  // 彻底失败，比偶发的竞态更糟。失败原因记日志。
+  let releaseLock: (() => void) | undefined
+  try {
+    releaseLock = acquireSyncLock(filePath)
+  } catch (e) {
+    logForDebugging(
+      `Settings lock unavailable for ${filePath}, writing without lock: ${e}`,
+      { level: 'error' },
+    )
+  }
+
+  try {
     // Try to get existing settings with validation. Bypass the per-source
     // cache — mergeWith below mutates its target (including nested refs),
     // and mutating the cached object would leak unpersisted state if the
@@ -518,6 +592,13 @@ export function updateSettingsForSource(
     )
     logError(error)
     return { error }
+  } finally {
+    // 无论成功失败都要放锁 —— 忘了放会让后续所有写入卡到 stale 超时才恢复
+    try {
+      releaseLock?.()
+    } catch (e) {
+      logForDebugging(`释放设置锁失败: ${e}`, { level: 'error' })
+    }
   }
 
   return { error: null }

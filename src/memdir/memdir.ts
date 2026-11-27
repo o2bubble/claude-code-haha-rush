@@ -36,7 +36,8 @@ export const MAX_ENTRYPOINT_LINES = 200
 // ~125 chars/line at 200 lines. At p97 today; catches long-line indexes that
 // slip past the line cap (p100 observed: 197KB under 200 lines).
 export const MAX_ENTRYPOINT_BYTES = 25_000
-const AUTO_MEM_DISPLAY_NAME = 'auto memory'
+// 小节标题对齐官方 2.1.316（`# Memory`）；teamMemPrompts 用的也是这个名字。
+const AUTO_MEM_DISPLAY_NAME = 'Memory'
 
 export type EntrypointTruncation = {
   content: string
@@ -484,7 +485,7 @@ export async function loadMemoryPrompt(): Promise<string | null> {
         'auto' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     })
     return buildMemoryLines(
-      'auto memory',
+      AUTO_MEM_DISPLAY_NAME,
       autoDir,
       extraGuidelines,
       skipIndex,
