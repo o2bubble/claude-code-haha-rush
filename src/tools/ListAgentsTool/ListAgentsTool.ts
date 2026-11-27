@@ -34,6 +34,16 @@ const outputSchema = lazySchema(() =>
         kind: z.enum(['subagent', 'teammate']),
         status: z.string(),
         description: z.string(),
+        /**
+         * 这一行是不是**调用者自己**。
+         *
+         * 子代理也会出现在任务表里，所以 ListAgents 会把自己的行也列出来，
+         * 而且它的状态永远是 running（自己当然还在跑）。任何「等所有 agent
+         * 结束」的循环如果把它算进目标，就会**等自己**、永不退出
+         * （2026-11-27 监工实测：被监察的子代理早就完成了，它还在每轮
+         * sleep 60，因为列表里始终有一行 running —— 就是它自己）。
+         */
+        isSelf: z.boolean().optional(),
       }),
     ),
     sessions: z.array(
@@ -82,15 +92,20 @@ Use this before SendMessage when you are not sure the target still exists — ad
   },
   async call(_input, context) {
     const tasks = context.getAppState().tasks ?? {}
+    // 调用者自己也会在这张任务表里 —— 必须标出来，否则「等所有 agent 结束」
+    // 的循环会把自己的行当成未完成目标，永远等下去（见 isSelf 注释）。
+    const selfId = context.agentId as string | undefined
 
     const agents: ListAgentsOutput['agents'] = []
     for (const [taskId, task] of Object.entries(tasks)) {
       if (isLocalAgentTask(task)) {
+        const name = task.agentId || taskId
         agents.push({
-          name: task.agentId || taskId,
+          name,
           kind: 'subagent',
           status: task.status,
           description: (task.description || task.prompt || '').slice(0, 80),
+          ...(selfId && name === selfId ? { isSelf: true } : {}),
         })
         continue
       }
@@ -122,7 +137,10 @@ Use this before SendMessage when you are not sure the target still exists — ad
     if (output.agents.length > 0) {
       lines.push('Agents in this session:')
       for (const a of output.agents) {
-        lines.push(`- ${a.name} (${a.kind}, ${a.status}) ${a.description}`)
+        // 「(this is you)」必须显眼：任何「等所有 agent 结束」的循环都得跳过自己，
+        // 否则会等一个永远 running 的自己。
+        const self = a.isSelf ? ' ← this is you, ignore it' : ''
+        lines.push(`- ${a.name} (${a.kind}, ${a.status}) ${a.description}${self}`)
       }
     } else {
       lines.push('No subagents or teammates are running in this session.')

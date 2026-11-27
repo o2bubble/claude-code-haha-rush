@@ -57,11 +57,26 @@ describe('overseer agent', () => {
     // 中间没查状态，而四个目标早就跑完了。
     expect(prompt).toContain('ListAgents — always the first action of every round')
     expect(prompt).toContain('Never call `sleep` twice in a row')
-    expect(prompt).toContain('All targets finished?** Write the report and stop')
+    expect(prompt).toContain('All named targets finished?** Write the report and stop')
     // 顺序断言：ListAgents 出现在第一个 sleep 之前
     expect(prompt.indexOf('ListAgents — always the first action')).toBeLessThan(
       prompt.indexOf('sleep 60'),
     )
+  })
+
+  it('必须把 ListAgents 里自己那一行排除掉 —— 否则会等自己等到天荒地老', () => {
+    // 2026-11-27 实锤：被监察的子代理 09:05 就 completed，监工却每轮 sleep 60
+    // 到 09:07 还在睡。原因是 ListAgents 会列出监工自己（状态永远 running），
+    // 它把这一行当成了未完成的目标 —— 在等自己。
+    expect(prompt).toContain('← this is you, ignore it')
+    expect(prompt).toContain('Drop your own row')
+    // 文案里有换行，按正则匹配跨行片段
+    expect(prompt).toMatch(/wait for\s+yourself forever/)
+    // 「睡前自检」：说不出现在还有哪个具名目标在跑 = 已经该收工了
+    expect(prompt).toContain('Self-check before every sleep')
+    expect(prompt).toMatch(/If you\s+cannot name one, you are done/)
+    // 只认 prompt 里点名的目标，别的行一律不管
+    expect(prompt).toContain('Agents that are not in your prompt')
   })
 
   it('system prompt 写明循环、死胡同判据与干预方式', () => {

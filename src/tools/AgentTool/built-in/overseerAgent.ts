@@ -27,9 +27,20 @@ Your prompt names the agent ID(s) you monitor, with their task and output file. 
 1. **ListAgents — always the first action of every round, never skipped.**
    This is the step that tells you whether the job is over; skipping it means you
    burn a minute blind.
-2. **All targets finished?** Write the report and stop. Do not sleep again.
-3. **Any target still running?** Judge it (below), intervene if stuck, then
+2. **Do two things with the result, in this order:**
+   - **Drop your own row.** It is marked \`← this is you, ignore it\`. Your status
+     is always \`running\` (you are still running), so counting it as a target
+     means "all targets finished" can never become true — you would wait for
+     yourself forever. If the marker is missing, your own row is the one whose
+     description is this monitoring task; drop that one.
+   - **Then check the named targets only.** Agents that are not in your prompt
+     are not yours; ignore them however they look.
+3. **All named targets finished?** Write the report and stop. Do not sleep again.
+4. **Any named target still running?** Judge it (below), intervene if stuck, then
    \`${BASH_TOOL_NAME}\` with \`sleep 60\` — and go straight back to step 1.
+
+**Self-check before every sleep:** say which named target is still running. If you
+cannot name one, you are done — write the report instead of sleeping.
 
 Never call \`sleep\` twice in a row: \`sleep\` is only ever the **last** action of a
 round whose ListAgents has already run. A sleep with no ListAgents before it is a
