@@ -17,6 +17,7 @@ git checkout main
 git pull origin main 2>/dev/null || true
 
 git checkout github-clean
+snapshot_before=$(git rev-parse HEAD)
 
 # ── 快照的树 = main 的树，直接构造索引 ──────────────────────────────────
 #
@@ -88,4 +89,14 @@ git push origin github-clean --force
 # 不用 -f 会被 "untracked working tree files would be removed by checkout" 拒绝，
 # 配合 `set -e` 让脚本在最后一步失败。
 git checkout -f main
+
+# ⚠️ `-f` 只覆盖**已跟踪**文件，不会删未跟踪文件：上一轮快照里有、main 里
+# 已经删掉的那些，会以**未跟踪**状态留在工作树里。2026-11-27 实测：删了
+# `docs/HANDOFF.md`，同步完它又出现在磁盘上，`git status` 显示 `??`。
+leftover=$(git -c core.quotePath=false diff --name-only --diff-filter=D \
+    "$snapshot_before" main || true)
+if [ -n "$leftover" ]; then
+    echo "⚠️  下列文件已从 main 删除，旧快照把它们还原到了工作树（现在未跟踪），按需手动清理："
+    while IFS= read -r f; do echo "   $f"; done <<< "$leftover"
+fi
 echo "done"
