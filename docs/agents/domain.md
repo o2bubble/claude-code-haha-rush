@@ -23,7 +23,7 @@
 | --- | --- |
 | 整体架构、启动流程、子系统划分 | `CLAUDE.md` |
 | 架构细节与参考 | `docs/architecture-reference.md`、`docs/architecture/` |
-| 跨机器 / 跨会话的当前状态 | `docs/HANDOFF.md` |
+| 跨机器 / 跨会话的当前状态 | **以 `git log` 为准**（旧的 `docs/HANDOFF.md` 已于 2026-11-27 删除：落后两个月、维护成本高于收益，状态改看 commit + 记忆） |
 | 反向工程的结论与方法 | `docs/reverse-engineering/` |
 | 事故复盘 | `docs/postmortems/` |
 | 构建与发布 | `docs/windows-build-playbook.md`、`docs/repo-split.md` |

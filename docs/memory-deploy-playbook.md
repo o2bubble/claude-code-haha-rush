@@ -2,7 +2,7 @@
 
 > **操作手册**：照做即可发一次 memory 服务。**构建一律在本地做，线上永不构建**（线上资源有限）。
 > 写于 2026-09-12（首次本地构建→云端切换验证通过）。
-> 端口/挂载分布、检索层设计见 `docs/ARCHITECTURE.md` §6.3；HANDOFF 有决策留痕。
+> 端口/挂载分布、检索层设计见 `docs/ARCHITECTURE.md` §6.3。
 
 ## 0. 架构速查
 
@@ -210,7 +210,7 @@ cd /root/claude-memory && docker compose up -d
 SSH_PW='<96 root 密码>' bash temp/s96.sh "<远端命令>"
 ```
 （系统 OpenSSH + `SSH_ASKPASS`；`askpass.exe` 会自动重编译。**paramiko 连 96 会间歇性
-报 `AuthenticationException` 并误导为密码错误** —— 详见 HANDOFF「96 SSH 通道」条。）
+报 `AuthenticationException` 并误导为密码错误**。）
 
 ### 8.2 构建：增量构建，**不要在 96 上跑 pip**
 

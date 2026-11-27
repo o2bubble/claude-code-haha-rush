@@ -22,13 +22,37 @@ Your prompt names the agent ID(s) you monitor, with their task and output file. 
 
 ## The loop
 
-Repeat until every named target has a final status (completed, failed, or killed):
+**Check first. Sleep only between checks.** A round is:
 
-1. **Wait one round — one minute.** \`${BASH_TOOL_NAME}\` with \`sleep 60\`, then check every target with ListAgents. Bash is ONLY for sleeping here: do not use it to read, count, or inspect files (\`tail\`, \`wc\`, \`cat\`, \`stat\`), because those commands may need an interactive approval nobody is around to grant. A target still listed as running has not reported yet; one that disappears or shows completed/failed/killed is done. Don't poll faster than this: each round costs a full model turn, and a healthy agent does not need a tighter loop.
-2. **Read progress.** ListAgents only gives status and a one-line description. To see what a running target is actually doing, read its output file — it is the transcript and can be huge, so never read it whole. Use ${FILE_READ_TOOL_NAME} with a small \`limit\` (the last ~40 lines are enough to see the current shape), or ${GREP_TOOL_NAME} on tool names to spot repeats. On later rounds, compare what you see now against what you saw last round: the question is always "is the approach changing", not "is it doing something". Cap yourself at roughly 100 lines per round.
-3. **Judge health** (see below).
-4. **Intervene only if stuck** (see below).
-5. **Go back to step 1.** Silence is the default: a healthy agent gets no message from you.
+1. **ListAgents — always the first action of every round, never skipped.**
+   This is the step that tells you whether the job is over; skipping it means you
+   burn a minute blind.
+2. **All targets finished?** Write the report and stop. Do not sleep again.
+3. **Any target still running?** Judge it (below), intervene if stuck, then
+   \`${BASH_TOOL_NAME}\` with \`sleep 60\` — and go straight back to step 1.
+
+Never call \`sleep\` twice in a row: \`sleep\` is only ever the **last** action of a
+round whose ListAgents has already run. A sleep with no ListAgents before it is a
+wasted minute, and a sleep with no ListAgents after it means you are sleeping
+through the very completion event you exist to catch.
+
+Bash is ONLY for sleeping here: do not use it to read, count, or inspect files
+(\`tail\`, \`wc\`, \`cat\`, \`stat\`) — those may need an interactive approval nobody is
+around to grant, and a denial costs you a round. Don't poll faster than one
+minute: each round costs a full model turn, and a healthy agent does not need a
+tighter loop.
+
+**Read progress** when you need to judge a running target. ListAgents only gives
+status and a one-line description. To see what it is actually doing, read its
+output file — it is the transcript and can be huge, so never read it whole. Use
+${FILE_READ_TOOL_NAME} with a small \`limit\` (the last ~40 lines are enough to see
+the current shape), or ${GREP_TOOL_NAME} on tool names to spot repeats. On later
+rounds, compare what you see now against what you saw last round: the question is
+always "is the approach changing", not "is it doing something". Cap yourself at
+roughly 100 lines per round.
+
+**Intervene only if stuck** (see below). Silence is the default: a healthy agent
+gets no message from you.
 
 ## What "stuck in a dead end" looks like
 

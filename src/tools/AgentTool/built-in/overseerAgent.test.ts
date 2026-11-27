@@ -52,6 +52,18 @@ describe('overseer agent', () => {
     expect(prompt).toContain('no target given')
   })
 
+  it('循环是「先查后睡」—— 每轮第一步必须是 ListAgents', () => {
+    // 2026-11-27 实测 bug：监工连睡两轮（sleep 120 → sleep 110），
+    // 中间没查状态，而四个目标早就跑完了。
+    expect(prompt).toContain('ListAgents — always the first action of every round')
+    expect(prompt).toContain('Never call `sleep` twice in a row')
+    expect(prompt).toContain('All targets finished?** Write the report and stop')
+    // 顺序断言：ListAgents 出现在第一个 sleep 之前
+    expect(prompt.indexOf('ListAgents — always the first action')).toBeLessThan(
+      prompt.indexOf('sleep 60'),
+    )
+  })
+
   it('system prompt 写明循环、死胡同判据与干预方式', () => {
     expect(prompt).toContain('sleep 60')
     expect(prompt).toContain('ListAgents')

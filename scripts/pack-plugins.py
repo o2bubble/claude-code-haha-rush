@@ -30,7 +30,9 @@ What goes in is **the plugin directory's real content**, minus:
 accidentally ship or hide. If you add a helper that shouldn't ship, list it here.
 """
 import argparse
+import hashlib
 import io
+import json
 import os
 import sys
 import zipfile
@@ -166,6 +168,86 @@ REQUIRED = {
             "vendor/win32-x64/dbx-mcp.exe"},
 }
 
+# ── 构建产物的新鲜度校验 ──
+#
+# 有些插件的产物是**入库**的（用户机器上没有 Node/构建工具，必须随包发）。
+# 这带来一个 REQUIRED 挡不住的风险：改了源码、忘了重建 → 包里是旧面板，
+# 而所有检查都通过（文件在、签名有效、结构合法）。
+#
+# 做法：构建时把「源文件指纹」写进产物目录（vite.config.ts 的 stampDist
+# 插件写 `dist/build-info.json`），打包时用**同一套算法**重算并比对。
+#
+# 算法必须与 vite.config.ts 的 computeSourceHash **逐字节一致**：
+#   relpath(统一 /) + "\0" + sha256(文件内容).hex() + "\n"，按 rela 的
+#   UTF-8 字节序排序，全部拼接后再 sha256。
+#
+# 用「排除 node_modules」的黑名单而不是白名单：新增源文件自动纳入。
+SOURCE_STAMP = {
+    # plugin: (源码目录, 产物目录) —— 都相对插件根
+    "dbx": ("ui", "dist"),
+}
+
+
+def _source_hash(root: str) -> "tuple[str, int]":
+    """重算源码指纹，与 vite.config.ts 的实现对齐（见上方注释）。"""
+    paths = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != "node_modules"]
+        for name in filenames:
+            paths.append(os.path.join(dirpath, name))
+
+    def rel(p: str) -> str:
+        return os.path.relpath(p, root).replace(os.sep, "/")
+
+    paths.sort(key=lambda p: rel(p).encode("utf-8"))
+
+    h = hashlib.sha256()
+    for p in paths:
+        with open(p, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        h.update(f"{rel(p)}\0{digest}\n".encode("utf-8"))
+    return h.hexdigest(), len(paths)
+
+
+def check_stamp(plugin: str, allow_stale: bool = False) -> bool:
+    """产物是不是由**当前源码**构建出来的。没有配置的插件直接通过。"""
+    entry = SOURCE_STAMP.get(plugin)
+    if not entry:
+        return True
+    src_rel, out_rel = entry
+    base = os.path.join(PLUGINS_DIR, plugin)
+    src_dir = os.path.join(base, src_rel)
+    info_path = os.path.join(base, out_rel, "build-info.json")
+
+    if not os.path.isdir(src_dir):
+        print(f"  [FAIL] {plugin}: 找不到源码目录 {src_rel}/，无法判断产物是否过期")
+        return False
+    if not os.path.exists(info_path):
+        print(f"  [FAIL] {plugin}: {out_rel}/build-info.json 不存在 ——"
+              f"先在 {src_rel}/ 里跑一次 `bun run build`")
+        return False
+    try:
+        with open(info_path, encoding="utf-8") as f:
+            info = json.load(f)
+    except Exception as e:  # noqa: BLE001 —— 文件坏了和过期一样要重建
+        print(f"  [FAIL] {plugin}: {out_rel}/build-info.json 读不了（{e}）")
+        return False
+
+    recorded = info.get("sourceHash")
+    actual, count = _source_hash(src_dir)
+    if actual == recorded:
+        return True
+
+    detail = (f"记录 {str(recorded)[:12]}… / 现在 {actual[:12]}…")
+    if allow_stale:
+        print(f"  [WARN] {plugin}: 产物与源码不一致（{detail}），--allow-stale 放行")
+        return True
+    print(f"  [FAIL] {plugin}: 产物已过期 —— 源码改了但没重新构建（{detail}）")
+    print(f"         重新构建：cd {os.path.join('packages', 'plugins', plugin, src_rel)}"
+          f" && bun run build")
+    print("         确有必要用旧产物时加 --allow-stale")
+    return False
+
 
 def collect(plugin: str):
     """Return [(abs_path, zip_rel_path)] for everything that should ship."""
@@ -193,7 +275,7 @@ def collect(plugin: str):
     return out
 
 
-def pack(plugin: str, check_only: bool = False) -> bool:
+def pack(plugin: str, check_only: bool = False, allow_stale: bool = False) -> bool:
     files = collect(plugin)
     if not files:
         print(f"  [FAIL] {plugin}: 目录为空或不存在")
@@ -204,6 +286,11 @@ def pack(plugin: str, check_only: bool = False) -> bool:
     missing = REQUIRED.get(plugin, set()) - present
     if missing:
         print(f"  [FAIL] {plugin}: 源目录就缺关键文件 → {sorted(missing)}")
+        return False
+
+    # ── 打包前：入库的构建产物是不是当前源码构建的 ──
+    # 放在 REQUIRED 之后：先确认文件都有，再谈新不新（否则报错顺序会误导）。
+    if not check_stamp(plugin, allow_stale):
         return False
 
     out = os.path.join(PLUGINS_DIR, plugin, f"{plugin}.zip")
@@ -269,6 +356,8 @@ def main() -> int:
     ap.add_argument("plugins", nargs="*", help="plugin directory names")
     ap.add_argument("--all", action="store_true", help="pack every plugin under plugins/")
     ap.add_argument("--check", action="store_true", help="verify only; write no zip")
+    ap.add_argument("--allow-stale", action="store_true",
+                    help="allow shipping an outdated build product (source stamp mismatch)")
     args = ap.parse_args()
 
     if args.all:
@@ -282,7 +371,7 @@ def main() -> int:
         ap.error("给插件名，或用 --all")
 
     print(f"{'检查' if args.check else '打包'} {len(targets)} 个插件：")
-    ok = all(pack(p, args.check) for p in targets)
+    ok = all(pack(p, args.check, args.allow_stale) for p in targets)
     if not ok:
         print("\n有插件未通过 —— 上面标 [FAIL] 的就是要修的地方。")
         return 1
